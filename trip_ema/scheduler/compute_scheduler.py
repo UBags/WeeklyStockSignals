@@ -257,6 +257,59 @@ class ComputeScheduler:
         )
         return summary
 
+    def _discover_source_timeframe(
+            self,
+            ticker_id: int,
+            target_tf: Timeframe,
+    ) -> Timeframe | None:
+        """Discover which timeframe of bars to use as the source for a
+        given target.
+
+        Mirrors the discovery logic in
+        TickerRegistry._fetch_and_aggregate_for_engine so that priming
+        and scheduler ingest agree on the source per ticker.
+
+        Returns None if no usable source bars exist for this ticker —
+        caller should treat that as "skip this ticker for this run."
+
+        We deliberately do NOT consult `record.source_timeframe`. That
+        column is metadata the ETL is supposed to keep in sync with
+        bars table contents, but nothing currently enforces that, and
+        bars table itself is the only ground truth. Trusting
+        source_timeframe would skip valid data when the column is
+        stale (e.g., refresh-listings inserts ticker rows with the
+        default '1W' but backfill writes '1D' bars without updating
+        source_timeframe).
+        """
+        with self._db_engine.connect() as conn:
+            available = BarsRepository(conn).available_timeframes(ticker_id)
+
+        if not available:
+            return None
+
+        # Case 1: bars exist at the exact target timeframe — that IS
+        # the source (no aggregation needed downstream).
+        if target_tf in available:
+            return target_tf
+
+        # Case 2: target is WEEKLY and we have a finer source to
+        # aggregate from. Prefer DAILY when present; daily_to_weekly()
+        # actually handles any finer timeframe (15m, hourly, 2-hourly,
+        # daily) — the name is just historical.
+        if target_tf == Timeframe.WEEKLY:
+            for source_tf in (
+                    Timeframe.DAILY,
+                    Timeframe.HOURLY_2,
+                    Timeframe.HOURLY,
+                    Timeframe.MIN_15,
+            ):
+                if source_tf in available:
+                    return source_tf
+
+        # Bars exist but none are at or finer than target — only
+        # "coarser-than-target" which we can't aggregate from. Skip.
+        return None
+
     def _process_ticker(
         self,
         ref,
@@ -270,11 +323,16 @@ class ComputeScheduler:
         Returns the list of SignalEvents that were fired (zero or one
         per run — at most one change is recorded per compute pass).
 
-        B4: When the ticker's source_timeframe differs from the engine's
-        target timeframe, this method fetches source bars and aggregates
-        before ingestion. The week-anchor for aggregation uses the
-        ticker's `tz` (Asia/Kolkata, America/New_York, etc.) so the
-        local-Monday convention is honored.
+        B4: When the discovered source timeframe (from ohlcv_bars)
+        differs from the engine's target timeframe, this method fetches
+        source bars and aggregates before ingestion. The week-anchor
+        for aggregation uses the ticker's `tz` (Asia/Kolkata,
+        America/New_York, etc.) so the local-Monday convention is
+        honored.
+
+        Source timeframe is discovered from the bars table itself, not
+        from `tickers.source_timeframe` — see
+        `_discover_source_timeframe` for the rationale.
         """
         ticker_id = self._registry.get_ticker_id(ref)
         record = self._registry.get_ticker_meta(ref)
@@ -282,7 +340,17 @@ class ComputeScheduler:
             # Defensive — should always be populated after prime_all
             logger.warning("No ticker metadata for %s; skipping", ref)
             return []
-        source_tf = Timeframe(record.source_timeframe)
+        source_tf = self._discover_source_timeframe(ticker_id, tf)
+        if source_tf is None:
+            # No usable source bars exist for this ticker (none at
+            # target timeframe, none finer that we can aggregate from).
+            # Skip cleanly; not an error. The registry's prime path
+            # would have made the same decision for this ticker.
+            logger.debug(
+                "No usable source bars for %s@%s; skipping",
+                ref, tf.value,
+            )
+            return []
         ticker_tz = record.tz
         key = (ref, tf)
 
