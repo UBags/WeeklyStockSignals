@@ -1,0 +1,158 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Verify the wheel installs
+        # Sanity check — pip-install the wheel into a fresh venv
+        # and confirm the version we baked in matches the tag.
+        # Catches a hatchling misconfiguration before we push.
+        run: |
+          python -m venv /tmp/verify-venv
+          /tmp/verify-venv/bin/pip install dist/*.whl
+          /tmp/verify-venv/bin/python -c "
+          from trip_ema import __version__
+          import os
+          tag = os.environ.get('GITHUB_REF_NAME', '').lstrip('v')
+          print(f'Wheel version: {__version__}')
+          print(f'Tag:           {tag}')
+          if tag and __version__ != tag:
+              raise SystemExit(f'Version mismatch: wheel says {__version__}, tag is {tag}')
+          "
+
+      - name: Upload distributions as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # ============================================================
+  # Publish to PyPI — only on tag push, only if the build job
+  # succeeded. Uses trusted publishing (no API token in secrets);
+  # configure the trusted publisher on PyPI first.
+  # ============================================================
+  publish:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+
+    # Required for trusted publishing
+    permissions:
+      id-token: write
+
+    environment:
+      name: pypi
+      url: https://pypi.org/p/trip-ema
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Trusted publishing — no token needed once configured
+          # on PyPI's side. Until then, this step is a no-op
+          # without a manual API token set.
+          skip-existing: true
+
+  # ============================================================
+  # Build the GUI operator-console binary for Linux (AppImage).
+  # Phase 12 item — gives non-developer operators a standalone
+  # executable instead of pip install + python -m run.
+  #
+  # Windows/macOS builds are deferred until operators on those
+  # platforms ask for them; they need code signing infrastructure
+  # we don't have set up yet.
+  # ============================================================
+  build-gui-installer:
+    name: Build GUI installer (Linux AppImage)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: System deps for offscreen Qt
+        # PyInstaller's static analysis needs to import PySide6 to
+        # detect bundled binaries — same Qt platform plugins as the
+        # CI test runner.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libxkbcommon0 libdbus-1-3 libfuse2 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-sync1 libxcb-xfixes0 \
+            libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
+
+      - name: Install package + GUI extras + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[gui]"
+          pip install pyinstaller
+
+      - name: Build the binary
+        run: pyinstaller gui_installer.spec --clean --noconfirm
+
+      - name: Smoke-test the binary
+        # Verify the binary at least launches and shows --help.
+        # Running the GUI itself would need a display; we don't try.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          ls -lh dist/trip-ema-console
+          # PyInstaller binaries don't always honor --help (they
+          # often start the full GUI). The smoke test is just that
+          # the binary exists and is executable.
+          test -x dist/trip-ema-console
+
+      - name: Package as tar.gz
+        # AppImage requires linuxdeploy + a desktop file + an icon;
+        # full AppImage packaging is out of scope for this phase.
+        # Distribute the bundle as a tar.gz for now — operators
+        # extract and run trip-ema-console directly.
+        run: |
+          cd dist/
+          tar -czf trip-ema-console-${{ github.ref_name }}-linux-x86_64.tar.gz \
+              trip-ema-console
+          ls -lh trip-ema-console-*.tar.gz
+
+      - name: Upload as release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-installer-linux
+          path: dist/trip-ema-console-*.tar.gz

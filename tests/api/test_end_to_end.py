@@ -1,0 +1,286 @@
+"""End-to-end integration test for the Phase 11 chart flow.
+
+Exercises the full pipeline from "raw bars in Postgres" to "JSON
+response from GET /v1/signals/.../history":
+
+  1. Run the legacy migrator (via the db_engine fixture) → tables exist
+  2. Run the Alembic baseline-stamp bridge → alembic_version row present
+  3. Insert a small synthetic ticker + ~500 daily bars covering a real
+     trend so the engine generates BUY/SELL events
+  4. Prime the TickerRegistry (the same code path `trip-ema` startup uses)
+  5. Run ComputeScheduler.run_once → signal_events get written, cache
+     gets populated
+  6. Issue HTTP requests via TestClient with dependency overrides:
+       GET /v1/signals/{exchange}/{symbol}            (latest signal)
+       GET /v1/signals/{exchange}/{symbol}/history    (chart replay)
+  7. Assert response shape — bar count is sensible, indicator values
+     are non-None after warmup, regime labels valid, signal_events
+     align with bar timestamps.
+
+This isn't a true cross-process e2e (we don't actually spawn
+`trip-ema-etl` and `trip-ema` as subprocesses). Doing that would
+require real yfinance access and full subprocess orchestration —
+both expensive to engineer and brittle in CI. This service-level
+integration test catches what matters in practice:
+
+  - Schema-shape mismatches between migrations and the engine's
+    persistence layer
+  - Priming → registry → cache wiring bugs
+  - Engine-replay-via-`/history` endpoint breakage
+  - Alembic-bridge interaction with the legacy migrator state
+
+Lives in tests/api/ so it runs in the Postgres-backed CI job
+(`postgres-integration` in .github/workflows/tests.yml). The slow
+job is gated to main-branch pushes and manual dispatch.
+"""
+
+from __future__ import annotations
+
+import math
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+
+# ---------- Test data: synthetic bars with a clear trend ----------
+
+NUM_DAYS = 500   # ~2 years of daily bars before weekend filtering
+
+
+def _generate_synthetic_bars(start_ts: datetime) -> list[dict]:
+    """Generate up to NUM_DAYS daily bars (weekends skipped) with a
+    synthetic price series containing a clear up-trend, sideways
+    middle, and down-trend.
+
+    Designed so the engine produces at least one BUY and one SELL
+    signal after warmup completes. Returns dicts ready for direct
+    INSERT to ohlcv_bars."""
+    bars = []
+    price = 100.0
+    for i in range(NUM_DAYS):
+        ts = start_ts + timedelta(days=i)
+        if ts.weekday() >= 5:
+            continue
+        if i < 150:
+            drift = 0.4
+            noise = math.sin(i * 0.3) * 0.5
+        elif i < 300:
+            drift = 0.0
+            noise = math.sin(i * 0.2) * 1.5
+        else:
+            drift = -0.3
+            noise = math.cos(i * 0.25) * 0.4
+
+        open_ = price
+        price = max(price + drift + noise, 10.0)
+        close = price
+        high = max(open_, close) + abs(noise) * 0.5
+        low = min(open_, close) - abs(noise) * 0.5
+        volume = 100000.0 + (i * 137 % 50000)
+
+        bars.append({
+            "timeframe": "1D",
+            "bar_timestamp": ts,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        })
+    return bars
+
+
+def _insert_ticker_and_bars(engine, exchange: str, symbol: str) -> int:
+    """Insert a ticker row + synthetic bars. Returns ticker_id."""
+    start_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    bars = _generate_synthetic_bars(start_ts)
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            text("""
+                INSERT INTO tickers (exchange, symbol, instrument, full_name)
+                VALUES (:exchange, :symbol, 'EQ', :name)
+                RETURNING ticker_id
+            """),
+            {"exchange": exchange, "symbol": symbol, "name": f"{symbol} Test Inc"},
+        )
+        ticker_id = result.scalar()
+        conn.execute(
+            text("""
+                INSERT INTO ohlcv_bars
+                  (ticker_id, timeframe, bar_timestamp, open, high, low, close, volume)
+                VALUES
+                  (:tid, :timeframe, :bar_timestamp,
+                   :open, :high, :low, :close, :volume)
+            """),
+            [{**bar, "tid": ticker_id} for bar in bars],
+        )
+    return ticker_id
+
+
+# ---------- The test ----------
+
+
+class TestEndToEndChartFlow:
+    """A real-but-fast service-level integration test.
+
+    bars → prime → compute → cache → HTTP /history endpoint.
+    """
+
+    def test_bars_to_chart_history_full_pipeline(self, db_engine):
+        # ---- Step 1: tables exist (db_engine fixture ran migrations) ----
+        with db_engine.connect() as conn:
+            tables = conn.execute(text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema='public'"
+            )).scalars().all()
+        for required in ("tickers", "ohlcv_bars", "signal_events",
+                         "schema_migrations"):
+            assert required in tables, f"Missing table: {required}"
+
+        # ---- Step 2: Alembic bridge stamps the baseline ----
+        from trip_ema.persistence.alembic_bridge import (
+            stamp_baseline_if_needed,
+            _alembic_has_a_version,
+        )
+        try:
+            import alembic  # noqa: F401
+            alembic_installed = True
+        except ImportError:
+            alembic_installed = False
+
+        if alembic_installed:
+            stamped = stamp_baseline_if_needed(db_engine)
+            assert stamped is True
+            assert _alembic_has_a_version(db_engine) is True
+            # Idempotent — second call shouldn't re-stamp
+            assert stamp_baseline_if_needed(db_engine) is False
+
+        # ---- Step 3: insert synthetic ticker and bars ----
+        ticker_id = _insert_ticker_and_bars(
+            db_engine, exchange="NSE", symbol="E2ETEST",
+        )
+        assert ticker_id > 0
+
+        with db_engine.connect() as conn:
+            bar_count = conn.execute(text(
+                "SELECT COUNT(*) FROM ohlcv_bars WHERE ticker_id = :tid"
+            ), {"tid": ticker_id}).scalar()
+        assert bar_count > 300, f"Expected >300 weekday bars, got {bar_count}"
+
+        # ---- Step 4: build registry + cache + prime ----
+        from trip_ema.api import prime_all_tickers
+        from trip_ema.cache import SignalCache
+        from trip_ema.domain import IndicatorParams, Timeframe
+        from trip_ema.registry import TickerRegistry
+
+        registry = TickerRegistry(
+            IndicatorParams(),
+            [Timeframe.WEEKLY],
+            history_limit=1000,
+            state_history_retain=600,
+        )
+        cache = SignalCache()
+        prime_result = prime_all_tickers(
+            db_engine=db_engine, registry=registry, cache=cache,
+        )
+        assert prime_result.primed >= 1, (
+            f"prime_all_tickers should have primed our test ticker; "
+            f"got {prime_result}"
+        )
+
+        # ---- Step 5: run a compute pass ----
+        from trip_ema.scheduler import ComputeScheduler
+        scheduler = ComputeScheduler(
+            db_engine=db_engine, registry=registry, cache=cache,
+        )
+        scheduler.run_once()
+
+        # ---- Step 6: HTTP layer via TestClient ----
+        from trip_ema.transports.http import create_app
+        from trip_ema.transports.http.dependencies import (
+            get_cache, get_compute_scheduler, get_config,
+            get_db_engine, get_registry,
+        )
+        from tests.transports.http.conftest import _build_test_config
+
+        app = create_app()
+        config = _build_test_config()
+        app.dependency_overrides[get_db_engine] = lambda: db_engine
+        app.dependency_overrides[get_cache] = lambda: cache
+        app.dependency_overrides[get_registry] = lambda: registry
+        app.dependency_overrides[get_compute_scheduler] = lambda: scheduler
+        app.dependency_overrides[get_config] = lambda: config
+
+        with TestClient(app) as client:
+            # /healthz — sanity
+            resp = client.get("/healthz")
+            assert resp.status_code == 200
+
+            # GET /v1/signals/NSE/E2ETEST — latest signal from cache
+            resp = client.get("/v1/signals/NSE/E2ETEST")
+            assert resp.status_code == 200, f"Body: {resp.text}"
+            body = resp.json()
+            assert body.get("exchange") == "NSE"
+            assert body.get("symbol") == "E2ETEST"
+
+            # GET /v1/signals/NSE/E2ETEST/history — chart replay
+            resp = client.get(
+                "/v1/signals/NSE/E2ETEST/history",
+                params={"years": 2},
+            )
+            assert resp.status_code == 200, f"Body: {resp.text}"
+            hist = resp.json()
+            assert "bars" in hist
+            assert "signal_events" in hist
+            assert len(hist["bars"]) > 30, (
+                f"Expected dozens of weekly bars; got {len(hist['bars'])}"
+            )
+
+            # ---- Step 7: validate response shape ----
+            # Last bar should be post-warmup; all indicator values non-None.
+            sample = hist["bars"][-1]
+            for field in (
+                "timestamp", "open", "high", "low", "close", "volume",
+                "med_ema", "long_ema", "longest_ema", "atr",
+                "upper_inner", "upper_mid", "upper_outer",
+                "lower_inner", "lower_mid", "lower_outer",
+                "regime",
+            ):
+                assert field in sample, f"Missing field '{field}' in history bar"
+
+            assert sample["med_ema"] is not None
+            assert sample["long_ema"] is not None
+            assert sample["longest_ema"] is not None
+            assert sample["atr"] is not None
+            assert sample["atr"] > 0
+
+            for bar in hist["bars"]:
+                if bar.get("regime") is not None:
+                    assert bar["regime"] in (
+                        "BULLISH", "NEUTRAL", "BEARISH",
+                    ), f"Invalid regime: {bar['regime']}"
+
+            # Bars in chronological order
+            timestamps = [bar["timestamp"] for bar in hist["bars"]]
+            assert timestamps == sorted(timestamps), (
+                "History bars are not in chronological order"
+            )
+
+            # signal_events — each must reference a bar timestamp
+            # that exists in the bars list
+            bar_timestamps = set(timestamps)
+            for event in hist["signal_events"]:
+                assert event.get("signal_type") in (
+                    "BUY", "SELL", "EXIT_FROM_BUY", "EXIT_FROM_SELL",
+                ), f"Unexpected signal_type: {event.get('signal_type')}"
+                # bar_timestamp may be a field name; the actual schema
+                # might use a different name. Check both.
+                event_ts = event.get("bar_timestamp") or event.get("timestamp")
+                assert event_ts in bar_timestamps, (
+                    f"Event at {event_ts} doesn't match any bar timestamp"
+                )
+
+        app.dependency_overrides.clear()

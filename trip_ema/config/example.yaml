@@ -1,0 +1,141 @@
+# trip_ema example configuration
+#
+# Only `database`, `ema`, `atr`, and `market_hours` are required. All
+# other sections have safe defaults; uncomment to override.
+# Durations default to minutes unless a suffix says otherwise.
+
+database:
+  driver: postgresql
+  host: localhost
+  port: 5432
+  database: market_data
+  user: trip_ema_app
+  password_env: TRIP_EMA_DB_PASSWORD
+  tickers_table: tickers
+  bars_table: ohlcv_bars
+  # --- Phase 12: per-process least-privilege roles (optional) ---
+  # The roles are created by Alembic migration 0002_db_roles.py.
+  # Operators grant LOGIN + set passwords as a deployment step,
+  # then uncomment this block. Without it, all processes use the
+  # top-level user/password above. See docs/ARCHITECTURE.md §8.6.
+  # roles:
+  #   etl:
+  #     user: trip_etl_user
+  #     password_env: TRIP_EMA_DB_ETL_PASSWORD
+  #   engine:
+  #     user: trip_engine_user
+  #     password_env: TRIP_EMA_DB_ENGINE_PASSWORD
+  #   gui:
+  #     user: trip_gui_user
+  #     password_env: TRIP_EMA_DB_GUI_PASSWORD
+
+# EMA parameters per stage. Match the Pine indicator defaults.
+ema:
+  med:
+    base: 8
+    s1: 4
+    s2: 4
+    final: null              # `med` has no final stage in Pine
+  long:
+    base: 15
+    s1: 4
+    s2: 4
+    final: 3
+  longest:
+    base: 28
+    s1: 7
+    s2: 5
+    final: 3
+
+atr:
+  length: 14
+  inner_mult: 0.2
+  mid_mult: 2.0
+  outer_mult: 4.0
+
+market_hours:
+  - exchange: NSE
+    open: "09:15"
+    close: "15:30"
+    tz: Asia/Kolkata
+    weekdays: [1, 2, 3, 4, 5]
+  - exchange: BSE
+    open: "09:15"
+    close: "15:30"
+    tz: Asia/Kolkata
+    weekdays: [1, 2, 3, 4, 5]
+  - exchange: NYSE
+    open: "09:30"
+    close: "16:00"
+    tz: America/New_York
+    weekdays: [1, 2, 3, 4, 5]
+
+scheduling:
+  compute_cadence_minutes: 60       # one full compute pass every hour
+  subscriber_cadence_minutes: 15    # GCD of all per-subscriber cadences
+  default_timeframe: "1W"
+
+cache:
+  max_history_bars: 1000            # bars loaded into each TickerEngine
+  state_history_retain: 200         # BarStates kept per engine
+
+http:
+  host: 0.0.0.0
+  port: 8000
+  # admin_token_env: TRIP_EMA_ADMIN_TOKEN   # env var name for bearer token
+  # notifier_subprocess_shutdown_timeout_seconds: 15
+
+# --- Phase 10: observability ----------------------------------------
+# All sub-fields have defaults; this whole section can be omitted.
+# observability:
+#   metrics_port: 9090              # Prometheus /metrics on a separate port
+#                                   # (omit / null = metrics server NOT started)
+#   log_json: false                 # set true for Loki / ELK
+#   tracing:
+#     enabled: false
+#     service_name: trip_ema
+#     exporter: console             # console | otlp
+#     otlp_endpoint: null           # required when exporter=otlp
+
+# --- Phase 10: transport circuit breakers ---------------------------
+# transports:
+#   circuit_breaker:
+#     enabled: true                 # default; trips on 5 consecutive failures
+#     failure_threshold: 5
+#     reset_timeout_seconds: 30
+#     half_open_max_successes: 1
+
+# --- Phase 11: ETL (used by `trip-ema-etl` CLI, NOT by the main app) -
+# The ETL section is read by the trip-ema-etl CLI when it runs as a
+# separate process. The main service ignores it.
+# etl:
+#   exchange: NSE
+#   tier_1_size: 200                # NIFTY 200 → tier-1 (daily refresh)
+#   tier_2_size: 500                # next 500 → tier-2 (weekly)
+#                                   # everything else → tier-3 (monthly)
+#   park_failure_threshold: 3       # park after this many consecutive failures
+#   yfinance_batch_size: 50
+#   yfinance_concurrency: 4
+#   yfinance_request_delay_seconds: 0.5
+#   reconcile_window_days: 7
+#   parked_dir: var/etl/parked
+#   checkpoint_dir: var/etl
+#   eod_run_hour_ist: 17
+#   eod_run_minute_ist: 30
+#   intraday_lookback_days: 5
+
+# --- Phase 9: optional Redis queue mode for the notifier ------------
+# If `redis` is omitted, the SubscriberDistributor runs in legacy
+# in-process mode (synchronous transport calls from the distributor
+# thread). When set, the distributor enqueues jobs to Redis and a
+# separate `trip-ema-notifier` worker process dispatches them.
+# redis:
+#   host: localhost
+#   port: 6379
+#   db: 0
+#   password_env: TRIP_EMA_REDIS_PASSWORD   # optional
+
+# notifier:
+#   # Only consulted when `redis` is set above.
+#   worker_concurrency: 4
+#   queue_name: trip_ema_notifications

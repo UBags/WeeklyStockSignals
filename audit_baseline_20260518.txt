@@ -1,0 +1,46 @@
+==========================================
+Dead island audit — checking 13 doomed paths
+==========================================
+
+--- trip_ema.transports.api ---
+  (no external importers — safe to delete)
+
+--- trip_ema.transports.cache ---
+  (no external importers — safe to delete)
+
+--- trip_ema.transports.config ---
+  (no external importers — safe to delete)
+
+--- trip_ema.transports.domain ---
+  (no external importers — safe to delete)
+
+--- trip_ema.transports.engine ---
+  (no external importers — safe to delete)
+
+--- trip_ema.transports.indicators ---
+  (no external importers — safe to delete)
+
+--- trip_ema.transports.notifications ---
+  (no external importers — safe to delete)
+
+--- trip_ema.transports.observability ---
+  (no external importers — safe to delete)
+
+--- trip_ema.transports.persistence ---
+  (no external importers — safe to delete)
+
+--- trip_ema.transports.registry ---
+  (no external importers — safe to delete)
+
+--- trip_ema.transports.scheduler ---
+  (no external importers — safe to delete)
+
+--- trip_ema.transports.app (orphan entry point) ---
+  (no importers — safe to delete)
+
+--- trip_ema/transports/transports/ (nested duplicate) ---
+  (no importers — safe to delete)
+
+==========================================
+VERDICT: SAFE — no external references found.
+Stage 3 deletion can proceed.

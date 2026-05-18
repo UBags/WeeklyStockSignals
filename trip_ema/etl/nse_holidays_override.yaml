@@ -1,0 +1,33 @@
+# NSE-specific holiday overrides on top of the holidays.India() base.
+#
+# Two sections:
+#   extra_holidays: dates that ARE NOT trading days even though
+#                   they'd be considered one by holidays.India().
+#                   Use for Maharashtra Day, Ganesh Chaturthi NSE
+#                   observance, mid-week election closures, etc.
+#   special_trading_days: dates that ARE trading days even though
+#                         they'd be considered non-trading otherwise
+#                         (e.g., muhurat trading on Diwali evening,
+#                         which falls on a Sunday some years).
+#
+# When NSE publishes its annual holiday list (typically in December
+# for the next year), update this file. The runner re-reads it at
+# CLI invocation, so no restart of the main service is needed.
+#
+# Confirmed holidays should be added here BEFORE they fall, not after,
+# so the runner skips fetches on those days rather than emitting
+# spurious gap-detection alerts.
+
+extra_holidays: []
+  # Examples (uncomment and edit when applicable):
+  # - 2026-04-14   # Dr. Ambedkar Jayanti
+  # - 2026-05-01   # Maharashtra Day
+  # - 2026-08-15   # Independence Day
+  # - 2026-10-02   # Gandhi Jayanti
+  # - 2026-11-08   # Diwali Laxmi Pujan
+
+special_trading_days: []
+  # Muhurat trading typically happens for ~1 hour on Diwali evening.
+  # If Diwali falls on a non-trading day (weekend), this override
+  # ensures the system doesn't flag the resulting bar as anomalous.
+  # - 2026-11-08

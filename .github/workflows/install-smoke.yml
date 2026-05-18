@@ -1,0 +1,176 @@
+name: install-smoke-test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  fresh-install-and-prime:
+    name: Fresh install + DB bootstrap + prime + serve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create the trip_ema database
+        # The service container starts with a `postgres` database
+        # but the app config expects `trip_ema`. Mirror what a fresh
+        # operator would do per the install docs.
+        run: |
+          psql -c "CREATE DATABASE trip_ema;"
+          psql -c "CREATE USER trip_ema_app WITH PASSWORD 'trip_ema_app' CREATEROLE;"
+          psql -c "GRANT ALL PRIVILEGES ON DATABASE trip_ema TO trip_ema_app;"
+
+      - name: Install trip_ema from source
+        # Use a fresh venv to catch any "works on my machine because
+        # something is already installed globally" failures.
+        run: |
+          python -m venv /tmp/smoke-venv
+          /tmp/smoke-venv/bin/pip install --upgrade pip
+          /tmp/smoke-venv/bin/pip install .
+
+      - name: Write a smoke-test config.yaml
+        # Minimal config that points at the service containers.
+        # Mirrors example.yaml but with the smoke-test DB.
+        run: |
+          cp trip_ema/config/example.yaml smoke-config.yaml
+          # Patch the database name; sed is fine for this single line.
+          sed -i 's/database: market_data/database: trip_ema/' smoke-config.yaml
+          # Smoke test runs with the postgres superuser, not the app role,
+          # so we don't need to set up role passwords.
+
+      - name: Run Alembic migrations to head
+        run: /tmp/smoke-venv/bin/alembic upgrade head
+        env:
+          # alembic.ini reads connection details from config — point
+          # it at the smoke-test config.
+          TRIP_EMA_CONFIG: ${{ github.workspace }}/smoke-config.yaml
+
+      - name: Confirm Alembic head is at the latest revision
+        # If the migration tree has a multiple-heads condition, this
+        # surfaces it as a clear failure instead of a confusing later
+        # symptom. The briefing's item 3 (leftover 011 baseline)
+        # would have been caught here.
+        run: |
+          heads=$(/tmp/smoke-venv/bin/alembic heads | wc -l)
+          if [ "$heads" -ne 1 ]; then
+            echo "FAIL: alembic has $heads heads, expected exactly 1"
+            /tmp/smoke-venv/bin/alembic heads
+            exit 1
+          fi
+
+      - name: Run refresh-listings ETL
+        run: /tmp/smoke-venv/bin/trip-ema-etl refresh-listings --config smoke-config.yaml
+
+      - name: Promote a small fixture set to tier 1
+        # We don't backfill 2,667 tickers in CI — pick a handful for
+        # the smoke test. The exact list doesn't matter as long as
+        # they're real listed instruments.
+        run: |
+          psql -d trip_ema -c "UPDATE tickers SET tier = 1 WHERE symbol IN ('AAPL','MSFT','NVDA') LIMIT 3;"
+
+      - name: Run backfill for tier 1
+        # 30-day backfill is enough to prove the path; we're not
+        # validating signal quality here, only that bars arrive.
+        run: |
+          /tmp/smoke-venv/bin/trip-ema-etl backfill \
+              --tier 1 \
+              --start $(date -d '30 days ago' +%Y-%m-%d) \
+              --config smoke-config.yaml
+
+      - name: Assert bars actually got written
+        # This is the assertion that would have caught Issue A
+        # (the dead source_timeframe column) in the first place:
+        # bars exist at '1D', the ticker rows still claim '1W',
+        # priming would silently skip everything. If priming below
+        # logs "0 tickers primed" while bars exist, we fail.
+        run: |
+          bar_count=$(psql -d trip_ema -tAc "SELECT COUNT(*) FROM ohlcv_bars;")
+          echo "Bar count after backfill: $bar_count"
+          if [ "$bar_count" -lt 10 ]; then
+            echo "FAIL: backfill wrote $bar_count bars, expected >=10"
+            exit 1
+          fi
+
+      - name: Start the trip-ema service in the background
+        run: |
+          /tmp/smoke-venv/bin/trip-ema --config smoke-config.yaml &
+          echo $! > /tmp/trip-ema.pid
+          # Give it time to load config, run priming, mount HTTP.
+          # 30s is generous for 3 tickers; tune down if it's reliably
+          # faster.
+          sleep 30
+
+      - name: Healthz must report a populated cache
+        # This is the assertion that catches "priming silently
+        # skipped every ticker." If cache_size is 0 here while
+        # ohlcv_bars has rows, Issue A is back.
+        run: |
+          response=$(curl -fsS http://localhost:8000/healthz)
+          echo "$response"
+          cache_size=$(echo "$response" | python -c "import sys, json; print(json.load(sys.stdin)['cache_size'])")
+          if [ "$cache_size" -lt 1 ]; then
+            echo "FAIL: cache_size is $cache_size, expected >=1"
+            echo "This is the Issue A failure mode — priming silently"
+            echo "skipped tickers because source_timeframe was stale."
+            exit 1
+          fi
+
+      - name: History endpoint must return bars
+        # Catches the signal_type vs signal SQL bug AND the source
+        # timeframe discovery bug in one shot.
+        run: |
+          response=$(curl -fsS "http://localhost:8000/v1/signals/NASDAQ/AAPL/STOCK/history?years=1")
+          echo "$response" | head -c 500
+          bars_count=$(echo "$response" | python -c "import sys, json; print(len(json.load(sys.stdin)['bars']))")
+          if [ "$bars_count" -lt 1 ]; then
+            echo "FAIL: history endpoint returned $bars_count bars"
+            exit 1
+          fi
+
+      - name: Stop the service
+        if: always()
+        run: |
+          if [ -f /tmp/trip-ema.pid ]; then
+            kill $(cat /tmp/trip-ema.pid) || true
+          fi

@@ -1,0 +1,139 @@
+# trip_ema — packaging metadata.
+#
+# Minimal pyproject.toml that declares the runtime dependencies and
+# carves the optional ones (observability, tracing) into extras. This
+# makes the "optional deps handled defensively at import time" story
+# (introduced in Turn 101/103) properly actionable: you can
+# `pip install trip-ema` for the core engine, or
+# `pip install trip-ema[observability,tracing]` to enable metrics and
+# OpenTelemetry. The defensive import paths in metrics.py /
+# metrics_server.py / tracing.py / circuit_breaker.py kick in only
+# when the extras aren't installed — so the runtime contract is
+# unchanged either way.
+#
+# Version is mastered here. `trip_ema/__init__.py`'s __version__
+# should be replaced by `importlib.metadata.version("trip-ema")` once
+# this file is published.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trip-ema"
+version = "0.12.0"
+description = "Triple-EMA + ATR weekly indicator signals and notifications (Pine port)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [
+    { name = "Uddipan P Bagchi" },
+]
+
+# Runtime deps — what `pip install trip-ema` must always pull in.
+dependencies = [
+    "pydantic >= 2.0",
+    "sqlalchemy >= 2.0",
+    "psycopg2-binary >= 2.9",       # PostgreSQL driver. -binary so users
+                                    # don't need libpq-dev on the machine.
+    "fastapi >= 0.110",
+    "uvicorn >= 0.27",
+    "pyyaml >= 6.0",
+    "redis >= 5.0",
+]
+
+[project.optional-dependencies]
+# Prometheus /metrics endpoint. Without this extra, the metrics
+# module's _NoOpMetric / _NoOpRegistry shims take over and the rest
+# of the codebase keeps importing cleanly. See ARCHITECTURE.md
+# invariant 3.12 (observability is additive).
+observability = [
+    "prometheus_client >= 0.20",
+]
+
+# OpenTelemetry tracing. Without this extra, get_tracer() returns
+# an in-module _NoOpTracer and the span sites compile to bare-body
+# no-ops. tracing-otlp adds the OTLP exporter for production
+# (console exporter works with just the base 'tracing' extra).
+tracing = [
+    "opentelemetry-api >= 1.25",
+    "opentelemetry-sdk >= 1.25",
+]
+tracing-otlp = [
+    "opentelemetry-api >= 1.25",
+    "opentelemetry-sdk >= 1.25",
+    "opentelemetry-exporter-otlp-proto-grpc >= 1.25",
+]
+
+# ETL pipeline (yfinance + NSE listings). Only needed when running
+# trip-ema-etl; the main service doesn't import these.
+etl = [
+    "yfinance >= 0.2.40",
+    "pandas >= 2.0",
+    "requests >= 2.31",
+    "holidays >= 0.50",
+]
+
+# PySide operator console (Slice 2+). Only needed when running
+# trip-ema-console; the headless service doesn't import these.
+gui = [
+    "PySide6 >= 6.7",
+    "pyqtgraph >= 0.13",
+    "requests >= 2.31",
+]
+
+# Alembic-managed migrations (Phase 11+). The legacy SQL migrator
+# handles 001-010 without this extra; install when you need to author
+# or apply migrations from 011 onwards. See alembic.ini and
+# docs/ARCHITECTURE.md §8.6.
+migrations = [
+    "alembic >= 1.13",
+]
+
+# Build the standalone operator-console binary (Phase 12). Not a
+# runtime dep — only needed on the build host (CI's
+# build-gui-installer job, or a developer building locally).
+gui-build = [
+    "PySide6 >= 6.7",
+    "pyqtgraph >= 0.13",
+    "requests >= 2.31",
+    "pyinstaller >= 6.0",
+]
+
+# All optional deps together — convenience for production install.
+all = [
+    "prometheus_client >= 0.20",
+    "opentelemetry-api >= 1.25",
+    "opentelemetry-sdk >= 1.25",
+    "opentelemetry-exporter-otlp-proto-grpc >= 1.25",
+    "yfinance >= 0.2.40",
+    "pandas >= 2.0",
+    "requests >= 2.31",
+    "holidays >= 0.50",
+    "PySide6 >= 6.7",
+    "pyqtgraph >= 0.13",
+    "alembic >= 1.13",
+]
+
+# Test deps — used by `pytest`. Kept separate from runtime so
+# images and lockfiles don't carry test framework into prod.
+test = [
+    "pytest >= 8.0",
+    "fakeredis >= 2.20",
+    "pytest-postgresql >= 6.0",     # Used by the persistence/integration
+                                    # test slices (not the DB-free ones).
+    "pytest-qt >= 4.4",             # Headless Qt tests for the GUI.
+]
+
+[project.scripts]
+trip-ema = "trip_ema.app:main"
+trip-ema-notifier = "trip_ema.notifier_worker:main"
+trip-ema-etl = "trip_ema.etl.cli:main"
+trip-ema-console = "trip_ema.gui.console:main"
+
+# Build configuration — hatchling needs to know what to include.
+[tool.hatch.build.targets.wheel]
+packages = ["trip_ema"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "trip_ema/migrations"

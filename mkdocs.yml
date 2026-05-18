@@ -1,0 +1,114 @@
+# MkDocs Material site for trip_ema.
+#
+# Generates a navigable static site from the existing markdown
+# under docs/ and the top-level README.md / PHASE11_CHANGELOG.md.
+# Published to GitHub Pages via .github/workflows/docs.yml on
+# every push to main.
+#
+# The conversation DOCX is NOT included — it remains an immutable
+# archive in /mnt/user-data/outputs/ and the repo's checked-in
+# copy. The MkDocs site is for engineers using the codebase; the
+# DOCX is for provenance and historical decisions.
+#
+# Build locally:
+#     pip install mkdocs-material
+#     mkdocs serve     # http://localhost:8000 with live reload
+#     mkdocs build     # static output to site/
+
+site_name: trip_ema
+site_description: >
+  Python port of the Weekly Triple-EMA + ATR-band Pine indicator,
+  plus a production-quality service, ETL pipeline, and PySide6
+  operator console.
+site_url: https://example.com/trip-ema/   # Set to your actual URL
+repo_name: trip-ema
+repo_url: https://github.com/example/trip-ema  # Set to your repo
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections     # show second-level nav as expanded sections
+    - navigation.top          # back-to-top button
+    - search.suggest
+    - search.highlight
+    - content.code.copy       # copy button on code blocks
+    - content.code.annotate   # inline annotations on code
+  palette:
+    # Default = light. Auto-switches with system preference.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+# Navigation. Each section maps to either a single file or a list of
+# pages. The order here is the order in the left sidebar.
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview: architecture/index.md
+      - Invariants: architecture/invariants.md
+      - Deployment & operations: architecture/operations.md
+  - Operator guide:
+      - Configuration: operator/configuration.md
+      - Running the service: operator/running.md
+      - Notifier DLQ: operator/dlq.md
+      - DB role separation: operator/db-roles.md
+  - Developer guide:
+      - Migrations: dev/migrations.md
+      - Adding a transport: dev/transports.md
+      - Running the tests: dev/testing.md
+      - Pine parity harness: dev/parity.md
+  - Changelog:
+      - Phase 11 + Tier 2: changelog/phase-11.md
+      - Phase 12: changelog/phase-12.md
+
+markdown_extensions:
+  # Syntax highlighting + line numbers + click-to-copy
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  # Admonitions (!!! note, !!! warning, etc.)
+  - admonition
+  - pymdownx.details
+  # Tabs in code blocks
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  # Optional: API reference auto-generated from docstrings.
+  # Disabled by default — turn on once docstrings are uniform.
+  # - mkdocstrings:
+  #     handlers:
+  #       python:
+  #         options:
+  #           show_source: true
+  #           docstring_style: google
+
+# Don't surface unfinished or in-progress sections in the production
+# build — use 'mkdocs serve --strict' locally to validate everything.
+strict: false

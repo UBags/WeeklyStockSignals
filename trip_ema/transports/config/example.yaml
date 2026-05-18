@@ -1,0 +1,66 @@
+# trip_ema example configuration
+# All durations are in minutes unless suffix says otherwise.
+
+database:
+  driver: postgresql
+  host: localhost
+  port: 5432
+  database: market_data
+  user: trip_ema_app
+  password_env: TRIP_EMA_DB_PASSWORD
+  tickers_table: tickers
+  bars_table: ohlcv_bars
+
+# EMA parameters per stage. Match the Pine indicator defaults.
+ema:
+  med:
+    base: 8
+    s1: 4
+    s2: 4
+    final: null              # `med` has no final stage in Pine
+  long:
+    base: 15
+    s1: 4
+    s2: 4
+    final: 3
+  longest:
+    base: 28
+    s1: 7
+    s2: 5
+    final: 3
+
+atr:
+  length: 14
+  inner_mult: 0.2
+  mid_mult: 2.0
+  outer_mult: 4.0
+
+market_hours:
+  - exchange: NSE
+    open: "09:15"
+    close: "15:30"
+    tz: Asia/Kolkata
+    weekdays: [1, 2, 3, 4, 5]
+  - exchange: BSE
+    open: "09:15"
+    close: "15:30"
+    tz: Asia/Kolkata
+    weekdays: [1, 2, 3, 4, 5]
+  - exchange: NYSE
+    open: "09:30"
+    close: "16:00"
+    tz: America/New_York
+    weekdays: [1, 2, 3, 4, 5]
+
+scheduling:
+  compute_cadence_minutes: 60       # one full compute pass every hour
+  subscriber_cadence_minutes: 15    # GCD of all per-subscriber cadences
+  default_timeframe: "1W"
+
+cache:
+  max_history_bars: 1000            # bars loaded into each TickerEngine
+  state_history_retain: 200         # BarStates kept per engine
+
+http:
+  host: 0.0.0.0
+  port: 8000
