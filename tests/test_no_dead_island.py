@@ -35,7 +35,6 @@ DEAD_SUBPACKAGES = [
 ]
 
 
-@pytest.mark.skip(reason="Enable after Stage 3 deletion lands")
 @pytest.mark.parametrize("name", DEAD_SUBPACKAGES)
 def test_dead_subpackage_is_gone(name: str) -> None:
     """No file or subpackage by this name should exist under trip_ema.transports."""
@@ -44,7 +43,6 @@ def test_dead_subpackage_is_gone(name: str) -> None:
         importlib.import_module(full_name)
 
 
-@pytest.mark.skip(reason="Enable after Stage 3 deletion lands")
 def test_only_http_lives_under_transports() -> None:
     """Belt-and-braces: enumerate what's actually under trip_ema.transports
     and assert it's exactly {http}. Catches anyone adding a new sibling
