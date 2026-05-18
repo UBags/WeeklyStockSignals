@@ -8,7 +8,7 @@ database:
   driver: postgresql
   host: localhost
   port: 5432
-  database: market_data
+  database: trip_ema
   user: trip_ema_app
   password_env: TRIP_EMA_DB_PASSWORD
   tickers_table: tickers

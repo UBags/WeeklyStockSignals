@@ -232,14 +232,22 @@ class TestTextFormatter:
 
 
 class TestConfigureLogging:
-
     def test_repeated_calls_dont_compound_handlers(self):
         """If a test calls configure_logging twice (common in fixtures),
-        the root logger must end up with exactly one handler, not two."""
+        each call should leave at most one configure_logging-installed
+        stderr handler — not two — at the end. (Pytest installs its own
+        log-capture handlers on the root logger; we don't count those.)
+        """
+        import sys
         configure_logging(level="INFO", json_output=False)
         configure_logging(level="DEBUG", json_output=True)
         root = logging.getLogger()
-        assert len(root.handlers) == 1
+        configure_logging_handlers = [
+            h for h in root.handlers
+            if isinstance(h, logging.StreamHandler)
+            and getattr(h, "stream", None) is sys.stderr
+        ]
+        assert len(configure_logging_handlers) == 1
         assert root.level == logging.DEBUG
 
 

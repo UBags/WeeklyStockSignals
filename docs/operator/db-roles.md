@@ -18,6 +18,25 @@ Roles are created by Alembic migration `0002_db_roles.py` with
 `NOLOGIN` and no password. Operators grant `LOGIN` and set
 passwords as a deployment step.
 
+## Prerequisites
+
+The migration user (the one in `config.yaml` running
+`alembic upgrade head`) needs the `CREATEROLE` Postgres attribute
+to execute the `CREATE ROLE` statements. Without it, migration
+0002 will fail with a `permission denied` error and the database
+will be left at revision `0001_initial_schema`.
+
+Grant it as a Postgres superuser before running migrations:
+
+```sql
+ALTER ROLE trip_ema_app CREATEROLE;
+```
+
+This is a one-time setup step. If you'd rather not use role
+separation at all, you can stop reading here — the application
+works correctly with whatever user is in `config.yaml`, and the
+`roles:` block in the config file is entirely optional.
+
 ## Setup
 
 ```sql

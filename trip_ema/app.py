@@ -444,8 +444,9 @@ def main(argv: list[str] | None = None) -> NoReturn:
     _configure_logging(args.log_level, json_output=False)
     state = _build_app_state(args.config)
     # Apply the user's preferred log format (json vs text). The
-    # observability.configure_logging is idempotent — clears existing
-    # handlers — so this safely replaces the bootstrap handler.
+    # observability.configure_logging is idempotent: repeated calls
+    # leave one handler at the end, with the most recent settings.
+    # This replaces the bootstrap handler set above.
     _configure_logging(args.log_level, json_output=state.config.observability.log_json)
     set_state(state)
 

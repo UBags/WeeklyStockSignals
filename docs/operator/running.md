@@ -10,18 +10,28 @@ as long as they all see the same Postgres and Redis.
 # 1. Install
 pip install trip-ema[all,migrations]
 
-# 2. Set up the database
+# 2. Prerequisite — grant CREATEROLE to the migration user
+#
+# Migration 0002_db_roles creates the per-process Postgres roles
+# (trip_etl_user, trip_engine_user, trip_gui_user). This requires
+# the user running migrations to have the CREATEROLE attribute.
+# Without it, `alembic upgrade head` fails on 0002.
+#
+# Run as a Postgres superuser:
+psql -c "ALTER ROLE trip_ema_app CREATEROLE;"
+
+# 3. Set up the database
 export TRIP_EMA_DB_PASSWORD=...
 alembic -x config=/path/to/config.yaml upgrade head
 
-# 3. (Optional) Set up the per-role users — Phase 12
+# 4. (Optional) Set up the per-role users — Phase 12
 # Run as a Postgres superuser:
 psql -c "ALTER USER trip_etl_user WITH LOGIN PASSWORD 'etl_secret';"
 psql -c "ALTER USER trip_engine_user WITH LOGIN PASSWORD 'eng_secret';"
 psql -c "ALTER USER trip_gui_user WITH LOGIN PASSWORD 'gui_secret';"
 # Then add the `roles:` block to config.yaml.
 
-# 4. Seed initial ticker universe
+# 5. Seed initial ticker universe
 TRIP_EMA_DB_PASSWORD=... trip-ema-etl refresh-listings --config config.yaml
 TRIP_EMA_DB_PASSWORD=... trip-ema-etl backfill --years 3 --config config.yaml
 ```

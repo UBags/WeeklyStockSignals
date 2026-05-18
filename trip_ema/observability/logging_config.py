@@ -111,15 +111,42 @@ def configure_logging(
     json_output: bool = False,
 ) -> None:
     """Configure the root logger with a single stderr handler using
-    either JSON or text format. Idempotent — clears existing handlers
-    first so repeated calls (e.g., in tests) don't compound."""
+    either JSON or text format.
+
+    Idempotent in two distinct senses:
+
+      - Repeated calls with the same arguments are a no-op.
+      - Re-calls with a different `json_output` swap the formatter
+        in place on the existing handler rather than tearing down
+        and rebuilding. This matters for `app.py`'s two-phase
+        bootstrap: an early text-mode call before config is loaded,
+        then a re-call once the operator-configured log_json is
+        known. The in-place swap ensures no log records emitted
+        between the two calls are lost to a handler tear-down.
+
+    Tests that want a fresh root logger should call
+    `_reset_for_tests()` (below) rather than relying on this
+    function to clear handlers.
+    """
     root = logging.getLogger()
-    # Clear existing handlers — this is the idempotency guarantee
-    for h in list(root.handlers):
-        root.removeHandler(h)
-    handler = logging.StreamHandler(stream=sys.stderr)
-    handler.setFormatter(JsonFormatter() if json_output else TextFormatter())
-    root.addHandler(handler)
+    formatter = JsonFormatter() if json_output else TextFormatter()
+
+    # Find any stderr handler this function previously installed.
+    # If found, just swap the formatter — preserves any records the
+    # handler may still be flushing, and preserves handler-specific
+    # state (filters, level, etc.).
+    existing = next(
+        (h for h in root.handlers
+         if isinstance(h, logging.StreamHandler) and h.stream is sys.stderr),
+        None,
+    )
+    if existing is not None:
+        existing.setFormatter(formatter)
+    else:
+        handler = logging.StreamHandler(stream=sys.stderr)
+        handler.setFormatter(formatter)
+        root.addHandler(handler)
+
     # Accept either a string ("INFO", "DEBUG") or an int (already a
     # logging level constant — what argparse-counted `-v` flags produce
     # after being mapped to logging.DEBUG/logging.INFO/etc.)
@@ -127,3 +154,11 @@ def configure_logging(
         root.setLevel(level)
     else:
         root.setLevel(getattr(logging, level.upper(), logging.INFO))
+
+
+def _reset_for_tests() -> None:
+    """Remove all root logger handlers. For test fixtures that need
+    a known-clean logger state between tests."""
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
