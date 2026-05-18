@@ -63,6 +63,21 @@ class FakeBarsRepo:
     def max_updated_at_since(self, ticker_id, timeframe, history_start_inclusive):
         return self._max_updated
 
+    def available_timeframes(self, ticker_id):
+        """Mirror of BarsRepository.available_timeframes for the fake.
+
+        Production reads ohlcv_bars; we read the source_bars dict keys.
+        Returns the set of Timeframe values present for this ticker_id.
+        """
+        result: set[Timeframe] = set()
+        for (tid, tf_value) in self._source_bars.keys():
+            if tid == ticker_id:
+                try:
+                    result.add(Timeframe(tf_value))
+                except ValueError:
+                    continue
+        return result
+
     def weekly_buckets_with_bars(
         self, ticker_id, timeframe, since_inclusive, tz,
     ):
