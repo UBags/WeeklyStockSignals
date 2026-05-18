@@ -88,7 +88,6 @@ class FakeRegistry:
         ref: TickerRef,
         engine: TickerEngine,
         tz: str = "UTC",
-        source_timeframe: str = "1D",
     ):
         self._engines = {(ref, engine.timeframe): engine}
         self._ticker_ids = {ref: ticker_id}
@@ -99,7 +98,6 @@ class FakeRegistry:
                 is_active=True,
                 full_name=None,
                 tz=tz,
-                source_timeframe=source_timeframe,
             )
         }
 
@@ -208,19 +206,19 @@ def _make_harness(
     now: datetime,
     source_bars: list[OHLCVBar],
     tz: str = "UTC",
-    source_timeframe: str = "1D",
+    bars_timeframe: str = "1D",
 ) -> _SchedulerHarness:
     ticker = _ticker()
     engine = _build_primed_engine(last_monday=last_monday)
     cache = SignalCache()
     _seed_cache_for_engine(cache, engine, now=now - timedelta(hours=1))
     bars_repo = FakeBarsRepo(
-        source_bars={(1, source_timeframe): source_bars},
+        source_bars={(1, bars_timeframe): source_bars},
         max_updated_at=None,    # no revision detection in these tests
     )
     registry = FakeRegistry(
         ticker_id=1, ref=ticker, engine=engine,
-        tz=tz, source_timeframe=source_timeframe,
+        tz=tz,
     )
     db_engine = FakeDBEngine()
     return _SchedulerHarness(

@@ -190,7 +190,6 @@ class TestSourceAggregationPrime:
                 NIFTY,
                 created_at=datetime.now(timezone.utc),
                 tz="UTC",
-                source_timeframe="1D",
             )
         _seed_daily_bars_for_weeks(db_engine, tid, n_weeks=10)
 
@@ -247,7 +246,6 @@ class TestSourceAggregationPrime:
                 NIFTY,
                 created_at=datetime.now(timezone.utc),
                 tz="UTC",
-                source_timeframe="1D",   # but no 1D bars seeded
             )
         registry = TickerRegistry(IndicatorParams(), [Timeframe.WEEKLY])
         result = registry.prime_all(db_engine)

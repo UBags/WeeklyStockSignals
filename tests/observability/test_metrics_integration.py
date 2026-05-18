@@ -72,7 +72,7 @@ class TestSchedulerInstrumentation:
         )
         registry = FakeRegistry(
             ticker_id=1, ref=ticker, engine=engine,
-            tz="UTC", source_timeframe="1D",
+            tz="UTC",
         )
         db_engine = FakeDBEngine()
 
@@ -130,7 +130,7 @@ class TestSchedulerInstrumentation:
         bars_repo = FakeBarsRepo(source_bars={(1, "1D"): bars})
         registry = FakeRegistry(
             ticker_id=1, ref=ticker, engine=engine,
-            tz="UTC", source_timeframe="1D",
+            tz="UTC",
         )
 
         monkeypatch.setattr(
@@ -172,7 +172,7 @@ class TestSchedulerInstrumentation:
         bars_repo = FakeBarsRepo(source_bars={})
         registry = FakeRegistry(
             ticker_id=1, ref=ticker, engine=engine,
-            tz="UTC", source_timeframe="1D",
+            tz="UTC",
         )
 
         sched = ComputeScheduler(
