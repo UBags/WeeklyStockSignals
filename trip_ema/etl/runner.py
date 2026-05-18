@@ -181,7 +181,7 @@ def recompute_tiers(engine: Engine, config: Config) -> int:
         # don't bias things). 30 trading days ≈ 45 calendar days.
         rows = conn.execute(
             text("""
-                WITH window AS (
+                WITH recent_bars AS (
                     SELECT ticker_id, close * volume AS daily_value
                     FROM ohlcv_bars
                     WHERE timeframe = '1D'
@@ -191,7 +191,7 @@ def recompute_tiers(engine: Engine, config: Config) -> int:
                 SELECT t.ticker_id,
                        COALESCE(AVG(w.daily_value), 0) AS avg_daily_value
                 FROM tickers t
-                LEFT JOIN window w ON t.ticker_id = w.ticker_id
+                LEFT JOIN recent_bars w ON t.ticker_id = w.ticker_id
                 WHERE t.is_active = TRUE AND t.delisted_at IS NULL
                   AND t.exchange = :ex
                 GROUP BY t.ticker_id
