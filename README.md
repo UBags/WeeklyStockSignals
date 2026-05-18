@@ -177,7 +177,7 @@ a separate port (`observability.metrics_port`).
 | `POST /v1/admin/prime-all` | Re-prime all tickers from DB (admin) |
 | `POST /v1/admin/compute-now` | Force `ComputeScheduler.run_once` (admin) |
 | `GET /v1/admin/stale-tickers` | List tickers flagged stale due to ETL gaps (admin) |
-| `POST /v1/admin/reprime-ticker/{exchange}/{symbol}` | Reprime one ticker, refreshing tz/source_timeframe from DB (admin) |
+| `POST /v1/admin/reprime-ticker/{exchange}/{symbol}` | Reprime one ticker, refreshing metadata from DB (admin) |
 | `GET /v1/admin/circuit-breakers` | Current transport-breaker state per transport (admin) |
 | `GET /v1/admin/etl/status` | ETL run history + tier counts (admin) |
 | `GET /v1/admin/etl/parked` | Currently parked tickers + failure reasons (admin) |

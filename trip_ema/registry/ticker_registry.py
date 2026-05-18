@@ -82,11 +82,11 @@ class TickerRegistry:
         """For every active ticker × configured timeframe, create a
         TickerEngine and prime it with the last N bars from the DB.
 
-        B4: When the engine's target timeframe is WEEKLY and the
-        ticker's source_timeframe is finer, this method fetches source
-        bars and aggregates them to weekly (using the ticker's tz for
-        the week anchor) before priming. When source == target, bars
-        are used directly.
+        B4: When the engine's target timeframe is WEEKLY and the bars
+        table contains a finer source resolution for the ticker, this
+        method fetches source bars and aggregates them to weekly (using
+        the ticker's tz for the week anchor) before priming. When bars
+        already exist at the target timeframe, they're used directly.
 
         Tickers with no bars are skipped (logged, not failed). Tickers
         that raise during priming are caught individually so one bad
@@ -154,14 +154,10 @@ class TickerRegistry:
             aggregate via daily_to_weekly().
           - Else, no usable data: return empty (skipped, not failed).
 
-        We deliberately ignore `record.source_timeframe` here. That
-        column is metadata the ETL is supposed to keep in sync with
-        what it inserts, but nothing currently enforces that, and the
-        bars table itself is the only ground truth. Trusting
-        source_timeframe would skip valid data when the column is
-        stale (e.g., refresh-listings inserts ticker rows with the
-        default '1W' but backfill writes '1D' bars without updating
-        source_timeframe).
+        Discovery from ohlcv_bars is the source of truth. A
+        `tickers.source_timeframe` column existed pre-Phase-13 to
+        declare per-ticker source resolution, but the ETL never kept
+        it in sync — it was removed in migration 0003.
         """
         with db_engine.connect() as conn:
             bars_repo = BarsRepository(conn)
@@ -230,17 +226,18 @@ class TickerRegistry:
         updated in the DB).
 
         Uses the same source-fetch-and-aggregate logic as prime_all,
-        so engines with source_timeframe != target stay correct.
+        so engines stay correct when source resolution differs from
+        target.
 
         Args:
-            refresh_metadata: When True, force-reload `TickerRecord` from
-                the DB even if a cached one exists. This catches tz /
-                source_timeframe / is_active changes that an operator
-                applied via direct DB update or a future admin endpoint.
-                Defaults False to preserve the scheduler's
-                revision-detection call-site behavior, where the
-                metadata isn't expected to have changed and an extra
-                DB round-trip per re-prime is wasteful.
+            refresh_metadata: When True, force-reload `TickerRecord`
+                from the DB even if a cached one exists. This catches
+                tz / is_active changes that an operator applied via
+                direct DB update or a future admin endpoint. Defaults
+                False to preserve the scheduler's revision-detection
+                call-site behavior, where the metadata isn't expected
+                to have changed and an extra DB round-trip per
+                re-prime is wasteful.
 
         Returns True if the engine was rebuilt, False if the ticker has
         no bars (in which case the engine is removed from the registry).
@@ -299,9 +296,9 @@ class TickerRegistry:
         return self._ticker_ids.get(ref)
 
     def get_ticker_meta(self, ref: TickerRef) -> TickerRecord | None:
-        """The TickerRecord (with tz, source_timeframe, etc.) for a
-        ref. Populated during prime_all. Used by the scheduler to know
-        the ticker's timezone for week-anchor computation."""
+        """The TickerRecord (tz, is_active, etc.) for a ref. Populated
+        during prime_all. Used by the scheduler to know the ticker's
+        timezone for week-anchor computation."""
         return self._ticker_meta.get(ref)
 
     def all_engines(self) -> list[tuple[EngineKey, TickerEngine]]:

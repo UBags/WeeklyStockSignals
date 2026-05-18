@@ -147,9 +147,9 @@ def admin_reprime_ticker(
 ) -> RepriumeResultPayload:
     """Reprime a single (ticker, timeframe). The registry's metadata
     cache for this ticker is force-refreshed from the DB before the
-    re-aggregation, so any operator changes to `tickers.tz` or
-    `tickers.source_timeframe` get picked up — that's the usual reason
-    to hit this endpoint rather than restarting the service.
+    re-aggregation, so any operator changes to `tickers.tz` get
+    picked up — that's the usual reason to hit this endpoint rather
+    than restarting the service.
 
     The cache entry for the ticker is replaced with a fresh
     `CachedSignal` synthesized from the rebuilt engine. Any prior

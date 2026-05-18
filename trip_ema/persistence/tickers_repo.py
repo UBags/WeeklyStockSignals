@@ -30,9 +30,12 @@ class TickerRecord:
       - `tz`: the exchange's IANA timezone (e.g. 'Asia/Kolkata').
         Used for week-anchor computation. Defaults to 'UTC' for
         pre-Phase-8 rows.
-      - `source_timeframe`: the resolution at which the ETL writes bars
-        for this ticker. The engine reads bars at this resolution and
-        aggregates to its target timeframe internally.
+
+    Note: a `source_timeframe` field was present pre-Phase-13. It was
+    dead metadata (never kept in sync by the ETL) and removed in
+    migration 0003_drop_tickers_source_timeframe. Discovery from
+    ohlcv_bars is now the source of truth — see
+    BarsRepository.available_timeframes().
     """
 
     ticker_id: int
@@ -40,7 +43,6 @@ class TickerRecord:
     is_active: bool
     full_name: str | None
     tz: str = "UTC"
-    source_timeframe: str = "1W"
 
 
 def _row_to_record(row) -> TickerRecord:
@@ -54,7 +56,6 @@ def _row_to_record(row) -> TickerRecord:
         is_active=row.is_active,
         full_name=row.full_name,
         tz=getattr(row, "tz", "UTC"),
-        source_timeframe=getattr(row, "source_timeframe", "1W"),
     )
 
 
@@ -108,17 +109,15 @@ class TickersRepository:
         full_name: str | None = None,
         is_active: bool = True,
         created_at,
-        tz: str = "UTC",
-        source_timeframe: str = "1W",
+            tz: str = "UTC",
     ) -> int:
         """Insert a new ticker. Returns the assigned ticker_id.
 
         Caller passes `created_at` explicitly (rather than letting the DB
         default kick in) to keep timestamps deterministic in tests.
 
-        Phase 8 B4: `tz` and `source_timeframe` are required schema
-        columns but default to 'UTC' / '1W' to preserve backward
-        compat with existing test fixtures.
+        Phase 8 B4: `tz` is a required schema column but defaults to
+        'UTC' to preserve backward compat with existing test fixtures.
         """
         stmt = (
             insert(tickers)
@@ -130,7 +129,6 @@ class TickersRepository:
                 is_active=is_active,
                 created_at=created_at,
                 tz=tz,
-                source_timeframe=source_timeframe,
             )
             .returning(tickers.c.ticker_id)
         )

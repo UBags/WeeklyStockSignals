@@ -80,10 +80,11 @@ class BarsRepository:
         """Return the set of timeframes that actually have at least
         one row for this ticker.
 
-        Used by the registry's prime path so we don't depend on the
-        possibly-stale `tickers.source_timeframe` column. The truth
-        about what data exists lives in `ohlcv_bars`, not in the
-        ticker's declared metadata.
+        Used by the registry's prime path and the compute scheduler
+        to discover what bar data is available for a ticker. The
+        bars table is the source of truth; ticker-level metadata
+        about expected source resolution was removed in migration
+        0003 because the ETL never kept it in sync.
 
         Returns a Python set rather than a list because callers
         always want membership tests, not order.

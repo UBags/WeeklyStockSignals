@@ -13,7 +13,7 @@ from enum import Enum, IntEnum
 
 class Timeframe(str, Enum):
     """Bar interval. String value matches what's stored in the DB
-    `ohlcv_bars.timeframe` column AND `tickers.source_timeframe`."""
+    `ohlcv_bars.timeframe` column."""
 
     MIN_15 = "15m"
     HOURLY = "1h"

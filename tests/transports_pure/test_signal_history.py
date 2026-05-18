@@ -61,27 +61,46 @@ class FakeRow:
             setattr(self, k, v)
 
 
-def _build_db_engine_with_bars(*, bars, ticker_exists=True, events=None):
+def _build_db_engine_with_bars(
+    *,
+    bars,
+    ticker_exists=True,
+    events=None,
+    available_timeframes=("1D",),
+):
     """Wire a MagicMock to return:
-      - ticker metadata via the first .execute() call
-      - bar rows via the second .execute() call
-      - signal_events rows via the third .execute() call
+      - ticker metadata via the first .execute().first() call
+      - available timeframes via the second .execute().all() call
+      - bar rows via the third .execute() call (iterated)
+      - signal_events rows via the fourth .execute() call (iterated)
+
+    The route discovers source timeframe from ohlcv_bars itself (the
+    `tickers.source_timeframe` column was dead metadata and dropped
+    in migration 0003). Tests advertise available timeframes via the
+    `available_timeframes` parameter — defaults to ('1D',) since every
+    test in this file feeds daily bars and expects daily-to-weekly
+    aggregation.
     """
     engine = MagicMock()
     conn = MagicMock()
     engine.connect.return_value.__enter__.return_value = conn
 
     if ticker_exists:
-        ticker_row = FakeRow(ticker_id=1, tz="Asia/Kolkata", source_timeframe="1D")
+        ticker_row = FakeRow(ticker_id=1, tz="Asia/Kolkata")
     else:
         ticker_row = None
 
-    # The route calls .execute() three times: ticker lookup, bars, events.
-    # We use a side_effect list of three return values; each MagicMock
-    # must support both .first() (for the ticker lookup) and iteration
-    # (for bars + events).
     ticker_result = MagicMock()
     ticker_result.first.return_value = ticker_row
+
+    # Discovery query — the route calls
+    #   conn.execute(...).all()
+    # to find which timeframes have bars for this ticker. Each row
+    # needs a `.timeframe` attribute that the route reads.
+    available_result = MagicMock()
+    available_result.all.return_value = [
+        FakeRow(timeframe=tf) for tf in available_timeframes
+    ]
 
     bars_result = MagicMock()
     bars_result.__iter__.return_value = iter(bars)
@@ -89,9 +108,11 @@ def _build_db_engine_with_bars(*, bars, ticker_exists=True, events=None):
     events_result = MagicMock()
     events_result.__iter__.return_value = iter(events or [])
 
-    conn.execute.side_effect = [ticker_result, bars_result, events_result]
+    # Four execute() results now: ticker, discovery, bars, events.
+    conn.execute.side_effect = [
+        ticker_result, available_result, bars_result, events_result,
+    ]
     return engine
-
 
 def _make_client(*, config=None, db_engine=None):
     app = create_app()
@@ -133,7 +154,7 @@ class TestEmptyHistory:
 
     def test_returns_empty_payload_when_no_bars(self):
         """Ticker exists but has no bars in the window."""
-        engine = _build_db_engine_with_bars(bars=[])
+        engine = _build_db_engine_with_bars(bars=[], available_timeframes=())
         client = _make_client(db_engine=engine)
         resp = client.get("/v1/signals/NSE/RELIANCE/history?years=3")
         assert resp.status_code == 200
@@ -209,13 +230,13 @@ class TestSignalEventsInResponse:
             FakeRow(
                 event_id=1,
                 bar_timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
-                signal="BUY",
+                signal_type="BUY",
                 price_at_signal=120.0,
             ),
             FakeRow(
                 event_id=2,
                 bar_timestamp=datetime(2025, 9, 1, tzinfo=timezone.utc),
-                signal="SELL",
+                signal_type="SELL",
                 price_at_signal=125.0,
             ),
         ]

@@ -518,7 +518,7 @@ class TickersView(QWidget):
         confirm = QMessageBox.question(
             self, f"Reprime {row.symbol}?",
             f"Force-reprime ticker {row.symbol} from DB?\n"
-            f"This refreshes its metadata (tz, source_timeframe) and "
+            f"This refreshes its metadata (tz) and "
             f"rebuilds its engine from current bars.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )

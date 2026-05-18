@@ -272,14 +272,10 @@ class ComputeScheduler:
         Returns None if no usable source bars exist for this ticker —
         caller should treat that as "skip this ticker for this run."
 
-        We deliberately do NOT consult `record.source_timeframe`. That
-        column is metadata the ETL is supposed to keep in sync with
-        bars table contents, but nothing currently enforces that, and
-        bars table itself is the only ground truth. Trusting
-        source_timeframe would skip valid data when the column is
-        stale (e.g., refresh-listings inserts ticker rows with the
-        default '1W' but backfill writes '1D' bars without updating
-        source_timeframe).
+        Discovery from ohlcv_bars is the source of truth. A
+        `tickers.source_timeframe` column existed pre-Phase-13 but
+        was dead metadata — the ETL never kept it in sync — and was
+        removed in migration 0003.
         """
         with self._db_engine.connect() as conn:
             available = BarsRepository(conn).available_timeframes(ticker_id)
@@ -330,9 +326,8 @@ class ComputeScheduler:
         America/New_York, etc.) so the local-Monday convention is
         honored.
 
-        Source timeframe is discovered from the bars table itself, not
-        from `tickers.source_timeframe` — see
-        `_discover_source_timeframe` for the rationale.
+        Source timeframe is discovered from the bars table itself —
+        see `_discover_source_timeframe`.
         """
         ticker_id = self._registry.get_ticker_id(ref)
         record = self._registry.get_ticker_meta(ref)

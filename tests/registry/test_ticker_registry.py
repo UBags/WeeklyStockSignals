@@ -179,8 +179,9 @@ def _seed_daily_bars_for_weeks(db_engine, ticker_id: int, n_weeks: int):
 
 
 class TestSourceAggregationPrime:
-    """When source_timeframe != target, prime_all must fetch source bars
-    and aggregate to the target before priming the engine."""
+    """When the bars table contains a finer source resolution than the
+    engine's target timeframe, prime_all must fetch source bars and
+    aggregate before priming the engine."""
 
     def test_weekly_engine_from_daily_source(self, db_engine):
         """Ticker has source='1D'; engine's target is WEEKLY. Registry
@@ -208,27 +209,9 @@ class TestSourceAggregationPrime:
         first_weekly_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
         assert history[0].timestamp == first_weekly_ts
 
-    def test_metadata_stored_on_registry(self, db_engine):
-        """get_ticker_meta returns the full TickerRecord for use by the
-        scheduler (which needs tz and source_timeframe)."""
-        with transaction(db_engine) as conn:
-            TickersRepository(conn).insert(
-                NIFTY,
-                created_at=datetime.now(timezone.utc),
-                tz="Asia/Kolkata",
-                source_timeframe="1h",
-            )
-        registry = TickerRegistry(IndicatorParams(), [Timeframe.WEEKLY])
-        registry.prime_all(db_engine)
-
-        meta = registry.get_ticker_meta(NIFTY)
-        assert meta is not None
-        assert meta.tz == "Asia/Kolkata"
-        assert meta.source_timeframe == "1h"
-
     def test_source_equals_target_uses_direct_fetch(self, db_engine):
-        """When source_timeframe == target, no aggregation runs; direct
-        fetch on the target tf."""
+        """When the target timeframe is already present in the bars
+        table, no aggregation runs; direct fetch on the target tf."""
         tid = _seed_ticker(db_engine, NIFTY)
         # _seed_ticker uses defaults: tz='UTC', source='1W'. Seed weekly bars.
         _seed_bars(db_engine, tid, n=10)

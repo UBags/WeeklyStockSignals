@@ -110,10 +110,10 @@ def get_signal_history(
     on-demand recompute is fine.
     """
     # Step 1: resolve (exchange, symbol, instrument) → ticker_id + tz.
-    # We deliberately ignore tickers.source_timeframe and instead look
-    # at what bars actually exist for this ticker — the source_timeframe
-    # column isn't kept in sync by the ETL and lies about the data.
-    # The bars table is the only ground truth.
+    # Discover from ohlcv_bars what timeframes actually exist for
+    # this ticker. A `tickers.source_timeframe` column existed
+    # pre-Phase-13 but was removed in migration 0003 — it was never
+    # kept in sync by the ETL.
     with db_engine.connect() as conn:
         row = conn.execute(text("""
                 SELECT ticker_id, COALESCE(tz, 'UTC') AS tz
