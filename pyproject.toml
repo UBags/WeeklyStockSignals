@@ -120,6 +120,7 @@ all = [
 test = [
     "pytest >= 8.0",
     "fakeredis >= 2.20",
+    "lupa >= 2.0",                  # Lua scripting support for fakeredis
     "pytest-postgresql >= 6.0",     # Used by the persistence/integration
                                     # test slices (not the DB-free ones).
     "pytest-qt >= 4.4",             # Headless Qt tests for the GUI.
