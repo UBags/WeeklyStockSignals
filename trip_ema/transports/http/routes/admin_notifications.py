@@ -69,7 +69,7 @@ def list_recent_notifications(
         SELECT nl.log_id, nl.last_sent_at, nl.subscriber_id,
                nl.event_id, nl.notification_count,
                s.address AS sub_address, s.transport AS sub_transport,
-               e.signal AS event_signal, e.bar_timestamp AS event_bar_timestamp,
+               e.signal_type AS event_signal, e.bar_timestamp AS event_bar_timestamp,
                t.symbol AS ticker_symbol, t.exchange AS ticker_exchange
         FROM notification_log nl
         JOIN subscribers s ON nl.subscriber_id = s.subscriber_id

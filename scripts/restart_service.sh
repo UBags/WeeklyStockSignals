@@ -39,7 +39,7 @@ export TRIP_EMA_DB_PASSWORD=devpassword
 SERVICE_PORT=8000
 CONFIG="${1:-config.yaml}"
 LOG_FILE=/tmp/trip-ema.log
-PRIME_WAIT_SECONDS=60
+PRIME_WAIT_SECONDS=120
 # =========================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
