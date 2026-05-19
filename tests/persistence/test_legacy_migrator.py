@@ -22,10 +22,30 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pytest_postgresql import factories
 from sqlalchemy import Engine, create_engine, text
 
 
 LEGACY_MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations" / "legacy"
+
+
+# Phase 14.5: parity test needs TWO independent databases — one migrated
+# by the legacy SQL runner, one by Alembic — to compare their schemas.
+# The default `postgresql` fixture is function-scoped so each test gets
+# a fresh DB, but it only gives ONE DB per test. Requesting both
+# `legacy_db_engine` and `db_engine` in the same test resolves the
+# `postgresql` dependency once and SHARES the DB between the two
+# fixtures, which means whichever migration system runs second tries to
+# CREATE objects the first one already created. The result was a
+# DuplicateObject error inside Alembic revision 0001.
+#
+# Solution: register a second factory bound to a different database
+# name on the same Postgres process. `parity_alembic_postgresql` is
+# created fresh per test (function-scope, default), and points at a
+# distinct database from the legacy_db_engine's `postgresql`.
+parity_alembic_postgresql = factories.postgresql(
+    "postgresql_proc", dbname="parity_alembic",
+)
 
 
 @pytest.fixture
@@ -140,12 +160,43 @@ def test_version_check_message_mentions_migration_003(legacy_db_engine):
 # Alembic ↔ Legacy schema parity
 # ============================================================
 
-def test_alembic_and_legacy_produce_same_tables(legacy_db_engine, db_engine):
+@pytest.fixture
+def parity_alembic_db_engine(parity_alembic_postgresql) -> Engine:
+    """A SQLAlchemy engine pointed at a SEPARATE database (distinct from
+    the one `legacy_db_engine` uses), migrated by Alembic. Created
+    specifically for the parity test below — see the comment on
+    `parity_alembic_postgresql` for why a dedicated fixture is needed.
+
+    We re-use the conftest's `_apply_alembic_upgrade` helper rather
+    than calling Alembic directly here, so any future change to the
+    Alembic invocation path stays in one place."""
+    from tests.persistence.conftest import _apply_alembic_upgrade
+
+    conn_info = parity_alembic_postgresql.info
+    url = (
+        f"postgresql+psycopg2://{conn_info.user}@"
+        f"{conn_info.host}:{conn_info.port}/{conn_info.dbname}"
+    )
+    _apply_alembic_upgrade(url)
+    engine = create_engine(url, future=True)
+    yield engine
+    engine.dispose()
+
+
+def test_alembic_and_legacy_produce_same_tables(
+    legacy_db_engine, parity_alembic_db_engine,
+):
     """The squashed Alembic revision must produce the same set of
     tables as the legacy SQL files. If this ever fails, either:
       - Someone changed migrations/legacy/*.sql (don't), or
       - Someone changed alembic_pkg/sql/0001_initial_schema.sql in
         a way that drifted from the legacy schema.
+
+    Uses two DISTINCT databases (`postgresql` and
+    `parity_alembic_postgresql`) so the two migration systems can run
+    in isolation. The default `db_engine` fixture shares the same DB
+    with `legacy_db_engine` when both are requested, which used to
+    cause the second migrator to step on the first's schema.
     """
     def _tables(engine):
         with engine.connect() as conn:
@@ -157,13 +208,17 @@ def test_alembic_and_legacy_produce_same_tables(legacy_db_engine, db_engine):
             }
 
     legacy_tables = _tables(legacy_db_engine)
-    alembic_tables = _tables(db_engine)
+    alembic_tables = _tables(parity_alembic_db_engine)
 
-    # alembic_tables will include alembic_version (not in legacy).
-    # legacy_tables will include schema_migrations (not in alembic).
-    # Ignore both for the parity check; the rest must match.
-    legacy_core = legacy_tables - {"schema_migrations"}
-    alembic_core = alembic_tables - {"alembic_version"}
+    # Ignore migration-bookkeeping tables on BOTH sides. The legacy
+    # migrator's bookkeeping table is `schema_migrations`; Alembic's
+    # is `alembic_version`. As of Phase 12, the bridge also creates
+    # `schema_migrations` on the Alembic side (so legacy DBs that
+    # later get switched to Alembic still have the legacy bookkeeping
+    # preserved); from the schema-parity standpoint, neither counts.
+    _IGNORED = {"schema_migrations", "alembic_version"}
+    legacy_core = legacy_tables - _IGNORED
+    alembic_core = alembic_tables - _IGNORED
 
     assert legacy_core == alembic_core, (
         f"Schema drift: only in legacy={legacy_core - alembic_core}, "

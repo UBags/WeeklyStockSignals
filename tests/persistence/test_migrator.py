@@ -29,13 +29,31 @@ def test_migrations_apply_cleanly_on_empty_db(db_engine):
 
 
 def test_applying_migrations_twice_is_idempotent(db_engine):
-    """A second call to apply_pending after a clean migration must
-    be a no-op — important property since the app may run apply_pending
-    on every startup."""
-    from trip_ema.persistence import apply_pending
+    """A second `alembic upgrade head` after a clean migration must be
+    a no-op — important property since the bridge runs it on every
+    startup.
 
-    newly_applied = apply_pending(db_engine, MIGRATIONS_DIR)
-    assert newly_applied == []  # nothing pending on a fresh DB
+    Phase 12 retired the legacy `apply_pending` SQL-file migrator in
+    favor of Alembic. The legacy migrator is gone; this test now
+    exercises the Alembic equivalent. The behavior we care about
+    (a redundant upgrade is harmless) is unchanged.
+
+    Note: the `db_engine` fixture already ran one Alembic upgrade
+    during setup. This call is the SECOND, and is what must be
+    a no-op."""
+    from trip_ema.persistence.alembic_bridge import (
+        _alembic_has_a_version, run_alembic_upgrade_head,
+    )
+
+    # Sanity: fixture's upgrade landed us at head.
+    assert _alembic_has_a_version(db_engine) is True
+
+    # Re-run — must not raise, must not change schema. We can't easily
+    # introspect "0 revisions applied" from Alembic's CLI surface
+    # without scraping stdout, so verifying success + still-at-head
+    # is the strongest check we can make from here.
+    run_alembic_upgrade_head()
+    assert _alembic_has_a_version(db_engine) is True
 
 
 def test_expected_tables_exist(db_engine):

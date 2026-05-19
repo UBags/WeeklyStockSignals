@@ -93,8 +93,25 @@ def _generate_synthetic_bars(start_ts: datetime) -> list[dict]:
 
 
 def _insert_ticker_and_bars(engine, exchange: str, symbol: str) -> int:
-    """Insert a ticker row + synthetic bars. Returns ticker_id."""
-    start_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    """Insert a ticker row + synthetic bars. Returns ticker_id.
+
+    The synthetic series spans NUM_DAYS calendar days, ending ~today.
+    We anchor relative to date.today() (rather than a hardcoded
+    datetime like 2024-01-01) because the ComputeScheduler's
+    gap-detector compares the high-water bar timestamp against today,
+    and once the gap exceeds a few weeks the scheduler refuses to
+    advance the engine, leaving `latest_change=NO_CHANGE` and breaking
+    every downstream assertion. Mirrors the `_bar_seed_start` helper
+    used in tests/scheduler/test_compute_scheduler.py."""
+    # End the series one calendar day before today, then walk back
+    # NUM_DAYS. This keeps the latest bar within the gap-detector's
+    # tolerance window without overlapping with today's potentially
+    # still-open trading day.
+    today_utc = datetime.now(timezone.utc).date()
+    end_date = datetime.combine(
+        today_utc, datetime.min.time(), tzinfo=timezone.utc,
+    ) - timedelta(days=1)
+    start_ts = end_date - timedelta(days=NUM_DAYS - 1)
     bars = _generate_synthetic_bars(start_ts)
 
     with engine.begin() as conn:
@@ -131,19 +148,31 @@ class TestEndToEndChartFlow:
 
     def test_bars_to_chart_history_full_pipeline(self, db_engine):
         # ---- Step 1: tables exist (db_engine fixture ran migrations) ----
+        #
+        # Phase 12 made Alembic the exclusive migration system; the
+        # `db_engine` fixture in tests/persistence/conftest.py runs
+        # `alembic upgrade head` on a fresh DB, which produces the
+        # `alembic_version` bookkeeping table (NOT `schema_migrations`,
+        # which is the legacy SQL-runner's table — that only appears
+        # if the DB went through the legacy migrator first).
         with db_engine.connect() as conn:
             tables = conn.execute(text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema='public'"
             )).scalars().all()
         for required in ("tickers", "ohlcv_bars", "signal_events",
-                         "schema_migrations"):
+                         "alembic_version"):
             assert required in tables, f"Missing table: {required}"
 
-        # ---- Step 2: Alembic bridge stamps the baseline ----
+        # ---- Step 2: Alembic bookkeeping is already at head ----
+        #
+        # Pre-Phase-12 this test exercised `stamp_baseline_if_needed`
+        # — the migration of a legacy DB into Alembic's tracking. The
+        # bridge is now a no-op against fresh-Alembic DBs (the only
+        # kind this fixture produces), so we just sanity-check that
+        # Alembic has a version recorded.
         from trip_ema.persistence.alembic_bridge import (
-            stamp_baseline_if_needed,
-            _alembic_has_a_version,
+            _alembic_has_a_version, stamp_baseline_if_needed,
         )
         try:
             import alembic  # noqa: F401
@@ -152,10 +181,9 @@ class TestEndToEndChartFlow:
             alembic_installed = False
 
         if alembic_installed:
-            stamped = stamp_baseline_if_needed(db_engine)
-            assert stamped is True
             assert _alembic_has_a_version(db_engine) is True
-            # Idempotent — second call shouldn't re-stamp
+            # Bridge is idempotent — no-ops on a DB that's already at
+            # an Alembic version.
             assert stamp_baseline_if_needed(db_engine) is False
 
         # ---- Step 3: insert synthetic ticker and bars ----
@@ -186,7 +214,12 @@ class TestEndToEndChartFlow:
         prime_result = prime_all_tickers(
             db_engine=db_engine, registry=registry, cache=cache,
         )
-        assert prime_result.primed >= 1, (
+        # `prime_all_tickers` returns a LifecycleResult, not a raw
+        # PrimeResult. The actual ticker count lives at
+        # `.prime_result.tickers_primed`. (This test was originally
+        # written against an older API where the function returned the
+        # PrimeResult directly.)
+        assert prime_result.prime_result.tickers_primed >= 1, (
             f"prime_all_tickers should have primed our test ticker; "
             f"got {prime_result}"
         )
@@ -223,8 +256,14 @@ class TestEndToEndChartFlow:
             resp = client.get("/v1/signals/NSE/E2ETEST")
             assert resp.status_code == 200, f"Body: {resp.text}"
             body = resp.json()
-            assert body.get("exchange") == "NSE"
-            assert body.get("symbol") == "E2ETEST"
+            # Response shape: ticker info is nested under `ticker`,
+            # not at the top level. The schema (TerseResponsePayload)
+            # exposes `ticker: TickerRefPayload` with `exchange` and
+            # `symbol` fields. (Earlier versions of this test asserted
+            # body["exchange"] directly — that was the response shape
+            # before the schemas were refactored.)
+            assert body["ticker"]["exchange"] == "NSE"
+            assert body["ticker"]["symbol"] == "E2ETEST"
 
             # GET /v1/signals/NSE/E2ETEST/history — chart replay
             resp = client.get(
@@ -241,13 +280,16 @@ class TestEndToEndChartFlow:
 
             # ---- Step 7: validate response shape ----
             # Last bar should be post-warmup; all indicator values non-None.
+            # Field names mirror HistoricalBarPayload in
+            # trip_ema/transports/http/schemas.py — `bar_timestamp`
+            # (not `timestamp`), `core_bg`/`display_bg` (not `regime`).
             sample = hist["bars"][-1]
             for field in (
-                "timestamp", "open", "high", "low", "close", "volume",
+                "bar_timestamp", "open", "high", "low", "close", "volume",
                 "med_ema", "long_ema", "longest_ema", "atr",
                 "upper_inner", "upper_mid", "upper_outer",
                 "lower_inner", "lower_mid", "lower_outer",
-                "regime",
+                "core_bg", "display_bg", "is_warmed_up",
             ):
                 assert field in sample, f"Missing field '{field}' in history bar"
 
@@ -257,28 +299,33 @@ class TestEndToEndChartFlow:
             assert sample["atr"] is not None
             assert sample["atr"] > 0
 
+            # The regime fields (core_bg / display_bg) are strings,
+            # not enum values. Valid values are documented on the
+            # domain Regime enum.
             for bar in hist["bars"]:
-                if bar.get("regime") is not None:
-                    assert bar["regime"] in (
-                        "BULLISH", "NEUTRAL", "BEARISH",
-                    ), f"Invalid regime: {bar['regime']}"
+                for field in ("core_bg", "display_bg"):
+                    val = bar.get(field)
+                    if val is not None:
+                        assert val in (
+                            "BULLISH", "NEUTRAL", "BEARISH",
+                        ), f"Invalid {field}: {val}"
 
-            # Bars in chronological order
-            timestamps = [bar["timestamp"] for bar in hist["bars"]]
+            # Bars in chronological order (by bar_timestamp).
+            timestamps = [bar["bar_timestamp"] for bar in hist["bars"]]
             assert timestamps == sorted(timestamps), (
                 "History bars are not in chronological order"
             )
 
             # signal_events — each must reference a bar timestamp
-            # that exists in the bars list
+            # that exists in the bars list. Field name in the schema
+            # is `signal` (not `signal_type`).
             bar_timestamps = set(timestamps)
             for event in hist["signal_events"]:
-                assert event.get("signal_type") in (
+                assert event.get("signal") in (
                     "BUY", "SELL", "EXIT_FROM_BUY", "EXIT_FROM_SELL",
-                ), f"Unexpected signal_type: {event.get('signal_type')}"
-                # bar_timestamp may be a field name; the actual schema
-                # might use a different name. Check both.
-                event_ts = event.get("bar_timestamp") or event.get("timestamp")
+                    "NO_CHANGE",
+                ), f"Unexpected signal: {event.get('signal')}"
+                event_ts = event.get("bar_timestamp")
                 assert event_ts in bar_timestamps, (
                     f"Event at {event_ts} doesn't match any bar timestamp"
                 )

@@ -37,6 +37,24 @@ from trip_ema.transports.http.dependencies import (
 from tests.transports.http.conftest import _build_test_config
 
 
+def _bar_seed_start(n: int) -> datetime:
+    """Compute a seed-start timestamp such that the last bar in a
+    weekly series of length `n` lands one week before today (UTC).
+
+    Tests originally hard-coded `datetime(2024, 1, 1, ...)`, but the
+    ComputeScheduler's gap detector compares high-water bar timestamps
+    against today — once the gap grows past a few weeks, runs route
+    through the gap-recovery path and `tickers_with_new_bars` silently
+    becomes 0. Anchoring to today removes that time-bound coupling.
+    Mirrors the helper of the same name in tests/scheduler/
+    test_compute_scheduler.py."""
+    today_utc = datetime.now(timezone.utc).date()
+    last_bar = datetime.combine(
+        today_utc, datetime.min.time(), tzinfo=timezone.utc,
+    ) - timedelta(weeks=1)
+    return last_bar - timedelta(weeks=(n - 1))
+
+
 @pytest.fixture
 def admin_token(monkeypatch):
     """Set the admin token env var to a known value, then unset on teardown."""
@@ -139,7 +157,7 @@ def test_prime_all_with_seeded_ticker(admin_client, auth_headers):
             created_at=datetime.now(timezone.utc),
         )
         bars_repo = BarsRepository(conn)
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        start = _bar_seed_start(60)
         for i in range(60):
             bars_repo.insert_bar(
                 tid, Timeframe.WEEKLY,
@@ -186,7 +204,7 @@ def test_compute_now_returns_run_summary(admin_client, auth_headers):
             created_at=datetime.now(timezone.utc),
         )
         bars_repo = BarsRepository(conn)
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        start = _bar_seed_start(60)
         for i in range(60):
             bars_repo.insert_bar(
                 tid, Timeframe.WEEKLY,

@@ -54,8 +54,18 @@ from trip_ema.persistence.connection import build_db_url  # noqa: E402
 config = context.config
 
 # Configure Python logging from alembic.ini's [logger_*] sections.
+#
+# CRITICAL: `disable_existing_loggers=False`. The fileConfig() default is
+# True, which silently disables every logger NOT explicitly registered
+# in alembic.ini's [loggers] section. Since our app sets up its own
+# loggers earlier in the boot sequence (and pytest's caplog registers
+# its handler against the root logger), the default behaviour wipes them
+# out — making logger.info/.warning/.error calls in app code invisible
+# AND making caplog.records empty in tests that exercise post-migration
+# code paths. The False keeps Alembic-specific loggers configured while
+# leaving everyone else's loggers intact.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 logger = logging.getLogger("alembic.env")
 

@@ -78,14 +78,50 @@ def now():
     return datetime.now(timezone.utc).replace(microsecond=0)
 
 
+def _bar_seed_start(n: int) -> datetime:
+    """Compute a seed-start timestamp such that the last bar in a
+    weekly series of length `n` lands one week before "today" (UTC).
+
+    Tests originally hard-coded `datetime(2024, 1, 1, ...)` which works
+    fine when the test is written but rots over time: the
+    ComputeScheduler's gap detector compares the high-water bar
+    timestamp against today, and once the gap exceeds a few weeks it
+    routes the run through the gap-recovery path instead of the
+    happy ingest path — silently turning `tickers_with_new_bars` into 0
+    and breaking every test that asserts a positive ingest count.
+
+    Anchoring to `date.today()` removes the time-bound coupling.
+    Concretely: the last bar is one week behind today (so a freshly
+    inserted "new bar" at position n still lands in a sensible spot
+    relative to today, not in the future); the rest stretches back
+    `n-1` weeks before that. With n=80 the series spans roughly 18
+    months ending last week — same shape as the original 2024-01-01
+    seed used to have in early 2024.
+    """
+    # Use a date (not a datetime) anchor so DST/test-clock-time wobble
+    # doesn't move the seed by hours. Convert back to a UTC midnight
+    # datetime to match what bars_repo expects.
+    from datetime import date as _date_cls
+    today_utc = datetime.now(timezone.utc).date()
+    # Last bar one week before today; first bar (n-1) more weeks back.
+    last_bar = datetime.combine(
+        today_utc, datetime.min.time(), tzinfo=timezone.utc,
+    ) - timedelta(weeks=1)
+    return last_bar - timedelta(weeks=(n - 1))
+
+
 def _seed_ticker_with_bars(db_engine, ref, n=80, start_close=100.0):
-    """Insert a ticker plus N daily-spaced bars. Returns ticker_id."""
+    """Insert a ticker plus N weekly-spaced bars. Returns ticker_id.
+
+    Bars are anchored relative to today (see `_bar_seed_start`)
+    rather than to a hardcoded date — keeps the scheduler's gap
+    detector quiet across the years."""
     with transaction(db_engine) as conn:
         tid = TickersRepository(conn).insert(
             ref, created_at=datetime.now(timezone.utc),
         )
         bars_repo = BarsRepository(conn)
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        start = _bar_seed_start(n)
         for i in range(n):
             close = start_close + i
             bars_repo.insert_bar(
@@ -100,8 +136,12 @@ def _seed_ticker_with_bars(db_engine, ref, n=80, start_close=100.0):
 
 
 def _seed_one_new_bar(db_engine, ticker_id, after_weeks, close):
-    """Add one weekly bar after the existing history."""
-    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    """Add one weekly bar after the existing history.
+
+    Caller passes `after_weeks` matching the `n` used when seeding the
+    base history; we use the same anchor logic to ensure the new bar
+    lands at the expected spot relative to today."""
+    start = _bar_seed_start(after_weeks)
     with transaction(db_engine) as conn:
         BarsRepository(conn).insert_bar(
             ticker_id, Timeframe.WEEKLY,
@@ -168,7 +208,7 @@ def test_run_once_ingests_new_bars(db_engine):
     cached = cache.get(NIFTY, Timeframe.WEEKLY)
     assert cached is not None
     # The newest BarState's timestamp matches the bar we just inserted.
-    expected_ts = datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(weeks=80)
+    expected_ts = _bar_seed_start(80) + timedelta(weeks=80)
     assert cached.latest_state.timestamp == expected_ts
 
 
@@ -187,7 +227,7 @@ def test_run_once_persists_signal_event_when_display_changes(db_engine):
     # We want to force a different display on the next compute. The
     # simplest reliable way: ingest enough sharply-reversing bars to flip
     # the regime. A single -50% reversal candle usually does it.
-    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    start = _bar_seed_start(80)
     with transaction(db_engine) as conn:
         repo = BarsRepository(conn)
         # 10 strongly bearish bars in a row
@@ -328,7 +368,7 @@ def test_one_bad_ticker_does_not_break_others(db_engine):
     # RELIANCE's new bar should have been ingested
     reliance_cache = cache.get(RELIANCE, Timeframe.WEEKLY)
     assert reliance_cache is not None
-    expected_ts = datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(weeks=80)
+    expected_ts = _bar_seed_start(80) + timedelta(weeks=80)
     assert reliance_cache.latest_state.timestamp == expected_ts
 
 
@@ -413,7 +453,7 @@ class TestProvisionalBarHandling:
         registry, cache = _build_registry_and_cache(db_engine)
 
         # Add a new bar at week 80 (Mon 2025-07-14 by aggregation convention).
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        start = _bar_seed_start(80)
         week_80_start = start + timedelta(weeks=80)
         _seed_one_new_bar(db_engine, tid, after_weeks=80, close=181.0)
 
@@ -437,7 +477,7 @@ class TestProvisionalBarHandling:
         becomes final — no provisional snapshot."""
         tid = _seed_ticker_with_bars(db_engine, NIFTY, n=80)
         registry, cache = _build_registry_and_cache(db_engine)
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        start = _bar_seed_start(80)
         _seed_one_new_bar(db_engine, tid, after_weeks=80, close=181.0)
 
         scheduler = ComputeScheduler(
@@ -458,7 +498,7 @@ class TestProvisionalBarHandling:
         if only the final value had been seen."""
         tid = _seed_ticker_with_bars(db_engine, NIFTY, n=80)
         registry, cache = _build_registry_and_cache(db_engine)
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        start = _bar_seed_start(80)
         week_80_start = start + timedelta(weeks=80)
 
         # Add the provisional bar with one set of OHLCV
@@ -538,7 +578,7 @@ class TestHistoricalRevisionDetection:
         # Now update an OLDER bar (week 40, well before last_ts).
         from sqlalchemy import update
         from trip_ema.persistence.tables import ohlcv_bars
-        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        start = _bar_seed_start(80)
         week_40_ts = start + timedelta(weeks=40)
         with transaction(db_engine) as conn:
             conn.execute(

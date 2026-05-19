@@ -27,6 +27,7 @@ from trip_ema.persistence import (
 
 
 NIFTY = TickerRef("NSE", "NIFTY", "INDEX")
+RELIANCE = TickerRef("NSE", "RELIANCE", "EQUITY")
 
 
 class RecordingTransport:
@@ -87,8 +88,19 @@ def seeded(db_engine, now):
     return sid, eid, tid
 
 
-def _build_job(subscriber_id: int, event_id: int) -> dict:
-    """Construct a job payload as the distributor would."""
+def _build_job(
+    subscriber_id: int,
+    event_id: int,
+    *,
+    ticker: TickerRef = NIFTY,
+) -> dict:
+    """Construct a job payload as the distributor would.
+
+    The `ticker` kwarg lets tests build jobs for different
+    tickers/instruments — relevant for multi-event tests where
+    the notifier worker's per-(ticker, timeframe) `is_event_superseded`
+    check would otherwise treat older events for the same ticker as
+    superseded by newer ones."""
     return {
         "subscriber_id": subscriber_id,
         "transport": "email",
@@ -96,9 +108,9 @@ def _build_job(subscriber_id: int, event_id: int) -> dict:
         "event_id": event_id,
         "event": {
             "ticker": {
-                "exchange": "NSE",
-                "symbol": "NIFTY",
-                "instrument": "INDEX",
+                "exchange": ticker.exchange,
+                "symbol": ticker.symbol,
+                "instrument": ticker.instrument,
             },
             "timeframe": "1W",
             "bar_timestamp": "2026-05-18T11:00:00+00:00",
@@ -270,18 +282,33 @@ def test_unknown_transport_uses_null_returning_success(db_engine, queue, seeded)
 
 
 def test_processes_multiple_jobs_in_order(db_engine, queue, now):
-    """Two events, two jobs — both should be processed."""
+    """Two events on TWO DIFFERENT tickers, two jobs — both should
+    be processed.
+
+    Important: this test originally used a SINGLE ticker for both
+    events. That tripped the notifier worker's Phase 9.3.4
+    `is_event_superseded` check, which drops any job whose event
+    is older than another event for the same (ticker, timeframe).
+    The older job became "superseded" (correctly, by production
+    semantics), the newer job sent — so `jobs_succeeded` was 1
+    not 2.
+
+    The intent of this test is "two unrelated jobs both reach the
+    transport". Two different tickers cleanly expresses that. If
+    you need to verify the supersede behavior itself, write a
+    dedicated test — there's one further down in this file."""
     with transaction(db_engine) as conn:
-        tid = TickersRepository(conn).insert(NIFTY, created_at=now)
+        nifty_tid = TickersRepository(conn).insert(NIFTY, created_at=now)
+        rel_tid = TickersRepository(conn).insert(RELIANCE, created_at=now)
         signals = SignalsRepository(conn)
-        eid1 = signals.insert_event(tid, SignalEvent(
+        eid1 = signals.insert_event(nifty_tid, SignalEvent(
             ticker=NIFTY, timeframe=Timeframe.WEEKLY,
             bar_timestamp=now - timedelta(hours=2),
             signal=ChangeSignal.BUY, price_at_signal=24000,
             computed_at=now - timedelta(hours=2),
         ))
-        eid2 = signals.insert_event(tid, SignalEvent(
-            ticker=NIFTY, timeframe=Timeframe.WEEKLY,
+        eid2 = signals.insert_event(rel_tid, SignalEvent(
+            ticker=RELIANCE, timeframe=Timeframe.WEEKLY,
             bar_timestamp=now - timedelta(hours=1),
             signal=ChangeSignal.SELL, price_at_signal=23800,
             computed_at=now - timedelta(hours=1),
@@ -302,8 +329,8 @@ def test_processes_multiple_jobs_in_order(db_engine, queue, now):
         queue=queue, db_engine=db_engine,
         transports={"email": transport},
     )
-    queue.enqueue(f"{sid}:{eid1}", _build_job(sid, eid1))
-    queue.enqueue(f"{sid}:{eid2}", _build_job(sid, eid2))
+    queue.enqueue(f"{sid}:{eid1}", _build_job(sid, eid1, ticker=NIFTY))
+    queue.enqueue(f"{sid}:{eid2}", _build_job(sid, eid2, ticker=RELIANCE))
 
     worker.run_once_for_test(max_jobs=2)
     assert worker.jobs_succeeded == 2
