@@ -47,6 +47,7 @@ from ..domain import OHLCVBar, Timeframe
 from ..observability import metrics as M
 from ..observability.correlation import correlation_id, new_correlation_id
 from ..persistence.bars_repo import BarsRepository
+from ..persistence.exchange_state_repo import ExchangeStateRepository
 from .corporate_actions_repo import CorporateActionsRepository
 from .exchanges import UnsupportedExchangeError, validate_exchange
 from .holidays_calendar import NseTradingCalendar
@@ -177,6 +178,14 @@ def refresh_listings(
                     f"unchanged={result.unchanged}"
                 ),
             )
+            # Phase 14.6b: same-transaction update of exchange_state.
+            # A successful etl_runs.close ⇒ a synchronized
+            # exchange_state row, by transactional guarantee.
+            ExchangeStateRepository(conn).record_listings_sync(
+                exchange,
+                run_at=datetime.now(timezone.utc),
+                run_id=run_id,
+            )
 
         M.etl_runs_total.labels(
             kind=RunKind.LISTINGS.value,
@@ -269,6 +278,10 @@ def recompute_tiers(
             run_id,
             RunOutcome.SUCCESS,
             notes=f"exchange={exchange}, tier reassignments: {changes}",
+        )
+        # Phase 14.6b: state write in the same transaction as close_run.
+        ExchangeStateRepository(conn).record_tier_recompute(
+            exchange, run_at=datetime.now(timezone.utc),
         )
         M.etl_runs_total.labels(
             kind=RunKind.TIER_RECOMPUTE.value,
@@ -520,6 +533,15 @@ def _run_fetch_pass(
         # Open the run row first
         with db_engine.begin() as conn:
             run_id = EtlStatusRepository(conn).open_run(kind, correlation_id=cid)
+            # Phase 14.6b: a backfill is the only ETL operation that
+            # has a "started" lifecycle event we care about, since
+            # `initial_load_started_at` is set on the first backfill
+            # against an exchange. Done in the same transaction as
+            # open_run so a crash between them is impossible.
+            if kind is RunKind.BACKFILL:
+                ExchangeStateRepository(conn).record_backfill_started(
+                    exchange, started_at=datetime.now(timezone.utc),
+                )
 
         t_start = time.monotonic()
         tickers = _select_tickers(
@@ -534,6 +556,14 @@ def _run_fetch_pass(
                 EtlStatusRepository(conn).close_run(
                     run_id, RunOutcome.SUCCESS,
                     notes=f"no tickers for exchange={exchange}",
+                )
+                # Phase 14.6b: even a no-tickers run is a recorded
+                # operational event — surface it in exchange_state so
+                # the GUI doesn't claim the EoD never ran.
+                _record_exchange_state_after_pass(
+                    conn, kind=kind, exchange=exchange,
+                    outcome=RunOutcome.SUCCESS, run_id=run_id,
+                    data_date=None,  # no bars touched
                 )
             return run_id
 
@@ -564,6 +594,12 @@ def _run_fetch_pass(
         with db_engine.begin() as conn:
             EtlStatusRepository(conn).close_run(run_id, outcome)
             parked_count = EtlStatusRepository(conn).count_parked()
+            # Phase 14.6b: same-transaction state write.
+            _record_exchange_state_after_pass(
+                conn, kind=kind, exchange=exchange,
+                outcome=outcome, run_id=run_id,
+                data_date=end_date,
+            )
         M.etl_parked_tickers.set(parked_count)
         M.etl_runs_total.labels(
             kind=kind.value, outcome=outcome.value,
@@ -868,6 +904,70 @@ def unpark_all(
 
 
 # ---------- Helpers ---------- #
+
+
+def _record_exchange_state_after_pass(
+    conn,
+    *,
+    kind: RunKind,
+    exchange: str,
+    outcome: RunOutcome,
+    run_id: int,
+    data_date: Optional[date],
+) -> None:
+    """Phase 14.6b dispatch: pick the right ExchangeStateRepository
+    write for each RunKind. Called from inside the same transaction
+    that closes the corresponding etl_runs row, so a successful
+    close ⇒ a synchronized exchange_state.
+
+    Tier-recompute is NOT routed here — recompute_tiers writes its
+    state directly inline because it doesn't go through _run_fetch_pass.
+    Listings refresh is also handled inline in refresh_listings for
+    the same reason.
+
+    Failed/partial outcomes still update last_eod_outcome (operators
+    need to see "the EoD ran but partially failed today" distinct
+    from "the EoD didn't run today"); backfill completion only sets
+    initial_load_completed_at on a clean success.
+    """
+    repo = ExchangeStateRepository(conn)
+    now = datetime.now(timezone.utc)
+
+    if kind is RunKind.EOD:
+        repo.record_eod(
+            exchange,
+            run_at=now,
+            outcome=outcome.value,
+            data_date=data_date,
+            run_id=run_id,
+        )
+    elif kind is RunKind.INTRADAY:
+        # Intraday isn't tracked per-outcome — only timestamp.
+        # An intraday failure is visible via etl_runs; the
+        # exchange_state field is just "when did we last run".
+        repo.record_intraday(exchange, run_at=now)
+    elif kind is RunKind.BACKFILL:
+        # Backfill always advances the last_eod_* fields too: a
+        # backfill that covers up to today is, by definition, a
+        # superset of what an EoD does. This keeps the "is this
+        # exchange caught up to today" question a single field
+        # lookup rather than max(last_eod_data_date, max-bar-from-backfill).
+        repo.record_eod(
+            exchange,
+            run_at=now,
+            outcome=outcome.value,
+            data_date=data_date,
+            run_id=run_id,
+        )
+        repo.record_backfill_completed(
+            exchange,
+            completed_at=now,
+            outcome=outcome.value,
+        )
+    # Other RunKinds (LISTINGS, TIER_RECOMPUTE) aren't routed here —
+    # their entry points write to exchange_state directly. Silently
+    # ignoring them rather than asserting keeps this helper safe to
+    # extend with new kinds in the future.
 
 
 def _today_in_ist() -> date:

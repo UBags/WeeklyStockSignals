@@ -11,7 +11,7 @@ human-readable strings on the wire.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -383,6 +383,55 @@ class EtlParkedListPayload(BaseModel):
     """Response from GET /v1/admin/etl/parked."""
     model_config = ConfigDict(frozen=True)
     parked: list[EtlParkedTicker]
+    total: int
+    snapshot_taken_at: datetime
+
+
+# ---------- Exchange state (Phase 14.6b) ---------- #
+
+
+class ExchangeStatePayload(BaseModel):
+    """One row from exchange_state — the per-exchange ETL snapshot.
+
+    Mirrors the trip_ema.persistence.exchange_state_repo.ExchangeState
+    dataclass field-for-field; this is just the wire-format projection
+    of it. Field semantics:
+
+      - initial_load_started_at: when the first backfill was kicked off
+        for this exchange (set once, never overwritten).
+      - initial_load_completed_at: when that first backfill finished
+        successfully (NULL if the initial load is still in progress
+        or its first attempt failed).
+      - last_eod_run_at / last_eod_outcome / last_eod_data_date:
+        most recent EoD pass.
+      - last_eod_run_id / last_listings_run_id: pointers into etl_runs
+        for drill-down (no FK on purpose — etl_runs may be truncated).
+      - last_intraday_run_at: most recent intraday tick.
+      - last_listings_sync_at: most recent listings refresh.
+      - last_tier_recompute_at: most recent tier reassignment pass.
+      - updated_at: server clock on the last write (any field).
+    """
+    model_config = ConfigDict(frozen=True)
+    exchange: str
+    initial_load_started_at: datetime | None
+    initial_load_completed_at: datetime | None
+    last_eod_run_at: datetime | None
+    last_eod_outcome: str | None
+    last_eod_data_date: date | None
+    last_eod_run_id: int | None
+    last_intraday_run_at: datetime | None
+    last_listings_sync_at: datetime | None
+    last_listings_run_id: int | None
+    last_tier_recompute_at: datetime | None
+    updated_at: datetime
+
+
+class ExchangeStateListPayload(BaseModel):
+    """Response from GET /v1/admin/exchange-state. One entry per
+    configured exchange. The GUI's per-exchange status panel reads
+    this."""
+    model_config = ConfigDict(frozen=True)
+    exchanges: list[ExchangeStatePayload]
     total: int
     snapshot_taken_at: datetime
 
