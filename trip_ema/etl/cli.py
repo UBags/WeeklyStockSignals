@@ -10,6 +10,16 @@ Subcommands:
   unpark               — clear parked flag for all parked tickers
   approve-action       — promote a corporate_actions row to approved
 
+Phase 14.6a: every ETL subcommand that touches ticker data requires
+`--exchange NAME`. NAME must be:
+  1. Known to the codebase (NSE, BSE, NYSE, NASDAQ, TSE, HKSE, SSE,
+     SZSE, LSE — see trip_ema/etl/exchanges.py); AND
+  2. Present in config.yaml's `market_hours:` block (the operator
+     has enabled it).
+
+If either check fails, the CLI prints a single line to stderr and
+exits 2 — no stack trace.
+
 Conventions:
   - argparse (no new dep)
   - Exit 0 success, 1 partial-failure, 2 fatal
@@ -31,6 +41,7 @@ from ..config.loader import load_config
 from ..observability.logging_config import configure_logging
 from ..persistence.connection import create_engine_from_config
 from .corporate_actions_repo import CorporateActionsRepository
+from .exchanges import UnsupportedExchangeError
 from .runner import (
     recompute_tiers,
     refresh_listings,
@@ -50,13 +61,14 @@ logger = logging.getLogger(__name__)
 
 
 def cmd_refresh_listings(args, config: Config) -> int:
-    engine = create_engine_from_config(config)
+    db_engine = create_engine_from_config(config)
     try:
-        result = refresh_listings(engine, config)
+        result = refresh_listings(db_engine, config, exchange=args.exchange)
     finally:
-        engine.dispose()
+        db_engine.dispose()
     print(
-        f"refresh-listings: new={result.sync_result.new_listings} "
+        f"refresh-listings ({args.exchange}): "
+        f"new={result.sync_result.new_listings} "
         f"renamed={result.sync_result.renamed_symbols} "
         f"enriched={result.sync_result.enriched_existing} "
         f"delisted={result.sync_result.delisted} "
@@ -71,55 +83,60 @@ def cmd_backfill(args, config: Config) -> int:
         print(f"error: --start must be YYYY-MM-DD, got {args.start!r}", file=sys.stderr)
         return 2
     tier_filter = _parse_tier_filter(args.tier)
-    engine = create_engine_from_config(config)
+    db_engine = create_engine_from_config(config)
     try:
         run_id = run_backfill(
-            engine, config,
+            db_engine, config,
+            exchange=args.exchange,
             start_date=start, tier_filter=tier_filter,
         )
     finally:
-        engine.dispose()
-    print(f"backfill complete (run_id={run_id})")
+        db_engine.dispose()
+    print(f"backfill complete ({args.exchange}, run_id={run_id})")
     return 0
 
 
 def cmd_incremental_eod(args, config: Config) -> int:
-    engine = create_engine_from_config(config)
+    db_engine = create_engine_from_config(config)
     try:
-        run_id = run_eod(engine, config, days_lookback=args.lookback_days)
+        run_id = run_eod(
+            db_engine, config,
+            exchange=args.exchange,
+            days_lookback=args.lookback_days,
+        )
     finally:
-        engine.dispose()
-    print(f"eod complete (run_id={run_id})")
+        db_engine.dispose()
+    print(f"eod complete ({args.exchange}, run_id={run_id})")
     return 0
 
 
 def cmd_incremental_intraday(args, config: Config) -> int:
-    engine = create_engine_from_config(config)
+    db_engine = create_engine_from_config(config)
     try:
-        run_id = run_intraday(engine, config)
+        run_id = run_intraday(db_engine, config, exchange=args.exchange)
     finally:
-        engine.dispose()
+        db_engine.dispose()
     if run_id < 0:
-        print("intraday: skipped (non-trading day)")
+        print(f"intraday ({args.exchange}): skipped (non-trading day)")
         return 0
-    print(f"intraday complete (run_id={run_id})")
+    print(f"intraday complete ({args.exchange}, run_id={run_id})")
     return 0
 
 
 def cmd_recompute_tiers(args, config: Config) -> int:
-    engine = create_engine_from_config(config)
+    db_engine = create_engine_from_config(config)
     try:
-        changes = recompute_tiers(engine, config)
+        changes = recompute_tiers(db_engine, config, exchange=args.exchange)
     finally:
-        engine.dispose()
-    print(f"tier reassignments: {changes}")
+        db_engine.dispose()
+    print(f"tier reassignments ({args.exchange}): {changes}")
     return 0
 
 
 def cmd_status(args, config: Config) -> int:
-    engine = create_engine_from_config(config)
+    db_engine = create_engine_from_config(config)
     try:
-        with engine.connect() as conn:
+        with db_engine.connect() as conn:
             status_repo = EtlStatusRepository(conn)
             recent = status_repo.list_recent_runs(limit=args.limit)
             parked = status_repo.list_parked()
@@ -142,28 +159,31 @@ def cmd_status(args, config: Config) -> int:
                     f"reason={t.parked_reason}"
                 )
     finally:
-        engine.dispose()
+        db_engine.dispose()
     return 0
 
 
 def cmd_unpark(args, config: Config) -> int:
-    engine = create_engine_from_config(config)
+    db_engine = create_engine_from_config(config)
     try:
-        count = unpark_all(engine, config)
+        count = unpark_all(db_engine, config, exchange=args.exchange)
     finally:
-        engine.dispose()
-    print(f"unparked {count} tickers (next EoD run will retry them)")
+        db_engine.dispose()
+    print(
+        f"unparked {count} {args.exchange} tickers "
+        f"(next EoD run will retry them)"
+    )
     return 0
 
 
 def cmd_approve_action(args, config: Config) -> int:
-    engine = create_engine_from_config(config)
+    db_engine = create_engine_from_config(config)
     try:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             repo = CorporateActionsRepository(conn)
             ok = repo.approve(args.action_id, reviewed_by="cli", notes=args.notes)
     finally:
-        engine.dispose()
+        db_engine.dispose()
     if not ok:
         print(
             f"action_id {args.action_id} not found or not in pending_review",
@@ -177,10 +197,32 @@ def cmd_approve_action(args, config: Config) -> int:
 # ---------- argparse setup ---------- #
 
 
+def _add_exchange_arg(parser: argparse.ArgumentParser) -> None:
+    """All ETL-action subcommands take a required --exchange flag.
+    Centralized here so the help text and constraints stay
+    consistent across subcommands."""
+    parser.add_argument(
+        "--exchange",
+        required=True,
+        help=(
+            "Exchange to operate on (e.g. NSE, BSE, NYSE). Must be "
+            "(1) supported by the codebase and (2) configured in "
+            "config.yaml's `market_hours:` block. See "
+            "trip_ema/etl/exchanges.py for the known list."
+        ),
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="trip-ema-etl",
-        description="ETL pipeline for trip_ema (NSE equities + ETFs from yfinance).",
+        description=(
+            "ETL pipeline for trip_ema. Each ETL action requires "
+            "an explicit --exchange (NSE, BSE, NYSE, NASDAQ, TSE, "
+            "HKSE, SSE, SZSE, LSE). Exchanges other than NSE may "
+            "not have full listings ingestion implemented yet — see "
+            "the runner module for current state."
+        ),
     )
     p.add_argument(
         "--config", "-c",
@@ -194,14 +236,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser(
+    rl = sub.add_parser(
         "refresh-listings",
-        help="Pull NSE equity + ETF CSVs and sync tickers table",
+        help="Pull listings CSVs and sync tickers table",
     )
+    _add_exchange_arg(rl)
 
-    bk = sub.add_parser(
-        "backfill", help="Historical OHLCV load",
-    )
+    bk = sub.add_parser("backfill", help="Historical OHLCV load")
+    _add_exchange_arg(bk)
     bk.add_argument(
         "--start", required=True,
         help="Start date (YYYY-MM-DD). e.g., 2010-01-01 for 15-year backfill",
@@ -213,27 +255,42 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     eod = sub.add_parser("incremental-eod", help="Daily EoD ETL pass")
+    _add_exchange_arg(eod)
     eod.add_argument(
         "--lookback-days", type=int, default=7,
         help="Calendar days of overlap to fetch (default 7).",
     )
 
-    sub.add_parser(
+    intraday = sub.add_parser(
         "incremental-intraday",
         help="Hourly Tier-1-only ETL during market hours",
     )
+    _add_exchange_arg(intraday)
 
-    sub.add_parser(
+    rt = sub.add_parser(
         "recompute-tiers",
         help="Refresh tickers.tier from 30-day ADV",
     )
+    _add_exchange_arg(rt)
 
-    status = sub.add_parser("status", help="Recent runs + parked count")
+    status = sub.add_parser(
+        "status", help="Recent runs + parked count",
+    )
+    # Status is read-only and exchange-agnostic — no --exchange filter
+    # in this slice. Add it if/when exchange-scoped status displays
+    # become useful (future GUI work).
     status.add_argument("--limit", type=int, default=10)
 
-    sub.add_parser("unpark", help="Clear parked flag for all parked tickers")
+    unpark = sub.add_parser(
+        "unpark", help="Clear parked flag for all parked tickers on an exchange",
+    )
+    _add_exchange_arg(unpark)
 
-    appr = sub.add_parser("approve-action", help="Approve a pending corporate_action")
+    appr = sub.add_parser(
+        "approve-action", help="Approve a pending corporate_action",
+    )
+    # Corporate actions are tracked per-ticker, not per-exchange at
+    # the CLI level — the action_id is already specific.
     appr.add_argument("action_id", type=int)
     appr.add_argument("--notes", help="Optional reviewer notes")
 
@@ -282,6 +339,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         return handler(args, config)
+    except UnsupportedExchangeError as e:
+        # Clean stderr line, no stack trace — these are user-facing
+        # validation errors, not bugs.
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         print("\ninterrupted by user", file=sys.stderr)
         return 130

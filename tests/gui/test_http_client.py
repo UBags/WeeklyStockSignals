@@ -1,4 +1,9 @@
-"""Tests for the trip_ema GUI HTTP client. No Qt — pure requests-mocking."""
+"""Tests for the trip_ema GUI HTTP client. No Qt — pure requests-mocking.
+
+Phase 14.6a: every ETL-action method now sends `exchange=` in the
+query params. Default is `"NSE"` at the client layer for backward
+compatibility; the underlying server requires it.
+"""
 
 from __future__ import annotations
 
@@ -49,7 +54,8 @@ class TestSuccessfulRequests:
             assert "/v1/admin/etl/status" in args[1]
             assert kwargs["params"] == {"limit": 10}
 
-    def test_run_eod(self):
+    def test_run_eod_default_exchange(self):
+        """run_eod() with no exchange kwarg defaults to NSE."""
         c = _build_client()
         with patch.object(c._session, "request") as mock_req:
             resp = MagicMock()
@@ -63,19 +69,92 @@ class TestSuccessfulRequests:
             assert result["action"] == "run-eod"
             args, kwargs = mock_req.call_args
             assert args[0] == "POST"
-            assert kwargs["params"] == {"lookback_days": 14}
+            assert kwargs["params"]["exchange"] == "NSE"
+            assert kwargs["params"]["lookback_days"] == 14
+
+    def test_run_eod_explicit_exchange(self):
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {
+                "action": "run-eod", "run_id": None,
+                "accepted_at": "2026-05-17T10:00:00Z", "notes": "ok",
+            }
+            mock_req.return_value = resp
+            c.run_eod(exchange="BSE", lookback_days=14)
+            _, kwargs = mock_req.call_args
+            assert kwargs["params"]["exchange"] == "BSE"
+
+    def test_refresh_listings_sends_exchange(self):
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {
+                "action": "refresh-listings", "run_id": None,
+                "accepted_at": "2026-05-17T10:00:00Z", "notes": "ok",
+            }
+            mock_req.return_value = resp
+            c.refresh_listings()
+            _, kwargs = mock_req.call_args
+            assert kwargs["params"] == {"exchange": "NSE"}
+
+    def test_run_intraday_sends_exchange(self):
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {
+                "action": "run-intraday", "run_id": None,
+                "accepted_at": "2026-05-17T10:00:00Z", "notes": "ok",
+            }
+            mock_req.return_value = resp
+            c.run_intraday(exchange="NSE")
+            _, kwargs = mock_req.call_args
+            assert kwargs["params"] == {"exchange": "NSE"}
+
+    def test_recompute_tiers_sends_exchange(self):
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {
+                "action": "recompute-tiers", "run_id": None,
+                "accepted_at": "2026-05-17T10:00:00Z", "notes": "ok",
+            }
+            mock_req.return_value = resp
+            c.recompute_tiers()
+            _, kwargs = mock_req.call_args
+            assert kwargs["params"] == {"exchange": "NSE"}
+
+    def test_unpark_all_sends_exchange(self):
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {
+                "action": "unpark-all", "run_id": None,
+                "accepted_at": "2026-05-17T10:00:00Z", "notes": "ok",
+            }
+            mock_req.return_value = resp
+            c.unpark_all()
+            _, kwargs = mock_req.call_args
+            assert kwargs["params"] == {"exchange": "NSE"}
 
     def test_backfill_includes_tier_when_set(self):
         c = _build_client()
         with patch.object(c._session, "request") as mock_req:
             resp = MagicMock()
             resp.status_code = 200
-            resp.json.return_value = {"action": "backfill", "run_id": None,
-                                     "accepted_at": "2026-05-17T10:00:00Z",
-                                     "notes": "ok"}
+            resp.json.return_value = {
+                "action": "backfill", "run_id": None,
+                "accepted_at": "2026-05-17T10:00:00Z", "notes": "ok",
+            }
             mock_req.return_value = resp
             c.backfill(start_date=date(2020, 1, 1), tier=1)
             _, kwargs = mock_req.call_args
+            assert kwargs["params"]["exchange"] == "NSE"
             assert kwargs["params"]["start_date"] == "2020-01-01"
             assert kwargs["params"]["tier"] == 1
 
@@ -84,13 +163,29 @@ class TestSuccessfulRequests:
         with patch.object(c._session, "request") as mock_req:
             resp = MagicMock()
             resp.status_code = 200
-            resp.json.return_value = {"action": "backfill", "run_id": None,
-                                     "accepted_at": "2026-05-17T10:00:00Z",
-                                     "notes": "ok"}
+            resp.json.return_value = {
+                "action": "backfill", "run_id": None,
+                "accepted_at": "2026-05-17T10:00:00Z", "notes": "ok",
+            }
             mock_req.return_value = resp
             c.backfill(start_date=date(2020, 1, 1), tier=None)
             _, kwargs = mock_req.call_args
+            assert kwargs["params"]["exchange"] == "NSE"
             assert "tier" not in kwargs["params"]
+
+    def test_backfill_with_explicit_exchange(self):
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {
+                "action": "backfill", "run_id": None,
+                "accepted_at": "2026-05-17T10:00:00Z", "notes": "ok",
+            }
+            mock_req.return_value = resp
+            c.backfill(start_date=date(2020, 1, 1), exchange="BSE")
+            _, kwargs = mock_req.call_args
+            assert kwargs["params"]["exchange"] == "BSE"
 
     def test_reprime_ticker(self):
         c = _build_client()

@@ -317,7 +317,13 @@ def _build_orchestrator_components(
         """Closure: each market's orchestrator gets a thin wrapper
         that calls `run_eod` with the right exchange code. Imported
         lazily so the etl extras don't have to be installed for
-        non-fetch tests."""
+        non-fetch tests.
+
+        Phase 14.6a: the runner's first positional parameter is
+        `db_engine` (renamed from `engine` for codebase-wide
+        consistency); the call below uses kwargs throughout to be
+        explicit.
+        """
         from .etl.runner import run_eod  # noqa: PLC0415
 
         def _fetch(exchange_str: str):
@@ -328,7 +334,9 @@ def _build_orchestrator_components(
                 f"fetch_fn for {exchange} invoked with {exchange_str}"
             )
             return run_eod(
-                db_engine=db_engine, config=config, exchange=exchange,
+                db_engine=db_engine,
+                config=config,
+                exchange=exchange,
             )
         return _fetch
 

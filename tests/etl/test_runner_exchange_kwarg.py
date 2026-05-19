@@ -1,13 +1,15 @@
-"""Tests for the `exchange` kwarg added to ETL runner public entry points.
+"""Tests for the `exchange` kwarg on the ETL runner internals.
+
+Phase 14.6a: `exchange` is now a REQUIRED keyword argument on every
+public runner entry point. The internal `_select_tickers` helper
+accordingly takes a required `exchange: str` and no longer falls
+back to `config.etl.exchange`. These tests cover the per-exchange
+isolation guarantee — each market's fetch pass only sees its own
+tickers.
 
 These don't require a real Postgres — they exercise `_select_tickers`
 against an in-memory SQLite database. The SQL uses standard named
 parameters and ANSI WHERE clauses, so it ports cleanly.
-
-What we're verifying:
-  - exchange=None → falls back to config.etl.exchange (backward compat)
-  - exchange="X" → overrides config, returns only X's tickers
-  - The (exchange, tier_filter) pair composes correctly
 """
 
 from __future__ import annotations
@@ -22,9 +24,10 @@ from trip_ema.etl.runner import _select_tickers
 
 def _make_config(default_exchange: str = "NSE") -> MagicMock:
     """Minimal mock config: only the etl.exchange field is needed for
-    these tests. Using MagicMock keeps the test independent of the
-    real Config schema, which would otherwise drag in the entire
-    config layer."""
+    these tests (a few legacy assertions reference it for backward-
+    compat shape, but the runner no longer reads it). Using MagicMock
+    keeps the test independent of the real Config schema, which would
+    otherwise drag in the entire config layer."""
     cfg = MagicMock()
     cfg.etl.exchange = default_exchange
     return cfg
@@ -32,9 +35,9 @@ def _make_config(default_exchange: str = "NSE") -> MagicMock:
 
 @pytest.fixture
 def engine():
-    """Bare SQLite engine seeded with a `tickers` table containing two
-    exchanges' worth of data. Tier values are integers (1, 2, 3) per
-    the real Tier(int, Enum) in trip_ema.etl.types."""
+    """Bare SQLite engine seeded with a `tickers` table containing
+    three exchanges' worth of data. Tier values are integers (1, 2, 3)
+    per the real Tier(int, Enum) in trip_ema.etl.types."""
     eng = create_engine("sqlite://")
     with eng.begin() as conn:
         conn.execute(text("""
@@ -76,46 +79,48 @@ def engine():
 
 
 # ---------------------------------------------------------------------------
-# Backward compatibility
+# Required exchange — the kwarg is no longer optional
 # ---------------------------------------------------------------------------
 
 
-class TestExchangeKwargBackwardCompat:
-    def test_no_exchange_kwarg_uses_config(self, engine):
+class TestExchangeKwargIsRequired:
+    """In Phase 14.6a the runner no longer derives exchange from
+    config. Callers MUST pass it explicitly. Missing it is a
+    TypeError."""
+
+    def test_missing_kwarg_raises_typeerror(self, engine):
         cfg = _make_config(default_exchange="NSE")
-        tickers = _select_tickers(engine, cfg)
+        with pytest.raises(TypeError):
+            _select_tickers(engine, cfg)  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# Per-exchange isolation
+# ---------------------------------------------------------------------------
+
+
+class TestExchangeKwargIsolatesMarkets:
+
+    def test_returns_only_nse_tickers(self, engine):
+        cfg = _make_config(default_exchange="NSE")
+        tickers = _select_tickers(engine, cfg, exchange="NSE")
         symbols = {t.symbol for t in tickers}
         # Three active, non-delisted NSE tickers.
         assert symbols == {"RELIANCE", "INFY", "TCS"}
 
-    def test_none_explicit_equivalent_to_no_kwarg(self, engine):
-        cfg = _make_config(default_exchange="NSE")
-        # Explicit None should behave the same as not passing it.
-        a = _select_tickers(engine, cfg)
-        b = _select_tickers(engine, cfg, exchange=None)
-        assert {t.symbol for t in a} == {t.symbol for t in b}
-
-    def test_config_default_change_propagates_when_kwarg_omitted(self, engine):
-        cfg = _make_config(default_exchange="BSE")
-        tickers = _select_tickers(engine, cfg)
-        symbols = {t.symbol for t in tickers}
-        assert symbols == {"BSEONLY", "BSEMID"}
-
-
-# ---------------------------------------------------------------------------
-# Explicit exchange override
-# ---------------------------------------------------------------------------
-
-
-class TestExchangeKwargOverride:
-    def test_kwarg_overrides_config(self, engine):
-        # Config says NSE, but we ask for BSE — should return BSE only.
+    def test_returns_only_bse_tickers(self, engine):
         cfg = _make_config(default_exchange="NSE")
         tickers = _select_tickers(engine, cfg, exchange="BSE")
         symbols = {t.symbol for t in tickers}
         assert symbols == {"BSEONLY", "BSEMID"}
 
-    def test_kwarg_isolates_each_market(self, engine):
+    def test_returns_only_nyse_tickers(self, engine):
+        cfg = _make_config(default_exchange="NSE")
+        tickers = _select_tickers(engine, cfg, exchange="NYSE")
+        symbols = {t.symbol for t in tickers}
+        assert symbols == {"AAPL"}
+
+    def test_no_cross_contamination(self, engine):
         cfg = _make_config(default_exchange="NSE")
         nse = {t.symbol for t in _select_tickers(engine, cfg, exchange="NSE")}
         bse = {t.symbol for t in _select_tickers(engine, cfg, exchange="BSE")}
@@ -124,10 +129,22 @@ class TestExchangeKwargOverride:
         assert nse.isdisjoint(bse)
         assert nse.isdisjoint(nyse)
         assert bse.isdisjoint(nyse)
-        assert nyse == {"AAPL"}
+
+    def test_config_default_does_not_leak(self, engine):
+        """The runner must NOT fall back to config.etl.exchange.
+        Passing exchange='BSE' must return BSE tickers regardless of
+        what config.etl.exchange happens to say."""
+        cfg = _make_config(default_exchange="NSE")
+        tickers = _select_tickers(engine, cfg, exchange="BSE")
+        symbols = {t.symbol for t in tickers}
+        assert symbols == {"BSEONLY", "BSEMID"}
 
     def test_unknown_exchange_returns_empty(self, engine):
         cfg = _make_config(default_exchange="NSE")
+        # `_select_tickers` doesn't itself validate the exchange code
+        # against the known suffix map — that's the job of the public
+        # entry points. So an unknown exchange simply returns an
+        # empty list (no rows match).
         tickers = _select_tickers(engine, cfg, exchange="LSE")
         assert tickers == []
 
@@ -160,7 +177,7 @@ class TestExchangeKwargComposesWithTierFilter:
         symbols = {t.symbol for t in tickers}
         assert symbols == {"RELIANCE", "INFY"}
 
-    def test_override_exchange_and_tier_filter(self, engine):
+    def test_bse_exchange_and_tier_filter(self, engine):
         from trip_ema.etl.types import Tier
 
         cfg = _make_config(default_exchange="NSE")

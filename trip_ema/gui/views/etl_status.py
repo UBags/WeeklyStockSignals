@@ -269,28 +269,33 @@ class EtlStatusView(QWidget):
 
     # ---------- action button handlers ---------- #
 
+    # Phase 14.6a: every ETL action now requires an exchange code.
+    # This view is operator-NSE-only today; Phase 14.6c will add an
+    # exchange picker. Until then, exchange is hardcoded to "NSE" at
+    # each click site.
+
     def _on_refresh_listings_clicked(self) -> None:
         self._fire_action(
             "Refresh listings",
-            lambda: self._http.refresh_listings(),
+            lambda: self._http.refresh_listings(exchange="NSE"),
         )
 
     def _on_run_eod_clicked(self) -> None:
         self._fire_action(
             "Run EoD",
-            lambda: self._http.run_eod(lookback_days=7),
+            lambda: self._http.run_eod(exchange="NSE", lookback_days=7),
         )
 
     def _on_run_intraday_clicked(self) -> None:
         self._fire_action(
             "Run intraday",
-            lambda: self._http.run_intraday(),
+            lambda: self._http.run_intraday(exchange="NSE"),
         )
 
     def _on_recompute_tiers_clicked(self) -> None:
         self._fire_action(
             "Recompute tiers",
-            lambda: self._http.recompute_tiers(),
+            lambda: self._http.recompute_tiers(exchange="NSE"),
         )
 
     def _on_unpark_all_clicked(self) -> None:
@@ -304,7 +309,7 @@ class EtlStatusView(QWidget):
             return
         self._fire_action(
             "Unpark all",
-            lambda: self._http.unpark_all(),
+            lambda: self._http.unpark_all(exchange="NSE"),
         )
 
     def _fire_action(self, label: str, fn) -> None:

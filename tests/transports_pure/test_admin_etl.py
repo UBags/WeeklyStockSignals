@@ -7,6 +7,8 @@ get_etl_executor. We verify:
   - Auth gate works (401/403/503 per env-var state).
   - GET /etl/status composes the response correctly when fed
     handcrafted row objects.
+  - Phase 14.6a: every action endpoint requires `?exchange=`.
+    Missing → 422. Unknown or unconfigured → 400.
 """
 
 from __future__ import annotations
@@ -51,10 +53,21 @@ class FakeExecutor:
         return MagicMock()
 
 
-def _make_config():
+def _make_config(*, market_hours_exchanges=("NSE",)):
+    """Build a MagicMock that satisfies the route's needs:
+      - .http.admin_token_env: env var name for auth
+      - .etl.exchange: legacy single-exchange field (used by /status
+        tier_counts default)
+      - .market_hours: list of MagicMock objects each exposing an
+        .exchange attribute. validate_exchange iterates over these
+        to decide which exchanges are configured.
+    """
     cfg = MagicMock()
     cfg.http.admin_token_env = "TRIP_EMA_ADMIN_TOKEN"
     cfg.etl.exchange = "NSE"
+    cfg.market_hours = [
+        type("MH", (), {"exchange": ex})() for ex in market_hours_exchanges
+    ]
     return cfg
 
 
@@ -84,20 +97,25 @@ class TestRefreshListings:
         exec_ = FakeExecutor()
         client = _make_client(executor=exec_)
         resp = client.post(
-            "/v1/admin/etl/refresh-listings", headers=auth_headers,
+            "/v1/admin/etl/refresh-listings?exchange=NSE",
+            headers=auth_headers,
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["action"] == "refresh-listings"
         assert body["run_id"] is None  # async; run_id is unknown at accept time
         # The runner was scheduled
         assert len(exec_.submitted) == 1
         assert exec_.submitted[0][0] == "_run_refresh_listings_safe"
+        # args = (db_engine, config, exchange)
+        _, args, _ = exec_.submitted[0]
+        assert args[2] == "NSE"
 
     def test_returns_503_without_executor(self, auth_headers):
         client = _make_client(executor=None)
         resp = client.post(
-            "/v1/admin/etl/refresh-listings", headers=auth_headers,
+            "/v1/admin/etl/refresh-listings?exchange=NSE",
+            headers=auth_headers,
         )
         assert resp.status_code == 503
         assert "disabled" in resp.json()["detail"].lower()
@@ -107,8 +125,39 @@ class TestRefreshListings:
         import os
         os.environ.pop("TRIP_EMA_ADMIN_TOKEN", None)
         client = _make_client(executor=FakeExecutor())
-        resp = client.post("/v1/admin/etl/refresh-listings")
+        resp = client.post(
+            "/v1/admin/etl/refresh-listings?exchange=NSE",
+        )
         assert resp.status_code in (401, 503)
+
+    def test_rejects_missing_exchange(self, auth_headers):
+        # `?exchange=` is required at the FastAPI Query layer.
+        client = _make_client(executor=FakeExecutor())
+        resp = client.post(
+            "/v1/admin/etl/refresh-listings", headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    def test_rejects_unknown_exchange(self, auth_headers):
+        # `XYZ` isn't in the codebase's known suffix map.
+        client = _make_client(executor=FakeExecutor())
+        resp = client.post(
+            "/v1/admin/etl/refresh-listings?exchange=XYZ",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+        assert "not supported" in resp.json()["detail"].lower()
+
+    def test_rejects_unconfigured_exchange(self, auth_headers):
+        # `BSE` is a known exchange but config only has NSE.
+        cfg = _make_config(market_hours_exchanges=("NSE",))
+        client = _make_client(config=cfg, executor=FakeExecutor())
+        resp = client.post(
+            "/v1/admin/etl/refresh-listings?exchange=BSE",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+        assert "not configured" in resp.json()["detail"].lower()
 
 
 # ---------- POST: run-eod ---------- #
@@ -119,30 +168,51 @@ class TestRunEod:
     def test_default_lookback(self, auth_headers):
         exec_ = FakeExecutor()
         client = _make_client(executor=exec_)
-        resp = client.post("/v1/admin/etl/run-eod", headers=auth_headers)
+        resp = client.post(
+            "/v1/admin/etl/run-eod?exchange=NSE", headers=auth_headers,
+        )
         assert resp.status_code == 200
         # Defaults: lookback_days=7
         _, args, _ = exec_.submitted[0]
-        # args = (db_engine, config, lookback_days)
-        assert args[2] == 7
+        # args = (db_engine, config, exchange, lookback_days)
+        assert args[2] == "NSE"
+        assert args[3] == 7
 
     def test_custom_lookback(self, auth_headers):
         exec_ = FakeExecutor()
         client = _make_client(executor=exec_)
         resp = client.post(
-            "/v1/admin/etl/run-eod?lookback_days=30", headers=auth_headers,
+            "/v1/admin/etl/run-eod?exchange=NSE&lookback_days=30",
+            headers=auth_headers,
         )
         assert resp.status_code == 200
         _, args, _ = exec_.submitted[0]
-        assert args[2] == 30
+        assert args[2] == "NSE"
+        assert args[3] == 30
 
     def test_invalid_lookback_rejected(self, auth_headers):
         client = _make_client(executor=FakeExecutor())
-        # Below ge=1
         resp = client.post(
-            "/v1/admin/etl/run-eod?lookback_days=0", headers=auth_headers,
+            "/v1/admin/etl/run-eod?exchange=NSE&lookback_days=0",
+            headers=auth_headers,
         )
         assert resp.status_code == 422
+
+    def test_rejects_missing_exchange(self, auth_headers):
+        client = _make_client(executor=FakeExecutor())
+        resp = client.post(
+            "/v1/admin/etl/run-eod", headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    def test_rejects_unconfigured_exchange(self, auth_headers):
+        cfg = _make_config(market_hours_exchanges=("NSE",))
+        client = _make_client(config=cfg, executor=FakeExecutor())
+        resp = client.post(
+            "/v1/admin/etl/run-eod?exchange=BSE",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
 
 
 # ---------- POST: run-intraday ---------- #
@@ -154,10 +224,14 @@ class TestRunIntraday:
         exec_ = FakeExecutor()
         client = _make_client(executor=exec_)
         resp = client.post(
-            "/v1/admin/etl/run-intraday", headers=auth_headers,
+            "/v1/admin/etl/run-intraday?exchange=NSE",
+            headers=auth_headers,
         )
         assert resp.status_code == 200
         assert exec_.submitted[0][0] == "_run_intraday_safe"
+        _, args, _ = exec_.submitted[0]
+        # args = (db_engine, config, exchange)
+        assert args[2] == "NSE"
 
 
 # ---------- POST: recompute-tiers ---------- #
@@ -169,10 +243,13 @@ class TestRecomputeTiers:
         exec_ = FakeExecutor()
         client = _make_client(executor=exec_)
         resp = client.post(
-            "/v1/admin/etl/recompute-tiers", headers=auth_headers,
+            "/v1/admin/etl/recompute-tiers?exchange=NSE",
+            headers=auth_headers,
         )
         assert resp.status_code == 200
         assert exec_.submitted[0][0] == "_recompute_tiers_safe"
+        _, args, _ = exec_.submitted[0]
+        assert args[2] == "NSE"
 
 
 # ---------- POST: unpark-all (synchronous) ---------- #
@@ -182,23 +259,33 @@ class TestUnparkAll:
 
     def test_unpark_all_is_synchronous(self, auth_headers, monkeypatch):
         """unpark-all runs synchronously (no executor needed). We mock
-        the runner.unpark_all directly to assert it was called and the
-        count flows through."""
-        # Override the actual unpark_all to return a known count
+        the runner.unpark_all directly to assert it was called with
+        the right exchange and the count flows through."""
         import trip_ema.transports.http.routes.admin_etl as mod
         called = []
-        def fake_unpark(engine, config):
-            called.append((engine, config))
+        def fake_unpark(engine, config, *, exchange):
+            called.append((engine, config, exchange))
             return 7
         monkeypatch.setattr(mod, "unpark_all", fake_unpark)
 
         client = _make_client(executor=None)  # No executor needed
-        resp = client.post("/v1/admin/etl/unpark-all", headers=auth_headers)
+        resp = client.post(
+            "/v1/admin/etl/unpark-all?exchange=NSE",
+            headers=auth_headers,
+        )
         assert resp.status_code == 200
         body = resp.json()
         assert body["action"] == "unpark-all"
-        assert "Unparked 7 tickers" in body["notes"]
+        assert "Unparked 7 NSE tickers" in body["notes"]
         assert len(called) == 1
+        assert called[0][2] == "NSE"
+
+    def test_rejects_missing_exchange(self, auth_headers):
+        client = _make_client(executor=None)
+        resp = client.post(
+            "/v1/admin/etl/unpark-all", headers=auth_headers,
+        )
+        assert resp.status_code == 422
 
 
 # ---------- POST: backfill ---------- #
@@ -210,32 +297,33 @@ class TestBackfill:
         exec_ = FakeExecutor()
         client = _make_client(executor=exec_)
         resp = client.post(
-            "/v1/admin/etl/backfill?start_date=2020-01-01",
+            "/v1/admin/etl/backfill?exchange=NSE&start_date=2020-01-01",
             headers=auth_headers,
         )
         assert resp.status_code == 200
         _, args, _ = exec_.submitted[0]
-        # args = (db_engine, config, start_date, tier_filter)
-        assert args[2] == date(2020, 1, 1)
-        assert args[3] is None
+        # args = (db_engine, config, exchange, start_date, tier_filter)
+        assert args[2] == "NSE"
+        assert args[3] == date(2020, 1, 1)
+        assert args[4] is None
 
     def test_with_specific_tier(self, auth_headers):
         exec_ = FakeExecutor()
         client = _make_client(executor=exec_)
         resp = client.post(
-            "/v1/admin/etl/backfill?start_date=2020-01-01&tier=1",
+            "/v1/admin/etl/backfill?exchange=NSE&start_date=2020-01-01&tier=1",
             headers=auth_headers,
         )
         assert resp.status_code == 200
         _, args, _ = exec_.submitted[0]
-        tier_filter = args[3]
+        tier_filter = args[4]
         from trip_ema.etl.types import Tier
         assert tier_filter == {Tier.TIER_1}
 
     def test_invalid_tier_rejected(self, auth_headers):
         client = _make_client(executor=FakeExecutor())
         resp = client.post(
-            "/v1/admin/etl/backfill?start_date=2020-01-01&tier=5",
+            "/v1/admin/etl/backfill?exchange=NSE&start_date=2020-01-01&tier=5",
             headers=auth_headers,
         )
         assert resp.status_code == 422
@@ -243,7 +331,15 @@ class TestBackfill:
     def test_missing_start_date_rejected(self, auth_headers):
         client = _make_client(executor=FakeExecutor())
         resp = client.post(
-            "/v1/admin/etl/backfill", headers=auth_headers,
+            "/v1/admin/etl/backfill?exchange=NSE", headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    def test_missing_exchange_rejected(self, auth_headers):
+        client = _make_client(executor=FakeExecutor())
+        resp = client.post(
+            "/v1/admin/etl/backfill?start_date=2020-01-01",
+            headers=auth_headers,
         )
         assert resp.status_code == 422
 

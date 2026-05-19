@@ -1,7 +1,7 @@
 """yfinance source.
 
 Wraps yf.download() with batching, retry-with-backoff, and validation.
-The output is a dict of {nse_symbol: FetchOutcome} so callers can
+The output is a dict of {bare_symbol: FetchOutcome} so callers can
 match results back to their input tickers.
 
 Design notes:
@@ -10,13 +10,22 @@ Design notes:
   - Batch size is small enough (default 50) that one bad symbol
     doesn't poison the whole batch — yfinance returns a partial frame
     with NaN columns for symbols that errored.
-  - We re-add `.NS` suffix for the actual yfinance call and strip it
-    when constructing the FetchOutcome — the dict is keyed by the
-    NSE symbol the caller knows.
+  - The exchange-specific suffix (NSE → '.NS', BSE → '.BO', NYSE →
+    '', etc.) is applied via `yfinance_symbol(symbol, exchange)` from
+    the `exchanges` module. The output dict is keyed by the bare
+    symbol the caller knows.
   - Daily interval ('1d') by default; '1h' for the intraday path.
     Both produce daily-OR-finer bars that the reconciler will write
     to ohlcv_bars with timeframe='1D' (we aggregate hourly→daily-
     provisional in the reconciler, not here).
+
+Phase 14.6a: the `YFinanceSource` now carries an `exchange` so it
+can be constructed once per ETL run and used across all batches.
+The legacy module-level `to_yfinance_symbol(symbol)` (NSE-hardcoded)
+function is retained as a thin deprecation shim — it forwards to
+the canonical mapper with exchange='NSE'. Internal call sites use
+the new `exchanges.yfinance_symbol(symbol, exchange)` directly via
+`self._yf(symbol)` so each fetch is exchange-correct.
 
 NOT in here:
   - Reconciliation with existing DB state (that's reconciler.py).
@@ -30,53 +39,96 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Iterable
 
+from .exchanges import (
+    UnsupportedExchangeError,
+    from_yfinance_symbol as _from_yf_canonical,
+    yfinance_symbol as _to_yf_canonical,
+)
 from .types import FetchOutcome, RawBar
 
 logger = logging.getLogger(__name__)
 
 
-def to_yfinance_symbol(nse_symbol: str) -> str:
-    """NSE 'RELIANCE' → yfinance 'RELIANCE.NS'.
+# ---------- Module-level mappers (legacy entry points) ---------- #
 
-    Note: yfinance has a hardcoded '.NS' for NSE-listed equities and
-    ETFs. The handful of dual-listed names that have both BSE (.BO)
-    and NSE (.NS) variants are pulled from .NS only; we don't merge
-    cross-exchange.
+
+def to_yfinance_symbol(symbol: str, exchange: str = "NSE") -> str:
+    """Format a bare symbol for yfinance.
+
+    Default exchange is 'NSE' for backward-compatibility with the
+    legacy single-exchange callers. New code should pass `exchange`
+    explicitly. Internal callers in this module use the canonical
+    `exchanges.yfinance_symbol` directly through `YFinanceSource._yf`,
+    so this function exists primarily for external imports.
     """
-    return f"{nse_symbol.upper()}.NS"
+    return _to_yf_canonical(symbol, exchange)
 
 
-def from_yfinance_symbol(yf_symbol: str) -> str:
-    """'RELIANCE.NS' → 'RELIANCE'. Defensive against unknown suffixes."""
-    if "." in yf_symbol:
-        return yf_symbol.split(".", 1)[0].upper()
-    return yf_symbol.upper()
+def from_yfinance_symbol(yf_symbol: str, exchange: str = "NSE") -> str:
+    """Inverse of `to_yfinance_symbol`. Defaults to NSE for
+    backward-compatibility (same reasoning as `to_yfinance_symbol`)."""
+    try:
+        return _from_yf_canonical(yf_symbol, exchange)
+    except UnsupportedExchangeError:
+        # Fall back to the legacy "strip after first dot" behaviour
+        # when called with an unknown exchange. Callers that care
+        # about strict validation should use exchanges.from_yfinance_symbol
+        # directly.
+        if "." in yf_symbol:
+            return yf_symbol.split(".", 1)[0].upper()
+        return yf_symbol.upper()
+
+
+# ---------- Source class ---------- #
 
 
 class YFinanceSource:
     """Stateful for batching, retry counters, etc. Kept thin — the
-    interesting business logic lives in the reconciler."""
+    interesting business logic lives in the reconciler.
+
+    Phase 14.6a: each instance is bound to a single exchange. The
+    runner constructs one source per ETL pass; the exchange is
+    inherited from the pass's exchange kwarg. All symbol formatting
+    within this instance goes through `self._yf(symbol)`.
+    """
 
     def __init__(
         self,
+        exchange: str = "NSE",
         batch_size: int = 50,
         max_retries: int = 3,
         retry_backoff_base: float = 2.0,
         request_delay_seconds: float = 0.0,
     ):
+        # NB: exchange is validated by the runner before YFinanceSource
+        # is constructed. We trust it here. A misformatted exchange
+        # would surface when _yf() is first called.
+        self._exchange = exchange
         self._batch_size = batch_size
         self._max_retries = max_retries
         self._retry_backoff_base = retry_backoff_base
         self._request_delay = request_delay_seconds
 
+    @property
+    def exchange(self) -> str:
+        return self._exchange
+
+    # ---------- internal symbol formatter ---------- #
+
+    def _yf(self, symbol: str) -> str:
+        """This instance's exchange-aware symbol mapper. All callsites
+        within YFinanceSource go through here; external callers use
+        the module-level `to_yfinance_symbol`."""
+        return _to_yf_canonical(symbol, self._exchange)
+
     # ---------- public ---------- #
 
     def fetch_daily_history(
         self,
-        nse_symbols: Iterable[str],
+        symbols: Iterable[str],
         start: date,
         end: date | None = None,
     ) -> dict[str, FetchOutcome]:
@@ -88,7 +140,7 @@ class YFinanceSource:
         """
         end_date = end or date.today()
         results: dict[str, FetchOutcome] = {}
-        symbols_list = list(nse_symbols)
+        symbols_list = list(symbols)
         for batch in self._batched(symbols_list, self._batch_size):
             batch_results = self._fetch_batch_daily(batch, start, end_date)
             results.update(batch_results)
@@ -98,7 +150,7 @@ class YFinanceSource:
 
     def fetch_hourly_recent(
         self,
-        nse_symbols: Iterable[str],
+        symbols: Iterable[str],
         lookback_days: int = 5,
     ) -> dict[str, FetchOutcome]:
         """Fetch hourly bars for the last `lookback_days`. Used by the
@@ -111,7 +163,7 @@ class YFinanceSource:
         """
         results: dict[str, FetchOutcome] = {}
         capped_lookback = min(lookback_days, 730)
-        symbols_list = list(nse_symbols)
+        symbols_list = list(symbols)
         for batch in self._batched(symbols_list, self._batch_size):
             batch_results = self._fetch_batch_hourly(batch, capped_lookback)
             results.update(batch_results)
@@ -128,13 +180,13 @@ class YFinanceSource:
 
     def _fetch_batch_daily(
         self,
-        nse_symbols: list[str],
+        symbols: list[str],
         start: date,
         end: date,
     ) -> dict[str, FetchOutcome]:
         import yfinance as yf  # lazy: only required when an ETL run fires
 
-        yf_symbols = [to_yfinance_symbol(s) for s in nse_symbols]
+        yf_symbols = [self._yf(s) for s in symbols]
         last_error = None
         for attempt in range(1, self._max_retries + 1):
             try:
@@ -149,14 +201,15 @@ class YFinanceSource:
                     progress=False,
                     group_by="ticker",
                 )
-                return self._normalize_df_to_outcomes(df, nse_symbols)
+                return self._normalize_df_to_outcomes(df, symbols)
             except Exception as e:
                 last_error = e
                 logger.warning(
                     "yfinance batch failed; will retry",
                     extra={
                         "attempt": attempt,
-                        "batch_size": len(nse_symbols),
+                        "batch_size": len(symbols),
+                        "exchange": self._exchange,
                         "error": str(e),
                     },
                 )
@@ -166,18 +219,18 @@ class YFinanceSource:
         # All retries exhausted — every ticker in the batch fails.
         err = f"batch fetch failed after {self._max_retries} retries: {last_error}"
         return {
-            s: FetchOutcome(yfinance_symbol=to_yfinance_symbol(s), error_message=err)
-            for s in nse_symbols
+            s: FetchOutcome(yfinance_symbol=self._yf(s), error_message=err)
+            for s in symbols
         }
 
     def _fetch_batch_hourly(
         self,
-        nse_symbols: list[str],
+        symbols: list[str],
         lookback_days: int,
     ) -> dict[str, FetchOutcome]:
         import yfinance as yf
 
-        yf_symbols = [to_yfinance_symbol(s) for s in nse_symbols]
+        yf_symbols = [self._yf(s) for s in symbols]
         last_error = None
         for attempt in range(1, self._max_retries + 1):
             try:
@@ -191,7 +244,7 @@ class YFinanceSource:
                     progress=False,
                     group_by="ticker",
                 )
-                return self._normalize_df_to_outcomes(df, nse_symbols)
+                return self._normalize_df_to_outcomes(df, symbols)
             except Exception as e:
                 last_error = e
                 if attempt < self._max_retries:
@@ -199,14 +252,14 @@ class YFinanceSource:
 
         err = f"hourly batch failed after {self._max_retries} retries: {last_error}"
         return {
-            s: FetchOutcome(yfinance_symbol=to_yfinance_symbol(s), error_message=err)
-            for s in nse_symbols
+            s: FetchOutcome(yfinance_symbol=self._yf(s), error_message=err)
+            for s in symbols
         }
 
     def _normalize_df_to_outcomes(
         self,
         df,
-        nse_symbols: list[str],
+        symbols: list[str],
     ) -> dict[str, FetchOutcome]:
         """yfinance returns either:
           - a multi-index DataFrame {ticker: {col: series}} for multi-symbol calls
@@ -221,22 +274,22 @@ class YFinanceSource:
         results: dict[str, FetchOutcome] = {}
 
         if df is None or df.empty:
-            for s in nse_symbols:
+            for s in symbols:
                 results[s] = FetchOutcome(
-                    yfinance_symbol=to_yfinance_symbol(s),
+                    yfinance_symbol=self._yf(s),
                     error_message="yfinance returned empty DataFrame",
                 )
             return results
 
-        is_multi = len(nse_symbols) > 1
+        is_multi = len(symbols) > 1
 
-        for nse_symbol in nse_symbols:
-            yf_symbol = to_yfinance_symbol(nse_symbol)
+        for symbol in symbols:
+            yf_symbol = self._yf(symbol)
             try:
                 if is_multi:
                     # Multi-index columns: df[yf_symbol] gives sub-frame
                     if yf_symbol not in df.columns.get_level_values(0):
-                        results[nse_symbol] = FetchOutcome(
+                        results[symbol] = FetchOutcome(
                             yfinance_symbol=yf_symbol,
                             error_message="symbol not in returned columns",
                         )
@@ -268,11 +321,11 @@ class YFinanceSource:
                         adj_close=float(ac) if not _is_nan(ac) else float(c),
                         volume=float(v) if not _is_nan(v) else 0.0,
                     ))
-                results[nse_symbol] = FetchOutcome(
+                results[symbol] = FetchOutcome(
                     yfinance_symbol=yf_symbol, bars=tuple(bars),
                 )
             except Exception as e:
-                results[nse_symbol] = FetchOutcome(
+                results[symbol] = FetchOutcome(
                     yfinance_symbol=yf_symbol,
                     error_message=f"normalization failed: {e}",
                 )

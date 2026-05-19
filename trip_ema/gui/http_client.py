@@ -65,26 +65,44 @@ class TripEmaHttpClient:
 
     # ---------- ETL actions (POST) ---------- #
 
-    def refresh_listings(self) -> dict:
-        return self._post("/v1/admin/etl/refresh-listings")
-
-    def run_eod(self, *, lookback_days: int = 7) -> dict:
+    def refresh_listings(self, *, exchange: str = "NSE") -> dict:
         return self._post(
-            "/v1/admin/etl/run-eod",
-            params={"lookback_days": lookback_days},
+            "/v1/admin/etl/refresh-listings",
+            params={"exchange": exchange},
         )
 
-    def run_intraday(self) -> dict:
-        return self._post("/v1/admin/etl/run-intraday")
+    def run_eod(self, *, exchange: str = "NSE", lookback_days: int = 7) -> dict:
+        return self._post(
+            "/v1/admin/etl/run-eod",
+            params={"exchange": exchange, "lookback_days": lookback_days},
+        )
 
-    def recompute_tiers(self) -> dict:
-        return self._post("/v1/admin/etl/recompute-tiers")
+    def run_intraday(self, *, exchange: str = "NSE") -> dict:
+        return self._post(
+            "/v1/admin/etl/run-intraday",
+            params={"exchange": exchange},
+        )
 
-    def unpark_all(self) -> dict:
-        return self._post("/v1/admin/etl/unpark-all")
+    def recompute_tiers(self, *, exchange: str = "NSE") -> dict:
+        return self._post(
+            "/v1/admin/etl/recompute-tiers",
+            params={"exchange": exchange},
+        )
 
-    def backfill(self, *, start_date: date, tier: Optional[int] = None) -> dict:
-        params = {"start_date": start_date.isoformat()}
+    def unpark_all(self, *, exchange: str = "NSE") -> dict:
+        return self._post(
+            "/v1/admin/etl/unpark-all",
+            params={"exchange": exchange},
+        )
+
+    def backfill(
+        self, *, start_date: date, tier: Optional[int] = None,
+        exchange: str = "NSE",
+    ) -> dict:
+        params: dict = {
+            "exchange": exchange,
+            "start_date": start_date.isoformat(),
+        }
         if tier is not None:
             params["tier"] = tier
         return self._post("/v1/admin/etl/backfill", params=params)

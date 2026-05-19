@@ -17,6 +17,16 @@ Concurrency model:
   - Tier ordering is preserved at submit time (Tier 1 batches submitted
     first); within a tier, batches finish in arbitrary order.
   - Each worker holds its own DB connection so writes don't serialize.
+
+Phase 14.6a — `exchange` is a required keyword argument on every
+public entry point (`refresh_listings`, `recompute_tiers`, `run_eod`,
+`run_intraday`, `run_backfill`, `unpark_all`). The engine parameter
+is now named `db_engine` (was `engine`) to match the convention used
+elsewhere in the codebase (admin routes, scheduler, app.py). Every
+public entry point calls `validate_exchange(exchange, config)` before
+doing any work — unknown or unconfigured exchanges raise
+UnsupportedExchangeError. The `YFinanceSource` is now constructed
+per-pass with `exchange=` so its symbol formatter is correct.
 """
 
 from __future__ import annotations
@@ -24,10 +34,10 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -38,6 +48,7 @@ from ..observability import metrics as M
 from ..observability.correlation import correlation_id, new_correlation_id
 from ..persistence.bars_repo import BarsRepository
 from .corporate_actions_repo import CorporateActionsRepository
+from .exchanges import UnsupportedExchangeError, validate_exchange
 from .holidays_calendar import NseTradingCalendar
 from .listings_sync import ListingsSync, SyncResult
 from .nse_downloader import NseDownloader
@@ -45,12 +56,12 @@ from .nse_listings_parser import parse_equity_csv, parse_etf_csv
 from .parked import ParkedEntry, append_parked
 from .reconciler import _StoredBar, reconcile
 from .status_repo import EtlStatusRepository
-from .symbol_history_repo import SymbolHistoryRepository
+from .symbol_history_repo import SymbolHistoryRepository  # noqa: F401  -- re-exported
 from .tiering import TickerAdv, assign_tiers
 from .types import (
-    FetchOutcome,
+    FetchOutcome,  # noqa: F401  -- re-exported for callers
     RawBar,
-    ReconcileResult,
+    ReconcileResult,  # noqa: F401  -- re-exported
     RunKind,
     RunOutcome,
     Tier,
@@ -72,22 +83,41 @@ class RefreshListingsResult:
 
 
 def refresh_listings(
-    engine: Engine,
+    db_engine: Engine,
     config: Config,
     *,
+    exchange: str,
     downloader: Optional[NseDownloader] = None,
 ) -> RefreshListingsResult:
-    """Pull the NSE equity + ETF CSVs and sync the tickers table.
+    """Pull the listings CSVs for `exchange` and sync the tickers table.
+
+    Phase 14.6a: `exchange` is a required keyword argument. Currently
+    only `NSE` has a fully-implemented listings ingestion pipeline
+    (the NseDownloader + nse_listings_parser); other exchanges are
+    validated here but the downstream listings code will error if
+    called with a non-NSE exchange. That asymmetry is the cleanest
+    place to put the limitation until Phase 15 adds per-exchange
+    listings sources.
 
     Single DB transaction — partial failures roll back. The CSV
     downloads are outside the transaction (they can take 10-30s and
     we don't want to hold a row lock).
     """
+    validate_exchange(exchange, config)
+    if exchange != "NSE":
+        raise UnsupportedExchangeError(
+            f"refresh_listings is currently implemented for NSE only; "
+            f"got exchange={exchange!r}. Other exchanges are accepted "
+            f"by validate_exchange but the listings downloader is "
+            f"NSE-specific. Multi-exchange listings ingestion is a "
+            f"Phase 15 deliverable.",
+        )
+
     dl = downloader or NseDownloader()
     cid = new_correlation_id()
 
     with correlation_id(cid):
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             status_repo = EtlStatusRepository(conn)
             run_id = status_repo.open_run(
                 RunKind.LISTINGS, correlation_id=cid,
@@ -95,13 +125,13 @@ def refresh_listings(
 
         t_start = time.monotonic()
         try:
-            logger.info("ETL: downloading NSE equities CSV")
+            logger.info("ETL: downloading NSE equities CSV", extra={"exchange": exchange})
             equities_bytes = dl.fetch_equities()
-            logger.info("ETL: downloading NSE ETFs CSV")
+            logger.info("ETL: downloading NSE ETFs CSV", extra={"exchange": exchange})
             etfs_bytes = dl.fetch_etfs()
         except Exception as e:
             logger.exception("Listings download failed")
-            with engine.begin() as conn:
+            with db_engine.begin() as conn:
                 EtlStatusRepository(conn).close_run(
                     run_id, RunOutcome.FAILED,
                     notes=f"download failed: {e}",
@@ -121,13 +151,14 @@ def refresh_listings(
         logger.info(
             "ETL: parsed listings",
             extra={
+                "exchange": exchange,
                 "equities": len(equity_listings),
                 "etfs": len(etf_listings),
             },
         )
 
-        with engine.begin() as conn:
-            sync = ListingsSync(conn, exchange=config.etl.exchange)
+        with db_engine.begin() as conn:
+            sync = ListingsSync(conn, exchange=exchange)
             # We sync the combined list with delisting detection enabled.
             # A ticker missing from BOTH the equity and ETF lists is
             # genuinely delisted; one in just the equity list might be
@@ -138,7 +169,8 @@ def refresh_listings(
                 run_id,
                 RunOutcome.SUCCESS,
                 notes=(
-                    f"sync: new={result.new_listings}, "
+                    f"sync: exchange={exchange}, "
+                    f"new={result.new_listings}, "
                     f"renamed={result.renamed_symbols}, "
                     f"enriched={result.enriched_existing}, "
                     f"delisted={result.delisted}, "
@@ -165,11 +197,24 @@ def refresh_listings(
 # ---------- Tier recompute ---------- #
 
 
-def recompute_tiers(engine: Engine, config: Config) -> int:
-    """Refresh tickers.tier based on trailing-30-day ADV. Returns the
-    number of tier reassignments that changed."""
+def recompute_tiers(
+    db_engine: Engine,
+    config: Config,
+    *,
+    exchange: str,
+) -> int:
+    """Refresh tickers.tier based on trailing-30-day ADV for `exchange`.
+
+    Returns the number of tier reassignments that changed.
+
+    Phase 14.6a: `exchange` is required. Only tickers belonging to
+    this exchange are re-tiered; other exchanges' tier assignments
+    are untouched.
+    """
+    validate_exchange(exchange, config)
+
     cid = new_correlation_id()
-    with correlation_id(cid), engine.begin() as conn:
+    with correlation_id(cid), db_engine.begin() as conn:
         status_repo = EtlStatusRepository(conn)
         run_id = status_repo.open_run(
             RunKind.TIER_RECOMPUTE, correlation_id=cid,
@@ -196,7 +241,7 @@ def recompute_tiers(engine: Engine, config: Config) -> int:
                   AND t.exchange = :ex
                 GROUP BY t.ticker_id
             """),
-            {"ex": config.etl.exchange},
+            {"ex": exchange},
         )
         advs = [
             TickerAdv(ticker_id=r.ticker_id, avg_daily_value=float(r.avg_daily_value))
@@ -223,7 +268,7 @@ def recompute_tiers(engine: Engine, config: Config) -> int:
         status_repo.close_run(
             run_id,
             RunOutcome.SUCCESS,
-            notes=f"tier reassignments: {changes}",
+            notes=f"exchange={exchange}, tier reassignments: {changes}",
         )
         M.etl_runs_total.labels(
             kind=RunKind.TIER_RECOMPUTE.value,
@@ -247,29 +292,27 @@ class _TickerInfo:
 
 
 def _select_tickers(
-    engine: Engine,
+    db_engine: Engine,
     config: Config,
     *,
+    exchange: str,
     tier_filter: Optional[set[Tier]] = None,
-    exchange: Optional[str] = None,
 ) -> list[_TickerInfo]:
-    """Active, non-delisted tickers ordered by (tier ASC, symbol ASC).
-    Tier 1 first so partial-run aborts lose the least important data.
+    """Active, non-delisted tickers for `exchange`, ordered by
+    (tier ASC, symbol ASC). Tier 1 first so partial-run aborts lose
+    the least important data.
 
-    `exchange`: defaults to `config.etl.exchange` for backward
-    compatibility with the single-exchange ETL CLI. Per-market
-    orchestrators pass the exchange explicitly so each market's loop
-    only fetches its own tickers.
+    Phase 14.6a: `exchange` is required. Each market's fetch pass
+    only selects its own tickers.
     """
-    effective_exchange = exchange if exchange is not None else config.etl.exchange
-    with engine.connect() as conn:
+    with db_engine.connect() as conn:
         query = """
             SELECT ticker_id, symbol, tier
             FROM tickers
             WHERE is_active = TRUE AND delisted_at IS NULL
               AND exchange = :ex
         """
-        params = {"ex": effective_exchange}
+        params: dict = {"ex": exchange}
         if tier_filter:
             query += " AND tier = ANY(:tiers)"
             params["tiers"] = [t.value for t in tier_filter]
@@ -282,7 +325,7 @@ def _select_tickers(
 
 
 def _fetch_existing_bars_for_tickers(
-    engine: Engine,
+    db_engine: Engine,
     ticker_ids: list[int],
     timeframe: Timeframe,
     *,
@@ -292,7 +335,7 @@ def _fetch_existing_bars_for_tickers(
     you really want it (backfill divergence detection on first run)."""
     if not ticker_ids:
         return {}
-    with engine.connect() as conn:
+    with db_engine.connect() as conn:
         query = """
             SELECT ticker_id, bar_timestamp, open, high, low,
                    close, adj_close, volume
@@ -319,110 +362,121 @@ def _fetch_existing_bars_for_tickers(
 
 
 def run_eod(
-    engine: Engine,
+    db_engine: Engine,
     config: Config,
     *,
+    exchange: str,
     source: Optional[YFinanceSource] = None,
     days_lookback: int = 7,
-    exchange: Optional[str] = None,
 ) -> int:
-    """Daily end-of-day pass: every active ticker for the given exchange.
+    """Daily end-of-day pass: every active ticker for `exchange`.
 
     Fetches the trailing `days_lookback` calendar days. We don't
     need full history — just enough overlap to detect intraday
     revisions on the latest bar(s).
 
-    `exchange`: defaults to `config.etl.exchange`. The MarketOrchestrator
-    passes the per-market exchange explicitly when driving fetches as
-    part of its pipeline.
+    Phase 14.6a: `exchange` is a required keyword argument. The
+    MarketOrchestrator passes its own market's exchange code; the
+    CLI passes whatever `--exchange` was specified.
 
     Returns the run_id so the GUI can show progress.
     """
+    validate_exchange(exchange, config)
     return _run_fetch_pass(
-        engine,
+        db_engine,
         config,
+        exchange=exchange,
         kind=RunKind.EOD,
         tier_filter=None,
         timeframe=Timeframe.DAILY,
         source=source,
         days_lookback=days_lookback,
-        exchange=exchange,
     )
 
 
 def run_intraday(
-    engine: Engine,
+    db_engine: Engine,
     config: Config,
     *,
+    exchange: str,
     source: Optional[YFinanceSource] = None,
-    exchange: Optional[str] = None,
 ) -> int:
-    """Hourly Tier-1-only pass during market hours.
+    """Hourly Tier-1-only pass for `exchange` during market hours.
 
     Yfinance returns hourly bars; we aggregate them to a daily
     PROVISIONAL bar (the latest one). The trip_ema scheduler's
     provisional path picks it up on its next cycle.
 
-    `exchange`: defaults to `config.etl.exchange`.
+    Phase 14.6a: `exchange` is required.
+
+    NOTE: The trading-day check still uses the NSE-specific calendar
+    (`NseTradingCalendar`). For non-NSE exchanges the per-market
+    orchestrator owns the trading-day decision via its own
+    TradingCalendar and would call this function only on real
+    trading days; the local check here is defensive for direct CLI
+    invocations. When other exchanges' calendars land in Phase 15,
+    select the right calendar by exchange.
     """
-    # Holiday check: skip on non-trading days outright.
-    # NOTE: Still uses the NSE-specific calendar; multi-market intraday
-    # is out of scope for Step 2. When per-market intraday is added,
-    # the orchestrator will own the trading-day check via its own
-    # TradingCalendar, and this function will trust the caller.
-    cal = NseTradingCalendar()
-    today_ist = _today_in_ist()
-    if not cal.is_trading_day(today_ist):
-        logger.info(
-            "Skipping intraday run on non-trading day",
-            extra={"date": today_ist.isoformat()},
-        )
-        return -1
+    validate_exchange(exchange, config)
+
+    # NSE-only defensive holiday check. Other exchanges fall through
+    # and trust the caller (typically the per-market orchestrator).
+    if exchange == "NSE":
+        cal = NseTradingCalendar()
+        today_ist = _today_in_ist()
+        if not cal.is_trading_day(today_ist):
+            logger.info(
+                "Skipping intraday run on non-trading day",
+                extra={"exchange": exchange, "date": today_ist.isoformat()},
+            )
+            return -1
 
     return _run_fetch_pass(
-        engine,
+        db_engine,
         config,
+        exchange=exchange,
         kind=RunKind.INTRADAY,
         tier_filter={Tier.TIER_1},
         timeframe=Timeframe.DAILY,  # We aggregate hourly → daily-provisional
         source=source,
         intraday=True,
-        exchange=exchange,
     )
 
 
 def run_backfill(
-    engine: Engine,
+    db_engine: Engine,
     config: Config,
     *,
+    exchange: str,
     start_date: date,
     source: Optional[YFinanceSource] = None,
     tier_filter: Optional[set[Tier]] = None,
-    exchange: Optional[str] = None,
 ) -> int:
-    """Historical backfill from `start_date` to today.
+    """Historical backfill from `start_date` to today for `exchange`.
 
     The full universe is fetched in tier order (so a Ctrl-C partway
     through still leaves us with the most-important tickers done).
 
-    `exchange`: defaults to `config.etl.exchange`.
+    Phase 14.6a: `exchange` is a required keyword argument.
     """
+    validate_exchange(exchange, config)
     return _run_fetch_pass(
-        engine,
+        db_engine,
         config,
+        exchange=exchange,
         kind=RunKind.BACKFILL,
         tier_filter=tier_filter,
         timeframe=Timeframe.DAILY,
         source=source,
         start_date=start_date,
-        exchange=exchange,
     )
 
 
 def _run_fetch_pass(
-    engine: Engine,
+    db_engine: Engine,
     config: Config,
     *,
+    exchange: str,
     kind: RunKind,
     tier_filter: Optional[set[Tier]],
     timeframe: Timeframe,
@@ -430,52 +484,72 @@ def _run_fetch_pass(
     start_date: Optional[date] = None,
     days_lookback: int = 7,
     intraday: bool = False,
-    exchange: Optional[str] = None,
 ) -> int:
     """Shared spine for backfill / eod / intraday. Differences:
 
+      - exchange: which exchange's tickers to fetch (passed through
+        to ticker selection and to the YFinanceSource symbol mapper).
       - tier_filter: None = all tickers, {Tier.TIER_1} = intraday.
       - start_date: backfill provides one; eod / intraday don't (they
         compute from days_lookback).
       - intraday: True → hourly fetch (Tier 1 only) → aggregate to
         provisional daily.
-      - exchange: None defaults to config.etl.exchange. Per-market
-        orchestrators pass this explicitly so each market's fetch
-        only sees its own tickers.
+
+    Caller is responsible for validating the exchange BEFORE calling
+    this helper (the public entry points do that).
     """
     cid = new_correlation_id()
     src = source or YFinanceSource(
+        exchange=exchange,
         batch_size=config.etl.yfinance_batch_size,
         request_delay_seconds=config.etl.yfinance_request_delay_seconds,
     )
 
+    # Sanity: if the caller supplied a source, ensure it matches the
+    # exchange we're about to fetch for. A mismatch is a programmer
+    # error (probably a test wiring bug).
+    if source is not None and source.exchange != exchange:
+        raise UnsupportedExchangeError(
+            f"YFinanceSource exchange mismatch: source.exchange="
+            f"{source.exchange!r}, requested exchange={exchange!r}. "
+            f"Construct the source with the right exchange or omit "
+            f"the kwarg so the runner builds one.",
+        )
+
     with correlation_id(cid):
         # Open the run row first
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             run_id = EtlStatusRepository(conn).open_run(kind, correlation_id=cid)
 
         t_start = time.monotonic()
         tickers = _select_tickers(
-            engine, config, tier_filter=tier_filter, exchange=exchange,
+            db_engine, config, exchange=exchange, tier_filter=tier_filter,
         )
         if not tickers:
-            logger.warning("No tickers to fetch", extra={"kind": kind.value})
-            with engine.begin() as conn:
+            logger.warning(
+                "No tickers to fetch",
+                extra={"kind": kind.value, "exchange": exchange},
+            )
+            with db_engine.begin() as conn:
                 EtlStatusRepository(conn).close_run(
-                    run_id, RunOutcome.SUCCESS, notes="no tickers",
+                    run_id, RunOutcome.SUCCESS,
+                    notes=f"no tickers for exchange={exchange}",
                 )
             return run_id
 
         logger.info(
             "ETL: fetch pass starting",
-            extra={"kind": kind.value, "ticker_count": len(tickers), "run_id": run_id},
+            extra={
+                "kind": kind.value, "exchange": exchange,
+                "ticker_count": len(tickers), "run_id": run_id,
+            },
         )
 
         end_date = date.today()
         effective_start = start_date or (end_date - _timedelta_days(days_lookback))
 
         outcome = _execute_batches(
-            engine=engine,
+            db_engine=db_engine,
             config=config,
             src=src,
             tickers=tickers,
@@ -487,7 +561,7 @@ def _run_fetch_pass(
             intraday=intraday,
         )
 
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             EtlStatusRepository(conn).close_run(run_id, outcome)
             parked_count = EtlStatusRepository(conn).count_parked()
         M.etl_parked_tickers.set(parked_count)
@@ -503,7 +577,7 @@ def _run_fetch_pass(
 
 def _execute_batches(
     *,
-    engine: Engine,
+    db_engine: Engine,
     config: Config,
     src: YFinanceSource,
     tickers: list[_TickerInfo],
@@ -533,7 +607,7 @@ def _execute_batches(
         futures = [
             ex.submit(
                 _process_one_batch,
-                engine=engine, config=config, src=src,
+                db_engine=db_engine, config=config, src=src,
                 batch=batch, start=start, end=end,
                 timeframe=timeframe, intraday=intraday,
             )
@@ -550,7 +624,7 @@ def _execute_batches(
             total_failed += bs.failed
             total_bars_written += bs.bars_written
             # Update the run counters incrementally so the GUI sees progress.
-            with engine.begin() as conn:
+            with db_engine.begin() as conn:
                 EtlStatusRepository(conn).increment_counters(
                     run_id,
                     attempted=bs.attempted, succeeded=bs.succeeded,
@@ -578,7 +652,7 @@ class _BatchStats:
 
 def _process_one_batch(
     *,
-    engine: Engine,
+    db_engine: Engine,
     config: Config,
     src: YFinanceSource,
     batch: list[_TickerInfo],
@@ -588,7 +662,11 @@ def _process_one_batch(
     intraday: bool,
 ) -> _BatchStats:
     """Fetch one batch, reconcile, write bars, update status. Runs in
-    a worker thread. Each call uses its own DB transaction(s)."""
+    a worker thread. Each call uses its own DB transaction(s).
+
+    The `src` carries the exchange; symbol formatting is handled
+    inside YFinanceSource.
+    """
     symbols = [t.symbol for t in batch]
 
     # Fetch
@@ -603,9 +681,9 @@ def _process_one_batch(
 
     # Index DB-stored bars for the reconciler
     ticker_ids = [t.ticker_id for t in batch]
-    by_id = {t.ticker_id: t for t in batch}
+    by_id = {t.ticker_id: t for t in batch}  # noqa: F841 -- handy for debugging
     existing = _fetch_existing_bars_for_tickers(
-        engine, ticker_ids, timeframe, since=start,
+        db_engine, ticker_ids, timeframe, since=start,
     )
 
     attempted = len(batch)
@@ -617,7 +695,7 @@ def _process_one_batch(
         outcome = results_by_symbol.get(ticker.symbol)
         if outcome is None or not outcome.succeeded:
             err = (outcome.error_message if outcome else "no result")
-            _handle_ticker_failure(engine, config, ticker, err)
+            _handle_ticker_failure(db_engine, config, ticker, err)
             failed += 1
             M.etl_tickers_fetched_total.labels(
                 tier=str(ticker.tier.value), outcome="failed",
@@ -632,7 +710,7 @@ def _process_one_batch(
             rolling_window_days=config.etl.reconcile_window_days,
         )
 
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             bars_repo = BarsRepository(conn)
             ca_repo = CorporateActionsRepository(conn)
             status_repo = EtlStatusRepository(conn)
@@ -714,14 +792,14 @@ def _aggregate_if_intraday(
 
 
 def _handle_ticker_failure(
-    engine: Engine,
+    db_engine: Engine,
     config: Config,
     ticker: _TickerInfo,
     error_message: str,
 ) -> None:
     """One ticker errored. Update etl_ticker_status; if the failure
     count crosses the park threshold, append to the parked CSV."""
-    with engine.begin() as conn:
+    with db_engine.begin() as conn:
         repo = EtlStatusRepository(conn)
         parked = repo.record_failure(
             ticker.ticker_id, error_message,
@@ -744,16 +822,48 @@ def _handle_ticker_failure(
 # ---------- Unpark ---------- #
 
 
-def unpark_all(engine: Engine, config: Config) -> int:
-    """Clear the parked flag for every parked ticker. Doesn't refetch
-    them — the next EoD run will. Returns the count of unparked
-    tickers."""
-    with engine.begin() as conn:
+def unpark_all(
+    db_engine: Engine,
+    config: Config,
+    *,
+    exchange: str,
+) -> int:
+    """Clear the parked flag for every parked ticker on `exchange`.
+    Doesn't refetch them — the next EoD run will. Returns the count
+    of unparked tickers.
+
+    Phase 14.6a: `exchange` is required. Unparking is scoped to one
+    exchange's tickers so a BSE operator-action doesn't accidentally
+    clear NSE parks.
+    """
+    validate_exchange(exchange, config)
+
+    with db_engine.begin() as conn:
         repo = EtlStatusRepository(conn)
         parked = repo.list_parked()
+        # The repository's list_parked doesn't currently filter by
+        # exchange; we filter here against the tickers table.
+        if parked:
+            # Pull the parked tickers' exchanges in one query and
+            # filter the unpark list to this exchange's IDs.
+            parked_ids = [p.ticker_id for p in parked]
+            rows = conn.execute(
+                text("""
+                    SELECT ticker_id FROM tickers
+                    WHERE ticker_id = ANY(:ids) AND exchange = :ex
+                """),
+                {"ids": parked_ids, "ex": exchange},
+            ).fetchall()
+            allowed_ids = {r.ticker_id for r in rows}
+            parked = [p for p in parked if p.ticker_id in allowed_ids]
+
         for t in parked:
             repo.unpark(t.ticker_id)
-        M.etl_parked_tickers.set(0)
+        # Update the gauge with the post-unpark total (across all
+        # exchanges, since the gauge isn't exchange-labelled).
+        M.etl_parked_tickers.set(
+            EtlStatusRepository(conn).count_parked(),
+        )
         return len(parked)
 
 
