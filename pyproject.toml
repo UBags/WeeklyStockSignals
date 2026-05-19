@@ -124,6 +124,7 @@ test = [
     "pytest-postgresql >= 6.0",     # Used by the persistence/integration
                                     # test slices (not the DB-free ones).
     "pytest-qt >= 4.4",             # Headless Qt tests for the GUI.
+    "pytest-asyncio >= 0.23",       # NEW: for PulseState's async subscriber tests
 ]
 
 [project.scripts]
@@ -138,3 +139,6 @@ packages = ["trip_ema"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "migrations" = "trip_ema/migrations"
+
+[tool.pytest.ini_options]
+postgresql_exec = "/usr/lib/postgresql/18/bin/pg_ctl"

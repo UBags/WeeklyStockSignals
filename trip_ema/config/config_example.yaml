@@ -1,0 +1,67 @@
+# Example config.yaml fragments for Step 2.
+# Existing YAML files keep working unchanged — every new field has a default.
+# Below shows the new optional fields and a sample multi-market setup.
+
+# ---------------------------------------------------------------------------
+# market_hours: each entry now supports tick-scheduling overrides.
+# ---------------------------------------------------------------------------
+
+market_hours:
+  - exchange: NSE
+    open: "09:15"
+    close: "15:30"
+    tz: Asia/Kolkata
+    weekdays: [1, 2, 3, 4, 5]
+    # ---- All fields below are NEW and OPTIONAL ----
+    post_open_offset_minutes: 5        # first tick fires at 09:20 IST
+    pre_close_offset_minutes: 15       # last tick fires at 15:15 IST
+    intraday_cadence_minutes: 60       # hourly ticks between 09:20 and 15:15
+    holidays_country: IN               # python-holidays code for IN federal holidays
+    holidays_override_file: configs/nse_holidays_2026.yaml  # operator overrides
+  
+  # Future-proofing: example NYSE entry for when paid feed is added.
+  # MarketOrchestrator handles this transparently — each market gets
+  # its own thread, calendar, and tick schedule.
+  - exchange: NYSE
+    open: "09:30"
+    close: "16:00"
+    tz: America/New_York
+    weekdays: [1, 2, 3, 4, 5]
+    post_open_offset_minutes: 5
+    pre_close_offset_minutes: 15
+    intraday_cadence_minutes: 60
+    holidays_country: US
+
+# ---------------------------------------------------------------------------
+# scheduling: new `orchestrator` block.
+# ---------------------------------------------------------------------------
+
+scheduling:
+  compute_cadence_minutes: 60          # legacy thread cadence (ignored when
+                                        # orchestrator.enabled=true)
+  subscriber_cadence_minutes: 15       # distributor safety-net cadence
+  default_timeframe: "1W"
+  
+  orchestrator:                        # NEW block, all fields optional
+    enabled: false                     # Default: keep using legacy thread
+                                        # until you've validated this in dev.
+                                        # Flip to true to activate the per-
+                                        # market orchestrators.
+    catch_up_on_startup: false         # Skip missed ticks on restart. Set to
+                                        # true if restarts often happen mid-day
+                                        # and you want one immediate catch-up.
+    catch_up_skip_if_recent_minutes: 30 # Even with catch_up_on_startup=true,
+                                        # don't fire if last successful pass
+                                        # was less than this many minutes ago.
+    fetch_timeout_seconds: 600         # Hard wall on a single fetch attempt.
+    fetch_retry_delay_minutes: 5       # Wait this long before the single
+                                        # in-flight retry of a failed fetch.
+
+# ---------------------------------------------------------------------------
+# Example override file: configs/nse_holidays_2026.yaml
+# ---------------------------------------------------------------------------
+# extra_holidays:
+#   - 2026-01-26   # Republic Day (also caught by python-holidays IN)
+#   - 2026-08-15   # Independence Day
+# special_trading_days:
+#   - 2026-11-12   # Muhurat Trading on Diwali (Saturday, market open ~18:30)

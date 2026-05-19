@@ -40,7 +40,7 @@ SERVICE_PORT=8000
 CONFIG="${1:-config.yaml}"
 LOG_FILE=/tmp/trip-ema.log
 PRIME_WAIT_SECONDS=120
-# =========================
+# =========================chmo
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"

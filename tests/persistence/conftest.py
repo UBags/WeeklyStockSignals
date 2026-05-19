@@ -25,7 +25,7 @@ from pytest_postgresql import factories
 from sqlalchemy import Engine, create_engine
 
 # Help pytest-postgresql find the Postgres binaries when they're not on PATH.
-_PG_BIN_DEFAULT = "/usr/lib/postgresql/16/bin"
+_PG_BIN_DEFAULT = "/usr/lib/postgresql/18/bin"
 _pg_bin = os.environ.get("TRIP_EMA_PG_BIN_PATH", _PG_BIN_DEFAULT)
 
 
