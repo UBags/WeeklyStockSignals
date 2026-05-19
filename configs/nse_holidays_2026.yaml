@@ -1,0 +1,13 @@
+# NSE holiday overrides for 2026.
+# python-holidays "IN" already covers federal holidays; this file is
+# for exchange-specific additions and Muhurat trading days.
+#
+# Schema:
+#   extra_holidays: list of YYYY-MM-DD dates to TREAT AS CLOSED even
+#                   if python-holidays says open.
+#   special_trading_days: list of YYYY-MM-DD dates that are NORMALLY
+#                         closed (weekend/holiday) but the exchange
+#                         opens for a special session (e.g., Muhurat
+#                         on Diwali).
+extra_holidays: []
+special_trading_days: []

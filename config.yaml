@@ -111,7 +111,7 @@ scheduling:
   default_timeframe: "1W"
 
   orchestrator:                        # NEW block, all fields optional
-    enabled: false                     # Default: keep using legacy thread
+    enabled: true                     # Default: keep using legacy thread
                                         # until you've validated this in dev.
                                         # Flip to true to activate the per-
                                         # market orchestrators.
