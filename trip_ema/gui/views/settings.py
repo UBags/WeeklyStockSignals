@@ -53,6 +53,12 @@ KEY_NOTIFICATIONS_REFRESH = "notifications_refresh_seconds"
 KEY_HEALTH_REFRESH = "health_refresh_seconds"
 KEY_CHART_DEFAULT_YEARS = "chart_default_years"
 
+# Phase 14.6c: the last exchange the operator targeted in the ETL
+# Status tab's picker. String, not int — handled by the dedicated
+# `load_last_selected_exchange` / `save_last_selected_exchange`
+# helpers below rather than the int-coercing `load_gui_settings`.
+KEY_LAST_SELECTED_EXCHANGE = "last_selected_exchange"
+
 
 DEFAULT_SETTINGS = {
     KEY_ETL_REFRESH: 5,
@@ -88,6 +94,41 @@ def save_gui_settings(values: dict) -> None:
     s.beginGroup(SETTINGS_GROUP)
     for key, value in values.items():
         s.setValue(key, int(value))
+    s.endGroup()
+    s.sync()
+
+
+# Phase 14.6c — string-typed pref helpers for the last-selected
+# exchange. Separate from load_gui_settings/save_gui_settings
+# because those round-trip everything through int(). Keeps the
+# existing int-only API stable; this is a parallel surface for
+# string values that may grow in future (e.g. last-selected
+# symbol on the Signals tab, last-opened tab name).
+
+
+def load_last_selected_exchange() -> Optional[str]:
+    """Return the operator's last-picked exchange in the ETL Status
+    tab, or None if nothing's been saved yet (first launch).
+
+    Returns a string (never an int) — the QSettings round-trip
+    naturally preserves strings if save_last_selected_exchange was
+    used. Returns None for both 'never saved' and 'saved but empty'."""
+    s = QSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    value = s.value(KEY_LAST_SELECTED_EXCHANGE, None)
+    s.endGroup()
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def save_last_selected_exchange(exchange: str) -> None:
+    """Persist the operator's exchange selection for next launch.
+    Caller is responsible for validating that `exchange` is a real
+    exchange code; this just writes whatever it's given."""
+    s = QSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    s.setValue(KEY_LAST_SELECTED_EXCHANGE, str(exchange))
     s.endGroup()
     s.sync()
 

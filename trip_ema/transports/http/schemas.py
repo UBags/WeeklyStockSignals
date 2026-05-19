@@ -436,6 +436,24 @@ class ExchangeStateListPayload(BaseModel):
     snapshot_taken_at: datetime
 
 
+class ExchangeListPayload(BaseModel):
+    """Response from GET /v1/admin/exchanges (Phase 14.6c).
+
+    The set of exchanges available for ETL actions, sourced from
+    config.market_hours. Distinct from ExchangeStateListPayload:
+    this answers 'what can I act on?'; the state list answers
+    'what activity has there been?'. A configured exchange may
+    have zero exchange_state activity.
+
+    The list is sorted alphabetically by the route handler so the
+    GUI's dropdown order is deterministic.
+    """
+    model_config = ConfigDict(frozen=True)
+    exchanges: list[str]
+    total: int
+    snapshot_taken_at: datetime
+
+
 # ---------- Signal history (chart data) ---------- #
 
 

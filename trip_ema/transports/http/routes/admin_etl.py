@@ -273,6 +273,16 @@ def admin_etl_backfill(
 @router.get("/status", response_model=EtlStatusPayload)
 def admin_etl_status(
     limit: int = Query(20, ge=1, le=100),
+    exchange: str | None = Query(
+        None, min_length=2, max_length=10,
+        description=(
+            "Optional exchange code (e.g. NSE). When provided, "
+            "tier_counts reflect only that exchange's tickers. "
+            "When omitted, falls back to config.etl.exchange for "
+            "backward compatibility. The recent_runs list and "
+            "parked_count are NOT filtered — they remain global."
+        ),
+    ),
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
 ) -> EtlStatusPayload:
@@ -282,15 +292,28 @@ def admin_etl_status(
 
     The GUI polls this every 5s by default.
 
-    Tier counts use `config.etl.exchange` as the default for backward
-    compatibility. A future enhancement could accept `?exchange=` to
-    show per-exchange tier breakdowns.
+    Phase 14.6c: accepts an optional `?exchange=` query parameter
+    that scopes the tier_counts to one exchange. The recent_runs
+    and parked_count are intentionally LEFT global so the operator
+    sees activity across all exchanges in the runs table even when
+    the picker is on a specific one. (If per-exchange runs filtering
+    is ever needed, it's a separate parameter — keep this one's
+    semantics focused on tier_counts only.)
+
+    Validation: an unknown or unconfigured exchange falls back
+    silently to config.etl.exchange rather than 400ing. The GUI's
+    picker only offers exchanges from /v1/admin/exchanges, so a bad
+    value here would mean the operator hit the URL directly with a
+    typo; returning data for a different exchange is friendlier than
+    a hard error in that case. Strict callers should pre-validate.
     """
+    effective_exchange = exchange or config.etl.exchange
+
     with db_engine.connect() as conn:
         status_repo = EtlStatusRepository(conn)
         recent = status_repo.list_recent_runs(limit=limit)
         parked_count = status_repo.count_parked()
-        tier_counts = _tier_counts(conn, config.etl.exchange)
+        tier_counts = _tier_counts(conn, effective_exchange)
 
     return EtlStatusPayload(
         recent_runs=[

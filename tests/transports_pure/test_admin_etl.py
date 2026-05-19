@@ -399,6 +399,68 @@ class TestStatusEndpoint:
         assert body["tier_counts"]["tier_2"] == 500
         assert body["tier_counts"]["tier_3"] == 1600
 
+    def test_exchange_param_passed_to_tier_counts(
+        self, auth_headers, monkeypatch,
+    ):
+        """Phase 14.6c: ?exchange=BSE → _tier_counts called with 'BSE',
+        not config.etl.exchange. The recent_runs/parked_count remain
+        global regardless."""
+        import trip_ema.transports.http.routes.admin_etl as mod
+
+        seen_exchanges = []
+
+        class FakeRepo:
+            def __init__(self, conn): pass
+            def list_recent_runs(self, limit): return []
+            def count_parked(self): return 0
+
+        def fake_tier_counts(conn, ex):
+            seen_exchanges.append(ex)
+            return mod.EtlTierCounts(tier_1=10, tier_2=20, tier_3=30)
+
+        monkeypatch.setattr(mod, "EtlStatusRepository", FakeRepo)
+        monkeypatch.setattr(mod, "_tier_counts", fake_tier_counts)
+
+        engine = MagicMock()
+        cfg = _make_config()  # cfg.etl.exchange = "NSE"
+        client = _make_client(
+            config=cfg, db_engine=engine, executor=FakeExecutor(),
+        )
+
+        # Without ?exchange=, falls back to config.etl.exchange = "NSE"
+        client.get("/v1/admin/etl/status", headers=auth_headers)
+        assert seen_exchanges[-1] == "NSE"
+
+        # With ?exchange=BSE, the param wins.
+        client.get(
+            "/v1/admin/etl/status?exchange=BSE", headers=auth_headers,
+        )
+        assert seen_exchanges[-1] == "BSE"
+
+    def test_status_does_not_require_exchange(self, auth_headers, monkeypatch):
+        """Backward compat: ?exchange= is OPTIONAL. Existing clients
+        that don't send it must still get a 200 with tier counts
+        scoped to config.etl.exchange."""
+        import trip_ema.transports.http.routes.admin_etl as mod
+
+        class FakeRepo:
+            def __init__(self, conn): pass
+            def list_recent_runs(self, limit): return []
+            def count_parked(self): return 0
+
+        monkeypatch.setattr(mod, "EtlStatusRepository", FakeRepo)
+        monkeypatch.setattr(
+            mod, "_tier_counts",
+            lambda conn, ex: mod.EtlTierCounts(tier_1=0, tier_2=0, tier_3=0),
+        )
+
+        engine = MagicMock()
+        client = _make_client(db_engine=engine, executor=FakeExecutor())
+        resp = client.get(
+            "/v1/admin/etl/status", headers=auth_headers,  # no ?exchange=
+        )
+        assert resp.status_code == 200
+
 
 # ---------- GET: parked ---------- #
 

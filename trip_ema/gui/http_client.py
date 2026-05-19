@@ -109,11 +109,46 @@ class TripEmaHttpClient:
 
     # ---------- ETL status reads (GET) ---------- #
 
-    def get_etl_status(self, *, limit: int = 20) -> dict:
-        return self._get("/v1/admin/etl/status", params={"limit": limit})
+    def get_etl_status(
+        self, *, limit: int = 20, exchange: Optional[str] = None,
+    ) -> dict:
+        """Phase 14.6c: optional `exchange` scopes the tier_counts
+        to one exchange. When omitted, server falls back to
+        config.etl.exchange for backward compatibility."""
+        params: dict = {"limit": limit}
+        if exchange is not None:
+            params["exchange"] = exchange
+        return self._get("/v1/admin/etl/status", params=params)
 
     def get_etl_parked(self) -> dict:
         return self._get("/v1/admin/etl/parked")
+
+    # ---------- Exchange registry + state (Phase 14.6c) ---------- #
+
+    def list_exchanges(self) -> dict:
+        """Return the configured-exchanges payload from the server.
+
+        Shape:
+          {
+            "exchanges": ["BSE", "NSE", "NYSE"],
+            "total": 3,
+            "snapshot_taken_at": "...",
+          }
+        Used by the GUI's exchange picker to populate its dropdown.
+        """
+        return self._get("/v1/admin/exchanges")
+
+    def get_exchange_state(self, exchange: str) -> dict:
+        """Return the exchange_state row for one exchange.
+
+        Returns the ExchangeStatePayload shape. Raises ApiError(404)
+        if no row exists for that exchange (i.e. no ETL activity yet).
+        """
+        return self._get(f"/v1/admin/exchange-state/{exchange}")
+
+    def list_exchange_states(self) -> dict:
+        """Return every exchange_state row. ExchangeStateListPayload shape."""
+        return self._get("/v1/admin/exchange-state")
 
     # ---------- Signal data (GET) — for the chart view ---------- #
 

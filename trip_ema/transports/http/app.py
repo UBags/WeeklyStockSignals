@@ -25,8 +25,9 @@ from typing import Callable
 from fastapi import FastAPI
 
 from .routes import (
-    admin, admin_etl, admin_exchange_state, admin_health, admin_notifications,
-    admin_orchestrator, admin_subscribers, compute, health, pulse, signals,
+    admin, admin_etl, admin_exchange_state, admin_exchanges, admin_health,
+    admin_notifications, admin_orchestrator, admin_subscribers, compute,
+    health, pulse, signals,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,7 @@ def create_app(
     app.include_router(admin.router)
     app.include_router(admin_etl.router)
     app.include_router(admin_exchange_state.router)
+    app.include_router(admin_exchanges.router)
     app.include_router(admin_subscribers.router)
     app.include_router(admin_notifications.router)
     app.include_router(admin_health.router)
