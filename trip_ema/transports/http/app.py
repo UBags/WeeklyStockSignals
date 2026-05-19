@@ -26,13 +26,16 @@ from fastapi import FastAPI
 
 from .routes import (
     admin, admin_etl, admin_health, admin_notifications,
-    admin_subscribers, compute, health, signals,
+    admin_orchestrator, admin_subscribers, compute, health, pulse, signals,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def create_app(shutdown_callback: Callable[[], None] | None = None) -> FastAPI:
+def create_app(
+    shutdown_callback: Callable[[], None] | None = None,
+    startup_callback: Callable[[], None] | None = None,
+) -> FastAPI:
     """Build the FastAPI app with all routers mounted.
 
     Args:
@@ -40,25 +43,49 @@ def create_app(shutdown_callback: Callable[[], None] | None = None) -> FastAPI:
             lifespan shutdown. Use to stop schedulers and dispose of the
             DB engine. Must be safe to call once; uvicorn guarantees a
             single shutdown invocation per process.
+        startup_callback: Optional zero-arg callable invoked during ASGI
+            lifespan startup, AFTER set_state() has been called by the
+            entry point. Phase 14 uses this for two things: binding the
+            PulseState to the asyncio event loop (so SSE subscribers can
+            be fanned out from the orchestrator's worker thread), and
+            starting the OrchestratorPool's per-market threads. Failures
+            here do not abort startup — they are logged and the app
+            continues with degraded functionality (pulse stream and
+            orchestrator endpoints will return 503).
 
     Does not initialize runtime state — `app.py` (the entry point) calls
     `dependencies.set_state()` after building the app to wire things up.
     """
-    if shutdown_callback is not None:
+    needs_lifespan = (
+        shutdown_callback is not None or startup_callback is not None
+    )
+    if needs_lifespan:
         @asynccontextmanager
         async def lifespan(app: FastAPI):
-            # Startup is a no-op — state wiring happens in app.py before
-            # this lifespan begins, because we need the state available
-            # during the boot sequence (priming the cache, etc.) BEFORE
-            # uvicorn starts accepting requests. Doing startup in the
-            # lifespan would create a chicken-and-egg with set_state().
+            # Startup — set_state() has already been called by app.py
+            # before this lifespan begins. The startup_callback's job
+            # is to bind the asyncio loop to PulseState (so it can
+            # fan events out to SSE subscribers) and start the
+            # OrchestratorPool. We do these here, not earlier in
+            # app.py, because they need the event loop to exist —
+            # which it does at this point but not in app.py's
+            # pre-uvicorn boot sequence.
+            if startup_callback is not None:
+                try:
+                    startup_callback()
+                except Exception:
+                    logger.exception(
+                        "Error during ASGI lifespan startup; continuing "
+                        "with degraded functionality",
+                    )
             yield
             # Shutdown — uvicorn calls this on SIGTERM/SIGINT (it owns
             # the signal handlers when running via `uvicorn.run`).
-            try:
-                shutdown_callback()
-            except Exception:
-                logger.exception("Error during ASGI lifespan shutdown")
+            if shutdown_callback is not None:
+                try:
+                    shutdown_callback()
+                except Exception:
+                    logger.exception("Error during ASGI lifespan shutdown")
 
         app = FastAPI(
             title="trip_ema",
@@ -81,4 +108,9 @@ def create_app(shutdown_callback: Callable[[], None] | None = None) -> FastAPI:
     app.include_router(admin_subscribers.router)
     app.include_router(admin_notifications.router)
     app.include_router(admin_health.router)
+    # Phase 14 — orchestrator pulse + admin routers. Endpoints return 503
+    # when AppState.pulse_state / AppState.orchestrator_pool are None
+    # (i.e., when `scheduling.orchestrator.enabled = False` in config).
+    app.include_router(pulse.router)
+    app.include_router(admin_orchestrator.router)
     return app

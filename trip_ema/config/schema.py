@@ -7,11 +7,23 @@ into these types. Downstream code only ever sees validated instances.
 
 from __future__ import annotations
 
-from typing import Literal
+from datetime import time as dt_time, timedelta
+from pathlib import Path
+from typing import Literal, TYPE_CHECKING
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..domain import IndicatorParams, Timeframe
+
+if TYPE_CHECKING:
+    # Avoid an import cycle: schema is loaded very early; the scheduler
+    # module imports from domain which doesn't depend on schema. The
+    # MarketTickConfig dataclass lives in scheduler.tick_planner, which
+    # is fine at runtime but creates a cycle if imported at top-level
+    # because some downstream modules import schema during their init.
+    from ..scheduler.tick_planner import MarketTickConfig
+    from ..scheduler.market_calendar import TradingCalendarConfig
 
 
 # ---------- Database ---------- #
@@ -178,6 +190,41 @@ class MarketHoursConfig(BaseModel):
         description="ISO weekdays open: 1=Monday..7=Sunday",
     )
 
+    # ---- New tick-scheduling fields (all optional with sane defaults) ---- #
+    # When the MarketOrchestrator owns a tick loop for this exchange, these
+    # control its firing pattern. Backward-compat: existing config.yaml files
+    # without these fields keep parsing unchanged.
+
+    post_open_offset_minutes: int = Field(
+        default=5, ge=0, le=240,
+        description="Minutes after open at which the first tick fires "
+                    "(default 5 = NSE-style 09:20 IST for a 09:15 open).",
+    )
+    pre_close_offset_minutes: int = Field(
+        default=15, ge=0, le=240,
+        description="Minutes before close at which the last tick fires "
+                    "(default 15 = NSE-style 15:15 IST for a 15:30 close).",
+    )
+    intraday_cadence_minutes: int = Field(
+        default=60, ge=1, le=720,
+        description="Wall-clock cadence (in market-local time) for "
+                    "intraday hourly ticks between post-open and "
+                    "pre-close.",
+    )
+    holidays_country: str | None = Field(
+        default=None,
+        description="python-holidays country code (e.g. 'IN', 'US'). "
+                    "None disables algorithmic holiday lookup; the "
+                    "calendar then uses only the weekday filter and "
+                    "any YAML override file.",
+    )
+    holidays_override_file: str | None = Field(
+        default=None,
+        description="Path (relative to cwd) to a YAML file with "
+                    "`extra_holidays` and `special_trading_days` lists. "
+                    "Operator overrides; exact wins over algorithm.",
+    )
+
     @field_validator("weekdays")
     @classmethod
     def _validate_weekdays(cls, v: list[int]) -> list[int]:
@@ -187,8 +234,111 @@ class MarketHoursConfig(BaseModel):
             raise ValueError("weekdays must be 1..7")
         return sorted(set(v))
 
+    @field_validator("open", "close")
+    @classmethod
+    def _validate_hhmm(cls, v: str) -> str:
+        # Pre-validate the HH:MM string here so the runtime adapter
+        # doesn't have to re-parse defensively. "09:15" → ok.
+        # ValueError surfaces as a Pydantic ValidationError at startup.
+        try:
+            dt_time.fromisoformat(v)
+        except ValueError as e:
+            raise ValueError(f"must be HH:MM, got {v!r}: {e}")
+        return v
+
+    @field_validator("tz")
+    @classmethod
+    def _validate_tz(cls, v: str) -> str:
+        # Verify the tz string is recognized by zoneinfo at startup,
+        # not at first tick. A typo'd tz that only fails at the first
+        # firing would be a nasty surprise.
+        try:
+            ZoneInfo(v)
+        except ZoneInfoNotFoundError as e:
+            raise ValueError(f"unknown IANA tz {v!r}: {e}")
+        return v
+
+    def to_tick_config(self) -> "MarketTickConfig":
+        """Adapt the YAML-shaped config into the runtime dataclass used
+        by `scheduler.tick_planner`. Lazy-imported to avoid the cycle
+        flagged at module top."""
+        from ..scheduler.tick_planner import MarketTickConfig  # noqa: PLC0415
+
+        return MarketTickConfig(
+            exchange=self.exchange,
+            tz=ZoneInfo(self.tz),
+            open=dt_time.fromisoformat(self.open),
+            close=dt_time.fromisoformat(self.close),
+            post_open_offset=timedelta(minutes=self.post_open_offset_minutes),
+            pre_close_offset=timedelta(minutes=self.pre_close_offset_minutes),
+            intraday_cadence=timedelta(minutes=self.intraday_cadence_minutes),
+        )
+
+    def to_calendar_config(self) -> "TradingCalendarConfig":
+        """Adapt the YAML-shaped config into the runtime dataclass used
+        by `scheduler.market_calendar`. Lazy-imported."""
+        from ..scheduler.market_calendar import TradingCalendarConfig  # noqa: PLC0415
+
+        override_path: Path | None = None
+        if self.holidays_override_file:
+            override_path = Path(self.holidays_override_file)
+
+        return TradingCalendarConfig(
+            exchange=self.exchange,
+            weekdays=frozenset(self.weekdays),
+            holidays_country=self.holidays_country,
+            holidays_override_file=override_path,
+        )
+
 
 # ---------- Scheduler / scanning ---------- #
+
+
+class OrchestratorConfig(BaseModel):
+    """Per-market hourly orchestrator settings.
+
+    The orchestrator owns the fetch → compute → distribute pipeline for
+    each market, replacing the legacy unconditional-hourly ComputeScheduler
+    thread. When `enabled=True`, the legacy thread is suppressed and one
+    MarketOrchestrator thread is spawned per entry in `market_hours`.
+    """
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = Field(
+        default=False,
+        description="When True, spawn one MarketOrchestrator per market "
+                    "and suppress the legacy ComputeScheduler hourly "
+                    "thread. Default False during rollout; flip to True "
+                    "once the orchestrator is validated in your env.",
+    )
+    catch_up_on_startup: bool = Field(
+        default=False,
+        description="If the orchestrator starts up to find at least one "
+                    "scheduled tick was missed today, fire one catch-up "
+                    "run_once immediately. Default False — missed ticks "
+                    "are skipped, the natural next-tick loop catches up "
+                    "at the next firing.",
+    )
+    catch_up_skip_if_recent_minutes: int = Field(
+        default=30, ge=0, le=1440,
+        description="When `catch_up_on_startup` is True, skip the catch-up "
+                    "if the last successful pass completed within this "
+                    "many minutes. Avoids firing on a normal restart that "
+                    "happens shortly after the last pass.",
+    )
+    fetch_timeout_seconds: int = Field(
+        default=600, ge=30, le=3600,
+        description="Hard wall-clock cap on a single fetch attempt. If "
+                    "exceeded, the attempt is killed and the retry "
+                    "policy takes over.",
+    )
+    fetch_retry_delay_minutes: int = Field(
+        default=5, ge=1, le=60,
+        description="When a fetch fails, schedule one retry after this "
+                    "many minutes. If the retry also fails, the next "
+                    "regular tick handles the next attempt — we do not "
+                    "stack further retries.",
+    )
 
 
 class SchedulingConfig(BaseModel):
@@ -196,7 +346,8 @@ class SchedulingConfig(BaseModel):
 
     compute_cadence_minutes: int = Field(
         default=60, ge=15,
-        description="How often the ComputeScheduler runs. Wall-clock anchored.",
+        description="How often the ComputeScheduler runs. Wall-clock anchored. "
+                    "Ignored when `orchestrator.enabled=True`.",
     )
     subscriber_cadence_minutes: int = Field(
         default=15, ge=15,
@@ -204,6 +355,7 @@ class SchedulingConfig(BaseModel):
                     "Must be a divisor of every subscriber's cadence.",
     )
     default_timeframe: Timeframe = Timeframe.WEEKLY
+    orchestrator: OrchestratorConfig = OrchestratorConfig()
 
 
 # ---------- Cache ---------- #

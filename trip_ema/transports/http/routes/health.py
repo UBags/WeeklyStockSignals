@@ -31,6 +31,7 @@ from ..dependencies import (
     get_cache,
     get_compute_scheduler,
     get_distributor,
+    get_orchestrator_pool,
     get_redis_queue,
     get_registry,
 )
@@ -61,6 +62,7 @@ def readyz(
     compute_scheduler: ComputeScheduler = Depends(get_compute_scheduler),
     distributor: SubscriberDistributor | None = Depends(get_distributor),
     redis_queue=Depends(get_redis_queue),
+    orchestrator_pool=Depends(get_orchestrator_pool),
 ) -> HealthPayload:
     """Readiness probe. Returns 200 only if the service can do useful work.
 
@@ -73,6 +75,8 @@ def readyz(
       - SubscriberDistributor thread was started but is now dead
       - SubscriberDistributor thread is alive but wedged
       - Redis configured but unreachable
+      - Orchestrator pool: at least one MarketOrchestrator was started
+        but its loop thread has died (Phase 14)
     """
     now = datetime.now(timezone.utc)
     issues: list[str] = []
@@ -83,7 +87,10 @@ def readyz(
     if len(cache) == 0:
         issues.append("Cache empty (never seeded)")
 
-    # ComputeScheduler health.
+    # ComputeScheduler health. When the orchestrator is on, the
+    # compute_scheduler is constructed but never started — its
+    # `is_unhealthy()` returns None for the never-started case,
+    # so this is correctly a no-op in orchestrator mode.
     compute_problem = compute_scheduler.is_unhealthy(now)
     if compute_problem:
         issues.append(compute_problem)
@@ -100,6 +107,14 @@ def readyz(
         redis_reachable = redis_queue.ping()
         if not redis_reachable:
             issues.append("Redis configured but unreachable")
+
+    # Phase 14: orchestrator pool health. None when orchestrator is
+    # disabled in config; we don't penalize that case.
+    if orchestrator_pool is not None and orchestrator_pool.any_unhealthy():
+        issues.append(
+            "Orchestrator pool: at least one market thread is "
+            "unhealthy. Check /v1/admin/orchestrator/status for details.",
+        )
 
     # Phase 9 A2: stale tickers — informational only.
     # Does NOT block readiness; it's an upstream-data concern, not a

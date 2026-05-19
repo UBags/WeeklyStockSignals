@@ -251,9 +251,17 @@ def _select_tickers(
     config: Config,
     *,
     tier_filter: Optional[set[Tier]] = None,
+    exchange: Optional[str] = None,
 ) -> list[_TickerInfo]:
-    """Active, non-delisted, NSE tickers ordered by (tier ASC, symbol ASC).
-    Tier 1 first so partial-run aborts lose the least important data."""
+    """Active, non-delisted tickers ordered by (tier ASC, symbol ASC).
+    Tier 1 first so partial-run aborts lose the least important data.
+
+    `exchange`: defaults to `config.etl.exchange` for backward
+    compatibility with the single-exchange ETL CLI. Per-market
+    orchestrators pass the exchange explicitly so each market's loop
+    only fetches its own tickers.
+    """
+    effective_exchange = exchange if exchange is not None else config.etl.exchange
     with engine.connect() as conn:
         query = """
             SELECT ticker_id, symbol, tier
@@ -261,7 +269,7 @@ def _select_tickers(
             WHERE is_active = TRUE AND delisted_at IS NULL
               AND exchange = :ex
         """
-        params = {"ex": config.etl.exchange}
+        params = {"ex": effective_exchange}
         if tier_filter:
             query += " AND tier = ANY(:tiers)"
             params["tiers"] = [t.value for t in tier_filter]
@@ -316,12 +324,17 @@ def run_eod(
     *,
     source: Optional[YFinanceSource] = None,
     days_lookback: int = 7,
+    exchange: Optional[str] = None,
 ) -> int:
-    """Daily end-of-day pass: every active NSE ticker.
+    """Daily end-of-day pass: every active ticker for the given exchange.
 
     Fetches the trailing `days_lookback` calendar days. We don't
     need full history — just enough overlap to detect intraday
     revisions on the latest bar(s).
+
+    `exchange`: defaults to `config.etl.exchange`. The MarketOrchestrator
+    passes the per-market exchange explicitly when driving fetches as
+    part of its pipeline.
 
     Returns the run_id so the GUI can show progress.
     """
@@ -333,6 +346,7 @@ def run_eod(
         timeframe=Timeframe.DAILY,
         source=source,
         days_lookback=days_lookback,
+        exchange=exchange,
     )
 
 
@@ -341,14 +355,21 @@ def run_intraday(
     config: Config,
     *,
     source: Optional[YFinanceSource] = None,
+    exchange: Optional[str] = None,
 ) -> int:
     """Hourly Tier-1-only pass during market hours.
 
     Yfinance returns hourly bars; we aggregate them to a daily
     PROVISIONAL bar (the latest one). The trip_ema scheduler's
     provisional path picks it up on its next cycle.
+
+    `exchange`: defaults to `config.etl.exchange`.
     """
     # Holiday check: skip on non-trading days outright.
+    # NOTE: Still uses the NSE-specific calendar; multi-market intraday
+    # is out of scope for Step 2. When per-market intraday is added,
+    # the orchestrator will own the trading-day check via its own
+    # TradingCalendar, and this function will trust the caller.
     cal = NseTradingCalendar()
     today_ist = _today_in_ist()
     if not cal.is_trading_day(today_ist):
@@ -366,6 +387,7 @@ def run_intraday(
         timeframe=Timeframe.DAILY,  # We aggregate hourly → daily-provisional
         source=source,
         intraday=True,
+        exchange=exchange,
     )
 
 
@@ -376,11 +398,14 @@ def run_backfill(
     start_date: date,
     source: Optional[YFinanceSource] = None,
     tier_filter: Optional[set[Tier]] = None,
+    exchange: Optional[str] = None,
 ) -> int:
     """Historical backfill from `start_date` to today.
 
     The full universe is fetched in tier order (so a Ctrl-C partway
     through still leaves us with the most-important tickers done).
+
+    `exchange`: defaults to `config.etl.exchange`.
     """
     return _run_fetch_pass(
         engine,
@@ -390,6 +415,7 @@ def run_backfill(
         timeframe=Timeframe.DAILY,
         source=source,
         start_date=start_date,
+        exchange=exchange,
     )
 
 
@@ -404,6 +430,7 @@ def _run_fetch_pass(
     start_date: Optional[date] = None,
     days_lookback: int = 7,
     intraday: bool = False,
+    exchange: Optional[str] = None,
 ) -> int:
     """Shared spine for backfill / eod / intraday. Differences:
 
@@ -412,6 +439,9 @@ def _run_fetch_pass(
         compute from days_lookback).
       - intraday: True → hourly fetch (Tier 1 only) → aggregate to
         provisional daily.
+      - exchange: None defaults to config.etl.exchange. Per-market
+        orchestrators pass this explicitly so each market's fetch
+        only sees its own tickers.
     """
     cid = new_correlation_id()
     src = source or YFinanceSource(
@@ -425,7 +455,9 @@ def _run_fetch_pass(
             run_id = EtlStatusRepository(conn).open_run(kind, correlation_id=cid)
 
         t_start = time.monotonic()
-        tickers = _select_tickers(engine, config, tier_filter=tier_filter)
+        tickers = _select_tickers(
+            engine, config, tier_filter=tier_filter, exchange=exchange,
+        )
         if not tickers:
             logger.warning("No tickers to fetch", extra={"kind": kind.value})
             with engine.begin() as conn:

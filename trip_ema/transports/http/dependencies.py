@@ -55,6 +55,20 @@ class AppState:
     the ETL admin endpoints are disabled (e.g., in tests that don't
     need them)."""
 
+    orchestrator_pool: "Optional[object]" = None
+    """Phase 14: the OrchestratorPool managing per-market MarketOrchestrators.
+    None when the orchestrator is disabled
+    (`scheduling.orchestrator.enabled=False`); in that case the
+    admin orchestrator endpoints return 503 and the legacy
+    ComputeScheduler thread remains in charge. Typed as Optional[object]
+    to avoid forward-reference cycles with the scheduler package."""
+
+    pulse_state: "Optional[object]" = None
+    """Phase 14: the in-memory PulseState pub/sub for GUI live updates.
+    None when no orchestrator is running — pulse is only meaningful
+    when there's an orchestrator producing events.
+    Typed as Optional[object] for the same reason as orchestrator_pool."""
+
 
 # Module-level singleton — set by app.py's create_app(), read by deps.
 # Tests don't touch this directly; they use app.dependency_overrides.
@@ -156,3 +170,37 @@ def get_etl_executor():
     return 503. Kept as Optional rather than required because tests
     and minimal deployments don't need it."""
     return _require_state().etl_executor
+
+
+def get_orchestrator_pool():
+    """Return the AppState's OrchestratorPool, or None.
+
+    Returns None in two cases:
+      1. Orchestrator disabled in config (orchestrator.enabled=false) —
+         the AppState field is set but None.
+      2. Application not yet initialized (e.g., in HTTP tests that
+         build a minimal app without calling set_state()). Unlike
+         most getters, this one does NOT raise 503 when state is
+         missing — /readyz uses it and must not be blocked by an
+         uninitialized state in tests.
+
+    The admin orchestrator endpoints check `pool is None` themselves
+    and return 503 with a clearer "orchestrator not running" message;
+    the snapshot/stream pulse endpoints do the same for pulse_state."""
+    if _state is None:
+        return None
+    return _state.orchestrator_pool
+
+
+def get_pulse_state():
+    """Return the AppState's PulseState, or None.
+
+    Returns None in two cases:
+      1. Orchestrator disabled in config — the AppState field is None.
+      2. Application not yet initialized. Mirrors `get_orchestrator_pool`
+         in tolerating missing state rather than 503-ing; the
+         /v1/pulse and /v1/pulse/stream endpoints check `pulse_state
+         is None` and return 503 with a clearer message in that case."""
+    if _state is None:
+        return None
+    return _state.pulse_state

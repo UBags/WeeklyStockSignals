@@ -28,6 +28,7 @@ import argparse
 import logging
 import signal
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import NoReturn
 
@@ -43,7 +44,10 @@ from .registry import TickerRegistry
 from .scheduler import (
     ComputeScheduler,
     MarketHoursService,
+    OrchestratorPool,
+    OrchestratorSettings,
     SubscriberDistributor,
+    build_pool_from_configs,
 )
 from .transports.http import AppState, create_app, set_state
 
@@ -135,15 +139,32 @@ def _build_app_state(config_path: Path) -> AppState:
         result.cache_entries_populated,
     )
 
-    logger.info("Starting ComputeScheduler (cadence=%d min)",
-                config.scheduling.compute_cadence_minutes)
     compute_scheduler = ComputeScheduler(
         db_engine=db_engine,
         registry=registry,
         cache=cache,
         cadence_minutes=config.scheduling.compute_cadence_minutes,
     )
-    compute_scheduler.start()
+    # Phase 14: when the orchestrator is enabled, it drives the
+    # fetch → compute → distribute pipeline at per-market wall-clock
+    # ticks. The orchestrator calls `compute_scheduler.run_once()`
+    # from inside its pipeline — so the ComputeScheduler instance is
+    # still needed — but its self-driving cadence thread MUST NOT
+    # start. Two clocks running the same compute would either
+    # collide on the reentrancy lock (wasting cycles) or, worse,
+    # produce duplicate signal events if the lock implementation
+    # ever drifts.
+    if config.scheduling.orchestrator.enabled:
+        logger.info(
+            "ComputeScheduler constructed but loop thread NOT started — "
+            "orchestrator owns the cadence",
+        )
+    else:
+        logger.info(
+            "Starting ComputeScheduler (cadence=%d min)",
+            config.scheduling.compute_cadence_minutes,
+        )
+        compute_scheduler.start()
 
     market_hours = MarketHoursService(config.market_hours)
 
@@ -203,6 +224,19 @@ def _build_app_state(config_path: Path) -> AppState:
         max_workers=2, thread_name_prefix="trip-ema-etl-",
     )
 
+    # Phase 14: build the per-market orchestrator pool + pulse state.
+    # The pool's threads are NOT started here — they're started during
+    # the FastAPI lifespan startup callback, so the asyncio loop is
+    # already running when the first orchestrator publishes (PulseState
+    # needs the loop for SSE fan-out). When the orchestrator is
+    # disabled, both are None and the new endpoints return 503.
+    pulse_state, orchestrator_pool = _build_orchestrator_components(
+        config=config,
+        db_engine=db_engine,
+        compute_scheduler=compute_scheduler,
+        distributor=distributor,
+    )
+
     return AppState(
         config=config,
         db_engine=db_engine,
@@ -213,7 +247,104 @@ def _build_app_state(config_path: Path) -> AppState:
         redis_queue=redis_queue,
         metrics_server=metrics_server,
         etl_executor=etl_executor,
+        orchestrator_pool=orchestrator_pool,
+        pulse_state=pulse_state,
     )
+
+
+def _build_orchestrator_components(
+    *,
+    config,
+    db_engine,
+    compute_scheduler: ComputeScheduler,
+    distributor: SubscriberDistributor,
+):
+    """Phase 14: build (PulseState, OrchestratorPool) if enabled in config.
+
+    Returns (None, None) when `scheduling.orchestrator.enabled = False` —
+    the legacy ComputeScheduler thread is in charge and the new HTTP
+    endpoints return 503. When enabled:
+
+      * `PulseState` is constructed (its asyncio loop binding happens
+        later, during FastAPI's lifespan startup, when the loop is
+        actually running).
+      * `OrchestratorPool` is built from `config.market_hours`. The
+        pool's threads are NOT started here — `start_all()` is called
+        from the lifespan startup callback for the same loop-binding
+        reason.
+      * The `fetch_fn` for each market closes over (db_engine, config)
+        and calls `run_eod(..., exchange=...)` — the natural fetch
+        primitive. If you need a different cadence (intraday, custom),
+        change the closure here.
+
+    Failure modes:
+      * Config validation (market_hours empty, tz invalid, etc.) raises
+        from `build_pool_from_configs`. Surfaced at startup with the
+        original Pydantic error.
+      * fetch_fn construction is lazy — the runner functions are
+        imported at call time so a broken yfinance install doesn't
+        block service startup for non-fetch tests.
+    """
+    if not config.scheduling.orchestrator.enabled:
+        logger.info("Orchestrator disabled in config; skipping pool build")
+        return (None, None)
+
+    if not config.market_hours:
+        logger.warning(
+            "Orchestrator enabled but config.market_hours is empty; "
+            "no per-market threads will run. Pool returned empty.",
+        )
+
+    # Local import: pulse_state lives under transports.http to keep the
+    # SSE-specific concerns close to the HTTP route that consumes them.
+    from .transports.http.pulse_state import PulseState
+
+    pulse_state = PulseState()
+
+    orch_cfg = config.scheduling.orchestrator
+    settings = OrchestratorSettings(
+        fetch_timeout=timedelta(seconds=orch_cfg.fetch_timeout_seconds),
+        fetch_retry_delay=timedelta(
+            minutes=orch_cfg.fetch_retry_delay_minutes,
+        ),
+        catch_up_on_startup=orch_cfg.catch_up_on_startup,
+        catch_up_skip_if_recent=timedelta(
+            minutes=orch_cfg.catch_up_skip_if_recent_minutes,
+        ),
+    )
+
+    def _fetch_fn_for(exchange: str):
+        """Closure: each market's orchestrator gets a thin wrapper
+        that calls `run_eod` with the right exchange code. Imported
+        lazily so the etl extras don't have to be installed for
+        non-fetch tests."""
+        from .etl.runner import run_eod  # noqa: PLC0415
+
+        def _fetch(exchange_str: str):
+            # The orchestrator passes its own exchange string; we
+            # honor it (rather than the closure-captured one) so a
+            # future per-market refactor wouldn't silently misroute.
+            assert exchange_str == exchange, (
+                f"fetch_fn for {exchange} invoked with {exchange_str}"
+            )
+            return run_eod(
+                db_engine=db_engine, config=config, exchange=exchange,
+            )
+        return _fetch
+
+    pool = build_pool_from_configs(
+        market_configs=config.market_hours,
+        settings=settings,
+        fetch_fn_factory=_fetch_fn_for,
+        compute_run_once=compute_scheduler.run_once,
+        distribute_run_once=distributor.run_once,
+        pulse=pulse_state,
+    )
+    logger.info(
+        "Built OrchestratorPool with %d market(s): %s",
+        len(pool), pool.exchanges(),
+    )
+    return (pulse_state, pool)
 
 
 def _build_redis_queue(redis_config):
@@ -313,6 +444,19 @@ def _build_shutdown_callback(state: AppState, notifier_proc=None):
 
     def _shutdown() -> None:
         logger.info("Lifespan shutdown: stopping background threads")
+        # Phase 14: stop the orchestrator pool FIRST. If we stopped
+        # the distributor before the pool, an in-flight orchestrator
+        # tick could try to call distributor.run_once() on a stopped
+        # distributor and hit a confusing state. Stopping the pool
+        # also lets us emit `orchestrator_stopped` pulse events
+        # before the consumers go away.
+        try:
+            if state.orchestrator_pool is not None:
+                state.orchestrator_pool.stop_all(
+                    timeout_per_orchestrator=10.0,
+                )
+        except Exception:
+            logger.exception("Error stopping orchestrator_pool")
         try:
             if state.distributor is not None:
                 state.distributor.stop()
@@ -356,6 +500,61 @@ def _build_shutdown_callback(state: AppState, notifier_proc=None):
             logger.exception("Error disposing db_engine")
         logger.info("Lifespan shutdown complete")
     return _shutdown
+
+
+def _build_startup_callback(state: AppState):
+    """Return a zero-arg callable that performs Phase 14 startup tasks
+    requiring a running asyncio event loop.
+
+    Two things happen here, in order:
+
+      1. **Bind PulseState to the loop.** PulseState's `publish()` is
+         called from the orchestrator's worker thread; the fan-out to
+         async SSE subscribers needs `loop.call_soon_threadsafe(...)`,
+         which needs the loop reference. We capture it here, inside
+         the lifespan's startup phase, where `asyncio.get_running_loop()`
+         is meaningful.
+
+      2. **Start the OrchestratorPool.** Each MarketOrchestrator's
+         daemon thread is spawned via pool.start_all(). The pool
+         emits `orchestrator_started` pulse events; with the loop
+         already bound, those reach any GUI client that connects to
+         /v1/pulse/stream during the boot window.
+
+    When the orchestrator is disabled in config (pool=None, pulse=None),
+    this is a no-op. The callback is still wired so the lifespan
+    path is uniform across deployment modes.
+    """
+    import asyncio  # local to keep import graph tidy
+
+    def _startup() -> None:
+        if state.pulse_state is None or state.orchestrator_pool is None:
+            logger.info(
+                "Phase 14 startup: orchestrator disabled; skipping",
+            )
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            state.pulse_state.bind_loop(loop)
+            logger.info("PulseState bound to asyncio event loop")
+        except RuntimeError:
+            # No running loop — shouldn't happen during lifespan
+            # startup, but defensive: log and continue. SSE fan-out
+            # will be a no-op; snapshot still works.
+            logger.exception(
+                "PulseState could not bind event loop; SSE fan-out "
+                "will be disabled (snapshot endpoint still works).",
+            )
+        try:
+            state.orchestrator_pool.start_all()
+            logger.info(
+                "OrchestratorPool started with %d market(s): %s",
+                len(state.orchestrator_pool),
+                state.orchestrator_pool.exchanges(),
+            )
+        except Exception:
+            logger.exception("Error starting orchestrator_pool")
+    return _startup
 
 
 def _install_signal_handlers(shutdown_callback) -> None:
@@ -465,7 +664,15 @@ def main(argv: list[str] | None = None) -> NoReturn:
     shutdown_callback = _build_shutdown_callback(state, notifier_proc=notifier_proc)
     _install_signal_handlers(shutdown_callback)
 
-    app = create_app(shutdown_callback=shutdown_callback)
+    # Phase 14: build the startup callback that binds PulseState to
+    # the asyncio loop and starts the OrchestratorPool. No-op when
+    # orchestrator is disabled in config.
+    startup_callback = _build_startup_callback(state)
+
+    app = create_app(
+        shutdown_callback=shutdown_callback,
+        startup_callback=startup_callback,
+    )
 
     # Run uvicorn synchronously. uvicorn manages its own signal handling
     # in the asyncio loop; the ASGI lifespan we registered fires our
