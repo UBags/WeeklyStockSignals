@@ -682,3 +682,63 @@ class HealthSnapshotPayload(BaseModel):
     """Worst of all card statuses. 'ok' / 'warn' / 'crit' / 'unknown'."""
     cards: list[HealthCardPayload]
     snapshot_taken_at: datetime
+
+
+# ---------- Signal generation (Phase 15b) ---------- #
+
+
+class SignalGenerateAcceptedPayload(BaseModel):
+    """Response from POST /v1/admin/signals/generate (202 Accepted).
+
+    `run_id` is the etl_runs row the route opened for this work. The
+    GUI (and external operators) can poll GET /v1/admin/etl/status to
+    track the run's progress — its kind will be 'signal_backtest'.
+
+    Phase 15a's `generate_historical_signals` is shaped to accept
+    `run_id` from the caller (Phase 15b's HTTP route) so the route
+    can open the row inside the concurrent-run guard's transaction
+    and let the runner close it on completion. See the design's
+    Finding 4 resolution in PHASE_15_DESIGN_ADDENDUM.md.
+
+    `estimated_output_path` is the path WHERE the file WILL be
+    written when the runner finishes — it's a hint for the
+    operator, not a guarantee that the file exists yet. The
+    operator should poll GET /v1/admin/signals/generated to know
+    when the file is actually there.
+    """
+    model_config = ConfigDict(frozen=True)
+    run_id: int
+    """The etl_runs.run_id opened for this signal_backtest run."""
+    exchange: str
+    timeframes: list[str]
+    """The timeframe codes that will be processed (e.g. ['1W'])."""
+    force_full: bool
+    estimated_output_path: str
+    """Relative path; will be written by the runner."""
+    submitted_at: datetime
+
+
+class SignalGeneratedFilePayload(BaseModel):
+    """Response from GET /v1/admin/signals/generated.
+
+    When `exists` is False, ONLY `exchange` and `exists` are
+    populated; the rest are None. When `exists` is True, all fields
+    reflect the on-disk file's metadata (NOT the full `by_date`
+    payload — that would be too large to return in this endpoint).
+    """
+    model_config = ConfigDict(frozen=True)
+    exchange: str
+    exists: bool
+    filename: str | None = None
+    """e.g. 'NSE.json'; None when the file doesn't exist."""
+    size_bytes: int | None = None
+    mtime: datetime | None = None
+    """File's last-modified time. None when the file doesn't exist."""
+    generated_by_run_id: int | None = None
+    """The etl_runs.run_id that produced this file. None when the
+    file doesn't exist."""
+    schema_version: str | None = None
+    counts: dict | None = None
+    """The counts subdict from the JSON file: tickers, signals_total,
+    signals_by_type (BUY/SELL/EXIT_FROM_BUY/EXIT_FROM_SELL), first_date,
+    last_date."""

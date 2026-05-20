@@ -157,6 +157,40 @@ ETL Status tab → pick the exchange in the dropdown at the top-left → click
 **Run EoD**. Confirms when the action is accepted; the runs table refreshes
 every few seconds with the new in-flight row.
 
+### Backtest signal generation (Phase 15b)
+
+After daily ETL completes, regenerate the per-exchange backtest JSON file
+that external consumers read. This replays every active ticker through a
+fresh engine and writes `generated_signals/{EXCHANGE}.json`.
+
+```bash
+# Fire the run (async; returns 202 with run_id):
+curl -X POST \
+  -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+  "http://localhost:8000/v1/admin/signals/generate?exchange=NSE"
+
+# With explicit timeframes (default is 1W only):
+curl -X POST \
+  -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+  "http://localhost:8000/v1/admin/signals/generate?exchange=NSE&timeframe=1D&timeframe=1W"
+
+# Force full recompute (wipes per-(ticker, timeframe) resume rows
+# and recomputes from each ticker's earliest bar). Use after
+# changing engine params or exchange_overrides:
+curl -X POST \
+  -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+  "http://localhost:8000/v1/admin/signals/generate?exchange=NSE&force_full=true"
+```
+
+A second POST while one is in flight for the same exchange returns 409
+with the in-flight `run_id`. Wait for it to finish (the runner writes
+`outcome='success'`/`'failed'` to its etl_runs row when done) or kill the
+worker.
+
+The CLI equivalent is `trip-ema-etl generate-signals --exchange NSE` (see
+§5 above) — use it for one-off operator work; use the HTTP endpoint for
+automation or when the GUI button (Phase 15c) becomes available.
+
 ---
 
 ## 5. Ad-hoc updates per exchange
@@ -430,6 +464,46 @@ curl -s -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
 Prints sections 1–6 of the most common checks in this file (service health,
 ticker counts, bar counts, exchange_state, alert counts, recent runs).
 Read-only. Safe to run any time.
+
+### Generated backtest file (Phase 15b)
+
+Inspect the per-exchange JSON file the signal generator writes
+(metadata only — the `by_date` payload is not returned, only the
+top-level counts and file mtime/size):
+
+```bash
+curl -s -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+  "http://localhost:8000/v1/admin/signals/generated?exchange=NSE" \
+  | python3 -m json.tool
+```
+
+Sample output:
+
+```json
+{
+  "exchange": "NSE",
+  "exists": true,
+  "filename": "NSE.json",
+  "size_bytes": 14_680_064,
+  "mtime": "2026-05-21T01:42:17.123456+00:00",
+  "generated_by_run_id": 29,
+  "schema_version": "1.0",
+  "counts": {
+    "tickers": 2283,
+    "signals_total": 105684,
+    "signals_by_type": {
+      "BUY": 32987, "SELL": 35396,
+      "EXIT_FROM_BUY": 17857, "EXIT_FROM_SELL": 19444
+    },
+    "first_date": "2005-01-03",
+    "last_date": "2026-05-15"
+  }
+}
+```
+
+A 200 with `exists: false` means the exchange is configured but no
+`generate-signals` run has finished yet for it. That's a normal
+post-deploy state, not an error.
 
 ---
 
