@@ -142,3 +142,4 @@ packages = ["trip_ema"]
 
 [tool.pytest.ini_options]
 postgresql_exec = "/usr/lib/postgresql/18/bin/pg_ctl"
+#addopts = "--deselect tests/gui/test_signals.py::TestRangeButton::test_range_button_click_updates_years"
