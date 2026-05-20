@@ -45,7 +45,7 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QComboBox, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QListWidget,
+    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -54,10 +54,7 @@ from ..db import GuiDbSession
 from ..http_client import ApiError, TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
 from .exchange_state_panel import ExchangeStatePanel
-from .settings import (
-    load_last_selected_exchange,
-    save_last_selected_exchange,
-)
+from .widgets.exchange_picker import ExchangePicker
 
 logger = logging.getLogger(__name__)
 
@@ -71,11 +68,10 @@ OUTCOME_COLORS = {
 }
 
 
-# Sentinel for "no exchange chosen yet". Used as the picker's initial
-# state before the first /v1/admin/exchanges response lands. Action
-# buttons are disabled while this is the value; an early click would
-# otherwise send empty-string and hit a 422.
-_EXCHANGE_LOADING = "(loading…)"
+# Backward-compat re-export: existing tests import _EXCHANGE_LOADING
+# from etl_status. The sentinel now lives on the extracted picker
+# widget; we re-export the name here so tests don't have to know.
+from .widgets.exchange_picker import EXCHANGE_LOADING_SENTINEL as _EXCHANGE_LOADING  # noqa: E402
 
 
 class EtlStatusView(QWidget):
@@ -94,11 +90,11 @@ class EtlStatusView(QWidget):
         self._db = db
         self._http = http
 
-        # Phase 14.6c: the picker drives every operator action. Until
-        # /v1/admin/exchanges populates it we hold the sentinel and
-        # gate action buttons.
-        self._selected_exchange: Optional[str] = None
-        self._exchanges_loaded: bool = False
+        # Phase 15c: picker logic moved into ExchangePicker widget.
+        # `self._exchange_combo`, `self._picker_hint`,
+        # `self._selected_exchange`, and the populate/apply methods
+        # are kept as legacy attributes/methods that delegate to the
+        # picker so the 14.6c test suite continues to pass unchanged.
 
         self._build_ui()
         self._scheduler = RefreshScheduler(
@@ -106,11 +102,8 @@ class EtlStatusView(QWidget):
         )
         self._scheduler.tick.connect(self._on_refresh_tick)
 
-        # Kick off the one-shot exchanges-list fetch so the picker
-        # populates as soon as the network responds. Independent of
-        # the periodic-refresh scheduler — we only need this once
-        # per session.
-        self._fetch_exchanges_list()
+        # Picker kicks off its own list_exchanges fetch automatically
+        # (auto_fetch=True is the default). No need to call it here.
 
         if start_refresh_on_init:
             self._scheduler.start()
@@ -131,25 +124,39 @@ class EtlStatusView(QWidget):
         bar = QHBoxLayout()
 
         # ---- Picker (left) ---- #
-        # Combo + status hint together act as the "annotated picker"
-        # per design Q3 Option C. The hint label updates whenever
-        # the panel refreshes — see _refresh_picker_hint().
-        picker_label = QLabel("Exchange:")
-        picker_label.setStyleSheet("font-weight: 600;")
-        bar.addWidget(picker_label)
-
-        self._exchange_combo = QComboBox()
-        self._exchange_combo.setMinimumWidth(120)
-        self._exchange_combo.addItem(_EXCHANGE_LOADING)
-        self._exchange_combo.setEnabled(False)
-        self._exchange_combo.currentTextChanged.connect(
-            self._on_exchange_picker_changed
+        # Phase 15c: extracted to ExchangePicker widget. We still
+        # expose `_exchange_combo`, `_picker_hint`, and
+        # `_selected_exchange` for back-compat with 14.6c tests that
+        # reach into those attributes directly.
+        self._picker = ExchangePicker(
+            self._http, label_text="Exchange:", parent=self,
         )
-        bar.addWidget(self._exchange_combo)
+        # Legacy alias attrs — keep existing tests passing.
+        self._exchange_combo = self._picker.combo
+        self._picker_hint = self._picker.hint_label
 
-        self._picker_hint = QLabel("")
-        self._picker_hint.setStyleSheet("color: #666; font-style: italic;")
-        bar.addWidget(self._picker_hint)
+        # Bold the label by re-styling the picker's first child (the
+        # internal QLabel "Exchange:"). The picker's internal layout
+        # is non-public, but the visual style was load-bearing in
+        # 14.6c — operators got used to the bold label. If this
+        # styling poking breaks in a future PySide6 rev, the worst
+        # case is a non-bold label, which is fine.
+        try:
+            internal_label = self._picker.findChild(QLabel)
+            if internal_label is not None:
+                internal_label.setStyleSheet("font-weight: 600;")
+        except Exception:
+            pass
+
+        # Wire selection changes to our follow-up actions (button
+        # gating + scheduler trigger). The picker has already
+        # persisted to QSettings and updated its own state by the
+        # time we get here.
+        self._picker.selection_changed.connect(
+            self._on_picker_selection_changed
+        )
+
+        bar.addWidget(self._picker)
 
         bar.addSpacing(20)
 
@@ -249,97 +256,60 @@ class EtlStatusView(QWidget):
         row.addWidget(self._last_refreshed_label)
         return row_widget
 
-    # ---------- exchange picker plumbing ---------- #
+    # ---------- exchange picker plumbing (15c: delegated to widget) ---------- #
+
+    @property
+    def _selected_exchange(self) -> Optional[str]:
+        """Backward-compat: pre-15c code stored this as a plain
+        attribute. Now it's just whatever the picker reports."""
+        return self._picker.current_exchange() if hasattr(self, "_picker") else None
+
+    @_selected_exchange.setter
+    def _selected_exchange(self, value: Optional[str]) -> None:
+        """No-op setter. The picker owns this state in 15c; the
+        property is read-only in practice. Kept as a setter to
+        absorb any legacy code that might still try to assign it
+        directly (e.g. tests that pre-set state before populate).
+        """
+        # If we don't yet have a picker (called during __init__ before
+        # _build_ui), silently swallow.
+        if not hasattr(self, "_picker"):
+            return
+        # Forward to the picker if it's a non-None real value. For
+        # None / sentinel, leave the picker alone.
+        if value is not None and value != _EXCHANGE_LOADING:
+            self._picker._apply_selection(value)
+
+    @property
+    def _exchanges_loaded(self) -> bool:
+        """Backward-compat: was a flag set after first populate."""
+        return self._picker.is_loaded() if hasattr(self, "_picker") else False
+
+    @_exchanges_loaded.setter
+    def _exchanges_loaded(self, value: bool) -> None:
+        """No-op — the picker owns its own loaded state."""
+        pass
 
     def _fetch_exchanges_list(self) -> None:
-        """One-shot fetch of /v1/admin/exchanges to populate the
-        picker. Runs once at construction; no polling — the configured
-        exchange set is static for a session.
-
-        Worker thread keeps UI responsive even if the server is slow.
-        """
-        http = self._http
-        worker = submit(lambda: http.list_exchanges())
-        worker.signals.finished.connect(self._on_exchanges_received)
-        worker.signals.failed.connect(self._on_exchanges_failed)
-
-    def _on_exchanges_received(self, payload: dict) -> None:
-        exchanges = list(payload.get("exchanges", []))
-        self._populate_exchange_picker(exchanges)
-
-    def _on_exchanges_failed(self, message: str) -> None:
-        """Picker fetch failed. Leave the picker disabled with a
-        sentinel so action buttons stay gated; surface the error in
-        the picker hint so the operator knows what went wrong."""
-        logger.warning("Exchange list fetch failed: %s", message)
-        self._picker_hint.setText(f"(picker offline: {message[:60]})")
-        # Leave the combo in its sentinel-only state. Action buttons
-        # remain disabled because _selected_exchange stays None.
+        """Backward-compat shim — 14.6c tests may call this directly.
+        Forwards to the picker; safe to call multiple times since
+        the picker's fetch is idempotent (the worker just runs again)."""
+        self._picker._fetch_exchanges_list()
 
     def _populate_exchange_picker(self, exchanges: list) -> None:
-        """Fill the combo with the configured exchanges and select
-        the operator's last choice (or the first one if none saved
-        or the saved one is no longer configured).
+        """Backward-compat shim for the 14.6c test
+        `_seed_picker(view, [...])` helper, which calls this on
+        EtlStatusView to bypass the network. Forwards to the picker."""
+        self._picker.populate_with_exchanges(exchanges)
 
-        Blocks signals while repopulating so the in-flight rebuild
-        doesn't fire spurious _on_exchange_picker_changed events.
+    def _on_picker_selection_changed(self, exchange: str) -> None:
+        """Slot for ExchangePicker.selection_changed. Picker has
+        already updated its own state and persisted to QSettings;
+        all we do here is refresh action buttons and trigger an
+        immediate panel refresh so tier counts + the
+        ExchangeStatePanel reflect the new selection.
         """
-        if not exchanges:
-            # No exchanges configured — operator has misconfigured.
-            self._picker_hint.setText(
-                "(no exchanges configured in config.yaml)"
-            )
-            return
-
-        self._exchanges_loaded = True
-
-        # Decide the initial selection: persisted choice → first available.
-        last = load_last_selected_exchange()
-        target = last if last in exchanges else exchanges[0]
-
-        # Repopulate. Block signals so currentTextChanged doesn't fire
-        # during the rebuild — we want one deliberate change, after.
-        self._exchange_combo.blockSignals(True)
-        try:
-            self._exchange_combo.clear()
-            for ex in exchanges:
-                self._exchange_combo.addItem(ex)
-            idx = self._exchange_combo.findText(target)
-            if idx >= 0:
-                self._exchange_combo.setCurrentIndex(idx)
-        finally:
-            self._exchange_combo.blockSignals(False)
-
-        self._exchange_combo.setEnabled(True)
-        # Apply the initial selection now that the combo is wired up.
-        self._apply_exchange_selection(target)
-
-    def _on_exchange_picker_changed(self, value: str) -> None:
-        """Fires when the user picks a different exchange. Ignore the
-        sentinel value (only present pre-populate)."""
-        if value == _EXCHANGE_LOADING or not value:
-            return
-        self._apply_exchange_selection(value)
-
-    def _apply_exchange_selection(self, exchange: str) -> None:
-        """Make `exchange` the active target: update internal state,
-        persist to QSettings, refresh the state panel + status, and
-        re-enable action buttons.
-
-        Called both on first populate (with the persisted-or-default
-        value) and on every subsequent picker change. Idempotent
-        relative to picker UI state — the caller is responsible for
-        having already set the combo's current index if needed.
-        """
-        self._selected_exchange = exchange
-        try:
-            save_last_selected_exchange(exchange)
-        except Exception:
-            # QSettings write failures shouldn't break the UI; log it.
-            logger.exception("Could not persist last_selected_exchange")
         self._refresh_action_buttons_enabled()
-        # Trigger an immediate refresh so the panel and tier counts
-        # reflect the new selection without waiting for the next tick.
         self._scheduler.trigger_now()
 
     def _refresh_action_buttons_enabled(self) -> None:

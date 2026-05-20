@@ -380,3 +380,141 @@ class TestErrorHandling:
             assert ei.value.status_code == 500
             # Body included in message
             assert "Internal" in ei.value.message
+
+
+# ============================================================
+# Phase 15b: signal-generation admin endpoints
+# ============================================================
+
+
+class TestGenerateSignals:
+
+    def test_default_timeframe_is_omitted_so_server_uses_1W_default(self):
+        """Calling generate_signals(exchange='NSE') with no timeframes
+        should NOT send a `timeframe` param — the server-side
+        Query(default=['1W']) populates it instead. This keeps the
+        client/server contracts aligned: 'no choice expressed' is
+        not the same as 'choose 1W explicitly'."""
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 202
+            resp.json.return_value = {
+                "run_id": 1, "exchange": "NSE", "timeframes": ["1W"],
+                "force_full": False,
+                "estimated_output_path": "generated_signals/NSE.json",
+                "submitted_at": "2026-05-21T01:00:00+00:00",
+            }
+            mock_req.return_value = resp
+            c.generate_signals(exchange="NSE")
+            _, kwargs = mock_req.call_args
+            assert kwargs["params"]["exchange"] == "NSE"
+            assert kwargs["params"]["force_full"] is False
+            assert "timeframe" not in kwargs["params"]
+
+    def test_explicit_timeframes_pass_as_list(self):
+        """The requests library turns {'timeframe': ['1D','1W']} into
+        ?timeframe=1D&timeframe=1W on the wire, which matches the
+        FastAPI Query(default=['1W']) shape. Verify our caller hands
+        a list (not a comma-joined string)."""
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 202
+            resp.json.return_value = {
+                "run_id": 2, "exchange": "NSE", "timeframes": ["1D", "1W"],
+                "force_full": False,
+                "estimated_output_path": "generated_signals/NSE.json",
+                "submitted_at": "2026-05-21T01:00:00+00:00",
+            }
+            mock_req.return_value = resp
+            c.generate_signals(exchange="NSE", timeframes=["1D", "1W"])
+            _, kwargs = mock_req.call_args
+            assert kwargs["params"]["timeframe"] == ["1D", "1W"]
+
+    def test_force_full_propagates(self):
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 202
+            resp.json.return_value = {
+                "run_id": 3, "exchange": "NSE", "timeframes": ["1W"],
+                "force_full": True,
+                "estimated_output_path": "generated_signals/NSE.json",
+                "submitted_at": "2026-05-21T01:00:00+00:00",
+            }
+            mock_req.return_value = resp
+            c.generate_signals(exchange="NSE", force_full=True)
+            _, kwargs = mock_req.call_args
+            assert kwargs["params"]["force_full"] is True
+
+    def test_409_raises_api_error_with_detail(self):
+        """The concurrent-run guard returns 409 with a `detail`
+        string that mentions the existing run_id. The client should
+        raise ApiError(409, detail) so the GUI can show the operator
+        a friendly message."""
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 409
+            resp.json.return_value = {
+                "detail": (
+                    "A signal_backtest run is already in flight for "
+                    "exchange='NSE' (run_id=15). Wait for completion."
+                ),
+            }
+            mock_req.return_value = resp
+            with pytest.raises(ApiError) as ei:
+                c.generate_signals(exchange="NSE")
+            assert ei.value.status_code == 409
+            assert "run_id=15" in ei.value.message
+
+
+class TestGetSignalGenerationMetadata:
+
+    def test_file_exists_returns_full_metadata(self):
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {
+                "exchange": "NSE", "exists": True,
+                "filename": "NSE.json",
+                "size_bytes": 14_680_064,
+                "mtime": "2026-05-21T01:42:00+00:00",
+                "generated_by_run_id": 17,
+                "schema_version": "1.0",
+                "counts": {
+                    "tickers": 2283, "signals_total": 105684,
+                    "signals_by_type": {
+                        "BUY": 32987, "SELL": 35396,
+                        "EXIT_FROM_BUY": 17857, "EXIT_FROM_SELL": 19444,
+                    },
+                    "first_date": "2005-01-03", "last_date": "2026-05-15",
+                },
+            }
+            mock_req.return_value = resp
+            result = c.get_signal_generation_metadata("NSE")
+            assert result["exists"] is True
+            assert result["size_bytes"] == 14_680_064
+            assert result["counts"]["signals_total"] == 105684
+            _, kwargs = mock_req.call_args
+            assert kwargs["params"] == {"exchange": "NSE"}
+
+    def test_file_missing_returns_exists_false(self):
+        """A configured exchange with no /generate run yet returns
+        200 with exists=false (NOT 404). Other fields are None."""
+        c = _build_client()
+        with patch.object(c._session, "request") as mock_req:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {
+                "exchange": "NSE", "exists": False,
+                "filename": None, "size_bytes": None, "mtime": None,
+                "generated_by_run_id": None, "schema_version": None,
+                "counts": None,
+            }
+            mock_req.return_value = resp
+            result = c.get_signal_generation_metadata("NSE")
+            assert result["exists"] is False
+            assert result["size_bytes"] is None

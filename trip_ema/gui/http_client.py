@@ -166,6 +166,54 @@ class TripEmaHttpClient:
             params={"instrument": instrument, "years": years},
         )
 
+    # ---------- Signal generation admin (Phase 15b) ---------- #
+
+    def generate_signals(
+        self,
+        *,
+        exchange: str,
+        timeframes: list[str] | None = None,
+        force_full: bool = False,
+    ) -> dict:
+        """POST /v1/admin/signals/generate.
+
+        Returns the SignalGenerateAcceptedPayload (202):
+          { run_id, exchange, timeframes, force_full,
+            estimated_output_path, submitted_at }
+
+        Raises ApiError(409, ...) when there's already an in-flight
+        signal_backtest run for this exchange — the detail string
+        names the existing run_id.
+
+        `timeframes`: list of "1D" / "1W"; defaults to ["1W"] (the
+        server's default). The `requests` library serializes a list
+        value as repeated `?timeframe=X&timeframe=Y` params, which
+        matches the server's `Query(default=["1W"])` shape.
+        """
+        params: dict = {"exchange": exchange, "force_full": force_full}
+        if timeframes:
+            params["timeframe"] = list(timeframes)
+        return self._post(
+            "/v1/admin/signals/generate", params=params,
+        )
+
+    def get_signal_generation_metadata(self, exchange: str) -> dict:
+        """GET /v1/admin/signals/generated.
+
+        Returns the SignalGeneratedFilePayload (always 200):
+          { exchange, exists, filename?, size_bytes?, mtime?,
+            generated_by_run_id?, schema_version?, counts? }
+
+        When `exists` is False, all other optional fields are None
+        — that's a normal post-deploy state (the exchange is
+        configured but no /generate has finished yet). 404 is
+        reserved for "exchange not found"; "no file yet" is 200.
+        """
+        return self._get(
+            "/v1/admin/signals/generated",
+            params={"exchange": exchange},
+        )
+
     # ---------- Subscribers admin (Slice 4) ---------- #
 
     def list_subscribers(self) -> dict:

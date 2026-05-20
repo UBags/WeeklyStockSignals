@@ -49,6 +49,7 @@ from sqlalchemy import text
 from ..db import GuiDbSession
 from ..http_client import ApiError, TripEmaHttpClient
 from ..workers import submit
+from .signal_generation_panel import SignalGenerationPanel
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,10 @@ class SignalsView(QWidget):
         super().__init__(parent)
         self._db = db
         self._http = http
+        # Captured for _build_ui — the signal-generation panel uses
+        # this same flag to decide whether to start its metadata
+        # polling timer.
+        self._populate_combo_on_init = populate_combo_on_init
 
         # State carried across refetches
         self._current_exchange: Optional[str] = None
@@ -178,6 +183,18 @@ class SignalsView(QWidget):
         outer.addLayout(self._build_selector_row())
         outer.addLayout(self._build_layer_row())
         outer.addLayout(self._build_chart_row(), 1)
+
+        # Phase 15c: the signal-generation panel sits below the chart
+        # area. Embedded as a child widget so the same SignalsView
+        # tab now hosts both "look at the chart" and "regenerate the
+        # backtest file" responsibilities. Constructed lazily on
+        # populate_combo_on_init so tests that build the view in
+        # headless minimal mode don't end up polling the network.
+        self._signal_generation_panel = SignalGenerationPanel(
+            self._http, parent=self,
+            start_polling_on_init=self._populate_combo_on_init,
+        )
+        outer.addWidget(self._signal_generation_panel)
 
     def _build_selector_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -702,9 +719,14 @@ class SignalsView(QWidget):
     # ---------- lifecycle ---------- #
 
     def on_close(self) -> None:
-        """Called by MainWindow.closeEvent. Nothing to clean up — we
-        don't run a refresh timer."""
-        pass
+        """Called by MainWindow.closeEvent. Stop the embedded
+        SignalGenerationPanel's polling timers so they don't keep
+        firing after the view (and the QApplication) tears down."""
+        try:
+            if hasattr(self, "_signal_generation_panel"):
+                self._signal_generation_panel.on_close()
+        except Exception:
+            pass
 
 
 def _fmt(v) -> str:
