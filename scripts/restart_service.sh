@@ -9,21 +9,21 @@
 #   3. Verify port is free.
 #   4. Start the service in the background via nohup so it survives
 #      this script's exit.
-#   5. Sleep 60 seconds to let priming complete.
+#   5. Poll /healthz for up to PRIME_WAIT_SECONDS to confirm priming.
 #   6. Print the /healthz response so you see cache_size before the
 #      script returns.
 #   7. Exit, leaving the service running.
 #
 # Usage:
-# With the env var set in your shell
-#export TRIP_EMA_DB_PASSWORD=devpassword
-#./scripts/restart_service.sh
+#   With the env var set in your shell:
+#     export TRIP_EMA_DB_PASSWORD=devpassword
+#     ./scripts/restart_service.sh
 #
-# Or inline (one-shot)
-#TRIP_EMA_DB_PASSWORD=devpassword ./scripts/restart_service.sh
+#   Or inline (one-shot):
+#     TRIP_EMA_DB_PASSWORD=devpassword ./scripts/restart_service.sh
 #
-# With a custom config
-#TRIP_EMA_DB_PASSWORD=devpassword ./scripts/restart_service.sh /path/to/config.yaml#
+#   With a custom config:
+#     TRIP_EMA_DB_PASSWORD=devpassword ./scripts/restart_service.sh /path/to/config.yaml
 #
 # Prereqs:
 #   - TRIP_EMA_DB_PASSWORD must be set (or in ~/.pgpass equivalent
@@ -33,14 +33,17 @@
 # Logs go to /tmp/trip-ema.log (overwritten each restart).
 
 set -euo pipefail
-export TRIP_EMA_DB_PASSWORD=devpassword
+
+# Default password for the dev environment. Override by exporting
+# TRIP_EMA_DB_PASSWORD before running, or by passing it inline.
+export TRIP_EMA_DB_PASSWORD="${TRIP_EMA_DB_PASSWORD:-devpassword}"
 
 # ===== Configuration =====
 SERVICE_PORT=8000
 CONFIG="${1:-config.yaml}"
 LOG_FILE=/tmp/trip-ema.log
 PRIME_WAIT_SECONDS=120
-# =========================chmo
+# =========================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -108,8 +111,8 @@ echo "  port is free"
 echo ""
 echo "=== Step 4: starting trip-ema (config=${CONFIG}) ==="
 # nohup detaches from the controlling terminal so closing the shell
-# doesn't kill the service. The `setsid` would do the same; nohup
-# is more portable.
+# doesn't kill the service. `setsid` would do the same; nohup is
+# more portable.
 nohup trip-ema --config "$CONFIG" > "$LOG_FILE" 2>&1 &
 SERVICE_PID=$!
 echo "  started, PID $SERVICE_PID"
@@ -117,7 +120,7 @@ echo "  logs at $LOG_FILE"
 
 # Step 5 — wait for priming to complete.
 echo ""
-echo "=== Step 5: waiting ${PRIME_WAIT_SECONDS}s for priming ==="
+echo "=== Step 5: waiting up to ${PRIME_WAIT_SECONDS}s for priming ==="
 # Poll healthz periodically rather than blindly sleeping. If the
 # service dies during startup, fail fast with the log tail.
 for i in $(seq 1 "$PRIME_WAIT_SECONDS"); do

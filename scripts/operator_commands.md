@@ -1,0 +1,446 @@
+# trip-ema operator commands
+
+Day-to-day operational recipes. Every command in this file is meant to be
+copy-pasted into a terminal. Sections are independent — read them in any order.
+
+For debugging recipes (orchestrator ticks, pulse streams, log digging), see
+[`debug_recipes.md`](debug_recipes.md).
+
+---
+
+## 1. Service lifecycle
+
+### Start (or restart) the service
+
+```bash
+./scripts/restart_service.sh
+```
+
+Restarts cleanly: kills whatever's bound to port 8000, waits for the socket to
+release, starts a new `trip-ema` process under `nohup`, polls `/healthz` until
+priming completes, and prints `cache_size` so you can confirm it loaded data.
+
+Pass a custom config as the first arg if needed:
+
+```bash
+./scripts/restart_service.sh /path/to/other_config.yaml
+```
+
+### Stop the service without restarting
+
+```bash
+ss -tlnp 2>/dev/null | grep :8000              # find PID
+kill <pid>
+```
+
+### Tail logs while it's running
+
+```bash
+tail -f /tmp/trip-ema.log
+```
+
+### Verify the service is healthy
+
+```bash
+curl -s http://localhost:8000/healthz | python3 -m json.tool
+```
+
+Expect `status: ok`, `cache_size > 0`. If `cache_size = 0`, the service started
+but hasn't primed — wait, or check `/tmp/trip-ema.log` for the priming step.
+
+---
+
+## 2. GUI
+
+### Start the operator console (idempotent)
+
+```bash
+./scripts/gui_start.sh
+```
+
+Idempotent: re-running while the GUI is open is a no-op. Needs a real display
+(`$DISPLAY` or `$WAYLAND_DISPLAY` set). Logs to `/tmp/trip-ema-console.log`.
+
+### Stop the GUI
+
+Close the window normally. If it's wedged:
+
+```bash
+pkill -f trip-ema-console
+```
+
+---
+
+## 3. Initial load for a new exchange
+
+When adding a new exchange (e.g. BSE for the first time), do these in order:
+
+```bash
+# 1. Confirm the exchange is configured in config.yaml's market_hours block.
+grep -A 2 "exchange: BSE" config.yaml
+
+# 2. Pull the listings CSV and sync the tickers table.
+trip-ema-etl refresh-listings --exchange BSE
+
+# 3. Confirm tickers landed.
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT exchange, COUNT(*)
+FROM tickers
+WHERE exchange = 'BSE' AND is_active
+GROUP BY exchange;"
+
+# 4. Backfill historical bars. --start is required; backfill runs from --start
+#    to today. There is no --end flag. 15-year backfill = 2010-01-01 or so.
+trip-ema-etl backfill --exchange BSE --start 2010-01-01
+
+# 5. Verify bars landed.
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT t.exchange, b.timeframe, COUNT(*) AS bars,
+       MIN(b.bar_timestamp)::date AS first_bar,
+       MAX(b.bar_timestamp)::date AS last_bar
+FROM ohlcv_bars b JOIN tickers t USING (ticker_id)
+WHERE t.exchange = 'BSE'
+GROUP BY t.exchange, b.timeframe;"
+
+# 6. Compute tiers from 30-day ADV (otherwise everything sits in tier-3).
+trip-ema-etl recompute-tiers --exchange BSE
+
+# 7. Optionally restart the service so it picks up the new tickers
+#    in its priming pass.
+./scripts/restart_service.sh
+```
+
+For very large backfills (15+ years × 2000+ tickers), this can take hours.
+The ETL runs against `yfinance` which has its own throttling — there's nothing
+to tune client-side; just let it run.
+
+**Tip:** if interrupted, re-running `backfill --start <date>` is safe. The
+upsert primary key on `ohlcv_bars` makes the operation idempotent.
+
+---
+
+## 4. Daily updates per exchange
+
+Run after market close each day, per exchange:
+
+```bash
+trip-ema-etl incremental-eod --exchange NSE
+trip-ema-etl incremental-eod --exchange BSE
+trip-ema-etl incremental-eod --exchange NYSE
+```
+
+`incremental-eod` fetches the last 7 days of bars by default (set via
+`--lookback-days N` if you want more overlap, e.g. after a long downtime).
+The window protects against late or revised bars without re-fetching the
+whole history.
+
+### Via HTTP (preferred for automation / cron from another host)
+
+```bash
+# Single exchange, async (returns 202 Accepted immediately):
+curl -X POST \
+  -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+  "http://localhost:8000/v1/admin/etl/run-eod?exchange=NSE"
+
+# Then check status:
+curl -s -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+  "http://localhost:8000/v1/admin/etl/status?exchange=NSE" \
+  | python3 -m json.tool
+```
+
+The exchange is a query parameter, not a JSON body. The route returns 202 and
+the actual ETL runs on the service's `etl_executor` thread.
+
+### Via the GUI
+
+ETL Status tab → pick the exchange in the dropdown at the top-left → click
+**Run EoD**. Confirms when the action is accepted; the runs table refreshes
+every few seconds with the new in-flight row.
+
+---
+
+## 5. Ad-hoc updates per exchange
+
+### Refresh intraday only (during market hours, tier-1 only)
+
+```bash
+trip-ema-etl incremental-intraday --exchange NSE
+```
+
+On non-trading days this prints `skipped (non-trading day)` and exits 0.
+
+### Re-fetch a specific window (e.g. after a vendor data correction)
+
+`backfill` always runs from `--start` to today. To re-fetch just the last
+week, use a recent start date:
+
+```bash
+trip-ema-etl backfill --exchange NSE --start 2026-05-13
+```
+
+The upserts in `ohlcv_bars` mean re-fetching overlapping data is safe —
+existing rows are overwritten with the latest values from upstream.
+
+### Re-fetch only tier-1 tickers (faster, smaller scope)
+
+```bash
+trip-ema-etl backfill --exchange NSE --start 2026-05-13 --tier 1
+```
+
+`--tier` takes `1`, `2`, `3`, or `all` (default).
+
+### Refresh listings mid-month (corporate actions, new IPOs)
+
+```bash
+trip-ema-etl refresh-listings --exchange NSE
+```
+
+The runner writes deltas to `symbol_history` and adds pending entries to
+`corporate_actions` for renames. New listings become active immediately;
+they get bars on the next `incremental-eod`.
+
+### Approve a pending corporate action
+
+```bash
+trip-ema-etl approve-action 42 --notes "Verified rename via Bloomberg"
+```
+
+Where `42` is the `action_id` from the corporate_actions table. Pending
+actions block their associated ticker from updating bars.
+
+### Unpark all tickers (clear retry-block)
+
+After fixing whatever caused tickers to fail (network issue, vendor data
+glitch), unpark them so they retry on the next EoD:
+
+```bash
+trip-ema-etl unpark --exchange NSE
+```
+
+The CLI prints how many tickers it unparked.
+
+---
+
+## 6. Inventory queries
+
+### Total scrips (tickers) per exchange
+
+```bash
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT
+    exchange,
+    COUNT(*) FILTER (WHERE is_active)        AS active,
+    COUNT(*) FILTER (WHERE NOT is_active)    AS inactive,
+    COUNT(*)                                  AS total
+FROM tickers
+GROUP BY exchange
+ORDER BY exchange;"
+```
+
+### Total bars per exchange and timeframe
+
+```bash
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT
+    t.exchange,
+    b.timeframe,
+    COUNT(*)                          AS bars,
+    MIN(b.bar_timestamp)::date        AS first_bar,
+    MAX(b.bar_timestamp)::date        AS last_bar
+FROM ohlcv_bars b
+JOIN tickers t USING (ticker_id)
+GROUP BY t.exchange, b.timeframe
+ORDER BY t.exchange, b.timeframe;"
+```
+
+### Tier counts per exchange (tier-1 / tier-2 / tier-3)
+
+```bash
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT
+    t.exchange,
+    ts.tier,
+    COUNT(*) AS tickers
+FROM tickers t
+LEFT JOIN etl_ticker_status ts USING (ticker_id)
+WHERE t.is_active
+GROUP BY t.exchange, ts.tier
+ORDER BY t.exchange, ts.tier NULLS LAST;"
+```
+
+`NULL` tier means the ticker has no `etl_ticker_status` row yet — usually
+because `recompute-tiers` hasn't been run since it was added.
+
+### Parked ticker counts per exchange
+
+```bash
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT
+    t.exchange,
+    COUNT(*) AS parked,
+    MAX(ts.parked_at) AS most_recent
+FROM etl_ticker_status ts
+JOIN tickers t USING (ticker_id)
+WHERE ts.is_parked
+GROUP BY t.exchange
+ORDER BY t.exchange;"
+```
+
+---
+
+## 7. Alerts (signal events) per exchange
+
+Alerts in trip-ema are rows in the `signal_events` table — one per
+`(ticker, timeframe, bar)` where the engine emitted BUY / SELL /
+EXIT_FROM_BUY / EXIT_FROM_SELL. `computed_at` is when the engine fired
+the signal; `bar_timestamp` is the bar it's attached to.
+
+### Last 60 minutes — per exchange
+
+```bash
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT
+    t.exchange,
+    COUNT(*)                                                       AS alerts,
+    COUNT(*) FILTER (WHERE s.signal_type = 'BUY')                  AS buys,
+    COUNT(*) FILTER (WHERE s.signal_type = 'SELL')                 AS sells,
+    COUNT(*) FILTER (WHERE s.signal_type LIKE 'EXIT_FROM%')        AS exits
+FROM signal_events s
+JOIN tickers t USING (ticker_id)
+WHERE s.computed_at >= NOW() - INTERVAL '60 minutes'
+GROUP BY t.exchange
+ORDER BY t.exchange;"
+```
+
+### Today (since local midnight) — per exchange
+
+```bash
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT
+    t.exchange,
+    COUNT(*)                                                       AS alerts,
+    COUNT(*) FILTER (WHERE s.signal_type = 'BUY')                  AS buys,
+    COUNT(*) FILTER (WHERE s.signal_type = 'SELL')                 AS sells,
+    COUNT(*) FILTER (WHERE s.signal_type LIKE 'EXIT_FROM%')        AS exits
+FROM signal_events s
+JOIN tickers t USING (ticker_id)
+WHERE s.computed_at >= DATE_TRUNC('day', NOW())
+GROUP BY t.exchange
+ORDER BY t.exchange;"
+```
+
+### Since Monday — per exchange
+
+`DATE_TRUNC('week', ...)` in Postgres returns the start of the ISO week,
+which is Monday 00:00:00 in the database's local time zone. To use the
+operator's timezone explicitly:
+
+```bash
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT
+    t.exchange,
+    COUNT(*)                                                       AS alerts,
+    COUNT(*) FILTER (WHERE s.signal_type = 'BUY')                  AS buys,
+    COUNT(*) FILTER (WHERE s.signal_type = 'SELL')                 AS sells,
+    COUNT(*) FILTER (WHERE s.signal_type LIKE 'EXIT_FROM%')        AS exits
+FROM signal_events s
+JOIN tickers t USING (ticker_id)
+WHERE s.computed_at >= DATE_TRUNC('week', NOW())
+GROUP BY t.exchange
+ORDER BY t.exchange;"
+```
+
+### Most recent alerts per exchange (with ticker + price)
+
+```bash
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT
+    t.exchange,
+    t.symbol,
+    s.signal_type,
+    s.price_at_signal,
+    to_char(s.computed_at, 'YYYY-MM-DD HH24:MI:SS') AS fired_at,
+    to_char(s.bar_timestamp, 'YYYY-MM-DD HH24:MI:SS') AS bar
+FROM signal_events s
+JOIN tickers t USING (ticker_id)
+WHERE s.computed_at >= NOW() - INTERVAL '60 minutes'
+ORDER BY s.computed_at DESC
+LIMIT 50;"
+```
+
+---
+
+## 8. ETL status snapshots
+
+### CLI (read-only, exchange-agnostic)
+
+```bash
+trip-ema-etl status --limit 10
+trip-ema-etl status --limit 20 -v        # also lists first 20 parked tickers
+```
+
+### HTTP (with optional `?exchange=` to scope tier counts)
+
+```bash
+# All exchanges, default limit
+curl -s -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+  http://localhost:8000/v1/admin/etl/status | python3 -m json.tool
+
+# Tier counts scoped to BSE; recent_runs + parked_count stay global
+curl -s -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+  "http://localhost:8000/v1/admin/etl/status?exchange=BSE&limit=5" \
+  | python3 -m json.tool
+
+# Per-exchange ETL state (last EoD, listings sync, etc.)
+curl -s -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+  http://localhost:8000/v1/admin/exchange-state/NSE \
+  | python3 -m json.tool
+
+# All exchange-states at once
+curl -s -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+  http://localhost:8000/v1/admin/exchange-state \
+  | python3 -m json.tool
+```
+
+### One-shot operator dashboard
+
+```bash
+./scripts/health_check.sh
+```
+
+Prints sections 1–6 of the most common checks in this file (service health,
+ticker counts, bar counts, exchange_state, alert counts, recent runs).
+Read-only. Safe to run any time.
+
+---
+
+## 9. The admin token
+
+Many admin endpoints require `Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN`.
+Set it in your shell:
+
+```bash
+export TRIP_EMA_ADMIN_TOKEN="<value from config.yaml or env>"
+```
+
+Or look up which env var the running config reads:
+
+```bash
+grep "admin_token_env" config.yaml
+```
+
+In the GUI, the same token is read from the same env var. If you launch the
+GUI from a terminal where `TRIP_EMA_ADMIN_TOKEN` is unset, the action buttons
+on the ETL Status tab will stay disabled.
+
+---
+
+## 10. Smoke tests after a code change
+
+```bash
+./scripts/smoke_test_fast.sh         # ~5s, hits /healthz + one ticker history
+./scripts/smoke_test_full.sh         # ~30s, broader coverage
+```
+
+Neither restarts the service. Run them after `./scripts/restart_service.sh`
+to confirm the new install is serving valid data.
