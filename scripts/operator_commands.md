@@ -223,6 +223,19 @@ trip-ema-etl backfill --exchange NSE --start 2026-05-13 --tier 1
 
 `--tier` takes `1`, `2`, `3`, or `all` (default).
 
+### Backfill from the GUI (Phase 15d)
+
+The ETL Status tab now has a **Backfill…** button next to the other
+action buttons. Clicking it opens a modal that asks for a start date
+(defaults to today minus 30 days) and an optional tier (off by
+default → all tiers). It posts to `/v1/admin/etl/backfill` through
+the same machinery as the CLI/HTTP path — the only difference is
+the entry point.
+
+Use this when you want a quick window-refresh without a terminal;
+use the CLI/HTTP for scripted backfills or when you need
+exchange-agnostic operations.
+
 ### Refresh listings mid-month (corporate actions, new IPOs)
 
 ```bash
@@ -537,3 +550,59 @@ on the ETL Status tab will stay disabled.
 
 Neither restarts the service. Run them after `./scripts/restart_service.sh`
 to confirm the new install is serving valid data.
+
+---
+
+## 11. Operator commands for GUI-deferred endpoints (Phase 15d)
+
+The full GUI-coverage audit lives in
+[`docs/gui_endpoint_audit.md`](../docs/gui_endpoint_audit.md). The
+recipes below cover the endpoints that don't have a GUI surface today
+and probably won't get one until a workflow forces the issue. Each is
+a deliberate gap, not an oversight.
+
+### Orchestrator status (per-market)
+
+The System Health tab doesn't render an orchestrator card yet (the
+health snapshot doesn't include one). Until that lands, use the
+endpoint directly:
+
+```bash
+curl -s -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+     http://localhost:8000/v1/admin/orchestrator/status | jq
+```
+
+Shows per-market last-run time, last outcome, paused state, and a
+pool-level `any_unhealthy` boolean.
+
+### Pause / resume / run-now a single market
+
+No GUI buttons today. CLI workflow:
+
+```bash
+TOKEN="$TRIP_EMA_ADMIN_TOKEN"
+
+# Pause one market (stops the orchestrator from ticking it)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+     http://localhost:8000/v1/admin/orchestrator/NSE/pause
+
+# Resume
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+     http://localhost:8000/v1/admin/orchestrator/NSE/resume
+
+# Force a single tick now (one-shot, doesn't change scheduling)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+     http://localhost:8000/v1/admin/orchestrator/NSE/run-now
+```
+
+### Reprime a single ticker
+
+When one ticker's signals look wrong (vendor-data correction, engine
+parameter change), reprime its engine state without touching others:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
+     "http://localhost:8000/v1/admin/reprime?exchange=NSE&symbol=RELIANCE"
+```
+
+Returns the new `priming_completed_at` timestamp on success.

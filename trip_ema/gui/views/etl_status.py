@@ -45,7 +45,7 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QListWidget,
+    QDialog, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -183,6 +183,9 @@ class EtlStatusView(QWidget):
         ))
         bar.addWidget(make_action_button(
             "Unpark All", self._on_unpark_all_clicked,
+        ))
+        bar.addWidget(make_action_button(
+            "Backfill…", self._on_backfill_clicked,
         ))
 
         # Action buttons start disabled until BOTH conditions hold:
@@ -558,6 +561,38 @@ class EtlStatusView(QWidget):
         self._fire_action(
             f"Unpark all ({exchange})",
             lambda: self._http.unpark_all(exchange=exchange),
+        )
+
+    def _on_backfill_clicked(self) -> None:
+        """Open the modal BackfillDialog to collect start_date +
+        optional tier; if the operator confirms, POST to /backfill
+        through the shared `_fire_action` machinery (button gating,
+        worker, outcome modal).
+
+        Phase 15d: deliberately no extra confirmation modal here.
+        The dialog itself is the gating step — the operator picks
+        a start date and clicks OK. A double-confirm would feel
+        bureaucratic for an operation that's bounded by start_date.
+        """
+        exchange = self._require_exchange()
+        if exchange is None:
+            return
+        # Lazy import — avoid loading the dialog module at view
+        # construction time so test imports don't have to pay for it.
+        from .widgets.backfill_dialog import BackfillDialog
+        dialog = BackfillDialog(exchange=exchange, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        start_date, tier = dialog.values()
+        label = (
+            f"Backfill ({exchange}, from {start_date.isoformat()}"
+            f"{f', tier={tier}' if tier is not None else ''})"
+        )
+        self._fire_action(
+            label,
+            lambda: self._http.backfill(
+                exchange=exchange, start_date=start_date, tier=tier,
+            ),
         )
 
     def _fire_action(self, label: str, fn) -> None:
