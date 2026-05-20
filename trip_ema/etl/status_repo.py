@@ -76,18 +76,49 @@ class EtlStatusRepository:
         self,
         kind: RunKind,
         *,
+        exchange: Optional[str] = None,
         correlation_id: Optional[str] = None,
         notes: Optional[str] = None,
     ) -> int:
         """Insert a new etl_runs row with started_at=NOW(); return the
-        run_id. finished_at and outcome stay NULL until close_run."""
+        run_id. finished_at and outcome stay NULL until close_run.
+
+        Lifecycle ownership note (Phase 15a): the typical pattern is
+        for one caller to own both `open_run` and `close_run` — the
+        runner functions in this package, the signal-generation
+        runner when called from the CLI, etc. The new HTTP signal-
+        backtest route (Phase 15b) is the exception: it opens the
+        row in the request thread (so a concurrent-run guard query
+        can serialize new submissions) and hands the run_id to the
+        background worker, which closes the row when work finishes
+        or fails. If you write a similar split-ownership caller,
+        document the split clearly — silent split ownership is hard
+        to reason about.
+
+        Args:
+            kind: the RunKind discriminator.
+            exchange: optional. New in Phase 15a — the etl_runs table
+                now has an `exchange TEXT` column. Pass it when the
+                caller knows which exchange the operation targets;
+                leave None only for genuinely cross-exchange
+                operations (none today; pre-Phase-15 rows remain
+                NULL forever, which is correct because they weren't
+                tagged at write time). All existing call sites in
+                this package were updated in Phase 15a to pass it.
+            correlation_id: optional correlation ID to thread through
+                logs.
+            notes: optional free-text note.
+        """
         result = self._conn.execute(
             text("""
-                INSERT INTO etl_runs (kind, correlation_id, notes)
-                VALUES (:kind, :cid, :notes)
+                INSERT INTO etl_runs (kind, exchange, correlation_id, notes)
+                VALUES (:kind, :ex, :cid, :notes)
                 RETURNING run_id
             """),
-            {"kind": kind.value, "cid": correlation_id, "notes": notes},
+            {
+                "kind": kind.value, "ex": exchange,
+                "cid": correlation_id, "notes": notes,
+            },
         )
         return result.scalar_one()
 

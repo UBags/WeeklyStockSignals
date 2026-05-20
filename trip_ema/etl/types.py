@@ -107,6 +107,12 @@ class RunKind(str, Enum):
     TIER_RECOMPUTE = "tier_recompute"
     UNPARK = "unpark"
     APPROVE_ACTION = "approve_action"
+    SIGNAL_BACKTEST = "signal_backtest"
+    """Phase 15a — historical signal generation for backtesting.
+    The runner replays each (ticker, timeframe) through a fresh
+    TickerEngine and writes the results to a per-exchange JSON file.
+    Async on etl_executor (Phase 15b HTTP route); synchronous from
+    the CLI (`trip-ema-etl generate-signals`)."""
 
 
 class RunOutcome(str, Enum):

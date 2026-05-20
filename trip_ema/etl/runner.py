@@ -121,7 +121,7 @@ def refresh_listings(
         with db_engine.begin() as conn:
             status_repo = EtlStatusRepository(conn)
             run_id = status_repo.open_run(
-                RunKind.LISTINGS, correlation_id=cid,
+                RunKind.LISTINGS, exchange=exchange, correlation_id=cid,
             )
 
         t_start = time.monotonic()
@@ -226,7 +226,7 @@ def recompute_tiers(
     with correlation_id(cid), db_engine.begin() as conn:
         status_repo = EtlStatusRepository(conn)
         run_id = status_repo.open_run(
-            RunKind.TIER_RECOMPUTE, correlation_id=cid,
+            RunKind.TIER_RECOMPUTE, exchange=exchange, correlation_id=cid,
         )
         t_start = time.monotonic()
 
@@ -532,7 +532,9 @@ def _run_fetch_pass(
     with correlation_id(cid):
         # Open the run row first
         with db_engine.begin() as conn:
-            run_id = EtlStatusRepository(conn).open_run(kind, correlation_id=cid)
+            run_id = EtlStatusRepository(conn).open_run(
+                kind, exchange=exchange, correlation_id=cid,
+            )
             # Phase 14.6b: a backfill is the only ETL operation that
             # has a "started" lifecycle event we care about, since
             # `initial_load_started_at` is set on the first backfill

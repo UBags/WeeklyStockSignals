@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal, TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..domain import IndicatorParams, Timeframe
 
@@ -174,6 +174,28 @@ class ATRConfig(BaseModel):
     inner_mult: float = Field(gt=0, default=0.2)
     mid_mult: float = Field(gt=0, default=2.0)
     outer_mult: float = Field(gt=0, default=4.0)
+
+
+# ---------- Exchange overrides (Phase 15a) ---------- #
+
+
+class ExchangeIndicatorOverride(BaseModel):
+    """One (exchange, timeframe)'s indicator params override.
+
+    Reuses EMAConfig and ATRConfig — same sub-shape as the
+    top-level `ema:` / `atr:` blocks, so a YAML author can
+    copy-paste-adjust without learning a new schema.
+
+    Phase 15a: consumed ONLY by the backtest signal-generation
+    path (trip_ema/etl/signal_generator.py via
+    config/exchange_overrides.py::resolve_indicator_params). The
+    live engine continues to use the global `ema:` + `atr:` blocks
+    unchanged until a later phase migrates it (per design OOS-7).
+    """
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ema: EMAConfig
+    atr: ATRConfig
 
 
 # ---------- Market hours ---------- #
@@ -548,6 +570,60 @@ class Config(BaseModel):
     notifier: "NotifierConfig | None" = None
     """Notifier worker process settings. Only consulted when `redis` is
     set."""
+
+    exchange_overrides: dict[str, dict[str, ExchangeIndicatorOverride]] | None = None
+    """Phase 15a — optional per-(exchange, timeframe) indicator
+    parameter overrides for the backtest signal-generator. Keys at
+    the outer level are exchange codes (must be present in
+    `market_hours`); keys at the inner level are timeframe strings
+    ('1D' or '1W'). Missing entries fall back to the global `ema:`
+    + `atr:` blocks via
+    `config.exchange_overrides.resolve_indicator_params`. The live
+    engine ignores this block entirely until a later phase migrates
+    it (per design OOS-7)."""
+
+    @model_validator(mode="after")
+    def _validate_exchange_overrides(self) -> "Config":
+        """Cross-field validation of exchange_overrides:
+
+        1. Every outer key (exchange code) must appear in
+           market_hours. A typo'd exchange code that silently does
+           nothing would be a very bad debugging experience —
+           "I set my NSE overrides, why isn't the engine picking
+           them up?" Better to fail at config-load time.
+
+        2. Every inner key (timeframe string) must be one of the
+           Phase 15-supported timeframes ('1D', '1W'). Phase 15
+           doesn't compute signals at intraday timeframes (storage
+           is daily-only; weekly is synthesized in-memory), so
+           accepting '15m' or '1h' here would mislead operators
+           into thinking they'd configured something that runs.
+        """
+        if not self.exchange_overrides:
+            return self
+
+        # Lazy-import to avoid circular import; the field is the
+        # only consumer of this constant.
+        from .exchange_overrides import SUPPORTED_BACKTEST_TIMEFRAMES
+
+        known_exchanges = {mh.exchange for mh in self.market_hours}
+        for ex_code, per_tf in self.exchange_overrides.items():
+            if ex_code not in known_exchanges:
+                raise ValueError(
+                    f"exchange_overrides references unknown exchange "
+                    f"{ex_code!r}. Add it to market_hours: or remove "
+                    f"the override. Known exchanges: "
+                    f"{sorted(known_exchanges)}."
+                )
+            for tf_key in per_tf.keys():
+                if tf_key not in SUPPORTED_BACKTEST_TIMEFRAMES:
+                    raise ValueError(
+                        f"exchange_overrides[{ex_code!r}] has timeframe "
+                        f"key {tf_key!r}, which is not supported by "
+                        f"Phase 15 backtest signal generation. "
+                        f"Supported: {sorted(SUPPORTED_BACKTEST_TIMEFRAMES)}."
+                    )
+        return self
 
     def to_indicator_params(self) -> IndicatorParams:
         """Flatten the hierarchical YAML structure into the engine's flat

@@ -189,3 +189,47 @@ etl:
 #   # Only consulted when `redis` is set above.
 #   worker_concurrency: 4
 #   queue_name: trip_ema_notifications
+
+# --- Phase 15a: optional per-(exchange, timeframe) indicator overrides ----
+# Consumed ONLY by the backtest signal generator (`trip-ema-etl
+# generate-signals` / `POST /v1/admin/signals/generate`). The live
+# engine continues to use the global `ema:` + `atr:` blocks above
+# until a later phase migrates it (per design OOS-7).
+#
+# Resolution: for a given (exchange, timeframe), the resolver checks
+# `exchange_overrides[exchange][timeframe]`. If present, the override
+# wins; otherwise it falls back to the global block. Missing
+# entries are normal — only override where you actually want tuning.
+#
+# Validation runs at config load time:
+#   - exchange keys must appear in market_hours: above
+#   - timeframe keys must be "1D" or "1W" (Phase 15 only)
+#   - a bad config fails fast with a clear error message
+#
+# Uncomment and adjust as needed. The example below reproduces the
+# global defaults so you can copy-and-modify rather than starting
+# from scratch.
+#
+# exchange_overrides:
+#   NSE:
+#     "1W":
+#       ema:
+#         med:     { base: 8,  s1: 4, s2: 4, final: null }
+#         long:    { base: 15, s1: 4, s2: 4, final: 3 }
+#         longest: { base: 28, s1: 7, s2: 5, final: 3 }
+#         volume_sma_length: 2
+#       atr:
+#         length: 14
+#         inner_mult: 0.2
+#         mid_mult: 2.0
+#         outer_mult: 4.0
+#     "1D":
+#       ema:
+#         med:     { base: 8,  s1: 4, s2: 4, final: null }
+#         long:    { base: 15, s1: 4, s2: 4, final: 3 }
+#         longest: { base: 28, s1: 7, s2: 5, final: 3 }
+#       atr:
+#         length: 14
+#         inner_mult: 0.2
+#         mid_mult: 2.0
+#         outer_mult: 4.0

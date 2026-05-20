@@ -219,6 +219,25 @@ trip-ema-etl unpark --exchange NSE
 
 The CLI prints how many tickers it unparked.
 
+### Generate historical signals for backtesting (Phase 15a)
+
+Replay every active ticker's bars through a fresh engine and write a
+per-exchange JSON file (`generated_signals/{EXCHANGE}.json`) that
+external backtesters can consume. First run for an exchange is the
+slow one (~30 min for a full NSE universe); subsequent runs are
+incremental via a per-(ticker, timeframe) resume table.
+
+```bash
+trip-ema-etl generate-signals --exchange NSE                # default: 1W only
+trip-ema-etl generate-signals --exchange NSE --timeframe 1D --timeframe 1W
+trip-ema-etl generate-signals --exchange NSE --force-full   # wipe resume rows
+```
+
+`--force-full` recomputes from each ticker's earliest bar; use after
+changing engine params (`ema:`/`atr:` or `exchange_overrides:`).
+The HTTP equivalent (`POST /v1/admin/signals/generate`) is added in
+Phase 15b.
+
 ---
 
 ## 6. Inventory queries

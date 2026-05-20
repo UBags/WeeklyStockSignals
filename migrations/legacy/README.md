@@ -31,6 +31,18 @@ Two reasons:
    Alembic revisions, not migrations the system ever applies in
    production.
 
+## Parity-file catalogue
+
+| File | Parallel of Alembic revision | What it creates / alters |
+|---|---|---|
+| `011_exchange_state.sql` | `0004_exchange_state` | `exchange_state` table + NSE seed row |
+| `012_signal_backtest_runs.sql` | `0005_signal_backtest_runs` | `signal_backtest_runs` table + `etl_runs.exchange` column |
+
+When adding a new Alembic revision that touches the table set
+(`CREATE TABLE`, `DROP TABLE`) OR alters an existing table's columns
+in a way that changes its shape, add a matching parity file and a
+row to the table above.
+
 ## When are they touched?
 
 Only by the parity test fixture (which calls
