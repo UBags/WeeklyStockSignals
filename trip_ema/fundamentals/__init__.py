@@ -16,7 +16,7 @@ IndustryIndex, IndustryIndexConstituent, IndustryIndexValue.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 
@@ -32,6 +32,17 @@ from typing import Optional
 CLASSIFICATION_SOURCES = (
     "YFINANCE", "GROWW", "MANUAL_OVERRIDE",
     "NSE_SECTORAL", "INSTRUMENT_TYPE",
+)
+
+# Allowed values for `instrument_shares.shares_source`. Added in
+# migration 0008 (Phase 2). YFINANCE is the direct `sharesOutstanding`
+# field; YFINANCE_IMPLIED is the back-derived `impliedSharesOutstanding`
+# used as fallback when the direct field is NULL — lower trust, so
+# recorded distinctly. NSE_XBRL is reserved for the future XBRL sidecar
+# (deferred — see docs/FUNDAMENTALS_PHASES_1_TO_8.md §14).
+SHARES_SOURCES = (
+    "YFINANCE", "YFINANCE_IMPLIED",
+    "NSE_XBRL", "MANUAL_OVERRIDE",
 )
 
 # Allowed values for `fundamentals_run.phase`.
@@ -99,3 +110,33 @@ class FundamentalsRun:
     skipped: int
     progress_json: Optional[dict]
     notes: Optional[str]
+
+
+@dataclass(frozen=True, slots=True)
+class SharesOutstanding:
+    """A single row from instrument_shares.
+
+    Composite PK on (ticker_id, as_of_date) — every refresh inserts
+    a new snapshot rather than overwriting, so we have a time series
+    of shares-outstanding per ticker.
+
+    as_of_date is the date of the refresh (when yfinance was queried),
+    NOT the source filing date. yfinance does not expose the filing
+    date the number was derived from. For the XBRL sidecar (deferred),
+    as_of_date will be the SHP filing date instead.
+
+    shares_outstanding may be NULL when neither sharesOutstanding nor
+    impliedSharesOutstanding was populated for this ticker — the row
+    still exists so the next refresh sees "we tried and got nothing"
+    rather than "we never tried".
+
+    free_float_factor is reserved for future XBRL/manual population;
+    yfinance does not provide it for Indian tickers.
+    """
+    ticker_id: int
+    as_of_date: date
+    shares_outstanding: Optional[int]
+    free_float_factor: Optional[float]
+    shares_source: str
+    fetched_at: datetime
+    xbrl_url: Optional[str] = None

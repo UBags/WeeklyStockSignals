@@ -562,3 +562,214 @@ def _run_from_row(row) -> FundamentalsRun:
         progress_json=pj,
         notes=row[10],
     )
+
+
+# ---------- InstrumentSharesOutstanding (Phase 2) ---------- #
+
+
+class InstrumentSharesRepository:
+    """Time-series shares-outstanding per ticker.
+
+    Composite PK is (ticker_id, as_of_date) — every refresh inserts
+    a new snapshot. Reads default to "latest"; the time-series shape
+    is used by Phase 4 for historical market cap and the (deferred)
+    XBRL sidecar for filling in historical filing rows.
+
+    Pattern matches InstrumentIndustryRepository: connection in
+    constructor, no transaction management, returns domain dataclasses.
+    """
+
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    # ----- reads ----- #
+
+    def get_latest(self, ticker_id: int):
+        """The most-recent snapshot for this ticker. None if no rows."""
+        from ..fundamentals import SharesOutstanding  # local to avoid cycle
+        row = self._conn.execute(
+            text("""
+                SELECT ticker_id, as_of_date, shares_outstanding,
+                       free_float_factor, shares_source, fetched_at, xbrl_url
+                FROM instrument_shares
+                WHERE ticker_id = :tid
+                ORDER BY as_of_date DESC
+                LIMIT 1
+            """),
+            {"tid": ticker_id},
+        ).fetchone()
+        if row is None:
+            return None
+        return _shares_from_row(row)
+
+    def get_as_of(self, ticker_id: int, as_of: "date"):
+        """The latest snapshot at-or-before `as_of`. Used by Phase 4
+        to find shares-outstanding for a historical trade date."""
+        row = self._conn.execute(
+            text("""
+                SELECT ticker_id, as_of_date, shares_outstanding,
+                       free_float_factor, shares_source, fetched_at, xbrl_url
+                FROM instrument_shares
+                WHERE ticker_id = :tid AND as_of_date <= :asof
+                ORDER BY as_of_date DESC
+                LIMIT 1
+            """),
+            {"tid": ticker_id, "asof": as_of},
+        ).fetchone()
+        return _shares_from_row(row) if row else None
+
+    def get_at(self, ticker_id: int, as_of: "date"):
+        """The exact snapshot at `as_of` if one exists, else None.
+        Used by the runner to test "have we already written today's
+        row?" before re-fetching."""
+        row = self._conn.execute(
+            text("""
+                SELECT ticker_id, as_of_date, shares_outstanding,
+                       free_float_factor, shares_source, fetched_at, xbrl_url
+                FROM instrument_shares
+                WHERE ticker_id = :tid AND as_of_date = :asof
+            """),
+            {"tid": ticker_id, "asof": as_of},
+        ).fetchone()
+        return _shares_from_row(row) if row else None
+
+    def list_history(self, ticker_id: int, *, limit: int = 100) -> list:
+        """All snapshots for this ticker, newest first."""
+        rows = self._conn.execute(
+            text("""
+                SELECT ticker_id, as_of_date, shares_outstanding,
+                       free_float_factor, shares_source, fetched_at, xbrl_url
+                FROM instrument_shares
+                WHERE ticker_id = :tid
+                ORDER BY as_of_date DESC
+                LIMIT :lim
+            """),
+            {"tid": ticker_id, "lim": limit},
+        )
+        return [_shares_from_row(r) for r in rows]
+
+    def list_latest_for_exchange(self, exchange: str) -> list:
+        """Latest snapshot per ticker for the exchange. Uses
+        DISTINCT ON which is more efficient than the windowed
+        equivalent in Postgres.
+
+        Joined against `tickers` to scope by exchange and to filter
+        to active tickers (delisted tickers' shares are still in the
+        table for historical lookups, but the "current view"
+        excludes them)."""
+        rows = self._conn.execute(text("""
+            SELECT DISTINCT ON (s.ticker_id)
+                   s.ticker_id, s.as_of_date, s.shares_outstanding,
+                   s.free_float_factor, s.shares_source, s.fetched_at,
+                   s.xbrl_url
+            FROM instrument_shares s
+            JOIN tickers t ON t.ticker_id = s.ticker_id
+            WHERE t.exchange = :ex AND t.is_active = TRUE
+            ORDER BY s.ticker_id, s.as_of_date DESC
+        """), {"ex": exchange})
+        return [_shares_from_row(r) for r in rows]
+
+    def coverage_counts_by_type(self) -> list[tuple[str, str, int, int]]:
+        """Per-(exchange, instrument_type) (total, with_shares).
+
+        `total` counts active tickers; `with_shares` counts those
+        that have AT LEAST ONE non-NULL shares_outstanding row.
+        Same shape as InstrumentIndustryRepository.coverage_counts_by_type
+        so fundamentals-status can render both side by side.
+
+        The COUNT(DISTINCT t.ticker_id) on `total` is important — a
+        LEFT JOIN against the time-series instrument_shares table
+        produces one joined row per (ticker, snapshot), so a naive
+        COUNT(*) over-counts tickers that have many snapshots.
+        """
+        rows = self._conn.execute(text("""
+            SELECT
+                t.exchange,
+                t.instrument_type,
+                COUNT(DISTINCT t.ticker_id) AS total,
+                COUNT(DISTINCT s.ticker_id) FILTER (
+                    WHERE s.shares_outstanding IS NOT NULL
+                ) AS with_shares
+            FROM tickers t
+            LEFT JOIN instrument_shares s ON s.ticker_id = t.ticker_id
+            WHERE t.is_active
+            GROUP BY t.exchange, t.instrument_type
+            ORDER BY t.exchange, t.instrument_type
+        """))
+        return [
+            (r[0], r[1], int(r[2]), int(r[3]))
+            for r in rows
+        ]
+
+    # ----- writes ----- #
+
+    def insert_snapshot(
+        self,
+        ticker_id: int,
+        *,
+        as_of_date,
+        shares_outstanding,
+        shares_source: str,
+        free_float_factor=None,
+        xbrl_url=None,
+    ) -> None:
+        """Insert a snapshot row. Idempotent on (ticker_id, as_of_date):
+        if a row already exists for that date, this is an UPDATE.
+
+        The idempotency is intentional — a same-day re-run shouldn't
+        fail with a PK violation; it should overwrite, since the
+        re-run presumably has fresher data.
+
+        shares_outstanding may be NULL (record-of-attempt) but
+        shares_source is always required so we know the provenance
+        of the attempt.
+        """
+        from ..fundamentals import SHARES_SOURCES
+        if shares_source not in SHARES_SOURCES:
+            raise ValueError(
+                f"shares_source must be one of {SHARES_SOURCES}, "
+                f"got {shares_source!r}"
+            )
+        self._conn.execute(
+            text("""
+                INSERT INTO instrument_shares
+                    (ticker_id, as_of_date, shares_outstanding,
+                     free_float_factor, shares_source, fetched_at, xbrl_url)
+                VALUES (:tid, :asof, :so, :ff, :src, NOW(), :url)
+                ON CONFLICT (ticker_id, as_of_date) DO UPDATE SET
+                    shares_outstanding = EXCLUDED.shares_outstanding,
+                    free_float_factor = EXCLUDED.free_float_factor,
+                    shares_source = EXCLUDED.shares_source,
+                    fetched_at = NOW(),
+                    xbrl_url = EXCLUDED.xbrl_url
+            """),
+            {"tid": ticker_id, "asof": as_of_date,
+             "so": shares_outstanding, "ff": free_float_factor,
+             "src": shares_source, "url": xbrl_url},
+        )
+
+    def delete_snapshot(self, ticker_id: int, as_of_date) -> bool:
+        """Remove one snapshot. Used by tests; not exposed in the CLI.
+        Operator overrides are NOT done via delete — they use
+        shares_source='MANUAL_OVERRIDE' on a fresh insert."""
+        result = self._conn.execute(
+            text("""
+                DELETE FROM instrument_shares
+                WHERE ticker_id = :tid AND as_of_date = :asof
+            """),
+            {"tid": ticker_id, "asof": as_of_date},
+        )
+        return result.rowcount > 0
+
+
+def _shares_from_row(row):
+    from ..fundamentals import SharesOutstanding
+    return SharesOutstanding(
+        ticker_id=row[0],
+        as_of_date=row[1],
+        shares_outstanding=int(row[2]) if row[2] is not None else None,
+        free_float_factor=float(row[3]) if row[3] is not None else None,
+        shares_source=row[4],
+        fetched_at=row[5],
+        xbrl_url=row[6],
+    )

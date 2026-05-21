@@ -16,6 +16,7 @@ from trip_ema.persistence.fundamentals_repo import (
     FundamentalsRunRepository,
     IndustryOverrideRepository,
     InstrumentIndustryRepository,
+    InstrumentSharesRepository,
 )
 from trip_ema.persistence.tickers_repo import TickersRepository
 from trip_ema.domain import TickerRef
@@ -405,3 +406,296 @@ class TestCoverageCountsByType:
             counts = InstrumentIndustryRepository(conn).coverage_counts_by_type()
         by_key = {(ex, typ): (total, classified) for ex, typ, total, classified in counts}
         assert by_key[("NSE", "ETF")] == (1, 0)
+
+
+# ---------- InstrumentSharesRepository (Phase 2) ---------- #
+
+
+class TestSharesInsertAndRead:
+    """Time-series insertion, idempotency, and basic reads."""
+
+    def test_insert_and_get_latest(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            r = InstrumentSharesRepository(conn)
+            r.insert_snapshot(
+                tid,
+                as_of_date=date(2026, 5, 21),
+                shares_outstanding=6_700_000_000,
+                shares_source="YFINANCE",
+            )
+        with db_engine.connect() as conn:
+            row = InstrumentSharesRepository(conn).get_latest(tid)
+        assert row is not None
+        assert row.ticker_id == tid
+        assert row.as_of_date == date(2026, 5, 21)
+        assert row.shares_outstanding == 6_700_000_000
+        assert row.shares_source == "YFINANCE"
+        assert row.free_float_factor is None  # not set
+
+    def test_get_latest_returns_None_for_unknown(self, db_engine, ticker_ids):
+        with db_engine.connect() as conn:
+            assert InstrumentSharesRepository(conn).get_latest(999_999) is None
+
+    def test_insert_same_date_is_idempotent_update(self, db_engine, ticker_ids):
+        """Same (ticker_id, as_of_date) twice → second one wins,
+        no PK violation."""
+        tid = ticker_ids[("NSE", "TCS")]
+        with transaction(db_engine) as conn:
+            r = InstrumentSharesRepository(conn)
+            r.insert_snapshot(
+                tid, as_of_date=date(2026, 5, 21),
+                shares_outstanding=3_600_000_000,
+                shares_source="YFINANCE",
+            )
+            r.insert_snapshot(
+                tid, as_of_date=date(2026, 5, 21),
+                shares_outstanding=3_600_500_000,  # corrected number
+                shares_source="YFINANCE",
+            )
+        with db_engine.connect() as conn:
+            history = InstrumentSharesRepository(conn).list_history(tid)
+        assert len(history) == 1  # one row, not two
+        assert history[0].shares_outstanding == 3_600_500_000
+
+    def test_insert_rejects_bad_source(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "TCS")]
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="shares_source"):
+                InstrumentSharesRepository(conn).insert_snapshot(
+                    tid, as_of_date=date(2026, 5, 21),
+                    shares_outstanding=1,
+                    shares_source="BOGUS",
+                )
+
+    def test_null_shares_outstanding_is_allowed(self, db_engine, ticker_ids):
+        """When yfinance returned no usable shares number, we still
+        record the attempt with NULL shares_outstanding. The next
+        refresh sees this and can decide to retry."""
+        tid = ticker_ids[("NSE", "HDFCBANK")]
+        with transaction(db_engine) as conn:
+            InstrumentSharesRepository(conn).insert_snapshot(
+                tid, as_of_date=date(2026, 5, 21),
+                shares_outstanding=None,
+                shares_source="YFINANCE",
+            )
+        with db_engine.connect() as conn:
+            row = InstrumentSharesRepository(conn).get_latest(tid)
+        assert row is not None
+        assert row.shares_outstanding is None
+        assert row.shares_source == "YFINANCE"
+
+
+class TestSharesHistoryAndAsOf:
+    """Time-series queries: history, as-of, get_at."""
+
+    def _build_history(self, db_engine, tid):
+        """Three snapshots for one ticker across 6 months."""
+        with transaction(db_engine) as conn:
+            r = InstrumentSharesRepository(conn)
+            r.insert_snapshot(
+                tid, as_of_date=date(2025, 12, 1),
+                shares_outstanding=1_000_000_000,
+                shares_source="YFINANCE",
+            )
+            r.insert_snapshot(
+                tid, as_of_date=date(2026, 3, 1),
+                shares_outstanding=1_050_000_000,  # +5% bonus issue
+                shares_source="YFINANCE",
+            )
+            r.insert_snapshot(
+                tid, as_of_date=date(2026, 5, 21),
+                shares_outstanding=1_055_000_000,  # buyback retired some
+                shares_source="YFINANCE",
+            )
+
+    def test_get_latest_returns_newest(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_history(db_engine, tid)
+        with db_engine.connect() as conn:
+            row = InstrumentSharesRepository(conn).get_latest(tid)
+        assert row.as_of_date == date(2026, 5, 21)
+        assert row.shares_outstanding == 1_055_000_000
+
+    def test_get_as_of_finds_correct_snapshot(self, db_engine, ticker_ids):
+        """as_of=2026-04-15 falls between the March and May snapshots
+        → should return the March one."""
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_history(db_engine, tid)
+        with db_engine.connect() as conn:
+            row = InstrumentSharesRepository(conn).get_as_of(
+                tid, date(2026, 4, 15),
+            )
+        assert row.as_of_date == date(2026, 3, 1)
+        assert row.shares_outstanding == 1_050_000_000
+
+    def test_get_as_of_before_first_snapshot_returns_None(
+        self, db_engine, ticker_ids,
+    ):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_history(db_engine, tid)
+        with db_engine.connect() as conn:
+            row = InstrumentSharesRepository(conn).get_as_of(
+                tid, date(2025, 1, 1),
+            )
+        assert row is None
+
+    def test_get_at_exact_date(self, db_engine, ticker_ids):
+        """get_at requires an exact match, unlike get_as_of."""
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_history(db_engine, tid)
+        with db_engine.connect() as conn:
+            r = InstrumentSharesRepository(conn)
+            assert r.get_at(tid, date(2026, 3, 1)) is not None
+            assert r.get_at(tid, date(2026, 4, 15)) is None  # no exact match
+
+    def test_list_history_newest_first(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_history(db_engine, tid)
+        with db_engine.connect() as conn:
+            history = InstrumentSharesRepository(conn).list_history(tid)
+        assert len(history) == 3
+        dates = [r.as_of_date for r in history]
+        assert dates == [date(2026, 5, 21), date(2026, 3, 1), date(2025, 12, 1)]
+
+    def test_list_history_respects_limit(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_history(db_engine, tid)
+        with db_engine.connect() as conn:
+            history = InstrumentSharesRepository(conn).list_history(tid, limit=2)
+        assert len(history) == 2
+
+
+class TestListLatestForExchange:
+
+    def test_returns_latest_per_ticker(self, db_engine, ticker_ids):
+        """Two tickers, three snapshots each, expect 2 rows back."""
+        with transaction(db_engine) as conn:
+            r = InstrumentSharesRepository(conn)
+            for sym in ("RELIANCE", "TCS"):
+                tid = ticker_ids[("NSE", sym)]
+                r.insert_snapshot(
+                    tid, as_of_date=date(2025, 12, 1),
+                    shares_outstanding=1_000,
+                    shares_source="YFINANCE",
+                )
+                r.insert_snapshot(
+                    tid, as_of_date=date(2026, 5, 21),
+                    shares_outstanding=2_000,
+                    shares_source="YFINANCE",
+                )
+        with db_engine.connect() as conn:
+            rows = InstrumentSharesRepository(conn).list_latest_for_exchange("NSE")
+        # Two tickers — one row each, both should be the May snapshot.
+        assert len(rows) == 2
+        for r in rows:
+            assert r.as_of_date == date(2026, 5, 21)
+            assert r.shares_outstanding == 2_000
+
+    def test_excludes_inactive_tickers(self, db_engine, ticker_ids, now):
+        """An inactive ticker's shares row exists for historical
+        lookups but shouldn't show up in the "current view"."""
+        from sqlalchemy import text as _text
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        # Insert a snapshot, then deactivate the ticker.
+        with transaction(db_engine) as conn:
+            InstrumentSharesRepository(conn).insert_snapshot(
+                tid, as_of_date=date(2026, 5, 21),
+                shares_outstanding=1,
+                shares_source="YFINANCE",
+            )
+            conn.execute(_text(
+                "UPDATE tickers SET is_active=FALSE WHERE ticker_id=:tid"
+            ), {"tid": tid})
+        with db_engine.connect() as conn:
+            rows = InstrumentSharesRepository(conn).list_latest_for_exchange("NSE")
+        # RELIANCE excluded; no other NSE ticker has shares → 0 rows.
+        assert len(rows) == 0
+
+
+class TestSharesCoverageCounts:
+
+    def test_coverage_reports_per_exchange_and_type(
+        self, db_engine, ticker_ids,
+    ):
+        # 3 NSE EQ tickers, 1 BSE EQ ticker (the fixture's universe).
+        # Insert shares for 2 of the 3 NSE tickers.
+        with transaction(db_engine) as conn:
+            r = InstrumentSharesRepository(conn)
+            r.insert_snapshot(
+                ticker_ids[("NSE", "RELIANCE")],
+                as_of_date=date(2026, 5, 21),
+                shares_outstanding=6_700_000_000,
+                shares_source="YFINANCE",
+            )
+            r.insert_snapshot(
+                ticker_ids[("NSE", "TCS")],
+                as_of_date=date(2026, 5, 21),
+                shares_outstanding=3_600_000_000,
+                shares_source="YFINANCE",
+            )
+            # HDFCBANK gets a row but with NULL shares — should NOT
+            # count as "with_shares".
+            r.insert_snapshot(
+                ticker_ids[("NSE", "HDFCBANK")],
+                as_of_date=date(2026, 5, 21),
+                shares_outstanding=None,
+                shares_source="YFINANCE",
+            )
+        with db_engine.connect() as conn:
+            counts = InstrumentSharesRepository(conn).coverage_counts_by_type()
+        by_ex_type = {(ex, t): (tot, w) for ex, t, tot, w in counts}
+        # NSE EQ: 3 total, 2 with non-NULL shares.
+        assert by_ex_type[("NSE", "EQ")] == (3, 2)
+        # BSE EQ: 1 total, 0 with shares.
+        assert by_ex_type[("BSE", "EQ")] == (1, 0)
+
+    def test_history_is_not_double_counted(self, db_engine, ticker_ids):
+        """Three snapshots for one ticker should count as ONE
+        ticker-with-shares, not three."""
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            r = InstrumentSharesRepository(conn)
+            for d in (date(2025, 12, 1), date(2026, 3, 1), date(2026, 5, 21)):
+                r.insert_snapshot(
+                    tid, as_of_date=d,
+                    shares_outstanding=1_000,
+                    shares_source="YFINANCE",
+                )
+        with db_engine.connect() as conn:
+            counts = InstrumentSharesRepository(conn).coverage_counts_by_type()
+        by_ex_type = {(ex, t): (tot, w) for ex, t, tot, w in counts}
+        assert by_ex_type[("NSE", "EQ")] == (3, 1)  # 3 total, 1 with shares
+
+
+class TestSharesDelete:
+
+    def test_delete_snapshot_removes_exact_row(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            r = InstrumentSharesRepository(conn)
+            r.insert_snapshot(
+                tid, as_of_date=date(2026, 5, 21),
+                shares_outstanding=1, shares_source="YFINANCE",
+            )
+            r.insert_snapshot(
+                tid, as_of_date=date(2026, 3, 1),
+                shares_outstanding=2, shares_source="YFINANCE",
+            )
+        with transaction(db_engine) as conn:
+            removed = InstrumentSharesRepository(conn).delete_snapshot(
+                tid, date(2026, 5, 21),
+            )
+        assert removed is True
+        with db_engine.connect() as conn:
+            history = InstrumentSharesRepository(conn).list_history(tid)
+        assert len(history) == 1
+        assert history[0].as_of_date == date(2026, 3, 1)
+
+    def test_delete_nonexistent_returns_False(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            removed = InstrumentSharesRepository(conn).delete_snapshot(
+                tid, date(2026, 5, 21),
+            )
+        assert removed is False
