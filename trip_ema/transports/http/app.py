@@ -27,7 +27,7 @@ from fastapi import FastAPI
 from .routes import (
     admin, admin_etl, admin_exchange_state, admin_exchanges, admin_health,
     admin_notifications, admin_orchestrator, admin_signals, admin_subscribers,
-    compute, health, pulse, signals,
+    compute, fundamentals, health, pulse, signals,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,4 +117,7 @@ def create_app(
     # (i.e., when `scheduling.orchestrator.enabled = False` in config).
     app.include_router(pulse.router)
     app.include_router(admin_orchestrator.router)
+    # Phase 1 fundamentals — industry classification + overrides + run
+    # status. Reuses AppState.etl_executor for fire-and-forget refresh.
+    app.include_router(fundamentals.router)
     return app

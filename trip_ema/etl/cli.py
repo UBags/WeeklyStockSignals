@@ -361,6 +361,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # Phase 1 fundamentals commands. Registered here so the user
+    # types `trip-ema-etl refresh-industry` exactly like the other
+    # ETL commands. The fundamentals package's CLI module owns the
+    # argparse wiring AND the handler functions; we only need to
+    # merge the returned handler map into the dispatcher below.
+    from ..fundamentals.cli import register_subparsers as _register_fundamentals
+    p._fundamentals_handlers = _register_fundamentals(sub, _add_exchange_arg)
+
     return p
 
 
@@ -400,6 +408,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "approve-action":       cmd_approve_action,
         "generate-signals":     cmd_generate_signals,
     }
+    # Merge Phase 1 fundamentals handlers (registered by
+    # _build_parser via fundamentals.cli.register_subparsers).
+    handlers.update(getattr(parser, "_fundamentals_handlers", {}))
     # `--timeframe` with action='append' starts as None, not [].
     # Apply the documented default (`['1W']`) here so subcommand
     # handlers don't have to repeat the logic.
