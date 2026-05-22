@@ -1739,3 +1739,170 @@ Walk the time series, maintain state.
 ### Phase 5-4
 
 Runners + CLI + HTTP. Same shape as Phase 4 wrappers.
+
+---
+
+## 24. Phase 5-2 (indicator compute primitives)
+
+Phase 5-1 shipped the schema. Phase 5-2 ships the math. The new
+module `trip_ema/fundamentals/indicator_primitives.py` (~700 lines)
+contains pure-function compute primitives that match the operator's
+Pine Script "Weekly - Triple EMA with Background Strategy" bit-
+exactly for the indicator half (regime states are still 5-3).
+
+### Five layers
+
+**Layer 1 — Pine Script primitive equivalents.** Direct ports of
+ta.ema (alpha=2/(n+1), seeded with src[0]), ta.wma (linear weights
+with leading-NaN window), ta.sma, and ta.rma (Wilder's smoothing,
+alpha=1/n — NOT 2/(n+1); this is the most-commonly-confused detail
+when porting Pine ATR). Each one uses pandas .ewm/.rolling under
+the hood with the right adjust/alpha settings.
+
+**Layer 2 — Composed indicators.** Built on Layer 1:
+  - hull_smooth: wma(2*wma(x, n/2) - wma(x, n), sqrt(n)) — the
+    Hull Moving Average transform. Corner cases at n=2 (collapses
+    to 2x - wma(x,2) because floor(sqrt(2))=1) and n=4 (uses outer
+    wma=2) are explicitly tested.
+  - volume_weighted_ema: ema(close × smoothed_vol, n) / ema(smoothed_vol, n).
+    Degenerates to plain EMA for constant volume — the property that
+    makes indices work via vol=1.
+  - true_range: standard TR = max(HL, |H - prevC|, |L - prevC|),
+    with first-bar TR collapsing to HL. The synthetic_for_index
+    flag activates the |Δclose|×√2 path for single-point series.
+  - atr: Wilder-smoothed TR via pine_rma (NOT pine_ema).
+  - hl_range_avg: 26-period SMA of (high - low).
+
+**Layer 3 — Triple-EMA stack.** Three independent EMAs each
+constructed as:
+  vwema → pine_ema → hull_smooth → optional pine_ema(final_smoothing).
+
+Parameter sets MED_DEFAULT (8/4/2/None), LONG_DEFAULT (12/8/5/4),
+LONGEST_DEFAULT (16/9/4/4) match the operator's updated Pine Script
+inputs exactly. `triple_ema_stack(close, vol)` returns a
+TripleEMASeries with three pandas Series.
+
+**Layer 4 — ATR bands.** ATRBandParams (0.2/2.0/4.5 default) and
+compute_atr_bands(emas, atr_series) produce six band Series:
+upper/lower × inner/mid/outer. The compute_indicator_series
+function combines Layers 1-4 into one call returning an
+IndicatorSeries dataclass with all 11 output Series.
+
+**Layer 5 — Per-bar state assembly.** Walks the Series outputs
+bar-by-bar and produces a list of dicts (one per bar) with all
+IndicatorState fields except regime:
+  - _detect_turns(ema): boolean turn signals via the Pine
+    `(ema > ema[1]) and (ema[1] < ema[2])` lookback.
+  - _pattern_label_for_ema(...): 4 detection cases (1HV, 2HV,
+    1LT, 2LT) with 3-bar sticky behavior matching Pine's
+    `or [1] or [2]` lookback chain.
+  - _PerEMATrackState: mutable state for last/second-last
+    turn values + last-turn bar indices + last-emitted labels.
+  - _bars_and_pct_since_turn: direction-dependent counters
+    (up-slope reports bars-since-buy with positive %; down-slope
+    reports bars-since-sell with negated %).
+  - compute_bar_states: the orchestrator that walks the series
+    and emits the dicts.
+
+The walker returns dicts rather than IndicatorState dataclasses
+because the polymorphic series identity (ticker_id/timeframe vs
+industry_name) is the runner's responsibility — Phase 5-4.
+
+### Numerical correctness discipline
+
+Every test uses hand-computed expected values. A representative
+sample:
+
+  pine_ema with n=3 on (10, 20, 30, 40):
+    alpha = 0.5
+    bar 0: 10 (seed)
+    bar 1: 0.5×20 + 0.5×10 = 15
+    bar 2: 0.5×30 + 0.5×15 = 22.5
+    bar 3: 0.5×40 + 0.5×22.5 = 31.25
+  → asserted exactly.
+
+  pine_rma with n=4 differs from pine_ema with n=4:
+    RMA alpha = 1/4 = 0.25; EMA alpha = 2/5 = 0.4
+    Same input (10, 20, 30); different outputs:
+      RMA: 10, 12.5, 17.5
+      EMA: 10, 14, 20
+  → asserted both, plus !=.
+
+  ATR with n=4 on a 5-bar OHLC series:
+    TR per bar hand-computed = (1.0, 2.5, 4.0, 3.0, 2.0)
+    RMA[4] = 2.205078125 (full chain hand-computed)
+  → asserted exactly.
+
+  hull_smooth(n=4) on (1,2,3,4,5,6):
+    Each WMA layer hand-computed; final = (NaN×4, 5.0, 6.0)
+  → asserted exactly.
+
+The discipline is the same as Phase 4A/4B numerical tests — define
+short input series, hand-compute every expected output, assert
+exact match (with float epsilon tolerance for accumulated error).
+Operator confirmed Phase 4 production data matched real-world
+expectations; same approach here.
+
+### Decisions made this session
+
+  - Synthetic ATR uses √2 multiplier applied per-TR (before RMA
+    smoothing), not on the final ATR. Mathematically equivalent
+    (constant commutes with linear smoothing), but cleaner because
+    the underlying TR values are themselves the "synthetic
+    intraday range".
+
+  - Distance metrics for indices: NULL when hl_range_avg = 0
+    (which is always, for single-point series). The Phase 5-1
+    schema's nullable columns accommodate this. Index-keyed
+    bar_state dicts have None for dist_to_*_in_hl_units.
+
+  - Walker returns dicts, not IndicatorState dataclasses. Reasoning:
+    (1) polymorphic identity isn't known yet; (2) regime fields
+    aren't filled; (3) dicts are easier to inspect/mutate before
+    upsert.
+
+  - Sticky pattern labels: TTL=3 bars (matches Pine's `or [1]
+    or [2]` chain). Fresh detection on the same bar overrides
+    sticky.
+
+### Test counts
+
+75 new tests in tests/fundamentals/test_indicator_primitives.py:
+  - 4 for pine_ema
+  - 4 for pine_wma
+  - 2 for pine_sma
+  - 3 for pine_rma (including the alpha=1/n vs 2/(n+1) lock)
+  - 3 for hull_smooth (including n=2 and n=4 hand-computed)
+  - 4 for volume_weighted_ema
+  - 3 for true_range
+  - 2 for atr (including hand-computed multi-bar trace + synthetic)
+  - 2 for hl_range_avg
+  - 4 for single_ema and triple_ema_stack
+  - 2 for compute_atr_bands
+  - 4 for compute_indicator_series end-to-end
+  - 3 for parameter dataclasses
+  - 5 for _detect_turns
+  - 11 for _pattern_label_for_ema (4 detection cases + 4 sticky
+    behavior cases + boundary cases)
+  - 5 for _bars_and_pct_since_turn
+  - 4 for _none_if_nan
+  - 6 for compute_bar_states end-to-end
+
+All 507 prior fundamentals tests still pass.
+
+Total: 582 fundamentals + migration tests.
+
+### Phase 5-3 (next session)
+
+The regime state machine. core_regime and display_regime are
+sequential through time and have their own state machine driven
+by price vs inner bands + EMA filters + the display_regime
+anti-chase gate.
+
+Walking the bar series with the state machine produces 2 more
+fields per bar dict. Then compute_bar_states + the regime walker
+combined gives full IndicatorState rows ready for upsert.
+
+### Phase 5-4
+
+Runners + CLI + HTTP. Same shape as Phase 4 wrappers.
