@@ -1360,3 +1360,598 @@ class TestMarketCapDelete:
         with transaction(db_engine) as conn:
             n = DailyMarketCapRepository(conn).delete_for_ticker(tid)
         assert n == 2
+
+
+# ---------- IndustryIndexRepository (Phase 4B-1) ---------- #
+
+
+from trip_ema.persistence.fundamentals_repo import (
+    IndustryIndexConstituentRepository,
+    IndustryIndexRepository,
+    IndustryIndexValueRepository,
+)
+
+
+class TestIndustryIndexInsertAndRead:
+
+    def test_upsert_and_get(self, db_engine):
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                "Specialty Industrial Machinery",
+                sector_name="Industrials",
+                base_date=date(2025, 10, 1),
+            )
+        with db_engine.connect() as conn:
+            row = IndustryIndexRepository(conn).get(
+                "Specialty Industrial Machinery"
+            )
+        assert row is not None
+        assert row.industry_name == "Specialty Industrial Machinery"
+        assert row.sector_name == "Industrials"
+        assert row.methodology == "MODIFIED_LASPEYRES"
+        assert row.base_value == 1000.0
+        assert row.base_date == date(2025, 10, 1)
+        assert row.rebalance_schedule == "SEMIANNUAL_APR_OCT"
+        assert row.min_constituents == 10
+        assert row.status == "ACTIVE"
+
+    def test_upsert_overrides_existing(self, db_engine):
+        with transaction(db_engine) as conn:
+            r = IndustryIndexRepository(conn)
+            r.upsert(
+                "X", sector_name="S1",
+                base_date=date(2025, 10, 1), base_value=100.0,
+            )
+            r.upsert(
+                "X", sector_name="S2",
+                base_date=date(2025, 10, 1), base_value=500.0,
+            )
+        with db_engine.connect() as conn:
+            row = IndustryIndexRepository(conn).get("X")
+        assert row.sector_name == "S2"
+        assert row.base_value == 500.0
+
+    def test_get_unknown_returns_None(self, db_engine):
+        with db_engine.connect() as conn:
+            assert IndustryIndexRepository(conn).get("Nope") is None
+
+    def test_list_active_excludes_retired(self, db_engine):
+        with transaction(db_engine) as conn:
+            r = IndustryIndexRepository(conn)
+            r.upsert("A", sector_name="S",
+                     base_date=date(2025, 10, 1))
+            r.upsert("B", sector_name="S",
+                     base_date=date(2025, 10, 1))
+            r.set_status("B", "RETIRED")
+        with db_engine.connect() as conn:
+            r = IndustryIndexRepository(conn)
+            active = r.list_active()
+            all_idx = r.list_all()
+        assert [i.industry_name for i in active] == ["A"]
+        assert {i.industry_name for i in all_idx} == {"A", "B"}
+
+    def test_upsert_rejects_bad_methodology(self, db_engine):
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="methodology"):
+                IndustryIndexRepository(conn).upsert(
+                    "X", sector_name="S",
+                    base_date=date(2025, 10, 1),
+                    methodology="BOGUS",
+                )
+
+    def test_upsert_rejects_bad_schedule(self, db_engine):
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="rebalance_schedule"):
+                IndustryIndexRepository(conn).upsert(
+                    "X", sector_name="S",
+                    base_date=date(2025, 10, 1),
+                    rebalance_schedule="BOGUS",
+                )
+
+    def test_upsert_rejects_negative_base_value(self, db_engine):
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="base_value"):
+                IndustryIndexRepository(conn).upsert(
+                    "X", sector_name="S",
+                    base_date=date(2025, 10, 1),
+                    base_value=-1.0,
+                )
+
+    def test_upsert_rejects_zero_min_constituents(self, db_engine):
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="min_constituents"):
+                IndustryIndexRepository(conn).upsert(
+                    "X", sector_name="S",
+                    base_date=date(2025, 10, 1),
+                    min_constituents=0,
+                )
+
+    def test_set_status(self, db_engine):
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                "X", sector_name="S", base_date=date(2025, 10, 1),
+            )
+        with transaction(db_engine) as conn:
+            ok = IndustryIndexRepository(conn).set_status("X", "RETIRED")
+        assert ok is True
+        with db_engine.connect() as conn:
+            assert IndustryIndexRepository(conn).get("X").status == "RETIRED"
+
+    def test_set_status_unknown_returns_False(self, db_engine):
+        with transaction(db_engine) as conn:
+            ok = IndustryIndexRepository(conn).set_status("Nope", "RETIRED")
+        assert ok is False
+
+    def test_delete_cascades(self, db_engine, ticker_ids):
+        """Deleting an index removes its constituents and values
+        via ON DELETE CASCADE."""
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                "X", sector_name="S", base_date=date(2025, 10, 1),
+            )
+            IndustryIndexConstituentRepository(conn).insert_constituent(
+                "X", ticker_id=tid,
+                rebalance_date=date(2025, 10, 1),
+                weight_at_rebalance=1.0,
+                market_cap_at_rebalance=1e12,
+                close_at_rebalance=1500.0,
+            )
+            IndustryIndexValueRepository(conn).upsert_value(
+                "X", trade_date=date(2025, 10, 1),
+                value=1000.0,
+                constituents_used=1, constituents_missing=0,
+                renormalized=False,
+                effective_rebalance_date=date(2025, 10, 1),
+            )
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).delete("X")
+        with db_engine.connect() as conn:
+            assert IndustryIndexRepository(conn).get("X") is None
+            # Constituents and values gone too.
+            assert IndustryIndexConstituentRepository(conn).list_active_for_index("X") == []
+            assert IndustryIndexValueRepository(conn).get_at("X", date(2025, 10, 1)) is None
+
+
+# ---------- IndustryIndexConstituentRepository (Phase 4B-1) ---------- #
+
+
+@pytest.fixture
+def index_X(db_engine):
+    """A single test index 'X' set up so the constituent tests
+    have a parent row to reference."""
+    with transaction(db_engine) as conn:
+        IndustryIndexRepository(conn).upsert(
+            "X", sector_name="S", base_date=date(2025, 10, 1),
+        )
+    return "X"
+
+
+class TestConstituentInsertAndRead:
+
+    def test_insert_and_list_active(
+        self, db_engine, index_X, ticker_ids,
+    ):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            IndustryIndexConstituentRepository(conn).insert_constituent(
+                index_X, ticker_id=tid,
+                rebalance_date=date(2025, 10, 1),
+                weight_at_rebalance=0.4,
+                market_cap_at_rebalance=9.7e12,
+                close_at_rebalance=1450.0,
+            )
+        with db_engine.connect() as conn:
+            rows = IndustryIndexConstituentRepository(conn).list_active_for_index(index_X)
+        assert len(rows) == 1
+        r = rows[0]
+        assert r.ticker_id == tid
+        assert r.rebalance_date == date(2025, 10, 1)
+        assert r.effective_from == date(2025, 10, 1)
+        assert r.effective_to is None
+        assert r.weight_at_rebalance == 0.4
+        assert r.removed_reason is None
+
+    def test_list_active_sorts_by_weight_desc(
+        self, db_engine, index_X, ticker_ids,
+    ):
+        with transaction(db_engine) as conn:
+            r = IndustryIndexConstituentRepository(conn)
+            r.insert_constituent(
+                index_X, ticker_id=ticker_ids[("NSE", "RELIANCE")],
+                rebalance_date=date(2025, 10, 1),
+                weight_at_rebalance=0.3,
+                market_cap_at_rebalance=1e12, close_at_rebalance=100.0,
+            )
+            r.insert_constituent(
+                index_X, ticker_id=ticker_ids[("NSE", "TCS")],
+                rebalance_date=date(2025, 10, 1),
+                weight_at_rebalance=0.5,
+                market_cap_at_rebalance=1e12, close_at_rebalance=100.0,
+            )
+            r.insert_constituent(
+                index_X, ticker_id=ticker_ids[("NSE", "HDFCBANK")],
+                rebalance_date=date(2025, 10, 1),
+                weight_at_rebalance=0.2,
+                market_cap_at_rebalance=1e12, close_at_rebalance=100.0,
+            )
+        with db_engine.connect() as conn:
+            rows = IndustryIndexConstituentRepository(conn).list_active_for_index(index_X)
+        weights = [r.weight_at_rebalance for r in rows]
+        assert weights == [0.5, 0.3, 0.2]
+
+    def test_close_period(self, db_engine, index_X, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            r = IndustryIndexConstituentRepository(conn)
+            r.insert_constituent(
+                index_X, ticker_id=tid,
+                rebalance_date=date(2025, 10, 1),
+                weight_at_rebalance=0.4,
+                market_cap_at_rebalance=1e12, close_at_rebalance=1500.0,
+            )
+        with transaction(db_engine) as conn:
+            ok = IndustryIndexConstituentRepository(conn).close_period(
+                index_X, ticker_id=tid,
+                effective_to=date(2026, 3, 31),
+                removed_reason="REBALANCE_EXIT",
+            )
+        assert ok is True
+        with db_engine.connect() as conn:
+            r = IndustryIndexConstituentRepository(conn)
+            # No longer in the active list.
+            assert r.list_active_for_index(index_X) == []
+            # But still in history.
+            history = r.list_history_for_ticker(index_X, tid)
+            assert len(history) == 1
+            assert history[0].effective_to == date(2026, 3, 31)
+            assert history[0].removed_reason == "REBALANCE_EXIT"
+
+    def test_close_period_no_open_returns_False(
+        self, db_engine, index_X, ticker_ids,
+    ):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            ok = IndustryIndexConstituentRepository(conn).close_period(
+                index_X, ticker_id=tid,
+                effective_to=date(2026, 3, 31),
+                removed_reason="REBALANCE_EXIT",
+            )
+        assert ok is False
+
+    def test_close_period_rejects_bad_reason(
+        self, db_engine, index_X, ticker_ids,
+    ):
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="removed_reason"):
+                IndustryIndexConstituentRepository(conn).close_period(
+                    index_X, ticker_id=ticker_ids[("NSE", "RELIANCE")],
+                    effective_to=date(2026, 3, 31),
+                    removed_reason="BOGUS",
+                )
+
+
+class TestConstituentAsOf:
+    """list_as_of(industry_name, trade_date) — the compute layer
+    relies on this to find who was in the index on a specific
+    historical day."""
+
+    def _setup_two_rebalances(self, db_engine, index_X, ticker_ids):
+        """Rebalance 2025-10-01 picks RELIANCE + TCS. Rebalance
+        2026-04-01 drops TCS and adds HDFCBANK."""
+        with transaction(db_engine) as conn:
+            r = IndustryIndexConstituentRepository(conn)
+            # Oct 2025 rebalance.
+            r.insert_constituent(
+                index_X, ticker_id=ticker_ids[("NSE", "RELIANCE")],
+                rebalance_date=date(2025, 10, 1),
+                weight_at_rebalance=0.6,
+                market_cap_at_rebalance=1e12, close_at_rebalance=100.0,
+            )
+            r.insert_constituent(
+                index_X, ticker_id=ticker_ids[("NSE", "TCS")],
+                rebalance_date=date(2025, 10, 1),
+                weight_at_rebalance=0.4,
+                market_cap_at_rebalance=1e12, close_at_rebalance=100.0,
+            )
+        # Apr 2026 rebalance: close TCS, leave RELIANCE open (still
+        # picked), open HDFCBANK as new.
+        # In practice the runner would close-and-reopen RELIANCE too
+        # so the new rebalance_date is recorded. Here we just simulate
+        # the simplest case: TCS dropped, HDFCBANK added.
+        with transaction(db_engine) as conn:
+            r = IndustryIndexConstituentRepository(conn)
+            r.close_period(
+                index_X, ticker_id=ticker_ids[("NSE", "TCS")],
+                effective_to=date(2026, 3, 31),
+                removed_reason="REBALANCE_EXIT",
+            )
+            r.insert_constituent(
+                index_X, ticker_id=ticker_ids[("NSE", "HDFCBANK")],
+                rebalance_date=date(2026, 4, 1),
+                weight_at_rebalance=0.4,
+                market_cap_at_rebalance=1e12, close_at_rebalance=100.0,
+            )
+
+    def test_as_of_first_rebalance_returns_first_picks(
+        self, db_engine, index_X, ticker_ids,
+    ):
+        self._setup_two_rebalances(db_engine, index_X, ticker_ids)
+        with db_engine.connect() as conn:
+            rows = IndustryIndexConstituentRepository(conn).list_as_of(
+                index_X, date(2025, 12, 15),
+            )
+        tids = {r.ticker_id for r in rows}
+        assert tids == {ticker_ids[("NSE", "RELIANCE")],
+                        ticker_ids[("NSE", "TCS")]}
+
+    def test_as_of_after_second_rebalance(
+        self, db_engine, index_X, ticker_ids,
+    ):
+        self._setup_two_rebalances(db_engine, index_X, ticker_ids)
+        with db_engine.connect() as conn:
+            rows = IndustryIndexConstituentRepository(conn).list_as_of(
+                index_X, date(2026, 4, 15),
+            )
+        tids = {r.ticker_id for r in rows}
+        # TCS dropped, HDFCBANK added, RELIANCE still in.
+        assert tids == {ticker_ids[("NSE", "RELIANCE")],
+                        ticker_ids[("NSE", "HDFCBANK")]}
+
+    def test_as_of_before_any_rebalance_empty(
+        self, db_engine, index_X, ticker_ids,
+    ):
+        self._setup_two_rebalances(db_engine, index_X, ticker_ids)
+        with db_engine.connect() as conn:
+            rows = IndustryIndexConstituentRepository(conn).list_as_of(
+                index_X, date(2025, 5, 1),
+            )
+        assert rows == []
+
+    def test_list_rebalances(
+        self, db_engine, index_X, ticker_ids,
+    ):
+        self._setup_two_rebalances(db_engine, index_X, ticker_ids)
+        with db_engine.connect() as conn:
+            dates = IndustryIndexConstituentRepository(conn).list_rebalances(
+                index_X,
+            )
+        # Newest first.
+        assert dates == [date(2026, 4, 1), date(2025, 10, 1)]
+
+
+class TestConstituentValidation:
+
+    def test_rejects_weight_above_one(self, db_engine, index_X, ticker_ids):
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="weight"):
+                IndustryIndexConstituentRepository(conn).insert_constituent(
+                    index_X, ticker_id=ticker_ids[("NSE", "RELIANCE")],
+                    rebalance_date=date(2025, 10, 1),
+                    weight_at_rebalance=1.1,
+                    market_cap_at_rebalance=1e12,
+                    close_at_rebalance=100.0,
+                )
+
+    def test_rejects_negative_weight(self, db_engine, index_X, ticker_ids):
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="weight"):
+                IndustryIndexConstituentRepository(conn).insert_constituent(
+                    index_X, ticker_id=ticker_ids[("NSE", "RELIANCE")],
+                    rebalance_date=date(2025, 10, 1),
+                    weight_at_rebalance=-0.1,
+                    market_cap_at_rebalance=1e12,
+                    close_at_rebalance=100.0,
+                )
+
+    def test_rejects_zero_market_cap(self, db_engine, index_X, ticker_ids):
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="market_cap"):
+                IndustryIndexConstituentRepository(conn).insert_constituent(
+                    index_X, ticker_id=ticker_ids[("NSE", "RELIANCE")],
+                    rebalance_date=date(2025, 10, 1),
+                    weight_at_rebalance=0.5,
+                    market_cap_at_rebalance=0.0,
+                    close_at_rebalance=100.0,
+                )
+
+    def test_rejects_zero_close(self, db_engine, index_X, ticker_ids):
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="close"):
+                IndustryIndexConstituentRepository(conn).insert_constituent(
+                    index_X, ticker_id=ticker_ids[("NSE", "RELIANCE")],
+                    rebalance_date=date(2025, 10, 1),
+                    weight_at_rebalance=0.5,
+                    market_cap_at_rebalance=1e12,
+                    close_at_rebalance=0.0,
+                )
+
+
+# ---------- IndustryIndexValueRepository (Phase 4B-1) ---------- #
+
+
+class TestIndexValueInsertAndRead:
+
+    def test_upsert_and_get_at(self, db_engine, index_X):
+        with transaction(db_engine) as conn:
+            IndustryIndexValueRepository(conn).upsert_value(
+                index_X, trade_date=date(2025, 10, 15),
+                value=1050.0,
+                constituents_used=10, constituents_missing=0,
+                renormalized=False,
+                effective_rebalance_date=date(2025, 10, 1),
+            )
+        with db_engine.connect() as conn:
+            row = IndustryIndexValueRepository(conn).get_at(
+                index_X, date(2025, 10, 15),
+            )
+        assert row is not None
+        assert row.value == 1050.0
+        assert row.constituents_used == 10
+        assert row.renormalized is False
+        assert row.effective_rebalance_date == date(2025, 10, 1)
+
+    def test_upsert_idempotent(self, db_engine, index_X):
+        with transaction(db_engine) as conn:
+            r = IndustryIndexValueRepository(conn)
+            r.upsert_value(
+                index_X, trade_date=date(2025, 10, 15), value=1000.0,
+                constituents_used=10, constituents_missing=0,
+                renormalized=False,
+                effective_rebalance_date=date(2025, 10, 1),
+            )
+            r.upsert_value(
+                index_X, trade_date=date(2025, 10, 15), value=1100.0,
+                constituents_used=9, constituents_missing=1,
+                renormalized=True,
+                effective_rebalance_date=date(2025, 10, 1),
+            )
+        with db_engine.connect() as conn:
+            row = IndustryIndexValueRepository(conn).get_at(
+                index_X, date(2025, 10, 15),
+            )
+        # Second write wins.
+        assert row.value == 1100.0
+        assert row.renormalized is True
+
+    def test_get_latest(self, db_engine, index_X):
+        with transaction(db_engine) as conn:
+            r = IndustryIndexValueRepository(conn)
+            for td, v in [
+                (date(2025, 10, 1), 1000.0),
+                (date(2025, 11, 1), 1100.0),
+                (date(2025, 12, 1), 1200.0),
+            ]:
+                r.upsert_value(
+                    index_X, trade_date=td, value=v,
+                    constituents_used=10, constituents_missing=0,
+                    renormalized=False,
+                    effective_rebalance_date=date(2025, 10, 1),
+                )
+        with db_engine.connect() as conn:
+            row = IndustryIndexValueRepository(conn).get_latest(index_X)
+        assert row.trade_date == date(2025, 12, 1)
+        assert row.value == 1200.0
+
+    def test_get_history_with_range(self, db_engine, index_X):
+        with transaction(db_engine) as conn:
+            r = IndustryIndexValueRepository(conn)
+            for td, v in [
+                (date(2025, 10, 1), 1000.0),
+                (date(2025, 11, 1), 1100.0),
+                (date(2025, 12, 1), 1200.0),
+                (date(2026, 1, 1),  1300.0),
+            ]:
+                r.upsert_value(
+                    index_X, trade_date=td, value=v,
+                    constituents_used=10, constituents_missing=0,
+                    renormalized=False,
+                    effective_rebalance_date=date(2025, 10, 1),
+                )
+        with db_engine.connect() as conn:
+            rows = IndustryIndexValueRepository(conn).get_history(
+                index_X,
+                from_date=date(2025, 11, 1),
+                to_date=date(2025, 12, 31),
+            )
+        dates = [r.trade_date for r in rows]
+        # Newest first within range.
+        assert dates == [date(2025, 12, 1), date(2025, 11, 1)]
+
+    def test_list_for_date_cross_industries(self, db_engine):
+        """Two indices on the same date — list_for_date returns
+        both, sorted by industry_name."""
+        with transaction(db_engine) as conn:
+            ir = IndustryIndexRepository(conn)
+            ir.upsert("Banks", sector_name="Financials",
+                      base_date=date(2025, 10, 1))
+            ir.upsert("IT", sector_name="Technology",
+                      base_date=date(2025, 10, 1))
+            vr = IndustryIndexValueRepository(conn)
+            vr.upsert_value(
+                "IT", trade_date=date(2025, 10, 15), value=1050.0,
+                constituents_used=10, constituents_missing=0,
+                renormalized=False,
+                effective_rebalance_date=date(2025, 10, 1),
+            )
+            vr.upsert_value(
+                "Banks", trade_date=date(2025, 10, 15), value=1030.0,
+                constituents_used=10, constituents_missing=0,
+                renormalized=False,
+                effective_rebalance_date=date(2025, 10, 1),
+            )
+        with db_engine.connect() as conn:
+            rows = IndustryIndexValueRepository(conn).list_for_date(
+                date(2025, 10, 15),
+            )
+        # Alphabetical: Banks before IT.
+        names = [r.industry_name for r in rows]
+        assert names == ["Banks", "IT"]
+
+    def test_coverage_summary(self, db_engine, index_X):
+        with transaction(db_engine) as conn:
+            r = IndustryIndexValueRepository(conn)
+            for td in (date(2025, 10, 1), date(2025, 11, 1),
+                       date(2025, 12, 1)):
+                r.upsert_value(
+                    index_X, trade_date=td, value=1000.0,
+                    constituents_used=10, constituents_missing=0,
+                    renormalized=False,
+                    effective_rebalance_date=date(2025, 10, 1),
+                )
+        with db_engine.connect() as conn:
+            summary = IndustryIndexValueRepository(conn).coverage_summary()
+        assert len(summary) == 1
+        name, count, earliest, latest = summary[0]
+        assert name == index_X
+        assert count == 3
+        assert earliest == date(2025, 10, 1)
+        assert latest == date(2025, 12, 1)
+
+    def test_get_at_unknown_returns_None(self, db_engine, index_X):
+        with db_engine.connect() as conn:
+            assert IndustryIndexValueRepository(conn).get_at(
+                index_X, date(2025, 10, 1),
+            ) is None
+
+    def test_get_latest_unknown_returns_None(self, db_engine, index_X):
+        with db_engine.connect() as conn:
+            assert IndustryIndexValueRepository(conn).get_latest(index_X) is None
+
+    def test_upsert_rejects_zero_value(self, db_engine, index_X):
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="value"):
+                IndustryIndexValueRepository(conn).upsert_value(
+                    index_X, trade_date=date(2025, 10, 1),
+                    value=0.0,
+                    constituents_used=10, constituents_missing=0,
+                    renormalized=False,
+                    effective_rebalance_date=date(2025, 10, 1),
+                )
+
+    def test_upsert_rejects_negative_counts(self, db_engine, index_X):
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="counts"):
+                IndustryIndexValueRepository(conn).upsert_value(
+                    index_X, trade_date=date(2025, 10, 1),
+                    value=1000.0,
+                    constituents_used=-1, constituents_missing=0,
+                    renormalized=False,
+                    effective_rebalance_date=date(2025, 10, 1),
+                )
+
+    def test_delete_for_index(self, db_engine, index_X):
+        with transaction(db_engine) as conn:
+            r = IndustryIndexValueRepository(conn)
+            for td in (date(2025, 10, 1), date(2025, 11, 1)):
+                r.upsert_value(
+                    index_X, trade_date=td, value=1000.0,
+                    constituents_used=10, constituents_missing=0,
+                    renormalized=False,
+                    effective_rebalance_date=date(2025, 10, 1),
+                )
+        with transaction(db_engine) as conn:
+            n = IndustryIndexValueRepository(conn).delete_for_index(index_X)
+        assert n == 2
+        with db_engine.connect() as conn:
+            assert IndustryIndexValueRepository(conn).get_latest(index_X) is None

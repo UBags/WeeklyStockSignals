@@ -219,3 +219,105 @@ class DailyMarketCap:
     market_cap: float
     source: str
     computed_at: datetime
+
+
+# Allowed values for industry_index.methodology. Added in migration
+# 0011 (Phase 4B-1). MODIFIED_LASPEYRES is the only one currently
+# implemented; the others are reserved for future indices.
+INDEX_METHODOLOGIES = (
+    "MODIFIED_LASPEYRES", "EQUAL_WEIGHTED", "FREE_FLOAT_WEIGHTED",
+)
+
+# Allowed values for industry_index.rebalance_schedule. Added in
+# migration 0011. SEMIANNUAL_APR_OCT is the only one currently
+# implemented.
+REBALANCE_SCHEDULES = (
+    "SEMIANNUAL_APR_OCT", "QUARTERLY", "ANNUAL_APR", "MANUAL",
+)
+
+# Allowed values for industry_index.status.
+INDEX_STATUSES = ("ACTIVE", "RETIRED")
+
+# Allowed values for industry_index_constituent.removed_reason
+# (when effective_to is set).
+CONSTITUENT_REMOVED_REASONS = (
+    "REBALANCE_EXIT", "DELISTED", "OPERATOR_REMOVED",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class IndustryIndex:
+    """An indexed yfinance industry.
+
+    industry_name is the natural key — yfinance industry name like
+    "Specialty Industrial Machinery". sector_name is the broader
+    yfinance sector. methodology, rebalance_schedule, and
+    min_constituents are stored per-index so future changes to
+    global defaults don't retroactively invalidate existing
+    indices.
+
+    base_date is the first rebalance date — index values for trade
+    dates before this don't exist (per the §20 design decision).
+    """
+    industry_name: str
+    sector_name: str
+    methodology: str
+    base_value: float
+    base_date: date
+    rebalance_schedule: str
+    min_constituents: int
+    status: str
+    notes: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class IndustryIndexConstituent:
+    """One constituent of an industry index for one effective
+    period.
+
+    effective_to is NULL while the constituent is active in the
+    index; set to the day before the next rebalance (or to
+    delisted_at for mid-cycle delistings).
+
+    weight_at_rebalance is fixed for this effective period. Mid-
+    cycle delistings are handled at value-computation time via
+    drop-and-renormalize — they do NOT mutate this row.
+
+    market_cap_at_rebalance and close_at_rebalance are stored
+    rather than re-derived because the modified Laspeyres formula
+    references close_i(t_rebalance) for every value computation
+    in the period; pre-storing avoids re-lookup.
+    """
+    industry_name: str
+    ticker_id: int
+    rebalance_date: date
+    effective_from: date
+    effective_to: Optional[date]
+    weight_at_rebalance: float
+    market_cap_at_rebalance: float
+    close_at_rebalance: float
+    removed_reason: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class IndustryIndexValue:
+    """One day's index value plus the audit metadata.
+
+    constituents_used + constituents_missing = total constituents
+    in the active rebalance period. `renormalized` is TRUE if any
+    were missing and weights were re-normalized across the
+    remaining ones.
+
+    effective_rebalance_date lets Phase 5+ analytics correlate
+    value movements with constituent changes (e.g. "the IT index
+    jumped 3% on 2025-10-01 because the rebalance brought in TCS
+    at a 15% weight").
+    """
+    industry_name: str
+    trade_date: date
+    value: float
+    constituents_used: int
+    constituents_missing: int
+    renormalized: bool
+    effective_rebalance_date: date
+    computed_at: datetime

@@ -1259,3 +1259,110 @@ Phase 4B (index construction).
 - CLI: build-industry-indices, compute-index-values.
 - HTTP endpoints.
 - Tests.
+
+---
+
+## 20. Phase 4B-1 (index construction foundation)
+
+Continuing from §19. Phase 4A produced daily market cap data; Phase
+4B builds the industry index layer on top.
+
+### Design decisions (locked in this session)
+
+- **Index identity**: industry_name as PK (operator's choice over
+  index_id surrogate). Simpler joins, more debuggable SQL. The
+  trade-off is that a yfinance industry-name change creates a
+  parallel index rather than a continuous one — flagged for the
+  operator at auto-discovery time so they can manually merge if
+  needed.
+- **Index creation**: auto-discovered from instrument_industry by
+  the build-indices runner (Phase 4B-2). Industries with
+  ≥ min_constituents (default 10) active classified EQ tickers
+  qualify. No operator declaration burden.
+- **Rebalance schedule**: SEMIANNUAL_APR_OCT (1st trading day of
+  April and October), matching NIFTY's general cadence for sectoral
+  indices.
+- **Methodology**: MODIFIED_LASPEYRES with formula
+  `value(t) = base_value × Σ_i [weight_i × close_i(t)/close_i(t_rebalance)]`
+  where weight_i is fixed at rebalance from full mcap (not free-
+  float, per the §2 decision).
+- **Base value**: 1000.0 (NIFTY convention).
+- **Base date**: first rebalance date at or after the earliest
+  mcap data. Index values pre-base_date are NOT computed.
+- **Mid-cycle delistings**: handled at compute time via drop-and-
+  renormalize. The constituent rows record the original weights;
+  the value-computation logic renormalizes when constituents are
+  missing. `renormalized` boolean on industry_index_value flags
+  these days for Phase 5+ analytics that want to filter them out.
+
+### Shipped this session
+
+- **Migration 0011 — industry_index**: per-industry index
+  definitions. CHECK constraints on methodology / schedule /
+  status / base_value / min_constituents. Partial index on
+  WHERE status='ACTIVE' for the hot "list active indices" query.
+
+- **Migration 0012 — industry_index_constituent**: membership-
+  with-history. Composite PK (industry_name, ticker_id,
+  effective_from). effective_to=NULL means "currently active".
+  weight_at_rebalance is fixed for the effective period; mid-cycle
+  delistings handled at compute time. CHECK constraints on
+  weight ∈ [0,1], market_cap > 0, close > 0. Two partial / sorted
+  indexes for the "active constituents" and "as-of" hot queries.
+
+- **Migration 0013 — industry_index_value**: daily index values.
+  Columns include constituents_used, constituents_missing,
+  renormalized, effective_rebalance_date as audit metadata for
+  Phase 5+ analytics.
+
+- **Domain types**: IndustryIndex, IndustryIndexConstituent,
+  IndustryIndexValue dataclasses (frozen + slots). Allowed-values
+  tuples for methodologies, schedules, statuses, removed reasons.
+
+- **Three repositories**:
+  - IndustryIndexRepository: upsert, get, list_active, list_all,
+    set_status, delete (cascades to constituents/values).
+  - IndustryIndexConstituentRepository: insert_constituent,
+    close_period, list_active_for_index, list_as_of (the compute
+    layer's hot path), list_history_for_ticker, list_rebalances.
+  - IndustryIndexValueRepository: upsert_value (idempotent on
+    (industry_name, trade_date)), get_at, get_latest, get_history
+    (with optional date range and limit for Phase 5+),
+    list_for_date (cross-industry analytics), coverage_summary,
+    delete_for_index.
+
+### Test counts
+
+49 new tests (35 repo across the three new repos + 14 domain
+dataclass tests). All 339 prior fundamentals + migration tests
+still pass. Total: 388 fundamentals + migration tests pass.
+
+### Phase 4B-2 still-to-build (next session)
+
+- `select_top_n_constituents(industry, rebalance_date, n)` —
+  reads daily_market_cap.list_for_date() filtered by industry,
+  returns top-N tickers by market cap.
+- `compute_index_value_for_date(industry_name, trade_date)` —
+  modified Laspeyres formula. Pulls active constituents via
+  IndustryIndexConstituentRepository.list_as_of, joins with
+  daily_market_cap.list_for_date close prices, computes the
+  value via Σ [weight × close(t)/close(rebalance)]. Handles
+  drop-and-renormalize for missing constituents.
+- `run_rebalance(industry_name, rebalance_date)` — full
+  rebalance lifecycle: close prior constituents (REBALANCE_EXIT),
+  pick new top-N, insert new constituents, write the rebalance
+  date's index value.
+- `run_index_value_backfill(industry_name, from_date, to_date)`
+  — walks the date range, computes index values for each
+  trading day with mcap data.
+- `run_industry_index_build(exchange, min_constituents=10)` —
+  auto-discovery + initial rebalance for newly-qualifying
+  industries.
+
+### Phase 4B-3 still-to-build (session after)
+
+- CLI: build-industry-indices, compute-index-values, rebalance-
+  industry-index, fundamentals-status extension to show index
+  coverage.
+- HTTP endpoints (3-4).
+- Tests at every layer.

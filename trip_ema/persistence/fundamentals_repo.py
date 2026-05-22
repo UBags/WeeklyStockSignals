@@ -1245,3 +1245,494 @@ def _mcap_from_row(row):
         source=row[5],
         computed_at=row[6],
     )
+
+
+# ---------- IndustryIndex (Phase 4B-1) ---------- #
+
+
+class IndustryIndexRepository:
+    """Index definitions. PK is industry_name (operator's choice
+    per §20 design decision).
+
+    Same connection-in-constructor pattern as the other Phase 1-4
+    repositories.
+    """
+
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    # ----- reads ----- #
+
+    def get(self, industry_name: str):
+        row = self._conn.execute(
+            text("""
+                SELECT industry_name, sector_name, methodology,
+                       base_value, base_date, rebalance_schedule,
+                       min_constituents, status, notes
+                FROM industry_index
+                WHERE industry_name = :n
+            """),
+            {"n": industry_name},
+        ).fetchone()
+        return _index_from_row(row) if row else None
+
+    def list_active(self) -> list:
+        rows = self._conn.execute(text("""
+            SELECT industry_name, sector_name, methodology,
+                   base_value, base_date, rebalance_schedule,
+                   min_constituents, status, notes
+            FROM industry_index
+            WHERE status = 'ACTIVE'
+            ORDER BY industry_name
+        """))
+        return [_index_from_row(r) for r in rows]
+
+    def list_all(self) -> list:
+        """Includes RETIRED indices. Used by audit / status views
+        rather than analytics."""
+        rows = self._conn.execute(text("""
+            SELECT industry_name, sector_name, methodology,
+                   base_value, base_date, rebalance_schedule,
+                   min_constituents, status, notes
+            FROM industry_index
+            ORDER BY status, industry_name
+        """))
+        return [_index_from_row(r) for r in rows]
+
+    # ----- writes ----- #
+
+    def upsert(
+        self, industry_name: str, *,
+        sector_name: str,
+        base_date: "date",
+        base_value: float = 1000.0,
+        methodology: str = "MODIFIED_LASPEYRES",
+        rebalance_schedule: str = "SEMIANNUAL_APR_OCT",
+        min_constituents: int = 10,
+        notes: Optional[str] = None,
+    ) -> None:
+        """Insert or update an index. Idempotent on industry_name.
+
+        The auto-discovery runner (Phase 4B-2) uses INSERT ...
+        ON CONFLICT DO NOTHING semantics by checking get() first
+        — once an index is created, its base_date and base_value
+        are immutable. This method allows overwriting for
+        administrative scenarios (e.g. operator changes the
+        threshold), and validation happens via the DB CHECK
+        constraints + this method's pre-checks.
+        """
+        from ..fundamentals import (
+            INDEX_METHODOLOGIES, REBALANCE_SCHEDULES,
+        )
+        if methodology not in INDEX_METHODOLOGIES:
+            raise ValueError(
+                f"methodology must be one of {INDEX_METHODOLOGIES}, "
+                f"got {methodology!r}"
+            )
+        if rebalance_schedule not in REBALANCE_SCHEDULES:
+            raise ValueError(
+                f"rebalance_schedule must be one of {REBALANCE_SCHEDULES}, "
+                f"got {rebalance_schedule!r}"
+            )
+        if base_value <= 0:
+            raise ValueError("base_value must be > 0")
+        if min_constituents < 1:
+            raise ValueError("min_constituents must be >= 1")
+        self._conn.execute(
+            text("""
+                INSERT INTO industry_index
+                    (industry_name, sector_name, methodology,
+                     base_value, base_date, rebalance_schedule,
+                     min_constituents, status, notes)
+                VALUES
+                    (:n, :s, :m, :bv, :bd, :rs, :mc, 'ACTIVE', :nt)
+                ON CONFLICT (industry_name) DO UPDATE SET
+                    sector_name = EXCLUDED.sector_name,
+                    methodology = EXCLUDED.methodology,
+                    base_value = EXCLUDED.base_value,
+                    base_date = EXCLUDED.base_date,
+                    rebalance_schedule = EXCLUDED.rebalance_schedule,
+                    min_constituents = EXCLUDED.min_constituents,
+                    notes = EXCLUDED.notes
+            """),
+            {"n": industry_name, "s": sector_name, "m": methodology,
+             "bv": base_value, "bd": base_date, "rs": rebalance_schedule,
+             "mc": min_constituents, "nt": notes},
+        )
+
+    def set_status(self, industry_name: str, status: str) -> bool:
+        """Change ACTIVE / RETIRED. Returns False if the index
+        doesn't exist."""
+        from ..fundamentals import INDEX_STATUSES
+        if status not in INDEX_STATUSES:
+            raise ValueError(
+                f"status must be one of {INDEX_STATUSES}, got {status!r}"
+            )
+        result = self._conn.execute(
+            text("""
+                UPDATE industry_index
+                SET status = :s
+                WHERE industry_name = :n
+            """),
+            {"n": industry_name, "s": status},
+        )
+        return result.rowcount > 0
+
+    def delete(self, industry_name: str) -> bool:
+        """Remove an index and ALL its constituents and values via
+        ON DELETE CASCADE. Used by tests and by an operator
+        admin path; normal lifecycle uses set_status('RETIRED')."""
+        result = self._conn.execute(
+            text("DELETE FROM industry_index WHERE industry_name = :n"),
+            {"n": industry_name},
+        )
+        return result.rowcount > 0
+
+
+def _index_from_row(row):
+    from ..fundamentals import IndustryIndex
+    return IndustryIndex(
+        industry_name=row[0],
+        sector_name=row[1],
+        methodology=row[2],
+        base_value=float(row[3]),
+        base_date=row[4],
+        rebalance_schedule=row[5],
+        min_constituents=int(row[6]),
+        status=row[7],
+        notes=row[8],
+    )
+
+
+# ---------- IndustryIndexConstituent (Phase 4B-1) ---------- #
+
+
+class IndustryIndexConstituentRepository:
+    """Membership-with-history for an industry index.
+
+    The hot read paths are:
+      - list_active_for_index(industry_name) — current
+        constituents (effective_to IS NULL).
+      - list_as_of(industry_name, trade_date) — constituents
+        active on a specific historical date.
+
+    Writes happen in two contexts:
+      - At each rebalance: insert_constituent() for each picked
+        ticker.
+      - At each non-first rebalance (and on mid-cycle delisting):
+        close_period() on the prior constituent rows.
+    """
+
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    # ----- reads ----- #
+
+    def list_active_for_index(self, industry_name: str) -> list:
+        """Currently-active constituents. effective_to IS NULL."""
+        rows = self._conn.execute(text("""
+            SELECT industry_name, ticker_id, rebalance_date,
+                   effective_from, effective_to,
+                   weight_at_rebalance, market_cap_at_rebalance,
+                   close_at_rebalance, removed_reason
+            FROM industry_index_constituent
+            WHERE industry_name = :n AND effective_to IS NULL
+            ORDER BY weight_at_rebalance DESC
+        """), {"n": industry_name})
+        return [_constituent_from_row(r) for r in rows]
+
+    def list_as_of(self, industry_name: str, trade_date: "date") -> list:
+        """Constituents whose effective period contains trade_date.
+        Used by the compute layer to figure out who was in the
+        index on a given day.
+        """
+        rows = self._conn.execute(text("""
+            SELECT industry_name, ticker_id, rebalance_date,
+                   effective_from, effective_to,
+                   weight_at_rebalance, market_cap_at_rebalance,
+                   close_at_rebalance, removed_reason
+            FROM industry_index_constituent
+            WHERE industry_name = :n
+              AND effective_from <= :td
+              AND (effective_to IS NULL OR effective_to >= :td)
+            ORDER BY weight_at_rebalance DESC
+        """), {"n": industry_name, "td": trade_date})
+        return [_constituent_from_row(r) for r in rows]
+
+    def list_history_for_ticker(
+        self, industry_name: str, ticker_id: int,
+    ) -> list:
+        """Every effective period this ticker has been a
+        constituent of this index. Used for audit / debugging
+        when "why isn't TCS in the IT index now" comes up."""
+        rows = self._conn.execute(text("""
+            SELECT industry_name, ticker_id, rebalance_date,
+                   effective_from, effective_to,
+                   weight_at_rebalance, market_cap_at_rebalance,
+                   close_at_rebalance, removed_reason
+            FROM industry_index_constituent
+            WHERE industry_name = :n AND ticker_id = :tid
+            ORDER BY effective_from DESC
+        """), {"n": industry_name, "tid": ticker_id})
+        return [_constituent_from_row(r) for r in rows]
+
+    def list_rebalances(self, industry_name: str) -> list["date"]:
+        """All distinct rebalance dates for this index, newest
+        first. Used for audit and for the value-computation logic
+        that needs to know which rebalance applies to date D."""
+        rows = self._conn.execute(text("""
+            SELECT DISTINCT rebalance_date
+            FROM industry_index_constituent
+            WHERE industry_name = :n
+            ORDER BY rebalance_date DESC
+        """), {"n": industry_name})
+        return [r[0] for r in rows]
+
+    # ----- writes ----- #
+
+    def insert_constituent(
+        self, industry_name: str, *,
+        ticker_id: int,
+        rebalance_date: "date",
+        weight_at_rebalance: float,
+        market_cap_at_rebalance: float,
+        close_at_rebalance: float,
+    ) -> None:
+        """Open a new effective period for this ticker as a
+        constituent of this index. effective_from = rebalance_date;
+        effective_to = NULL.
+
+        The runner ensures there's no overlapping prior period for
+        this (industry, ticker) by calling close_period first
+        when needed; we don't enforce that here at the DB level."""
+        if not (0 <= weight_at_rebalance <= 1):
+            raise ValueError(
+                f"weight_at_rebalance must be in [0, 1], "
+                f"got {weight_at_rebalance!r}"
+            )
+        if market_cap_at_rebalance <= 0:
+            raise ValueError("market_cap_at_rebalance must be > 0")
+        if close_at_rebalance <= 0:
+            raise ValueError("close_at_rebalance must be > 0")
+        self._conn.execute(text("""
+            INSERT INTO industry_index_constituent
+                (industry_name, ticker_id, rebalance_date,
+                 effective_from, effective_to,
+                 weight_at_rebalance, market_cap_at_rebalance,
+                 close_at_rebalance, removed_reason)
+            VALUES (:n, :tid, :rd, :ef, NULL,
+                    :w, :mc, :cl, NULL)
+        """), {"n": industry_name, "tid": ticker_id,
+               "rd": rebalance_date, "ef": rebalance_date,
+               "w": weight_at_rebalance,
+               "mc": market_cap_at_rebalance,
+               "cl": close_at_rebalance})
+
+    def close_period(
+        self, industry_name: str, ticker_id: int,
+        effective_to: "date", removed_reason: str,
+    ) -> bool:
+        """Close the currently-open effective period (the row with
+        effective_to IS NULL) for this (industry, ticker). Returns
+        False if there was no open period.
+
+        Used at rebalance time (REBALANCE_EXIT) and on mid-cycle
+        delistings (DELISTED). Operator admin path uses
+        OPERATOR_REMOVED."""
+        from ..fundamentals import CONSTITUENT_REMOVED_REASONS
+        if removed_reason not in CONSTITUENT_REMOVED_REASONS:
+            raise ValueError(
+                f"removed_reason must be one of "
+                f"{CONSTITUENT_REMOVED_REASONS}, got {removed_reason!r}"
+            )
+        result = self._conn.execute(text("""
+            UPDATE industry_index_constituent
+            SET effective_to = :et, removed_reason = :rr
+            WHERE industry_name = :n
+              AND ticker_id = :tid
+              AND effective_to IS NULL
+        """), {"n": industry_name, "tid": ticker_id,
+               "et": effective_to, "rr": removed_reason})
+        return result.rowcount > 0
+
+
+def _constituent_from_row(row):
+    from ..fundamentals import IndustryIndexConstituent
+    return IndustryIndexConstituent(
+        industry_name=row[0],
+        ticker_id=int(row[1]),
+        rebalance_date=row[2],
+        effective_from=row[3],
+        effective_to=row[4],
+        weight_at_rebalance=float(row[5]),
+        market_cap_at_rebalance=float(row[6]),
+        close_at_rebalance=float(row[7]),
+        removed_reason=row[8],
+    )
+
+
+# ---------- IndustryIndexValue (Phase 4B-1) ---------- #
+
+
+class IndustryIndexValueRepository:
+    """Daily index values output by the compute layer.
+
+    PK is (industry_name, trade_date). Two read hot paths:
+      - get_history(industry_name) for time-series analytics.
+      - list_for_date(trade_date) for cross-industry queries.
+    """
+
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    # ----- reads ----- #
+
+    def get_at(self, industry_name: str, trade_date: "date"):
+        row = self._conn.execute(text("""
+            SELECT industry_name, trade_date, value,
+                   constituents_used, constituents_missing,
+                   renormalized, effective_rebalance_date, computed_at
+            FROM industry_index_value
+            WHERE industry_name = :n AND trade_date = :td
+        """), {"n": industry_name, "td": trade_date}).fetchone()
+        return _value_from_row(row) if row else None
+
+    def get_latest(self, industry_name: str):
+        row = self._conn.execute(text("""
+            SELECT industry_name, trade_date, value,
+                   constituents_used, constituents_missing,
+                   renormalized, effective_rebalance_date, computed_at
+            FROM industry_index_value
+            WHERE industry_name = :n
+            ORDER BY trade_date DESC
+            LIMIT 1
+        """), {"n": industry_name}).fetchone()
+        return _value_from_row(row) if row else None
+
+    def get_history(
+        self, industry_name: str, *,
+        from_date: Optional["date"] = None,
+        to_date: Optional["date"] = None,
+        limit: Optional[int] = None,
+    ) -> list:
+        """Time-series history for one index. Optional date-range
+        filter; defaults to all history newest-first.
+
+        Phase 5+ indicator stack will use this with a date-range
+        filter to pull just the lookback window it needs.
+        """
+        conditions = ["industry_name = :n"]
+        params: dict = {"n": industry_name}
+        if from_date is not None:
+            conditions.append("trade_date >= :fd")
+            params["fd"] = from_date
+        if to_date is not None:
+            conditions.append("trade_date <= :td")
+            params["td"] = to_date
+        sql = f"""
+            SELECT industry_name, trade_date, value,
+                   constituents_used, constituents_missing,
+                   renormalized, effective_rebalance_date, computed_at
+            FROM industry_index_value
+            WHERE {' AND '.join(conditions)}
+            ORDER BY trade_date DESC
+        """
+        if limit is not None:
+            sql += " LIMIT :lim"
+            params["lim"] = limit
+        rows = self._conn.execute(text(sql), params)
+        return [_value_from_row(r) for r in rows]
+
+    def list_for_date(self, trade_date: "date") -> list:
+        """All industries' index values on a specific date.
+        Sorted alphabetically — at this layer we don't impose a
+        ranking. Cross-industry "show me today's sector movers"
+        analytics happen above this in Phase 5+.
+        """
+        rows = self._conn.execute(text("""
+            SELECT industry_name, trade_date, value,
+                   constituents_used, constituents_missing,
+                   renormalized, effective_rebalance_date, computed_at
+            FROM industry_index_value
+            WHERE trade_date = :td
+            ORDER BY industry_name
+        """), {"td": trade_date})
+        return [_value_from_row(r) for r in rows]
+
+    def coverage_summary(self) -> list[tuple[str, int, "date", "date"]]:
+        """Per-index (industry_name, num_value_rows, earliest_date,
+        latest_date). Used by fundamentals-status to show coverage
+        at a glance after the value computation runs."""
+        rows = self._conn.execute(text("""
+            SELECT
+                industry_name,
+                COUNT(*) AS rows,
+                MIN(trade_date) AS earliest,
+                MAX(trade_date) AS latest
+            FROM industry_index_value
+            GROUP BY industry_name
+            ORDER BY industry_name
+        """))
+        return [
+            (r[0], int(r[1]), r[2], r[3])
+            for r in rows
+        ]
+
+    # ----- writes ----- #
+
+    def upsert_value(
+        self, industry_name: str, *,
+        trade_date: "date",
+        value: float,
+        constituents_used: int,
+        constituents_missing: int,
+        renormalized: bool,
+        effective_rebalance_date: "date",
+    ) -> None:
+        """Idempotent on (industry_name, trade_date). Re-running
+        the compute for a date overwrites — useful when constituents
+        change retroactively (e.g. operator backfills a missing
+        mcap row and the compute needs to be re-run)."""
+        if value <= 0:
+            raise ValueError("value must be > 0")
+        if constituents_used < 0 or constituents_missing < 0:
+            raise ValueError("constituent counts must be >= 0")
+        self._conn.execute(text("""
+            INSERT INTO industry_index_value
+                (industry_name, trade_date, value,
+                 constituents_used, constituents_missing,
+                 renormalized, effective_rebalance_date, computed_at)
+            VALUES (:n, :td, :v, :cu, :cm, :rn, :erd, NOW())
+            ON CONFLICT (industry_name, trade_date) DO UPDATE SET
+                value = EXCLUDED.value,
+                constituents_used = EXCLUDED.constituents_used,
+                constituents_missing = EXCLUDED.constituents_missing,
+                renormalized = EXCLUDED.renormalized,
+                effective_rebalance_date = EXCLUDED.effective_rebalance_date,
+                computed_at = NOW()
+        """), {"n": industry_name, "td": trade_date, "v": value,
+               "cu": constituents_used, "cm": constituents_missing,
+               "rn": renormalized, "erd": effective_rebalance_date})
+
+    def delete_for_index(self, industry_name: str) -> int:
+        """Wipe all value rows for one index. Used by tests and
+        by the admin "recompute from scratch" path."""
+        result = self._conn.execute(text("""
+            DELETE FROM industry_index_value
+            WHERE industry_name = :n
+        """), {"n": industry_name})
+        return result.rowcount
+
+
+def _value_from_row(row):
+    from ..fundamentals import IndustryIndexValue
+    return IndustryIndexValue(
+        industry_name=row[0],
+        trade_date=row[1],
+        value=float(row[2]),
+        constituents_used=int(row[3]),
+        constituents_missing=int(row[4]),
+        renormalized=row[5],
+        effective_rebalance_date=row[6],
+        computed_at=row[7],
+    )
