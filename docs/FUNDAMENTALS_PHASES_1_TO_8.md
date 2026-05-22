@@ -662,3 +662,165 @@ ORDER BY t.exchange, t.instrument_type;
 Expectation after a complete refresh + ETF backfill: ETF rows have
 `industry='ETF'`, `classification_source='INSTRUMENT_TYPE'`, and
 most (but not all) have `etf_long_name` populated.
+
+---
+
+## 14. Phase 2 addendum: shares-outstanding via yfinance
+
+Original Phase 2 plan was NSE XBRL primary, yfinance fallback for
+non-NSE exchanges. The NSE XBRL spike (scripts/spike_nse_xbrl.py)
+revealed that NSE sits behind Akamai Bot Manager, which fingerprints
+at the TLS layer (JA3/JA4). Python `requests` is rejected with HTTP
+403 at the homepage before any cookies are issued — bypassing
+requires browser-impersonating libraries (curl_cffi) that are in
+an explicit arms-race with Akamai and break on a 6-12 month cycle.
+
+For a quant trading system where bad shares-outstanding feeds bad
+market caps feed bad signals, "works today, might not next quarter"
+is unacceptable on the critical path. The XBRL ambition is deferred
+to a sidecar cross-validation feature (not blocking critical path).
+
+### What we shipped
+
+- **Migration 0008**: `instrument_shares` time-series table with
+  composite PK `(ticker_id, as_of_date)`, supporting
+  `shares_source` values `YFINANCE` / `YFINANCE_IMPLIED` /
+  `NSE_XBRL` / `MANUAL_OVERRIDE`. Time-series shape (not single-row)
+  so corporate actions, refreshes, and the future XBRL sidecar can
+  coexist without overwriting each other.
+
+- **shares_fetch.py**: yfinance fetcher with the same typed-exception
+  pattern as industry_fetch (`SharesFetchRateLimited` /
+  `SharesFetchTransient` / `SharesFetchPermanent`). Prefers
+  `sharesOutstanding` (source `YFINANCE`); falls back to
+  `impliedSharesOutstanding` (source `YFINANCE_IMPLIED`) only when
+  the direct field is NULL. The implied number is back-derived by
+  yfinance from `marketCap / price`, so analytics can filter on
+  `shares_source` to distinguish higher-trust direct numbers from
+  the derived fallback.
+
+- **run_shares_refresh()** in runners.py: mirrors
+  `run_industry_refresh` — serial yfinance calls, checkpointed every
+  50 tickers, resumable via `progress_json`, 80-day skip-if-recent
+  guard, KeyboardInterrupt → PARTIAL close. Differences:
+    - No instrument-type branching; ETFs have meaningful
+      `sharesOutstanding` (units issued) and are included.
+    - No operator-override skip table; the override path is "insert
+      a row with shares_source='MANUAL_OVERRIDE'" — the time-series
+      shape accommodates operator-set values without a separate table.
+    - Inserts (not upserts-in-place); the composite PK gives
+      same-day idempotency via `ON CONFLICT DO UPDATE`.
+
+- **InstrumentSharesRepository** in fundamentals_repo.py:
+  `get_latest`, `get_as_of(date)`, `get_at(date)`, `list_history`,
+  `list_latest_for_exchange`, `coverage_counts_by_type`,
+  `insert_snapshot`, `delete_snapshot`. The `coverage_counts_by_type`
+  query uses `COUNT(DISTINCT t.ticker_id)` rather than `COUNT(*)`
+  because a LEFT JOIN against the time-series table multiplies rows
+  by history depth.
+
+- **CLI**: `refresh-shares --exchange NSE [--force] [--resume RUN_ID]`,
+  plus `fundamentals-status` now reports shares coverage in a
+  separate section alongside industry coverage.
+
+- **HTTP**: `GET /v1/fundamentals/shares`,
+  `GET /v1/fundamentals/shares/{ticker_id}`,
+  `GET /v1/fundamentals/shares/{ticker_id}/history`,
+  `POST /v1/fundamentals/refresh-shares` (fire-and-forget via
+  AppState.etl_executor; returns 202 immediately).
+
+- **Scheduler**: `QuarterlyFundamentalsScheduler` now fires both
+  `industry` and `shares` refreshes at quarter-end+1month. Same
+  60-day window, same 80-day skip-if-recent per (phase, exchange).
+  Industry runs first per exchange so that downstream Phase 4 code
+  reading industry-then-shares doesn't see stale industry data.
+
+### What we deliberately did NOT build
+
+- **NSE XBRL primary source.** Akamai blocks naked Python requests
+  at the TLS layer. We chose not to put TLS-fingerprint evasion on
+  the critical path. The XBRL pipeline is deferred to a future
+  "shares cross-validation sidecar" — see §15 below.
+
+- **A separate `shares_override` table.** Operator overrides use
+  `shares_source='MANUAL_OVERRIDE'` on an `insert_snapshot` call.
+  The runner's quarterly refresh always inserts a new row, never
+  modifies prior rows, so manual snapshots persist. Analytics that
+  want to ignore manual rows filter on `shares_source`.
+
+- **Free-float factor population.** `free_float_factor` is reserved
+  for the XBRL sidecar; yfinance has no equivalent field for Indian
+  tickers. Phase 4's index construction uses full market cap as
+  documented in §2.
+
+### Verification
+
+After running `refresh-shares --exchange NSE`:
+
+```sql
+SELECT
+    t.exchange,
+    t.instrument_type,
+    COUNT(DISTINCT t.ticker_id) AS total_tickers,
+    COUNT(DISTINCT s.ticker_id) FILTER (
+        WHERE s.shares_outstanding IS NOT NULL
+    ) AS with_shares,
+    COUNT(DISTINCT s.ticker_id) FILTER (
+        WHERE s.shares_source = 'YFINANCE'
+    ) AS direct_source,
+    COUNT(DISTINCT s.ticker_id) FILTER (
+        WHERE s.shares_source = 'YFINANCE_IMPLIED'
+    ) AS implied_source
+FROM tickers t
+LEFT JOIN instrument_shares s ON s.ticker_id = t.ticker_id
+WHERE t.is_active
+GROUP BY t.exchange, t.instrument_type
+ORDER BY t.exchange, t.instrument_type;
+```
+
+Realistic expectation for NSE:
+  - EQ: ~85-90% with_shares, mostly via YFINANCE direct.
+    YFINANCE_IMPLIED expected at 5-10% of named for mid/small-caps
+    where the direct field is NULL.
+  - ETF: ~95-100% with_shares (unit counts are reliable on yfinance
+    for these).
+
+### Phase 4 implications
+
+Phase 4's "compute historical market cap" path now has the choice
+of three sources for shares as-of a date:
+
+  1. `instrument_shares.get_as_of(date)` — the latest snapshot at or
+     before the requested date, via composite PK.
+  2. `yfinance.Ticker.history(period='max', actions=True)` — split-
+     adjusted price + split events, from which a shares-history can
+     be reconstructed for dates predating our Phase 2 data.
+  3. Approximation: `close × current_shares` for dates where we have
+     no better signal.
+
+Per the design doc §2 the boundary is 180 days: dates older than
+that use yfinance historical mcap directly; newer dates use
+`close × shares_outstanding` from our Phase 2 data. Phase 4 will
+implement this; Phase 2 just lays the data.
+
+---
+
+## 15. Deferred: NSE XBRL shares cross-validation sidecar
+
+Reserved for a future session. Sketch:
+
+- Separate from the quarterly refresh path. Operator-triggered.
+- Uses curl_cffi or equivalent to bypass Akamai TLS fingerprinting.
+- Fetches SHP filings quarterly per ticker. Parses XBRL via lxml
+  with localname-tolerant XPath against the SEBI INDAS taxonomy.
+- Writes rows with `shares_source='NSE_XBRL'` to the same
+  `instrument_shares` table. The time-series shape means XBRL rows
+  coexist with yfinance rows for the same ticker at different dates.
+- Cross-validation query flags any (ticker, quarter) pair where
+  yfinance and XBRL disagree by more than 5%.
+- Will populate `free_float_factor` from the SHP filing's promoter
+  vs public breakdown.
+- Will populate `xbrl_url` for audit trail.
+
+The sidecar is OFF the critical path — if Akamai breaks it, Phase
+2's yfinance flow keeps working and Phase 4 keeps building indices.
