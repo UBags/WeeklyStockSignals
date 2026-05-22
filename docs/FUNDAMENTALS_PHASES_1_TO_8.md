@@ -824,3 +824,129 @@ Reserved for a future session. Sketch:
 
 The sidecar is OFF the critical path — if Akamai breaks it, Phase
 2's yfinance flow keeps working and Phase 4 keeps building indices.
+
+---
+
+## 16. Phase 3.A addendum: quarterly financials via yfinance
+
+Original Phase 3 plan: yfinance `quarterly_financials` for revenue
+and EBITDA, four quarters, simple PK. The plan landed with two
+modifications:
+
+- **Time-series PK** (`ticker_id, fiscal_quarter, fetched_at`)
+  rather than single-row, so restatements and yfinance data
+  revisions are detectable. Operator's call; the cost is the same
+  PK-multiplication issue we hit on shares (need
+  `COUNT(DISTINCT t.ticker_id)` in coverage queries).
+- **EBITDA computation deferred to Phase 3.B.** Phase 3.A stores
+  whatever yfinance puts in the `EBITDA` or `Normalized EBITDA`
+  rows of `quarterly_income_stmt`, NULL when both are missing.
+  Phase 3.B (next session) will probe yfinance's actual line-item
+  availability for Indian tickers, then implement
+  `operating_income + depreciation_amortization` only after we
+  verify those fields are reliably populated. Same discipline
+  pattern as the bhavcopy / ETF / XBRL probes.
+
+### What we shipped
+
+- **Migration 0009**: `quarterly_financials` with composite PK
+  `(ticker_id, fiscal_quarter, fetched_at)`. `source` column
+  supports `YFINANCE` / `YFINANCE_COMPUTED` (reserved) / `NSE_XBRL`
+  (reserved) / `MANUAL_OVERRIDE`. Two indexes: one for
+  `DISTINCT ON (ticker_id, fiscal_quarter) ORDER BY fetched_at DESC`
+  reads (the latest-per-quarter query), one on `fiscal_quarter DESC`
+  for time-axis analytics ("everyone's Q3 2025").
+
+- **financials_fetch.py**: yfinance fetcher with the typed-exception
+  pattern. Tries multiple candidate names for the revenue and
+  EBITDA rows because yfinance's labels vary across companies and
+  yfinance versions (`Total Revenue` / `Revenues` /
+  `Revenue From Operations`; `EBITDA` / `Normalized EBITDA`).
+  Returns up to 4 quarters per ticker. Quarters with neither
+  revenue nor ebitda populated are filtered out — no value in
+  recording rows that are entirely empty.
+
+- **run_financials_refresh()** in runners.py: mirrors
+  `run_shares_refresh`. Each ticker can produce 0-4 quarter rows;
+  the runner writes all of them in one transaction per ticker.
+  Same checkpoint-every-50, same 80-day skip-if-recent, same
+  rate-limit cool-off retry semantics.
+
+- **QuarterlyFinancialsRepository**: `get_latest`,
+  `get_latest_n_quarters`, `get_history`, `list_latest_for_exchange`,
+  `coverage_counts_by_type`, `insert_snapshot`, `delete_for_ticker`.
+  Coverage query reports `with_revenue` and `with_ebitda` as
+  separate columns because that gap is the important quality
+  signal — yfinance has revenue for most Indian tickers but EBITDA
+  for far fewer.
+
+- **CLI**: `refresh-financials --exchange NSE [--force] [--resume RUN_ID]`.
+  `fundamentals-status` now reports three coverage sections:
+  industry, shares, and financials.
+
+- **HTTP**: `GET /v1/fundamentals/financials` (latest per ticker),
+  `GET /v1/fundamentals/financials/{ticker_id}/quarters?n=4`
+  (latest N quarters for one ticker),
+  `GET /v1/fundamentals/financials/{ticker_id}/quarter/{date}/history`
+  (restatement detection for one (ticker, quarter) pair),
+  `POST /v1/fundamentals/refresh-financials` (fire-and-forget).
+
+- **Scheduler**: `SCHEDULED_PHASES` now `('industry', 'shares',
+  'financials')`. Each phase fires per exchange at quarter-end+
+  1month windows. Industry first, shares second, financials third
+  per exchange — Phase 4 / Phase 7 code that joins across the three
+  sees them in a consistent freshness order.
+
+### Realistic coverage expectation
+
+Based on yfinance's data quality for Indian tickers:
+  - **Revenue**: likely 80-90% coverage. Most NSE tickers yfinance
+    knows about have at least one quarter of revenue.
+  - **EBITDA**: likely 40-60% coverage. Mid/small-caps frequently
+    have NULL EBITDA. This gap motivates the Phase 3.B computation
+    work.
+
+These will be confirmed when the operator runs the first
+`refresh-financials --exchange NSE` against the real yfinance.
+
+### What's deliberately NOT in Phase 3.A
+
+- **EBITDA computation** from operating income + D&A. Reserved
+  for Phase 3.B after probing yfinance's field reliability.
+- **Other income-statement line items** (gross profit, operating
+  income, net income, etc.). Phase 3.A is scoped to revenue +
+  EBITDA only, per the original design doc §1.
+- **Balance-sheet items** (assets, liabilities, equity). Out of
+  scope for this entire fundamentals vertical slice; would be a
+  Phase 10+ addition if ever needed.
+- **Annual financials**. yfinance exposes them via `financials`
+  (annual) vs `quarterly_financials`; we only fetch quarterly.
+
+### Verification
+
+After running `refresh-financials --exchange NSE`:
+
+```sql
+SELECT
+    t.exchange,
+    t.instrument_type,
+    COUNT(DISTINCT t.ticker_id) AS total_tickers,
+    COUNT(DISTINCT qf.ticker_id) FILTER (
+        WHERE qf.revenue IS NOT NULL
+    ) AS with_revenue,
+    COUNT(DISTINCT qf.ticker_id) FILTER (
+        WHERE qf.ebitda IS NOT NULL
+    ) AS with_ebitda,
+    ROUND(100.0 * COUNT(DISTINCT qf.ticker_id) FILTER (
+        WHERE qf.ebitda IS NOT NULL
+    ) / NULLIF(COUNT(DISTINCT t.ticker_id), 0), 1) AS ebitda_pct
+FROM tickers t
+LEFT JOIN quarterly_financials qf ON qf.ticker_id = t.ticker_id
+WHERE t.is_active
+GROUP BY t.exchange, t.instrument_type
+ORDER BY t.exchange, t.instrument_type;
+```
+
+The `ebitda_pct` column is the input that drives whether Phase 3.B's
+EBITDA-computation work is worth doing — if it's >80% we may not
+bother; if it's <50% we definitely need to compute.

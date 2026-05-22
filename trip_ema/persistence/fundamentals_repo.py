@@ -773,3 +773,215 @@ def _shares_from_row(row):
         fetched_at=row[5],
         xbrl_url=row[6],
     )
+
+
+# ---------- QuarterlyFinancial (Phase 3) ---------- #
+
+
+class QuarterlyFinancialsRepository:
+    """Time-series quarterly revenue + EBITDA per ticker.
+
+    Composite PK is (ticker_id, fiscal_quarter, fetched_at). Reads
+    default to the latest fetched_at per (ticker, quarter) via
+    DISTINCT ON; the history of a single (ticker, quarter) pair
+    is exposed via get_history for restatement detection.
+
+    Pattern matches InstrumentSharesRepository: connection in
+    constructor, no transaction management, returns domain
+    dataclasses.
+    """
+
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    # ----- reads ----- #
+
+    def get_latest(self, ticker_id: int, fiscal_quarter: "date"):
+        """The most-recent snapshot for (ticker, quarter). None if
+        the runner never recorded anything for this pair."""
+        row = self._conn.execute(
+            text("""
+                SELECT ticker_id, fiscal_quarter, fetched_at,
+                       revenue, ebitda, currency, source
+                FROM quarterly_financials
+                WHERE ticker_id = :tid AND fiscal_quarter = :fq
+                ORDER BY fetched_at DESC
+                LIMIT 1
+            """),
+            {"tid": ticker_id, "fq": fiscal_quarter},
+        ).fetchone()
+        return _qfinancial_from_row(row) if row else None
+
+    def get_latest_n_quarters(self, ticker_id: int, n: int = 4) -> list:
+        """Latest snapshots for the N most-recent quarters this
+        ticker has been refreshed for. Newest quarter first.
+
+        This is the Phase 7 "show me Q-4 .. Q-1 revenue and EBITDA"
+        query. It assumes every (ticker, quarter) pair has at least
+        one row — gaps in the time series surface as missing
+        quarters.
+        """
+        rows = self._conn.execute(
+            text("""
+                SELECT DISTINCT ON (fiscal_quarter)
+                       ticker_id, fiscal_quarter, fetched_at,
+                       revenue, ebitda, currency, source
+                FROM quarterly_financials
+                WHERE ticker_id = :tid
+                ORDER BY fiscal_quarter DESC, fetched_at DESC
+                LIMIT :n
+            """),
+            {"tid": ticker_id, "n": n},
+        )
+        return [_qfinancial_from_row(r) for r in rows]
+
+    def get_history(self, ticker_id: int, fiscal_quarter: "date") -> list:
+        """All snapshots for one (ticker, quarter) pair, newest first.
+
+        Used for restatement detection: if length > 1, the number
+        has been reported differently at different times. Phase 3
+        ships with this query available but no analytics built on
+        top — it's reserved for the (future) data-quality tooling.
+        """
+        rows = self._conn.execute(
+            text("""
+                SELECT ticker_id, fiscal_quarter, fetched_at,
+                       revenue, ebitda, currency, source
+                FROM quarterly_financials
+                WHERE ticker_id = :tid AND fiscal_quarter = :fq
+                ORDER BY fetched_at DESC
+            """),
+            {"tid": ticker_id, "fq": fiscal_quarter},
+        )
+        return [_qfinancial_from_row(r) for r in rows]
+
+    def list_latest_for_exchange(
+        self, exchange: str, *, fiscal_quarter: Optional["date"] = None,
+    ) -> list:
+        """Latest snapshot per (ticker, quarter) for active tickers
+        on `exchange`. If `fiscal_quarter` is given, scopes to that
+        quarter; otherwise returns the latest quarter per ticker.
+
+        Phase 7 will call this with the most recent quarter date to
+        show a universe-wide snapshot.
+        """
+        if fiscal_quarter is None:
+            # Latest known quarter per ticker, with latest fetched_at
+            # within that. DISTINCT ON is the cleanest way to express
+            # the per-ticker max in Postgres.
+            sql = """
+                SELECT DISTINCT ON (qf.ticker_id)
+                       qf.ticker_id, qf.fiscal_quarter, qf.fetched_at,
+                       qf.revenue, qf.ebitda, qf.currency, qf.source
+                FROM quarterly_financials qf
+                JOIN tickers t ON t.ticker_id = qf.ticker_id
+                WHERE t.exchange = :ex AND t.is_active = TRUE
+                ORDER BY qf.ticker_id, qf.fiscal_quarter DESC, qf.fetched_at DESC
+            """
+            params = {"ex": exchange}
+        else:
+            sql = """
+                SELECT DISTINCT ON (qf.ticker_id)
+                       qf.ticker_id, qf.fiscal_quarter, qf.fetched_at,
+                       qf.revenue, qf.ebitda, qf.currency, qf.source
+                FROM quarterly_financials qf
+                JOIN tickers t ON t.ticker_id = qf.ticker_id
+                WHERE t.exchange = :ex AND t.is_active = TRUE
+                  AND qf.fiscal_quarter = :fq
+                ORDER BY qf.ticker_id, qf.fetched_at DESC
+            """
+            params = {"ex": exchange, "fq": fiscal_quarter}
+        rows = self._conn.execute(text(sql), params)
+        return [_qfinancial_from_row(r) for r in rows]
+
+    def coverage_counts_by_type(self) -> list[tuple[str, str, int, int, int]]:
+        """Per-(exchange, instrument_type) (total, with_revenue,
+        with_ebitda) tuples.
+
+        Used by fundamentals-status. The COUNT(DISTINCT ...) on each
+        column matters: a LEFT JOIN against the time-series table
+        produces one row per (ticker, quarter, fetched_at) and naive
+        COUNT(*) would multiply by history depth.
+        """
+        rows = self._conn.execute(text("""
+            SELECT
+                t.exchange,
+                t.instrument_type,
+                COUNT(DISTINCT t.ticker_id) AS total,
+                COUNT(DISTINCT qf.ticker_id) FILTER (
+                    WHERE qf.revenue IS NOT NULL
+                ) AS with_revenue,
+                COUNT(DISTINCT qf.ticker_id) FILTER (
+                    WHERE qf.ebitda IS NOT NULL
+                ) AS with_ebitda
+            FROM tickers t
+            LEFT JOIN quarterly_financials qf ON qf.ticker_id = t.ticker_id
+            WHERE t.is_active
+            GROUP BY t.exchange, t.instrument_type
+            ORDER BY t.exchange, t.instrument_type
+        """))
+        return [
+            (r[0], r[1], int(r[2]), int(r[3]), int(r[4]))
+            for r in rows
+        ]
+
+    # ----- writes ----- #
+
+    def insert_snapshot(
+        self,
+        ticker_id: int,
+        *,
+        fiscal_quarter: "date",
+        revenue: Optional[float],
+        ebitda: Optional[float],
+        currency: str = "INR",
+        source: str = "YFINANCE",
+    ) -> None:
+        """Insert a snapshot row. The PK is (ticker_id, fiscal_quarter,
+        fetched_at), and fetched_at is NOW() — so same-millisecond
+        inserts of the same (ticker, quarter) would collide, but in
+        practice the runner sleeps 2s between tickers so this never
+        happens.
+
+        Both revenue and ebitda may be NULL — record-of-attempt
+        rather than skipping the write entirely. The next refresh
+        sees "we tried and got nothing" and can decide policy.
+        """
+        from ..fundamentals import FINANCIAL_SOURCES
+        if source not in FINANCIAL_SOURCES:
+            raise ValueError(
+                f"source must be one of {FINANCIAL_SOURCES}, got {source!r}"
+            )
+        self._conn.execute(
+            text("""
+                INSERT INTO quarterly_financials
+                    (ticker_id, fiscal_quarter, fetched_at,
+                     revenue, ebitda, currency, source)
+                VALUES (:tid, :fq, NOW(), :rev, :ebt, :cur, :src)
+            """),
+            {"tid": ticker_id, "fq": fiscal_quarter,
+             "rev": revenue, "ebt": ebitda,
+             "cur": currency, "src": source},
+        )
+
+    def delete_for_ticker(self, ticker_id: int) -> int:
+        """Remove all rows for a ticker. Used by tests; not exposed
+        in the CLI. Returns count deleted."""
+        result = self._conn.execute(
+            text("DELETE FROM quarterly_financials WHERE ticker_id = :tid"),
+            {"tid": ticker_id},
+        )
+        return result.rowcount
+
+
+def _qfinancial_from_row(row):
+    from ..fundamentals import QuarterlyFinancial
+    return QuarterlyFinancial(
+        ticker_id=row[0],
+        fiscal_quarter=row[1],
+        fetched_at=row[2],
+        revenue=float(row[3]) if row[3] is not None else None,
+        ebitda=float(row[4]) if row[4] is not None else None,
+        currency=row[5],
+        source=row[6],
+    )

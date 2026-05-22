@@ -45,6 +45,16 @@ SHARES_SOURCES = (
     "NSE_XBRL", "MANUAL_OVERRIDE",
 )
 
+# Allowed values for `quarterly_financials.source`. Added in
+# migration 0009 (Phase 3). YFINANCE is direct from
+# quarterly_income_stmt; YFINANCE_COMPUTED is reserved for Phase 3.B
+# (computed EBITDA from operating income + D&A); NSE_XBRL for the
+# future XBRL sidecar; MANUAL_OVERRIDE for operator-set values.
+FINANCIAL_SOURCES = (
+    "YFINANCE", "YFINANCE_COMPUTED",
+    "NSE_XBRL", "MANUAL_OVERRIDE",
+)
+
 # Allowed values for `fundamentals_run.phase`.
 RUN_PHASES = (
     "industry", "shares", "financials",
@@ -140,3 +150,38 @@ class SharesOutstanding:
     shares_source: str
     fetched_at: datetime
     xbrl_url: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class QuarterlyFinancial:
+    """A single row from quarterly_financials.
+
+    Composite PK is (ticker_id, fiscal_quarter, fetched_at) — the
+    time-series shape means one (ticker, quarter) pair can have
+    multiple rows reflecting restatements or yfinance data
+    revisions. Reads default to the latest fetched_at per
+    (ticker, quarter); the history is queryable for analytics that
+    care about restatement detection.
+
+    revenue and ebitda are NUMERIC(20,2) at the DB level; we cast to
+    float here because pandas/numpy code downstream prefers float.
+    A future refactor could move to decimal.Decimal but that's a
+    project-wide change.
+
+    fiscal_quarter is the quarter-end date AS REPORTED BY YFINANCE.
+    We do not align to a global calendar — Indian companies file
+    Mar/Jun/Sep/Dec quarter-ends; some yfinance entries use calendar
+    Q-ends, some use fiscal. Trust what yfinance returns.
+
+    Both revenue and ebitda may be NULL: revenue is rarely missing
+    for any company yfinance knows about; ebitda is missing for
+    many mid/small caps. Phase 3.A stores NULL when missing rather
+    than computing it (deferred to Phase 3.B after probing).
+    """
+    ticker_id: int
+    fiscal_quarter: date
+    fetched_at: datetime
+    revenue: Optional[float]
+    ebitda: Optional[float]
+    currency: str
+    source: str

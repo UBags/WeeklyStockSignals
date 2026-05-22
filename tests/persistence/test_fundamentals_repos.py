@@ -699,3 +699,373 @@ class TestSharesDelete:
                 tid, date(2026, 5, 21),
             )
         assert removed is False
+
+
+# ---------- QuarterlyFinancialsRepository (Phase 3) ---------- #
+
+
+from trip_ema.persistence.fundamentals_repo import (
+    QuarterlyFinancialsRepository,
+)
+
+
+class TestQuarterlyFinancialsInsertAndRead:
+    """Basic insertion and idempotency."""
+
+    def test_insert_and_get_latest(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            QuarterlyFinancialsRepository(conn).insert_snapshot(
+                tid,
+                fiscal_quarter=date(2025, 12, 31),
+                revenue=2_500_000_000_000.0,  # 2.5 lakh crore
+                ebitda=350_000_000_000.0,
+            )
+        with db_engine.connect() as conn:
+            row = QuarterlyFinancialsRepository(conn).get_latest(
+                tid, date(2025, 12, 31),
+            )
+        assert row is not None
+        assert row.ticker_id == tid
+        assert row.fiscal_quarter == date(2025, 12, 31)
+        assert row.revenue == 2_500_000_000_000.0
+        assert row.ebitda == 350_000_000_000.0
+        assert row.currency == "INR"
+        assert row.source == "YFINANCE"
+
+    def test_get_latest_returns_None_when_no_data(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with db_engine.connect() as conn:
+            row = QuarterlyFinancialsRepository(conn).get_latest(
+                tid, date(2025, 12, 31),
+            )
+        assert row is None
+
+    def test_null_ebitda_is_allowed(self, db_engine, ticker_ids):
+        """The whole reason for storing nullable ebitda — yfinance
+        doesn't have it for many mid/small caps."""
+        tid = ticker_ids[("NSE", "TCS")]
+        with transaction(db_engine) as conn:
+            QuarterlyFinancialsRepository(conn).insert_snapshot(
+                tid,
+                fiscal_quarter=date(2025, 12, 31),
+                revenue=600_000_000_000.0,
+                ebitda=None,
+            )
+        with db_engine.connect() as conn:
+            row = QuarterlyFinancialsRepository(conn).get_latest(
+                tid, date(2025, 12, 31),
+            )
+        assert row.revenue == 600_000_000_000.0
+        assert row.ebitda is None
+
+    def test_null_revenue_is_allowed(self, db_engine, ticker_ids):
+        """Record-of-attempt: both fields NULL still writes a row
+        so the runner knows it tried."""
+        tid = ticker_ids[("NSE", "HDFCBANK")]
+        with transaction(db_engine) as conn:
+            QuarterlyFinancialsRepository(conn).insert_snapshot(
+                tid,
+                fiscal_quarter=date(2025, 12, 31),
+                revenue=None,
+                ebitda=None,
+            )
+        with db_engine.connect() as conn:
+            row = QuarterlyFinancialsRepository(conn).get_latest(
+                tid, date(2025, 12, 31),
+            )
+        assert row is not None
+        assert row.revenue is None
+        assert row.ebitda is None
+
+    def test_insert_rejects_bad_source(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="source"):
+                QuarterlyFinancialsRepository(conn).insert_snapshot(
+                    tid,
+                    fiscal_quarter=date(2025, 12, 31),
+                    revenue=1.0,
+                    ebitda=1.0,
+                    source="BOGUS",
+                )
+
+
+class TestQuarterlyFinancialsTimeSeries:
+    """Time-series PK semantics."""
+
+    def _build_restatement_history(self, db_engine, tid):
+        """Two snapshots for same (ticker, quarter) — simulating
+        a restatement. Tiny sleep between writes to ensure
+        fetched_at differs."""
+        import time
+        with transaction(db_engine) as conn:
+            QuarterlyFinancialsRepository(conn).insert_snapshot(
+                tid,
+                fiscal_quarter=date(2025, 9, 30),
+                revenue=500_000_000_000.0,  # original report
+                ebitda=70_000_000_000.0,
+            )
+        time.sleep(0.01)
+        with transaction(db_engine) as conn:
+            QuarterlyFinancialsRepository(conn).insert_snapshot(
+                tid,
+                fiscal_quarter=date(2025, 9, 30),
+                revenue=495_000_000_000.0,  # restated (slightly less)
+                ebitda=68_000_000_000.0,
+            )
+
+    def test_two_inserts_same_quarter_produces_two_rows(
+        self, db_engine, ticker_ids,
+    ):
+        """Time-series PK means same (ticker, quarter) twice → two
+        rows, not a conflict. Validates that the PK includes
+        fetched_at."""
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_restatement_history(db_engine, tid)
+        with db_engine.connect() as conn:
+            history = QuarterlyFinancialsRepository(conn).get_history(
+                tid, date(2025, 9, 30),
+            )
+        assert len(history) == 2
+
+    def test_get_latest_returns_newest_fetched_at(self, db_engine, ticker_ids):
+        """Of two snapshots for the same quarter, get_latest returns
+        the newer fetched_at (the restated number)."""
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_restatement_history(db_engine, tid)
+        with db_engine.connect() as conn:
+            row = QuarterlyFinancialsRepository(conn).get_latest(
+                tid, date(2025, 9, 30),
+            )
+        # The second insert (restated) is what should come back.
+        assert row.revenue == 495_000_000_000.0
+        assert row.ebitda == 68_000_000_000.0
+
+    def test_get_history_returns_newest_first(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_restatement_history(db_engine, tid)
+        with db_engine.connect() as conn:
+            history = QuarterlyFinancialsRepository(conn).get_history(
+                tid, date(2025, 9, 30),
+            )
+        # Newest first: restated value at index 0, original at 1.
+        assert history[0].revenue == 495_000_000_000.0
+        assert history[1].revenue == 500_000_000_000.0
+
+
+class TestGetLatestNQuarters:
+    """The Phase 7 'show me Q-4 .. Q-1' query."""
+
+    def _build_four_quarters(self, db_engine, tid):
+        """Four consecutive quarter snapshots for one ticker."""
+        with transaction(db_engine) as conn:
+            r = QuarterlyFinancialsRepository(conn)
+            for fq, rev in [
+                (date(2025, 3, 31),  100.0),
+                (date(2025, 6, 30),  110.0),
+                (date(2025, 9, 30),  120.0),
+                (date(2025, 12, 31), 130.0),
+            ]:
+                r.insert_snapshot(
+                    tid, fiscal_quarter=fq, revenue=rev, ebitda=None,
+                )
+
+    def test_returns_4_newest_quarters(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_four_quarters(db_engine, tid)
+        with db_engine.connect() as conn:
+            quarters = QuarterlyFinancialsRepository(conn).get_latest_n_quarters(
+                tid, n=4,
+            )
+        assert len(quarters) == 4
+        # Newest quarter first.
+        revs = [q.revenue for q in quarters]
+        assert revs == [130.0, 120.0, 110.0, 100.0]
+
+    def test_n_smaller_than_available_truncates(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_four_quarters(db_engine, tid)
+        with db_engine.connect() as conn:
+            quarters = QuarterlyFinancialsRepository(conn).get_latest_n_quarters(
+                tid, n=2,
+            )
+        assert len(quarters) == 2
+        assert [q.revenue for q in quarters] == [130.0, 120.0]
+
+    def test_n_larger_than_available_returns_all(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        self._build_four_quarters(db_engine, tid)
+        with db_engine.connect() as conn:
+            quarters = QuarterlyFinancialsRepository(conn).get_latest_n_quarters(
+                tid, n=10,
+            )
+        assert len(quarters) == 4
+
+    def test_picks_latest_fetched_at_per_quarter(self, db_engine, ticker_ids):
+        """Restated quarter — get_latest_n_quarters should return the
+        latest snapshot per quarter, not duplicate the quarter."""
+        import time
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            r = QuarterlyFinancialsRepository(conn)
+            r.insert_snapshot(
+                tid, fiscal_quarter=date(2025, 9, 30),
+                revenue=100.0, ebitda=None,
+            )
+        time.sleep(0.01)
+        with transaction(db_engine) as conn:
+            QuarterlyFinancialsRepository(conn).insert_snapshot(
+                tid, fiscal_quarter=date(2025, 9, 30),
+                revenue=99.0, ebitda=None,  # restated
+            )
+        with db_engine.connect() as conn:
+            quarters = QuarterlyFinancialsRepository(conn).get_latest_n_quarters(
+                tid, n=4,
+            )
+        assert len(quarters) == 1  # NOT 2 — DISTINCT ON dedupes by quarter
+        assert quarters[0].revenue == 99.0
+
+
+class TestListLatestForExchange:
+
+    def test_returns_one_row_per_ticker(self, db_engine, ticker_ids):
+        """Each NSE ticker that has any data should appear exactly
+        once, with its latest quarter."""
+        with transaction(db_engine) as conn:
+            r = QuarterlyFinancialsRepository(conn)
+            for sym in ("RELIANCE", "TCS"):
+                tid = ticker_ids[("NSE", sym)]
+                # Two quarters of data each.
+                r.insert_snapshot(
+                    tid, fiscal_quarter=date(2025, 9, 30),
+                    revenue=100.0, ebitda=None,
+                )
+                r.insert_snapshot(
+                    tid, fiscal_quarter=date(2025, 12, 31),
+                    revenue=200.0, ebitda=None,
+                )
+        with db_engine.connect() as conn:
+            rows = QuarterlyFinancialsRepository(conn).list_latest_for_exchange(
+                "NSE",
+            )
+        assert len(rows) == 2
+        for r in rows:
+            # Each row is the latest quarter for its ticker.
+            assert r.fiscal_quarter == date(2025, 12, 31)
+            assert r.revenue == 200.0
+
+    def test_scope_to_specific_quarter(self, db_engine, ticker_ids):
+        """When fiscal_quarter=... is passed, only that quarter
+        is returned."""
+        with transaction(db_engine) as conn:
+            r = QuarterlyFinancialsRepository(conn)
+            for sym, q3, q4 in [
+                ("RELIANCE", 100.0, 110.0),
+                ("TCS", 200.0, 210.0),
+            ]:
+                tid = ticker_ids[("NSE", sym)]
+                r.insert_snapshot(tid, fiscal_quarter=date(2025, 9, 30),
+                                  revenue=q3, ebitda=None)
+                r.insert_snapshot(tid, fiscal_quarter=date(2025, 12, 31),
+                                  revenue=q4, ebitda=None)
+        with db_engine.connect() as conn:
+            rows = QuarterlyFinancialsRepository(conn).list_latest_for_exchange(
+                "NSE", fiscal_quarter=date(2025, 9, 30),
+            )
+        assert len(rows) == 2
+        revenues = sorted(r.revenue for r in rows)
+        assert revenues == [100.0, 200.0]
+
+    def test_excludes_inactive_tickers(self, db_engine, ticker_ids):
+        """Time-series rows persist past deactivation, but the
+        list_latest_for_exchange (current view) excludes them."""
+        from sqlalchemy import text as _text
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            QuarterlyFinancialsRepository(conn).insert_snapshot(
+                tid, fiscal_quarter=date(2025, 12, 31),
+                revenue=100.0, ebitda=None,
+            )
+            conn.execute(_text(
+                "UPDATE tickers SET is_active=FALSE WHERE ticker_id=:tid"
+            ), {"tid": tid})
+        with db_engine.connect() as conn:
+            rows = QuarterlyFinancialsRepository(conn).list_latest_for_exchange("NSE")
+        assert len(rows) == 0
+
+
+class TestFinancialsCoverageCounts:
+
+    def test_reports_per_exchange_and_type(self, db_engine, ticker_ids):
+        # 3 NSE EQ, 1 BSE EQ. Insert data for 2 of 3 NSE — one with
+        # revenue+ebitda, one with revenue-only, one with NULL both
+        # (record-of-attempt).
+        with transaction(db_engine) as conn:
+            r = QuarterlyFinancialsRepository(conn)
+            r.insert_snapshot(
+                ticker_ids[("NSE", "RELIANCE")],
+                fiscal_quarter=date(2025, 12, 31),
+                revenue=100.0, ebitda=15.0,
+            )
+            r.insert_snapshot(
+                ticker_ids[("NSE", "TCS")],
+                fiscal_quarter=date(2025, 12, 31),
+                revenue=200.0, ebitda=None,  # revenue only
+            )
+            r.insert_snapshot(
+                ticker_ids[("NSE", "HDFCBANK")],
+                fiscal_quarter=date(2025, 12, 31),
+                revenue=None, ebitda=None,  # NULL both
+            )
+        with db_engine.connect() as conn:
+            counts = QuarterlyFinancialsRepository(conn).coverage_counts_by_type()
+        by_ex_type = {(ex, t): (tot, rev, ebt) for ex, t, tot, rev, ebt in counts}
+        # NSE EQ: 3 tickers total, 2 with revenue, 1 with ebitda.
+        assert by_ex_type[("NSE", "EQ")] == (3, 2, 1)
+        assert by_ex_type[("BSE", "EQ")] == (1, 0, 0)
+
+    def test_history_doesnt_inflate_counts(self, db_engine, ticker_ids):
+        """A ticker with 4 quarters × 2 restatements each (8 rows)
+        should still count as 1 ticker."""
+        import time
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            r = QuarterlyFinancialsRepository(conn)
+            for fq in (date(2025, 3, 31), date(2025, 6, 30),
+                       date(2025, 9, 30), date(2025, 12, 31)):
+                r.insert_snapshot(
+                    tid, fiscal_quarter=fq, revenue=1.0, ebitda=1.0,
+                )
+        time.sleep(0.01)
+        with transaction(db_engine) as conn:
+            r = QuarterlyFinancialsRepository(conn)
+            for fq in (date(2025, 3, 31), date(2025, 6, 30),
+                       date(2025, 9, 30), date(2025, 12, 31)):
+                r.insert_snapshot(
+                    tid, fiscal_quarter=fq, revenue=1.0, ebitda=1.0,
+                )
+        with db_engine.connect() as conn:
+            counts = QuarterlyFinancialsRepository(conn).coverage_counts_by_type()
+        by_ex_type = {(ex, t): (tot, rev, ebt) for ex, t, tot, rev, ebt in counts}
+        # 3 NSE EQ in total — 1 has data (RELIANCE). NOT 8.
+        assert by_ex_type[("NSE", "EQ")] == (3, 1, 1)
+
+
+class TestFinancialsDelete:
+
+    def test_delete_for_ticker_removes_all_rows(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            r = QuarterlyFinancialsRepository(conn)
+            for fq in (date(2025, 9, 30), date(2025, 12, 31)):
+                r.insert_snapshot(
+                    tid, fiscal_quarter=fq, revenue=1.0, ebitda=None,
+                )
+        with transaction(db_engine) as conn:
+            n = QuarterlyFinancialsRepository(conn).delete_for_ticker(tid)
+        assert n == 2
+        with db_engine.connect() as conn:
+            assert QuarterlyFinancialsRepository(conn).get_latest(
+                tid, date(2025, 12, 31),
+            ) is None
