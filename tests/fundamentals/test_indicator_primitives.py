@@ -1221,3 +1221,431 @@ class TestComputeBarStatesEndToEnd:
                 # If EMA is still rising, we look back to the turn.
                 # bars = 1.
                 assert next_bar["bars_since_med_turn"] == 1
+
+
+# ============================================================
+# Layer 6: regime state machines (Phase 5-3)
+# ============================================================
+
+
+from trip_ema.fundamentals.indicator_primitives import (
+    compute_core_regime,
+    compute_display_regime,
+)
+
+
+def _const_series(value: float, n: int) -> pd.Series:
+    """Helper for building constant-value Series."""
+    return pd.Series([value] * n)
+
+
+def _series_from_list(values: list) -> pd.Series:
+    """Helper for building Series from a list."""
+    return pd.Series(values, dtype=float)
+
+
+class TestComputeCoreRegimeEntries:
+    """Tests for entering each regime state from 0."""
+
+    def test_stays_at_zero_when_price_between_bands(self):
+        """Close inside the inner bands, EMA filters mixed
+        → stays at 0."""
+        n = 5
+        # Close = 100; bands ±5 around EMAs at 100.
+        # No filter satisfies green or red strongly.
+        close = _const_series(100.0, n)
+        med = _const_series(100.0, n)
+        long = _const_series(100.0, n)
+        longest = _const_series(100.0, n)
+        upper_inner = _const_series(105.0, n)
+        lower_inner = _const_series(95.0, n)
+        out = compute_core_regime(
+            close, med, long, longest, upper_inner, lower_inner,
+        )
+        assert out.tolist() == [0] * n
+
+    def test_enters_plus_one_when_above_upper_inner_with_green_filter(self):
+        """close > upper_inner AND med > longest → enter +1."""
+        n = 3
+        # bar 0: close=100, all EMAs at 100 → still 0 (close == upper_inner edge)
+        # bar 1: close=110, med=105 > longest=100, close > upper_inner → +1
+        close = _series_from_list([100.0, 110.0, 115.0])
+        med = _series_from_list([100.0, 105.0, 108.0])
+        long = _series_from_list([100.0, 100.0, 100.0])
+        longest = _series_from_list([100.0, 100.0, 100.0])
+        upper_inner = _series_from_list([101.0, 107.0, 110.0])
+        lower_inner = _series_from_list([99.0, 93.0, 90.0])
+        out = compute_core_regime(
+            close, med, long, longest, upper_inner, lower_inner,
+        )
+        # bar 0: close=100 < upper=101 → stay 0
+        # bar 1: close=110 > upper=107 AND green (med 105 > longest 100) → +1
+        # bar 2: stay +1 (sticky), exit conditions not met
+        assert out.tolist() == [0, 1, 1]
+
+    def test_enters_minus_one_when_below_lower_with_red_filter(self):
+        """Symmetric: close < lower_inner AND med < longest → -1."""
+        n = 3
+        close = _series_from_list([100.0, 90.0, 85.0])
+        med = _series_from_list([100.0, 95.0, 92.0])
+        long = _series_from_list([100.0, 100.0, 100.0])
+        longest = _series_from_list([100.0, 100.0, 100.0])
+        upper_inner = _series_from_list([101.0, 107.0, 110.0])
+        lower_inner = _series_from_list([99.0, 93.0, 90.0])
+        out = compute_core_regime(
+            close, med, long, longest, upper_inner, lower_inner,
+        )
+        # bar 0: close=100 between bands → 0
+        # bar 1: close=90 < lower=93 AND red (med 95 < longest 100) → -1
+        # bar 2: stay -1
+        assert out.tolist() == [0, -1, -1]
+
+    def test_above_upper_without_green_filter_stays_zero(self):
+        """close > upper_inner but green filter fails → stay 0."""
+        # The green filter has three clauses ORed:
+        #   (med > longest) OR (long > longest) OR (med rising AND
+        #     long rising AND close > longest).
+        # To make all three fail: med <= longest AND long <= longest
+        # AND (med not rising OR long not rising OR close <= longest).
+        n = 2
+        close = _series_from_list([100.0, 110.0])
+        med = _series_from_list([100.0, 95.0])     # falling, < longest
+        long = _series_from_list([100.0, 95.0])    # falling, < longest
+        longest = _series_from_list([100.0, 100.0])
+        upper_inner = _series_from_list([101.0, 105.0])
+        lower_inner = _series_from_list([99.0, 50.0])  # well below — keep red filter from also firing
+        out = compute_core_regime(
+            close, med, long, longest, upper_inner, lower_inner,
+        )
+        # bar 1: close > upper, but green filter fails. red filter
+        # would fire (med < longest, etc.) — but red entry needs
+        # close < lower, and close=110 is way above lower=50.
+        # So we stay at 0.
+        assert out.tolist() == [0, 0]
+
+
+class TestComputeCoreRegimeStickiness:
+    """Tests for staying in +1 / -1 once entered."""
+
+    def test_plus_one_sticky_when_price_dips_inside_bands(self):
+        """Once in +1, a single bar with close back inside the bands
+        does NOT exit to 0 — exit needs (close < long AND long not
+        rising) OR green filter fails."""
+        # Bar 0: enter +1.
+        # Bar 1: close dips back to 100 (between bands), but long EMA
+        #        is rising AND green filter still holds → stay at +1.
+        n = 2
+        close = _series_from_list([110.0, 100.0])
+        med = _series_from_list([108.0, 107.0])     # > longest
+        long = _series_from_list([105.0, 106.0])    # rising
+        longest = _series_from_list([100.0, 100.0])
+        upper_inner = _series_from_list([109.0, 109.0])
+        lower_inner = _series_from_list([90.0, 90.0])
+        out = compute_core_regime(
+            close, med, long, longest, upper_inner, lower_inner,
+        )
+        # bar 0: close=110 > upper=109, green (med=108 > longest=100) → +1
+        # bar 1: close=100 between bands.
+        #        exit_plus_one requires (close < long AND not long_slope_positive) OR not green_filter.
+        #        close=100 < long=106 ✓ but long_slope_positive=True (106 > 105) → first clause False.
+        #        green_filter: med=107 > longest=100 → True. So not green = False.
+        #        Total: False OR False = False → no exit. Stay +1.
+        assert out.tolist() == [1, 1]
+
+    def test_plus_one_exits_to_zero_when_long_falls_below_close(self):
+        """Exit condition 1: close < long_ema AND long EMA not
+        rising."""
+        # Bar 0: enter +1.
+        # Bar 1: close=95, long=100, long not rising. Should exit.
+        n = 2
+        close = _series_from_list([110.0, 95.0])
+        med = _series_from_list([108.0, 105.0])
+        long = _series_from_list([105.0, 100.0])   # falling
+        longest = _series_from_list([100.0, 100.0])
+        upper_inner = _series_from_list([109.0, 109.0])
+        lower_inner = _series_from_list([97.0, 97.0])
+        # bar 1: close=95 < long=100 AND not long_slope_positive (100 < 105)
+        #        → exit_plus_one = True.
+        # Now: does this go to -1 or 0?
+        #   close=95 < lower=97 ✓; red filter:
+        #     med=105 < longest=100 — False.
+        #     long=100 < longest=100 — False.
+        #     (med falling: 105 < 108 ✓ AND long falling: 100 < 105 ✓
+        #      AND close < longest: 95 < 100 ✓) → True.
+        #   So red filter = True. Both conditions met → -1.
+        out = compute_core_regime(
+            close, med, long, longest, upper_inner, lower_inner,
+        )
+        assert out.tolist() == [1, -1]
+
+    def test_plus_one_exits_to_zero_when_green_filter_fails(self):
+        """Exit condition 2: green filter fails, and red entry
+        condition does NOT fire (because close not below lower)."""
+        n = 2
+        close = _series_from_list([110.0, 100.0])
+        med = _series_from_list([108.0, 95.0])     # crosses below longest
+        long = _series_from_list([105.0, 95.0])    # crosses below longest
+        longest = _series_from_list([100.0, 100.0])
+        upper_inner = _series_from_list([109.0, 109.0])
+        lower_inner = _series_from_list([50.0, 50.0])  # way below, can't trigger red entry
+        # bar 1: close=100. close < long? 100 < 95? No → first exit clause False.
+        # green_filter: med < longest, long < longest, AND (med rising? 95 < 108 — no, falling)
+        #   → all three OR clauses fail → green_filter = False.
+        # → exit fires. close=100, lower=50, not below → no -1 entry. → 0.
+        out = compute_core_regime(
+            close, med, long, longest, upper_inner, lower_inner,
+        )
+        assert out.tolist() == [1, 0]
+
+
+class TestComputeCoreRegimeNaNHandling:
+
+    def test_nan_in_inputs_keeps_current_state(self):
+        """If any input is NaN, the regime stays at its current value.
+        On bar 0 (initial state is 0), NaN → stays 0."""
+        n = 3
+        close = _series_from_list([100.0, float('nan'), 110.0])
+        med = _series_from_list([100.0, 100.0, 105.0])
+        long = _series_from_list([100.0, 100.0, 100.0])
+        longest = _series_from_list([100.0, 100.0, 100.0])
+        upper_inner = _series_from_list([101.0, 105.0, 105.0])
+        lower_inner = _series_from_list([99.0, 95.0, 95.0])
+        out = compute_core_regime(
+            close, med, long, longest, upper_inner, lower_inner,
+        )
+        # bar 0: 0 (between bands)
+        # bar 1: NaN close → stay 0
+        # bar 2: close=110 > upper=105, green (med=105 > longest=100) → +1
+        assert out.tolist() == [0, 0, 1]
+
+
+class TestComputeDisplayRegimeBasics:
+
+    def test_zero_when_core_is_zero(self):
+        """display follows core to 0 immediately."""
+        n = 3
+        close = _const_series(100.0, n)
+        open_ = _const_series(100.0, n)
+        core = pd.Series([0, 0, 0], dtype="int64")
+        ui = _const_series(110.0, n)
+        li = _const_series(90.0, n)
+        uo = _const_series(120.0, n)
+        lo = _const_series(80.0, n)
+        out = compute_display_regime(
+            close, open_, core, ui, li, uo, lo,
+        )
+        assert out.tolist() == [0, 0, 0]
+
+    def test_enters_plus_one_when_core_plus_one_and_green_gate(self):
+        """core == +1, candle green (close > open), close > upper_inner,
+        close < upper_outer (anti-chase OK) → display = +1."""
+        n = 2
+        close = _series_from_list([100.0, 115.0])
+        open_ = _series_from_list([100.0, 110.0])  # candle green: 115 > 110
+        core = pd.Series([0, 1], dtype="int64")
+        ui = _series_from_list([110.0, 110.0])
+        li = _series_from_list([90.0, 90.0])
+        uo = _series_from_list([120.0, 120.0])
+        lo = _series_from_list([80.0, 80.0])
+        out = compute_display_regime(
+            close, open_, core, ui, li, uo, lo,
+        )
+        # bar 0: core=0 → display=0
+        # bar 1: core=+1, close=115 > open=110 (green), close > ui=110,
+        #        prev_display=0 (fresh), close=115 < uo=120 (anti-chase OK)
+        #        → green_gate fires → display = +1
+        assert out.tolist() == [0, 1]
+
+    def test_anti_chase_blocks_fresh_entry_when_at_outer_band(self):
+        """Same as above but close >= upper_outer → display stays 0."""
+        n = 2
+        close = _series_from_list([100.0, 125.0])  # past outer
+        open_ = _series_from_list([100.0, 110.0])
+        core = pd.Series([0, 1], dtype="int64")
+        ui = _series_from_list([110.0, 110.0])
+        li = _series_from_list([90.0, 90.0])
+        uo = _series_from_list([120.0, 120.0])
+        lo = _series_from_list([80.0, 80.0])
+        out = compute_display_regime(
+            close, open_, core, ui, li, uo, lo,
+        )
+        # bar 1: close=125, fresh entry (prev=0), close=125 >= uo=120
+        # → anti_chase_ok = (not is_fresh) or (close < uo) = False or False = False
+        # → green_gate = False
+        # → display stays 0
+        assert out.tolist() == [0, 0]
+
+    def test_sticky_stays_plus_one_when_gate_fails_mid_run(self):
+        """Once in +1, a bar where the gate fails (e.g. red candle)
+        does NOT drop back to 0 — stays +1 because core is still +1."""
+        n = 3
+        close = _series_from_list([115.0, 113.0, 117.0])
+        open_ = _series_from_list([110.0, 114.0, 115.0])  # bar 1 red: 113 < 114
+        core = pd.Series([1, 1, 1], dtype="int64")
+        ui = _series_from_list([110.0, 110.0, 110.0])
+        li = _series_from_list([90.0, 90.0, 90.0])
+        uo = _series_from_list([120.0, 120.0, 120.0])
+        lo = _series_from_list([80.0, 80.0, 80.0])
+        out = compute_display_regime(
+            close, open_, core, ui, li, uo, lo,
+        )
+        # bar 0: fresh entry, green (115>110), 115 > ui=110, 115 < uo=120 → +1
+        # bar 1: red candle (113<114), gate=False. prev_display=+1 → sticky stays +1
+        # bar 2: green (117>115), gate=True → +1
+        assert out.tolist() == [1, 1, 1]
+
+    def test_drops_to_zero_when_core_leaves_plus_one(self):
+        """When core flips from +1 to 0, display follows."""
+        n = 3
+        close = _series_from_list([115.0, 113.0, 100.0])
+        open_ = _series_from_list([110.0, 110.0, 105.0])
+        core = pd.Series([1, 1, 0], dtype="int64")  # exit on bar 2
+        ui = _series_from_list([110.0, 110.0, 110.0])
+        li = _series_from_list([90.0, 90.0, 90.0])
+        uo = _series_from_list([120.0, 120.0, 120.0])
+        lo = _series_from_list([80.0, 80.0, 80.0])
+        out = compute_display_regime(
+            close, open_, core, ui, li, uo, lo,
+        )
+        # bar 0: +1 (green gate fires from 0)
+        # bar 1: stay +1 (sticky)
+        # bar 2: core=0 → display=0
+        assert out.tolist() == [1, 1, 0]
+
+
+class TestComputeDisplayRegimeMinusOne:
+    """Symmetric tests for the -1 side."""
+
+    def test_enters_minus_one_when_red_gate_fires(self):
+        n = 2
+        close = _series_from_list([100.0, 85.0])
+        open_ = _series_from_list([100.0, 90.0])  # red: 85 < 90
+        core = pd.Series([0, -1], dtype="int64")
+        ui = _series_from_list([110.0, 110.0])
+        li = _series_from_list([90.0, 90.0])
+        uo = _series_from_list([120.0, 120.0])
+        lo = _series_from_list([80.0, 80.0])
+        out = compute_display_regime(
+            close, open_, core, ui, li, uo, lo,
+        )
+        # bar 1: core=-1, red (85<90), close=85 < li=90, fresh entry,
+        #        close=85 > lo=80 → anti-chase OK → red_gate → -1
+        assert out.tolist() == [0, -1]
+
+    def test_anti_chase_blocks_minus_one_fresh_entry_below_outer(self):
+        """close <= lower_outer on fresh entry → blocked."""
+        n = 2
+        close = _series_from_list([100.0, 75.0])  # past lower outer
+        open_ = _series_from_list([100.0, 90.0])
+        core = pd.Series([0, -1], dtype="int64")
+        ui = _series_from_list([110.0, 110.0])
+        li = _series_from_list([90.0, 90.0])
+        uo = _series_from_list([120.0, 120.0])
+        lo = _series_from_list([80.0, 80.0])
+        out = compute_display_regime(
+            close, open_, core, ui, li, uo, lo,
+        )
+        # bar 1: fresh entry, close=75 <= lo=80 → anti-chase fails → blocked
+        assert out.tolist() == [0, 0]
+
+
+class TestComputeDisplayRegimeIndexSynthesis:
+    """When open is synthesized as prev_close (the index case),
+    the gate uses day-over-day direction."""
+
+    def test_index_synthesis_uses_prev_close_as_open(self):
+        """For an index series with vol=1, the caller passes
+        open=close.shift(1). A rising close gives candle_green=True."""
+        n = 3
+        # Rising series.
+        close = _series_from_list([100.0, 105.0, 110.0])
+        open_ = close.shift(1)  # NaN, 100.0, 105.0
+        # Synthetic candle direction: bar 1: 105 > 100 (green), bar 2: 110 > 105 (green).
+        core = pd.Series([0, 1, 1], dtype="int64")
+        ui = _series_from_list([100.0, 100.0, 100.0])
+        li = _series_from_list([80.0, 80.0, 80.0])
+        uo = _series_from_list([120.0, 120.0, 120.0])
+        lo = _series_from_list([70.0, 70.0, 70.0])
+        out = compute_display_regime(
+            close, open_, core, ui, li, uo, lo,
+        )
+        # bar 0: core=0 → 0
+        # bar 1: core=+1, open=100 (prev_close), close=105 > 100 (green),
+        #        close=105 > ui=100, close=105 < uo=120, fresh entry → +1
+        # bar 2: stay +1 (sticky or gate fires either way)
+        assert out.tolist() == [0, 1, 1]
+
+
+class TestComputeBarStatesIncludesRegime:
+    """End-to-end: compute_bar_states emits regime fields too."""
+
+    def test_dict_has_regime_keys(self):
+        n = 100
+        close = pd.Series(
+            100.0 + 10.0 * np.sin(np.linspace(0, 4 * math.pi, n))
+        )
+        high = close + 2.0
+        low = close - 2.0
+        volume = pd.Series([1e6] * n)
+        dates = pd.Series(pd.date_range("2024-01-05", periods=n, freq="W")).dt.date
+        series = compute_indicator_series(close, volume, high, low)
+        bar_states = compute_bar_states(
+            close, volume, high, low,
+            trade_dates=dates, series=series,
+        )
+        # Last bar should have regime keys.
+        late = bar_states[-1]
+        assert "core_regime" in late
+        assert "display_regime" in late
+        # And values must be in {-1, 0, 1}.
+        assert late["core_regime"] in (-1, 0, 1)
+        assert late["display_regime"] in (-1, 0, 1)
+
+    def test_display_implies_core(self):
+        """A display value of +1 should never appear without a
+        matching core value of +1; same for -1. This is a structural
+        invariant of the gating: display is downstream of core."""
+        n = 100
+        close = pd.Series(
+            100.0 + 10.0 * np.sin(np.linspace(0, 4 * math.pi, n))
+        )
+        high = close + 2.0
+        low = close - 2.0
+        volume = pd.Series([1e6] * n)
+        dates = pd.Series(pd.date_range("2024-01-05", periods=n, freq="W")).dt.date
+        series = compute_indicator_series(close, volume, high, low)
+        bar_states = compute_bar_states(
+            close, volume, high, low,
+            trade_dates=dates, series=series,
+        )
+        for b in bar_states:
+            if b["display_regime"] == 1:
+                assert b["core_regime"] == 1
+            elif b["display_regime"] == -1:
+                assert b["core_regime"] == -1
+
+    def test_index_path_can_enter_display_regime(self):
+        """For an industry index (synthetic OHLC, vol=1), if open
+        defaults to close.shift(1), the display gate CAN fire.
+        This tests the workaround for the all-False candle problem."""
+        # Strong uptrend so core enters +1 and stays there, and
+        # close > prev_close consistently so synthetic candle is green.
+        n = 100
+        value = pd.Series(np.linspace(1000, 1500, n))
+        vol = pd.Series([1.0] * n)
+        dates = pd.Series(pd.date_range("2024-01-05", periods=n, freq="W")).dt.date
+        series = compute_indicator_series(
+            value, vol, value, value,
+            synthetic_atr_for_index=True,
+        )
+        bar_states = compute_bar_states(
+            value, vol, value, value,
+            trade_dates=dates, series=series,
+            # Default open_=None will use close.shift(1).
+        )
+        # At least some late bars should have display_regime != 0.
+        late_display = [b["display_regime"] for b in bar_states[-30:]]
+        assert any(d != 0 for d in late_display), (
+            "Index display_regime never entered a non-zero state — "
+            "the synthetic candle direction workaround isn't firing"
+        )

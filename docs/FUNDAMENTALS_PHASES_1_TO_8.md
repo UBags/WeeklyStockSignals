@@ -1906,3 +1906,157 @@ combined gives full IndicatorState rows ready for upsert.
 ### Phase 5-4
 
 Runners + CLI + HTTP. Same shape as Phase 4 wrappers.
+
+---
+
+## 25. Phase 5-3 (regime state machines)
+
+Two state machines complete the indicator math from Phases 5-1 and
+5-2. Both are sequential walkers over the bar series — they cannot
+be vectorized cleanly because each bar's state depends on the
+prior bar's state. They live in indicator_primitives.py alongside
+the Layer 5 walker; the integrated `compute_bar_states` now emits
+both regime fields per bar.
+
+### compute_core_regime
+
+The underlying regime: -1 / 0 / +1, driven by:
+
+  - Price vs inner ATR band (0.2 × ATR — NOT mid or outer; this
+    is the most common misread of the Pine code).
+  - EMA filters:
+      green = (med > longest) OR (long > longest)
+              OR (med rising AND long rising AND close > longest)
+      red = symmetric with < and "falling"
+  - Long EMA slope direction.
+
+State transitions:
+
+  From 0:
+    Enter +1 if (close > upper_inner) AND green_filter.
+    Enter -1 if (close < lower_inner) AND red_filter.
+    Else stay 0.
+
+  From +1:
+    Stay +1 unless exit conditions fire:
+      (close < long_ema AND NOT long_slope_positive) OR NOT green_filter.
+    On exit, transition to -1 if simultaneously (close < lower
+    AND red_filter); otherwise to 0.
+
+  From -1: symmetric.
+
+Critical subtleties:
+  - The state is sticky. A single bar dipping back inside the
+    bands does NOT exit a non-zero state. The exit conditions
+    must explicitly fire.
+  - Transitions are single-bar — on a bar where +1 exit fires
+    AND -1 entry conditions hold, state goes directly to -1
+    (not pass through 0 first).
+
+### compute_display_regime
+
+A gated version of core_regime that downstream strategy consumers
+read. Adds:
+
+  - Candle direction: close > open (green) or close < open (red).
+  - Anti-chase: a fresh entry (prev_display == 0) is rejected
+    when close has already reached the outer band. Prevents
+    entering late in a move.
+
+State machine:
+
+  If core == +1:
+    If green_gate fires (candle green AND close > upper_inner
+      AND (prev_display == +1 OR close < upper_outer)):
+      display = +1
+    Else if prev_display == +1: display = +1 (sticky)
+    Else: display = 0
+  If core == -1: symmetric.
+  If core == 0: display = 0 (force exit regardless of stickiness).
+
+### Index synthesis problem
+
+For industry indices, we synthesize O=H=L=C=value, so close == open
+on every bar. This means `candleIsGreen = close > open` is ALWAYS
+False, and the display_regime gate could never fire — defeating
+its purpose for indices.
+
+Solution: compute_bar_states accepts an `open_` parameter. For
+tickers, callers pass the real open price Series. For indices,
+they pass `close.shift(1)` (default behavior when `open_` is None).
+This makes the synthetic candle direction = "today's value moved
+up from yesterday", which preserves the gate's semantic intent
+(continuation of the move).
+
+The phase 5-4 runner will populate `open_` correctly based on
+series kind.
+
+### Layer 6 integration into compute_bar_states
+
+`compute_bar_states` now:
+  1. Computes core_regime Series via compute_core_regime.
+  2. Computes display_regime Series via compute_display_regime.
+  3. Walks bars and emits per-bar dicts including both regime
+     fields.
+
+Each dict now has all 38 IndicatorState fields (minus the
+polymorphic identity fields, which the runner adds).
+
+### Decisions made this session
+
+  - Inner band only: the Pine "upper_band"/"lower_band" in the
+    state machine refers to the inner ATR band. I documented this
+    explicitly because it's a frequent source of porting errors.
+
+  - Sticky regime on NaN inputs: when any required indicator is
+    NaN, regime stays at the current state (not reset to 0). This
+    matches Pine's behavior where ta.na propagation effectively
+    holds the state.
+
+  - Display follows core to 0 immediately: when core leaves a
+    non-zero state, display drops to 0 regardless of stickiness.
+    Core is the gatekeeper; display can only operate within core's
+    permissible states.
+
+  - Synthetic candle direction for indices via close.shift(1)
+    rather than bypassing the candle gate entirely. Preserves
+    the anti-chase semantics.
+
+### Test counts
+
+19 new tests in tests/fundamentals/test_indicator_primitives.py:
+
+  - 4 for compute_core_regime entry conditions (stays 0, enters +1,
+    enters -1, doesn't enter without filter)
+  - 3 for compute_core_regime stickiness (stays +1 when dipping
+    inside, exits to 0 via long-EMA condition, exits to 0 via
+    failed green filter)
+  - 1 for compute_core_regime NaN handling
+  - 5 for compute_display_regime basics (zero-when-core-zero,
+    enter +1, anti-chase block, sticky stay, drop to 0 on core
+    exit)
+  - 2 for compute_display_regime -1 side (enter -1, anti-chase block)
+  - 1 for compute_display_regime index synthesis
+  - 3 for compute_bar_states integration (dict has regime keys,
+    display implies core invariant, index path can enter display)
+
+All 582 prior fundamentals tests still pass.
+
+Total: 601 fundamentals + migration tests.
+
+### Phase 5-4 (next session)
+
+Runners + CLI + HTTP wrappers. Same shape as Phase 4 wrappers:
+
+  - run_indicator_state_backfill(engine, series_identity, ...):
+    walks the date range, computes via compute_indicator_series
+    + compute_bar_states, upserts into indicator_state.
+  - run_indicator_state_for_all_active(engine, kind):
+    iterates over all tickers or all industry indices.
+  - CLI: compute-indicator-state with --industry / --all-active /
+    --ticker filters.
+  - HTTP: GET /indicator-state/{ticker_or_industry}/values plus
+    fire-and-forget POST.
+
+Then Phase 5 is complete — full indicator pipeline from raw bars
+to rows in indicator_state, runnable by operators.
