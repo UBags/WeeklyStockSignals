@@ -185,3 +185,37 @@ class QuarterlyFinancial:
     ebitda: Optional[float]
     currency: str
     source: str
+
+
+# Allowed values for `daily_market_cap.source`. Added in migration
+# 0010 (Phase 4A). COMPUTED = close × shares (trusted);
+# YFINANCE_HIST_MCAP = yfinance's pre-baked historical mcap series;
+# APPROX_TODAYS_SHARES = close × today's shares (wrong if corporate
+# actions intervened, marked for filter); MANUAL_OVERRIDE = operator.
+MARKET_CAP_SOURCES = (
+    "COMPUTED", "YFINANCE_HIST_MCAP",
+    "APPROX_TODAYS_SHARES", "MANUAL_OVERRIDE",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DailyMarketCap:
+    """A single row from daily_market_cap.
+
+    market_cap is in the ticker's reporting currency — for NSE/BSE
+    tickers this is INR. We don't store currency on this table
+    because mcap is implicitly in the same currency as `close_price`
+    and `shares_used`; downstream code joining against the bars
+    table should not need a currency lookup.
+
+    shares_used is NULL when source = YFINANCE_HIST_MCAP (yfinance
+    gives the mcap directly without exposing the shares-count used
+    in its derivation).
+    """
+    ticker_id: int
+    trade_date: date
+    close_price: float
+    shares_used: Optional[int]
+    market_cap: float
+    source: str
+    computed_at: datetime

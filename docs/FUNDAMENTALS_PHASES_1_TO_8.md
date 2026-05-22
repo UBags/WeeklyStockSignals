@@ -950,3 +950,102 @@ ORDER BY t.exchange, t.instrument_type;
 The `ebitda_pct` column is the input that drives whether Phase 3.B's
 EBITDA-computation work is worth doing — if it's >80% we may not
 bother; if it's <50% we definitely need to compute.
+
+---
+
+## 17. Empirical Phase 1-3 findings + Phase 4A foundation
+
+After running the full Phase 1, 2, and 3 refreshes against the
+NSE universe (2347 active equities + 320 ETFs), the coverage
+numbers came back materially better than the predictions in §1-3
+of this doc:
+
+| Metric | Empirical | Original prediction |
+|---|---|---|
+| Industry (EQ) | 96.2% | 60-85% |
+| Shares (EQ)   | 95.4% | 85-90% |
+| Revenue (EQ)  | 95.1% | 80-90% |
+| EBITDA (EQ)   | **91.9%** | 40-60% |
+
+The EBITDA number is the surprise. yfinance has materially better
+EBITDA coverage for Indian equities than its general reputation
+suggests. The EBITDA-to-revenue ratio is **96.5%** — of the
+equities yfinance gave us *any* financial data for, almost all
+also had a populated EBITDA row.
+
+**Implication: Phase 3.B (computed EBITDA from operating income +
+D&A) is explicitly NOT pursued.** The premise was "EBITDA gap large
+enough to justify computation despite silent-failure risk." A 4%
+gap (77 tickers out of 2347) doesn't justify it. Those 77 tickers
+join the long tail addressed via the operator override pattern
+that Phase 1 established for industry classification.
+
+### Trust profile of Phase 2 shares data
+
+Real shares_source breakdown after the first NSE refresh:
+  - YFINANCE         : 2239 tickers
+  - YFINANCE_IMPLIED :    1 ticker
+
+The fallback path effectively never fires. Phase 4's downstream
+code can treat all shares as roughly equal-trust without filtering
+on shares_source.
+
+### Phase 4A foundation (this session)
+
+Phase 4A is split across multiple sessions. This session shipped
+the foundation:
+
+- **Migration 0010**: `daily_market_cap` table with PK
+  `(ticker_id, trade_date)`, columns close_price, shares_used,
+  market_cap NUMERIC(22,2), source VARCHAR(24) with allowed values
+  COMPUTED / YFINANCE_HIST_MCAP / APPROX_TODAYS_SHARES /
+  MANUAL_OVERRIDE, computed_at. Index on (trade_date,
+  market_cap DESC) for Phase 4B's "top-N tickers by mcap on date X"
+  query.
+- **Domain types**: MARKET_CAP_SOURCES tuple + DailyMarketCap
+  dataclass (frozen, slots).
+- **Test coverage**: domain layer tests pinning the contract.
+  Repo / fetcher / runner / CLI / HTTP tests deferred to subsequent
+  sessions.
+
+### Phase 4A still-to-build (next session)
+
+- DailyMarketCapRepository (get_latest, get_at, list_for_date,
+  upsert_snapshot, coverage_counts_by_date, delete_for_date) +
+  tests.
+- market_cap_compute.py — computes one day's mcap for all active EQ
+  tickers, joining ohlcv_bars × instrument_shares.
+- yfinance historical mcap fetcher for backfill of dates older
+  than the earliest instrument_shares row. Needs a probe-first to
+  verify the API shape before committing to the integration.
+- Runner run_market_cap_backfill walking the 1-year date range
+  (the operator's choice for Phase 4A backfill horizon).
+- CLI: compute-market-cap [--date YYYY-MM-DD] [--backfill-from
+  YYYY-MM-DD]. fundamentals-status extended to show mcap coverage.
+- HTTP routes (3 endpoints).
+
+### Phase 4A scheduler decision
+
+Market cap is daily-cadence, not quarterly. The existing
+QuarterlyFundamentalsScheduler doesn't fit. For Phase 4A, the
+mcap compute is **operator-triggered only** (CLI). The natural
+integration point for daily mcap is the bars-ingestion daemon, but
+that integration belongs in Phase 4C alongside the other backfill/
+integration work.
+
+### Phase 4 design decisions (locked in)
+
+These are settled and will be threaded through Phase 4B/C:
+
+- **Index methodology**: modified Laspeyres.
+  `value(t) = base × Σ_i [weight_i × close_i(t)/close_i(t_rebalance)]`
+  Weights fixed at rebalance.
+- **Mid-cycle delisting**: drop and re-normalize remaining weights.
+- **Backfill horizon**: 1 year (methodology validation against
+  NIFTY sectoral indices; not a long backtest).
+- **Minimum constituents threshold**: 10 (changed from the design
+  doc default of 20). Industries with fewer than 10 active
+  classified tickers get no index. The 10 is operator-configurable
+  via a runtime parameter, not a hardcode.
+- **ETFs excluded from constituent selection** via
+  `WHERE instrument_type = 'EQ'`.
