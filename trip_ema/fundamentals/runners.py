@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Callable, Optional
 
@@ -1189,3 +1190,671 @@ def _parse_iso_date(s: str) -> "date":
     progress_json on resume."""
     from datetime import date as _date
     return _date.fromisoformat(s)
+
+
+# ============================================================
+# Phase 4B-2 — industry index lifecycle
+# ============================================================
+#
+# Three runners:
+#
+#   run_rebalance(industry_name, rebalance_date) — single transactional
+#     rebalance for one index. Closes prior constituents (REBALANCE_EXIT),
+#     picks new top-N, inserts new constituents, writes the
+#     rebalance_date's index value. Returns RebalanceResult.
+#
+#   run_index_value_backfill(industry_name, from_date, to_date) —
+#     walks a date range, computes and writes daily index values.
+#     fundamentals_run lifecycle, checkpoint-every-N dates, resume.
+#
+#   run_industry_index_build(exchange, min_constituents=10) —
+#     auto-discovery: finds industries with ≥min_constituents active
+#     EQ tickers, creates industry_index rows (idempotent), kicks
+#     off the initial rebalance for each one.
+#
+# All three are pure orchestration over the picker+computer from
+# index_compute.py — they don't recompute math, they just sequence
+# DB writes.
+
+
+# ---------- helpers ---------- #
+
+
+def _next_semiannual_rebalance_date(db_engine, after_date: "date") -> Optional["date"]:
+    """Find the first trading day (≥ after_date) that's also a
+    1st-of-April or 1st-of-October target.
+
+    The semantics:
+      - Target dates are April 1 and October 1 each year.
+      - If the target date isn't a trading day (weekend / holiday),
+        we walk forward to the next available trading day.
+      - "Trading day" = any date with at least one row in
+        daily_market_cap. Cheaper than reading ohlcv_bars and
+        captures exactly the dates we can index.
+      - Returns None if no qualifying date is found within the
+        next 2 years (defensive bound; shouldn't happen for a
+        live data set).
+
+    For Phase 4B, this is called to find the FIRST rebalance date
+    for newly-discovered indices. The runner uses it to set
+    base_date.
+    """
+    from datetime import date as _date, timedelta as _td
+
+    # Generate target dates: April 1 and October 1 for the next 2 years.
+    candidates: list[_date] = []
+    year = after_date.year
+    for y in (year, year + 1, year + 2):
+        for month in (4, 10):
+            target = _date(y, month, 1)
+            if target >= after_date:
+                candidates.append(target)
+    candidates.sort()
+
+    with db_engine.connect() as conn:
+        for target in candidates:
+            # Walk forward up to 7 days looking for the next
+            # trading day at or after target. (NSE has at most
+            # a 3-day weekend with Monday/Tuesday holiday;
+            # 7 days is comfortable margin.)
+            for offset in range(7):
+                probe = target + _td(days=offset)
+                row = conn.execute(
+                    text("""
+                        SELECT 1
+                        FROM daily_market_cap
+                        WHERE trade_date = :td
+                        LIMIT 1
+                    """),
+                    {"td": probe},
+                ).fetchone()
+                if row is not None:
+                    return probe
+    return None
+
+
+def _list_trading_days_in_range(
+    db_engine, from_date: "date", to_date: "date",
+) -> list["date"]:
+    """All distinct trade_dates with daily_market_cap rows in the
+    range, ascending. Used by run_index_value_backfill to walk
+    only days that have data."""
+    with db_engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT trade_date
+            FROM daily_market_cap
+            WHERE trade_date >= :fd AND trade_date <= :td
+            ORDER BY trade_date ASC
+        """), {"fd": from_date, "td": to_date}).fetchall()
+    return [r[0] for r in rows]
+
+
+@dataclass(frozen=True, slots=True)
+class RebalanceResult:
+    """Summary of one rebalance. Used by tests and by
+    run_industry_index_build for logging."""
+    industry_name: str
+    rebalance_date: "date"
+    constituents_picked: int
+    constituents_closed: int  # how many prior constituents we closed
+    rebalance_skipped: bool   # True if min_constituents not met
+    skip_reason: Optional[str]
+
+
+# ---------- run_rebalance ---------- #
+
+
+def run_rebalance(
+    db_engine: Engine,
+    industry_name: str,
+    rebalance_date: "date",
+    *,
+    n: int = 10,
+    exchange: Optional[str] = None,
+    min_constituents: Optional[int] = None,
+) -> RebalanceResult:
+    """Execute one rebalance for `industry_name` on `rebalance_date`.
+
+    Algorithm:
+      1. Look up the index. If it doesn't exist, raise.
+      2. Pick top-N constituents via select_top_n_constituents.
+      3. If count < min_constituents (taken from index row if not
+         overridden), log warning and return without writing.
+      4. In a single transaction:
+         a. Close any prior active constituents with effective_to
+            = rebalance_date - 1 day, reason=REBALANCE_EXIT.
+         b. Insert new constituent rows for each picked ticker.
+         c. Compute and write the index value for rebalance_date.
+            (At the rebalance, value should equal base_value
+            because every ratio is 1.0; the write confirms this
+            and serves as the anchor for future computations.)
+
+    Returns RebalanceResult. The `rebalance_skipped` field tells
+    the caller whether the rebalance was committed; if True, no
+    DB state changed.
+    """
+    from datetime import timedelta as _td
+
+    from .index_compute import (
+        compute_index_value_for_date,
+        select_top_n_constituents,
+    )
+    from ..persistence.fundamentals_repo import (
+        IndustryIndexConstituentRepository,
+        IndustryIndexRepository,
+        IndustryIndexValueRepository,
+    )
+
+    with db_engine.connect() as conn:
+        idx = IndustryIndexRepository(conn).get(industry_name)
+    if idx is None:
+        raise ValueError(
+            f"run_rebalance: index {industry_name!r} does not exist"
+        )
+
+    effective_min = (
+        min_constituents if min_constituents is not None
+        else idx.min_constituents
+    )
+
+    # ----- pick new constituents (read-only) ----- #
+    picked = select_top_n_constituents(
+        db_engine, industry_name, rebalance_date,
+        n=n, exchange=exchange,
+    )
+
+    if len(picked) < effective_min:
+        skip_reason = (
+            f"picked {len(picked)} < min_constituents {effective_min}"
+        )
+        logger.warning(
+            "run_rebalance: skipping %s on %s — %s",
+            industry_name, rebalance_date, skip_reason,
+        )
+        return RebalanceResult(
+            industry_name=industry_name,
+            rebalance_date=rebalance_date,
+            constituents_picked=len(picked),
+            constituents_closed=0,
+            rebalance_skipped=True,
+            skip_reason=skip_reason,
+        )
+
+    # ----- write phase: single transaction so we can't half-rebalance ----- #
+    closed_count = 0
+    with transaction(db_engine) as conn:
+        cr = IndustryIndexConstituentRepository(conn)
+        # Close any prior active constituents. effective_to is
+        # the day BEFORE the new rebalance — yesterday's close
+        # was the last day they were "in" the index.
+        prior = cr.list_active_for_index(industry_name)
+        for p in prior:
+            cr.close_period(
+                industry_name, ticker_id=p.ticker_id,
+                effective_to=rebalance_date - _td(days=1),
+                removed_reason="REBALANCE_EXIT",
+            )
+            closed_count += 1
+        # Insert new constituents.
+        for sc in picked:
+            cr.insert_constituent(
+                industry_name, ticker_id=sc.ticker_id,
+                rebalance_date=rebalance_date,
+                weight_at_rebalance=sc.weight,
+                market_cap_at_rebalance=sc.market_cap,
+                close_at_rebalance=sc.close_price,
+            )
+
+    # ----- write the rebalance day's index value ----- #
+    # Done in a separate transaction so the constituent inserts are
+    # committed before the value computation reads them.
+    cv = compute_index_value_for_date(
+        db_engine, industry_name, rebalance_date,
+    )
+    if cv is not None:
+        with transaction(db_engine) as conn:
+            IndustryIndexValueRepository(conn).upsert_value(
+                industry_name,
+                trade_date=rebalance_date,
+                value=cv.value,
+                constituents_used=cv.constituents_used,
+                constituents_missing=cv.constituents_missing,
+                renormalized=cv.renormalized,
+                effective_rebalance_date=cv.effective_rebalance_date,
+            )
+
+    logger.info(
+        "run_rebalance %s on %s: picked=%d closed_prior=%d",
+        industry_name, rebalance_date, len(picked), closed_count,
+    )
+    return RebalanceResult(
+        industry_name=industry_name,
+        rebalance_date=rebalance_date,
+        constituents_picked=len(picked),
+        constituents_closed=closed_count,
+        rebalance_skipped=False,
+        skip_reason=None,
+    )
+
+
+# ---------- run_index_value_backfill ---------- #
+
+
+def run_index_value_backfill(
+    db_engine: Engine,
+    industry_name: str,
+    *,
+    from_date: "date",
+    to_date: "date",
+    resume_run_id: Optional[int] = None,
+    force: bool = False,
+) -> int:
+    """Walk trading days in [from_date, to_date], computing and
+    writing daily index values for `industry_name`.
+
+    Trading days come from daily_market_cap.trade_date — any day
+    we have mcap data is a candidate. Pre-base_date days return
+    None from compute_index_value_for_date and are skipped without
+    error.
+
+    Same fundamentals_run lifecycle as the Phase 1-3 runners.
+    The progress_json carries the date list (not ticker list) for
+    resume.
+
+    Returns run_id.
+    """
+    from .index_compute import compute_index_value_for_date
+    from ..persistence.fundamentals_repo import (
+        IndustryIndexRepository,
+        IndustryIndexValueRepository,
+    )
+
+    if from_date > to_date:
+        raise ValueError(
+            f"from_date {from_date} must be <= to_date {to_date}"
+        )
+
+    # Sanity check: index must exist.
+    with db_engine.connect() as conn:
+        idx = IndustryIndexRepository(conn).get(industry_name)
+    if idx is None:
+        raise ValueError(
+            f"run_index_value_backfill: index {industry_name!r} "
+            f"does not exist"
+        )
+
+    # Skip-if-recent guard: use the value table's latest entry,
+    # not the run-record (which uses a fixed-width exchange column
+    # that doesn't accommodate per-industry granularity). If the
+    # latest value row is within 80 days of today, skip unless
+    # forced.
+    phase = "index_value"
+    if not force and resume_run_id is None:
+        with db_engine.connect() as conn:
+            latest = IndustryIndexValueRepository(conn).get_latest(
+                industry_name,
+            )
+        if latest is not None:
+            age = (date.today() - latest.trade_date).days
+            if age < 80:
+                logger.info(
+                    "Skipping index value backfill for %s: latest "
+                    "value is from %s (%d days ago)",
+                    industry_name, latest.trade_date, age,
+                )
+                # Return a synthetic "no-op success" run id by
+                # opening and closing one. Different from the
+                # mcap pattern but the skip-if-recent contract
+                # requires we return an int.
+                with transaction(db_engine) as conn:
+                    run_id = FundamentalsRunRepository(conn).open(
+                        phase=phase, exchange="ALL",
+                        notes=f"Skipped (recent values exist): {industry_name}",
+                    )
+                    FundamentalsRunRepository(conn).close(
+                        run_id, status="SUCCESS",
+                        succeeded=0, failed=0, skipped=0,
+                    )
+                return run_id
+
+    # ----- resume path ----- #
+    if resume_run_id is not None:
+        with db_engine.connect() as conn:
+            run = FundamentalsRunRepository(conn).get(resume_run_id)
+        if run is None:
+            raise ValueError(f"No run with id {resume_run_id}")
+        if run.phase != phase:
+            raise ValueError(
+                f"Cannot resume: run {resume_run_id} has phase "
+                f"{run.phase!r}, expected {phase!r}"
+            )
+        progress = run.progress_json or {}
+        date_list_iso = progress.get("date_list", [])
+        cursor_index = progress.get("cursor_index", 0)
+        date_list = [_parse_iso_date(s) for s in date_list_iso]
+        run_id = resume_run_id
+        logger.info(
+            "Resuming index value backfill run %d at date index %d/%d",
+            run_id, cursor_index, len(date_list),
+        )
+        # Also restore the range — even if the caller passed a
+        # different one, the resumed run uses the original.
+        if "from_date" in progress:
+            from_date = _parse_iso_date(progress["from_date"])
+            to_date = _parse_iso_date(progress["to_date"])
+    else:
+        # Fresh run.
+        date_list = _list_trading_days_in_range(
+            db_engine, from_date, to_date,
+        )
+        if not date_list:
+            logger.warning(
+                "No trading days in [%s, %s] for index %s — nothing to do",
+                from_date, to_date, industry_name,
+            )
+            with transaction(db_engine) as conn:
+                run_id = FundamentalsRunRepository(conn).open(
+                    phase=phase, exchange="ALL",
+                    notes=f"No trading days in range for {industry_name}",
+                )
+                FundamentalsRunRepository(conn).close(
+                    run_id, status="SUCCESS",
+                    succeeded=0, failed=0, skipped=0,
+                )
+            return run_id
+        with transaction(db_engine) as conn:
+            run_id = FundamentalsRunRepository(conn).open(
+                phase=phase, exchange="ALL",
+                notes=(
+                    f"Index value backfill for {industry_name} "
+                    f"{from_date}→{to_date}, {len(date_list)} trading days"
+                ),
+            )
+            FundamentalsRunRepository(conn).update_progress(
+                run_id,
+                progress_json={
+                    "date_list": [d.isoformat() for d in date_list],
+                    "cursor_index": 0,
+                    "from_date": from_date.isoformat(),
+                    "to_date": to_date.isoformat(),
+                    "industry_name": industry_name,
+                },
+            )
+        cursor_index = 0
+
+    # ----- main loop ----- #
+    succeeded = 0  # days we wrote a value for
+    skipped = 0    # days we skipped (pre-base, no constituents, etc.)
+    failed = 0     # days that errored
+
+    try:
+        for idx_pos in range(cursor_index, len(date_list)):
+            td = date_list[idx_pos]
+            try:
+                cv = compute_index_value_for_date(
+                    db_engine, industry_name, td,
+                )
+                if cv is None:
+                    skipped += 1
+                else:
+                    with transaction(db_engine) as conn:
+                        IndustryIndexValueRepository(conn).upsert_value(
+                            industry_name,
+                            trade_date=cv.trade_date,
+                            value=cv.value,
+                            constituents_used=cv.constituents_used,
+                            constituents_missing=cv.constituents_missing,
+                            renormalized=cv.renormalized,
+                            effective_rebalance_date=cv.effective_rebalance_date,
+                        )
+                    succeeded += 1
+            except Exception as e:
+                logger.exception(
+                    "Failed computing value for %s on %s: %s",
+                    industry_name, td, e,
+                )
+                failed += 1
+
+            if (idx_pos + 1) % CHECKPOINT_EVERY == 0:
+                # Build a checkpoint snapshot — date_list re-encoded
+                # so the progress_json is self-contained.
+                with transaction(db_engine) as conn:
+                    FundamentalsRunRepository(conn).update_progress(
+                        run_id,
+                        succeeded=succeeded,
+                        failed=failed,
+                        skipped=skipped,
+                        progress_json={
+                            "date_list": [d.isoformat() for d in date_list],
+                            "cursor_index": idx_pos + 1,
+                            "from_date": from_date.isoformat(),
+                            "to_date": to_date.isoformat(),
+                            "industry_name": industry_name,
+                        },
+                    )
+                logger.info(
+                    "Checkpoint: %d/%d dates (s=%d sk=%d f=%d) for %s",
+                    idx_pos + 1, len(date_list),
+                    succeeded, skipped, failed, industry_name,
+                )
+
+    except KeyboardInterrupt:
+        logger.warning(
+            "KeyboardInterrupt — closing index value run %d as PARTIAL",
+            run_id,
+        )
+        with transaction(db_engine) as conn:
+            FundamentalsRunRepository(conn).close(
+                run_id, status="PARTIAL",
+                succeeded=succeeded, failed=failed, skipped=skipped,
+                notes="Interrupted by KeyboardInterrupt",
+            )
+        raise
+
+    status = _terminal_status(succeeded, failed)
+    with transaction(db_engine) as conn:
+        FundamentalsRunRepository(conn).close(
+            run_id, status=status,
+            succeeded=succeeded, failed=failed, skipped=skipped,
+        )
+    logger.info(
+        "Index value backfill run %d for %s finished: status=%s s=%d sk=%d f=%d",
+        run_id, industry_name, status, succeeded, skipped, failed,
+    )
+    return run_id
+
+
+# ---------- run_industry_index_build ---------- #
+
+
+def run_industry_index_build(
+    db_engine: Engine,
+    exchange: str,
+    *,
+    min_constituents: int = 10,
+    base_value: float = 1000.0,
+    n: int = 10,
+) -> dict:
+    """Auto-discover qualifying industries and create indices for them.
+
+    Algorithm:
+      1. Query instrument_industry for active EQ tickers on the
+         exchange, grouped by effective industry (industry_override
+         beats auto-classified).
+      2. For each industry with ≥min_constituents tickers:
+         a. Determine first rebalance date: the next semiannual
+            April/October trading day at or after the earliest
+            daily_market_cap date.
+         b. Upsert an industry_index row (idempotent) with that
+            base_date.
+         c. Call run_rebalance for that date.
+      3. Industries with fewer than min_constituents are skipped
+         and reported in the return dict.
+
+    Returns a dict with per-industry outcome lists:
+      {
+        'qualified': [(industry, sector, count), ...],
+        'unqualified': [(industry, sector, count), ...],
+        'indexed': [(industry, base_date, picked), ...],
+        'failed': [(industry, error), ...],
+      }
+    """
+    # ----- 1. Find candidate industries ----- #
+    with db_engine.connect() as conn:
+        rows = conn.execute(text("""
+            WITH effective_industry AS (
+                SELECT
+                    t.ticker_id,
+                    COALESCE(io.industry, ii.industry) AS industry,
+                    COALESCE(io.sector, ii.sector) AS sector
+                FROM tickers t
+                LEFT JOIN industry_override io
+                  ON io.ticker_id = t.ticker_id
+                LEFT JOIN instrument_industry ii
+                  ON ii.ticker_id = t.ticker_id
+                WHERE t.is_active = TRUE
+                  AND t.instrument_type = 'EQ'
+                  AND t.exchange = :ex
+            )
+            SELECT
+                ei.industry,
+                MAX(ei.sector) AS sector,  -- modal-ish; differences are rare
+                COUNT(*) AS ticker_count
+            FROM effective_industry ei
+            WHERE ei.industry IS NOT NULL
+            GROUP BY ei.industry
+            ORDER BY ei.industry
+        """), {"ex": exchange}).fetchall()
+
+    candidates = [
+        (r[0], r[1] or "Unknown", int(r[2]))
+        for r in rows
+    ]
+
+    qualified: list[tuple[str, str, int]] = []
+    unqualified: list[tuple[str, str, int]] = []
+    for industry, sector, count in candidates:
+        if count >= min_constituents:
+            qualified.append((industry, sector, count))
+        else:
+            unqualified.append((industry, sector, count))
+
+    logger.info(
+        "run_industry_index_build %s: %d qualified, %d unqualified "
+        "industries",
+        exchange, len(qualified), len(unqualified),
+    )
+
+    # ----- 2. Find the earliest mcap date for this exchange ----- #
+    with db_engine.connect() as conn:
+        earliest_row = conn.execute(text("""
+            SELECT MIN(mc.trade_date)
+            FROM daily_market_cap mc
+            JOIN tickers t ON t.ticker_id = mc.ticker_id
+            WHERE t.exchange = :ex
+        """), {"ex": exchange}).fetchone()
+    earliest_mcap_date = earliest_row[0] if earliest_row else None
+    if earliest_mcap_date is None:
+        logger.warning(
+            "No mcap data for exchange %s — cannot determine "
+            "base_date for indices", exchange,
+        )
+        return {
+            "qualified": qualified,
+            "unqualified": unqualified,
+            "indexed": [],
+            "failed": [(i, "no mcap data") for i, _, _ in qualified],
+        }
+
+    # ----- 3. Determine the first rebalance date (shared across industries) ----- #
+    # This is the next semiannual trading day at or after the
+    # earliest mcap date. All newly-discovered indices get the
+    # same base_date if they're being built in this run.
+    first_rebalance = _next_semiannual_rebalance_date(
+        db_engine, earliest_mcap_date,
+    )
+    if first_rebalance is None:
+        logger.warning(
+            "Could not find a semiannual trading day in the next "
+            "2 years from %s — aborting build", earliest_mcap_date,
+        )
+        return {
+            "qualified": qualified,
+            "unqualified": unqualified,
+            "indexed": [],
+            "failed": [
+                (i, "no semiannual trading day found")
+                for i, _, _ in qualified
+            ],
+        }
+
+    # ----- 4. For each qualified industry: upsert index + rebalance ----- #
+    from ..persistence.fundamentals_repo import IndustryIndexRepository
+
+    indexed: list[tuple[str, "date", int]] = []
+    failed: list[tuple[str, str]] = []
+
+    for industry, sector, count in qualified:
+        try:
+            # Idempotent upsert. If the index already exists, the
+            # base_date and base_value are preserved (we re-write
+            # them but to the same value typically; the runner
+            # caller can override by passing base_value).
+            with db_engine.connect() as conn:
+                existing = IndustryIndexRepository(conn).get(industry)
+            with transaction(db_engine) as conn:
+                IndustryIndexRepository(conn).upsert(
+                    industry,
+                    sector_name=sector,
+                    base_date=(existing.base_date if existing
+                               else first_rebalance),
+                    base_value=(existing.base_value if existing
+                                else base_value),
+                    min_constituents=min_constituents,
+                )
+            # Run the rebalance — but only if this is a brand-new
+            # index, OR the index has no constituents yet. We
+            # don't want to rebalance every existing index on
+            # every build call.
+            with db_engine.connect() as conn:
+                from ..persistence.fundamentals_repo import (
+                    IndustryIndexConstituentRepository,
+                )
+                current_constituents = (
+                    IndustryIndexConstituentRepository(conn)
+                    .list_active_for_index(industry)
+                )
+            if current_constituents:
+                logger.debug(
+                    "Skipping initial rebalance for %s — already has "
+                    "%d active constituents", industry,
+                    len(current_constituents),
+                )
+                continue
+            result = run_rebalance(
+                db_engine, industry, first_rebalance,
+                n=n, exchange=exchange,
+                min_constituents=min_constituents,
+            )
+            if result.rebalance_skipped:
+                failed.append((industry, result.skip_reason or "skipped"))
+            else:
+                indexed.append(
+                    (industry, first_rebalance, result.constituents_picked)
+                )
+        except Exception as e:
+            logger.exception(
+                "Failed to build index for %s: %s", industry, e,
+            )
+            failed.append((industry, str(e)))
+
+    logger.info(
+        "run_industry_index_build %s: indexed=%d failed=%d",
+        exchange, len(indexed), len(failed),
+    )
+    return {
+        "qualified": qualified,
+        "unqualified": unqualified,
+        "indexed": indexed,
+        "failed": failed,
+    }

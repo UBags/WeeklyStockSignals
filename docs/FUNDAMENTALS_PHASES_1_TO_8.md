@@ -1366,3 +1366,140 @@ still pass. Total: 388 fundamentals + migration tests pass.
   coverage.
 - HTTP endpoints (3-4).
 - Tests at every layer.
+
+---
+
+## 21. Phase 4B-2 (constituent picker + value computer + runners)
+
+Continuing from §20. Phase 4B-1 shipped the data layer (3 migrations,
+3 repos, 49 tests). This session built the algorithmic core: the
+selection logic, the modified-Laspeyres value math, and the three
+runners that orchestrate them into rebalance and value-backfill
+lifecycles.
+
+### Decisions made / locked in this session
+
+- **Split adjustment**: use `daily_market_cap.close_price` on both
+  sides of the `close_i(t) / close_i(t_rebalance)` ratio. Since
+  both come from yfinance's adjusted close, whatever adjustment
+  policy yfinance applies, both numerator and denominator are
+  subject to the same policy → the math is consistent.
+
+  Known limitation: yfinance applies split adjustments
+  retroactively. If a constituent splits mid-cycle, the
+  historical `close_at_rebalance` stored in
+  `industry_index_constituent` becomes stale until manually
+  refreshed. **Not implementing a refresh-on-split detector for
+  Phase 4B** — no evidence yet that this is a problem in practice.
+  Phase 4C+ work if it shows up.
+
+- **Mid-cycle delisting / missing-day handling**: implemented at
+  compute time via drop-and-renormalize. The constituent rows
+  store the rebalance-time weights unchanged; the value formula
+  divides by the present-constituents weight sum. `renormalized
+  =True` flagged on the value row.
+
+- **Multi-rebalance handling**: `list_as_of(trade_date)` returns
+  the constituents active on that day. All such constituents
+  share the same `rebalance_date` (by construction — the runner
+  closes-and-reopens as a batch). The compute layer takes that
+  shared date as `effective_rebalance_date` for the output. A
+  defensive check warns if mixed rebalance dates appear (which
+  would indicate data corruption).
+
+- **First-rebalance date discovery**: helper
+  `_next_semiannual_rebalance_date(after_date)` walks forward
+  from `after_date` looking for the next April 1 or October 1
+  that's also a trading day (i.e. has at least one mcap row).
+  If the target date is a holiday, walks forward up to 7 days
+  to find the next trading day. Bounds the search at 2 years for
+  defensiveness.
+
+- **Skip-if-recent for `run_index_value_backfill`**: uses the
+  value table's `get_latest` rather than the
+  fundamentals_run.last_success path. The reason: the `exchange`
+  column in fundamentals_run is VARCHAR(16), too narrow for a
+  per-industry marker. Using the value table directly is also
+  more semantically accurate — we're asking "do we have recent
+  data" not "did a run recently succeed".
+
+### Shipped this session
+
+- **`trip_ema/fundamentals/index_compute.py`** (~280 lines):
+    - `SelectedConstituent`, `ComputedValue` dataclasses
+      (frozen + slots).
+    - `select_top_n_constituents(industry, rebalance_date, n=10,
+       exchange=None)` — top-N by mcap, scoped via the effective
+      industry CTE (industry_override beats instrument_industry).
+      ETFs and inactive/delisted-before-rebalance tickers
+      excluded.
+    - `compute_index_value_for_date(industry_name, trade_date)` —
+      modified Laspeyres with drop-and-renormalize. Returns None
+      for unknown index / pre-base / no constituents / all-missing.
+
+- **Runners** in `runners.py`:
+    - `run_rebalance(industry_name, rebalance_date)` — closes
+      prior constituents (REBALANCE_EXIT, effective_to =
+      rebalance_date - 1 day), picks new top-N, writes the
+      rebalance day's value. Single transaction on the close-
+      and-insert phase; separate transaction for the value write
+      (so the constituent inserts are visible to the compute
+      layer when it reads them back).
+    - `run_index_value_backfill(industry_name, from_date,
+      to_date)` — walks trading days in range from
+      daily_market_cap, computes per-day, writes via upsert.
+      fundamentals_run lifecycle with checkpoint-every-50.
+    - `run_industry_index_build(exchange, min_constituents=10)`
+      — auto-discovery: queries effective-industry classifications
+      for ≥min_constituents tickers per industry. For each
+      qualifying industry, upserts an industry_index row and
+      kicks off the initial rebalance. Idempotent: re-running
+      doesn't re-rebalance existing indices.
+
+  All three runners are pure orchestration over the picker and
+  computer — they don't recompute math, just sequence DB writes.
+
+### Test counts
+
+42 new tests total this session:
+- 23 in `tests/fundamentals/test_index_compute.py` covering
+  selector happy path, selector filtering (industry / ETF /
+  inactive / delisted / override / mcap / exchange), selector
+  edge cases (empty industry, no mcap), compute happy path
+  (rebalance-day = base, all-up-10%, mixed movements with the
+  1050.0 verification), drop-and-renormalize (the 1137.5
+  verification), pre-base / unknown / no-constituents, and
+  across-rebalances (April vs October picking).
+- 19 in `tests/fundamentals/test_index_runner.py` covering
+  rebalance happy path (first rebalance, subsequent rebalance
+  closes prior, skip when below min_constituents, unknown index
+  raises), helper functions (semiannual date discovery in the
+  May-→-Oct case and the holiday-walk case, trading-days-in-
+  range), value backfill (writes per day, skips pre-base
+  silently, unknown index raises, inverted range rejected,
+  empty range succeeds with 0), index build (qualifying vs
+  unqualifying, idempotent re-run doesn't re-rebalance, no-mcap
+  case returns failed), end-to-end build-then-backfill smoke
+  test.
+
+Total: 430 fundamentals + migration tests pass. Up from 388 at
+start of session.
+
+### Still pending for Phase 4B
+
+Phase 4B-3 (next session):
+- CLI commands: `build-industry-indices`, `compute-index-values`,
+  `rebalance-industry-index`. Extension to `fundamentals-status`
+  to show index coverage section.
+- HTTP endpoints: `GET /v1/fundamentals/industry-indices`,
+  `GET /v1/fundamentals/industry-indices/{name}/values`,
+  `GET /v1/fundamentals/industry-indices/{name}/constituents`,
+  `POST /v1/fundamentals/build-industry-indices`,
+  `POST /v1/fundamentals/compute-index-values`.
+- Tests at every layer.
+- Full sweep, design doc update, package.
+
+After Phase 4B-3 the operator can run:
+  `trip-ema-etl build-industry-indices --exchange NSE`
+  `trip-ema-etl compute-index-values --industry "IT - Services" --from 2025-10-01 --to 2026-05-22`
+to actually produce the index time series Phase 5+ depends on.
