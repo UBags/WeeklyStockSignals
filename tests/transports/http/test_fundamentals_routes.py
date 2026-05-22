@@ -1189,3 +1189,231 @@ class TestComputeIndexValuesEndpoint:
             "/v1/fundamentals/compute-index-values?all_active=true"
         )
         assert r.status_code == 401
+
+
+# ============================================================
+# Phase 5-4 — indicator state endpoints
+# ============================================================
+
+
+from trip_ema.fundamentals import IndicatorState
+from trip_ema.persistence.fundamentals_repo import (
+    IndicatorStateRepository,
+)
+
+
+def _make_indicator_row(industry_name: str, trade_date: date,
+                        *, core_regime: int = 0, display_regime: int = 0):
+    """Helper: build a minimal valid IndicatorState for an industry."""
+    return IndicatorState(
+        ticker_id=None, timeframe=None,
+        industry_name=industry_name, trade_date=trade_date,
+        med_ema=840.0, long_ema=848.0, longest_ema=856.0,
+        atr=12.95,
+        upper_inner_band=859.0, lower_inner_band=830.0,
+        upper_mid_band=882.0, lower_mid_band=815.0,
+        upper_outer_band=915.0, lower_outer_band=798.0,
+        core_regime=core_regime, display_regime=display_regime,
+        pierces_upper_mid=False, pierces_lower_mid=False,
+        dist_to_med_in_hl_units=None,
+        dist_to_long_in_hl_units=None,
+        dist_to_longest_in_hl_units=None,
+        mean_dist_to_med_in_hl_units=None,
+        mean_dist_to_long_in_hl_units=None,
+        mean_dist_to_longest_in_hl_units=None,
+        bars_since_med_turn=None, bars_since_long_turn=None,
+        bars_since_longest_turn=None,
+        pct_change_since_med_turn=None,
+        pct_change_since_long_turn=None,
+        pct_change_since_longest_turn=None,
+        med_pattern_label="NA",
+        long_pattern_label="NA",
+        longest_pattern_label="NA",
+        med_turn_buy=False, med_turn_sell=False,
+        long_turn_buy=False, long_turn_sell=False,
+        longest_turn_buy=False, longest_turn_sell=False,
+        computed_at=datetime.now(timezone.utc),
+    )
+
+
+# ---------- GET /indicator-state/industries/{name} ---------- #
+
+
+class TestGetIndustryIndicatorState:
+
+    def _setup_industry_with_indicator_history(
+        self, db_engine, name: str = "IT - Services",
+    ):
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                name, sector_name="Technology",
+                base_date=date(2025, 10, 1),
+            )
+            repo = IndicatorStateRepository(conn)
+            for td, cr in [
+                (date(2025, 10, 1), 0),
+                (date(2025, 10, 8), 1),
+                (date(2025, 10, 15), 1),
+            ]:
+                repo.upsert_for_industry(
+                    _make_indicator_row(name, td, core_regime=cr,
+                                        display_regime=cr)
+                )
+
+    def test_returns_history_newest_first(
+        self, real_db_client, db_engine,
+    ):
+        self._setup_industry_with_indicator_history(db_engine)
+        r = real_db_client.get(
+            "/v1/fundamentals/indicator-state/industries/IT - Services",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        rows = r.json()["rows"]
+        dates = [r["trade_date"] for r in rows]
+        assert dates == ["2025-10-15", "2025-10-08", "2025-10-01"]
+
+    def test_date_range_filter(self, real_db_client, db_engine):
+        self._setup_industry_with_indicator_history(db_engine)
+        r = real_db_client.get(
+            "/v1/fundamentals/indicator-state/industries/IT - Services"
+            "?from_date=2025-10-08&to_date=2025-10-08",
+            headers=AUTH_HEADERS,
+        )
+        body = r.json()
+        assert len(body["rows"]) == 1
+        assert body["rows"][0]["trade_date"] == "2025-10-08"
+        assert body["from_date"] == "2025-10-08"
+
+    def test_limit_param(self, real_db_client, db_engine):
+        self._setup_industry_with_indicator_history(db_engine)
+        r = real_db_client.get(
+            "/v1/fundamentals/indicator-state/industries/IT - Services?limit=2",
+            headers=AUTH_HEADERS,
+        )
+        body = r.json()
+        assert len(body["rows"]) == 2
+
+    def test_unknown_industry_returns_empty(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/indicator-state/industries/Nonexistent",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        assert r.json()["rows"] == []
+
+    def test_payload_includes_all_fields(self, real_db_client, db_engine):
+        self._setup_industry_with_indicator_history(db_engine)
+        r = real_db_client.get(
+            "/v1/fundamentals/indicator-state/industries/IT - Services?limit=1",
+            headers=AUTH_HEADERS,
+        )
+        row = r.json()["rows"][0]
+        # Spot-check key fields are present.
+        for k in ["med_ema", "long_ema", "longest_ema", "atr",
+                  "upper_inner_band", "lower_outer_band",
+                  "core_regime", "display_regime",
+                  "med_pattern_label", "med_turn_buy"]:
+            assert k in row
+
+    def test_requires_auth(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/indicator-state/industries/IT - Services"
+        )
+        assert r.status_code == 401
+
+
+# ---------- GET /indicator-state/tickers/{id} ---------- #
+
+
+class TestGetTickerIndicatorState:
+
+    def test_returns_empty_when_no_data(
+        self, real_db_client, reliance_ticker,
+    ):
+        """No ticker indicator_state rows have been written yet
+        (Phase 5-4 ships industry compute only). Endpoint should
+        return empty list without error."""
+        r = real_db_client.get(
+            f"/v1/fundamentals/indicator-state/tickers/{reliance_ticker}"
+            "?timeframe=1w",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        assert r.json()["rows"] == []
+        assert r.json()["ticker_id"] == reliance_ticker
+
+    def test_requires_timeframe_param(
+        self, real_db_client, reliance_ticker,
+    ):
+        """timeframe is a required query parameter."""
+        r = real_db_client.get(
+            f"/v1/fundamentals/indicator-state/tickers/{reliance_ticker}",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422  # validation error
+
+
+# ---------- POST /compute-indicator-state ---------- #
+
+
+class TestComputeIndicatorStateEndpoint:
+
+    def test_rejects_no_industry_and_no_all_industries(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-indicator-state",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+        assert "industry" in r.json()["detail"]
+
+    def test_rejects_both_industry_and_all_industries(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-indicator-state"
+            "?industry=IT - Services&all_industries=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+    def test_returns_202_for_industry(
+        self, real_db_client, db_engine, monkeypatch,
+    ):
+        called = []
+        def fake_runner(engine, name, *, force=False):
+            called.append((name, force))
+            return 1
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_indicator_state_for_industry",
+            fake_runner,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-indicator-state"
+            "?industry=IT - Services&force=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        assert called == [("IT - Services", True)]
+
+    def test_returns_202_for_all_industries(
+        self, real_db_client, db_engine, monkeypatch,
+    ):
+        called = []
+        def fake_runner(engine, *, force=False):
+            called.append(force)
+            return {"succeeded": [], "skipped": [], "failed": []}
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_indicator_state_for_all_industries",
+            fake_runner,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-indicator-state?all_industries=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        assert called == [False]
+
+    def test_requires_auth(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-indicator-state?all_industries=true"
+        )
+        assert r.status_code == 401

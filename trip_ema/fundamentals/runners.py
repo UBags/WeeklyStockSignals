@@ -1858,3 +1858,276 @@ def run_industry_index_build(
         "indexed": indexed,
         "failed": failed,
     }
+
+
+# ============================================================
+# Phase 5-4: indicator state runners
+# ============================================================
+#
+# Different from the Phase 1-3 runners: no yfinance, no checkpoint
+# resume, no per-bar serialization. The compute is a single all-or-
+# nothing pass over the full bar history (because the regime state
+# machine is sequential — bar N depends on bar N-1).
+#
+# Single-industry path: atomic — succeed completely or raise.
+# Bulk path: per-industry error isolation, the fundamentals_run row
+# tracks the per-industry SUCCESS/FAIL count.
+
+
+def run_indicator_state_for_industry(
+    db_engine: Engine,
+    industry_name: str,
+    *,
+    force: bool = False,
+) -> int:
+    """Compute and upsert indicator state for one industry index.
+
+    Reads the full industry_index_value history for the industry,
+    computes the indicator state Series + per-bar dicts via
+    Phase 5-2/5-3 primitives, and upserts each bar into
+    indicator_state.
+
+    The compute is atomic: either all bars succeed and get written,
+    or an exception propagates (no partial writes — the upserts
+    are batched in a single transaction).
+
+    Skip-if-recent guard: if the indicator_state table has rows for
+    this industry with a latest trade_date within 80 days of the
+    industry index's latest value date, skip (unless force=True).
+    This prevents accidental thrashing of bulk operations.
+
+    Returns run_id of the recorded fundamentals_run row.
+    Raises ValueError if the industry has no value history at all.
+    """
+    import pandas as pd
+    from ..persistence.fundamentals_repo import (
+        IndicatorStateRepository,
+        IndustryIndexRepository,
+        IndustryIndexValueRepository,
+    )
+    from ..fundamentals import IndicatorState
+    from .indicator_primitives import (
+        compute_bar_states,
+        compute_indicator_series,
+        INDICATOR_DEFAULTS,
+    )
+    from datetime import datetime, timezone
+
+    # Sanity: industry must exist as an index.
+    with db_engine.connect() as conn:
+        idx = IndustryIndexRepository(conn).get(industry_name)
+    if idx is None:
+        raise ValueError(
+            f"run_indicator_state_for_industry: index {industry_name!r} "
+            f"does not exist"
+        )
+
+    phase = "index_indicators"
+    if not force:
+        with db_engine.connect() as conn:
+            latest = IndicatorStateRepository(conn).get_latest_for_industry(
+                industry_name,
+            )
+        if latest is not None:
+            age = (date.today() - latest.trade_date).days
+            if age < 80:
+                logger.info(
+                    "Skipping indicator_state for %s: latest=%s "
+                    "(age=%d days < 80). Use force=True to override.",
+                    industry_name, latest.trade_date, age,
+                )
+                with transaction(db_engine) as conn:
+                    run_id = FundamentalsRunRepository(conn).open(
+                        phase=phase, exchange="ALL",
+                    )
+                    FundamentalsRunRepository(conn).close(
+                        run_id, status="SUCCESS",
+                        succeeded=0, failed=0, skipped=1,
+                    )
+                return run_id
+
+    # Read the full value history. We need it ordered oldest-first
+    # for the indicator walk; get_history returns newest-first.
+    with db_engine.connect() as conn:
+        history = IndustryIndexValueRepository(conn).get_history(
+            industry_name,
+        )
+    if not history:
+        raise ValueError(
+            f"run_indicator_state_for_industry: industry "
+            f"{industry_name!r} has no value rows. Run "
+            f"compute-index-values first."
+        )
+    history.reverse()  # oldest-first
+
+    # Build pandas Series from the history.
+    values = pd.Series([h.value for h in history], dtype=float)
+    vol = pd.Series([1.0] * len(history), dtype=float)
+    dates = pd.Series([h.trade_date for h in history])
+
+    # Compute indicators + regime walk.
+    series = compute_indicator_series(
+        values, vol, values, values,
+        params=INDICATOR_DEFAULTS,
+        synthetic_atr_for_index=True,
+    )
+    bar_states = compute_bar_states(
+        values, vol, values, values,
+        trade_dates=dates, series=series,
+        params=INDICATOR_DEFAULTS,
+        # open_ defaults to values.shift(1) — the index synthesis.
+    )
+
+    # Open the run, upsert all bars, close. Single transaction for
+    # atomicity: either every bar's indicator_state is written, or
+    # none of them is (rollback on exception).
+    succeeded = 0
+    failed = 0
+    skipped = 0
+    with transaction(db_engine) as conn:
+        run_id = FundamentalsRunRepository(conn).open(
+            phase=phase, exchange="ALL",
+        )
+        repo = IndicatorStateRepository(conn)
+        for bs in bar_states:
+            # Skip bars where required indicators are NaN (early
+            # bars before EMAs stabilize). These shouldn't go into
+            # indicator_state — they have no analytic meaning.
+            if (bs.get("med_ema") is None or pd.isna(bs.get("med_ema"))
+                or bs.get("long_ema") is None or pd.isna(bs.get("long_ema"))
+                or bs.get("longest_ema") is None or pd.isna(bs.get("longest_ema"))
+                or bs.get("atr") is None or pd.isna(bs.get("atr"))):
+                skipped += 1
+                continue
+
+            state = IndicatorState(
+                ticker_id=None, timeframe=None,
+                industry_name=industry_name,
+                trade_date=bs["trade_date"],
+                med_ema=float(bs["med_ema"]),
+                long_ema=float(bs["long_ema"]),
+                longest_ema=float(bs["longest_ema"]),
+                atr=float(bs["atr"]),
+                upper_inner_band=float(bs["upper_inner_band"]),
+                lower_inner_band=float(bs["lower_inner_band"]),
+                upper_mid_band=float(bs["upper_mid_band"]),
+                lower_mid_band=float(bs["lower_mid_band"]),
+                upper_outer_band=float(bs["upper_outer_band"]),
+                lower_outer_band=float(bs["lower_outer_band"]),
+                core_regime=bs["core_regime"],
+                display_regime=bs["display_regime"],
+                pierces_upper_mid=bs["pierces_upper_mid"],
+                pierces_lower_mid=bs["pierces_lower_mid"],
+                dist_to_med_in_hl_units=bs["dist_to_med_in_hl_units"],
+                dist_to_long_in_hl_units=bs["dist_to_long_in_hl_units"],
+                dist_to_longest_in_hl_units=bs["dist_to_longest_in_hl_units"],
+                mean_dist_to_med_in_hl_units=bs["mean_dist_to_med_in_hl_units"],
+                mean_dist_to_long_in_hl_units=bs["mean_dist_to_long_in_hl_units"],
+                mean_dist_to_longest_in_hl_units=bs["mean_dist_to_longest_in_hl_units"],
+                bars_since_med_turn=bs["bars_since_med_turn"],
+                bars_since_long_turn=bs["bars_since_long_turn"],
+                bars_since_longest_turn=bs["bars_since_longest_turn"],
+                pct_change_since_med_turn=bs["pct_change_since_med_turn"],
+                pct_change_since_long_turn=bs["pct_change_since_long_turn"],
+                pct_change_since_longest_turn=bs["pct_change_since_longest_turn"],
+                med_pattern_label=bs["med_pattern_label"],
+                long_pattern_label=bs["long_pattern_label"],
+                longest_pattern_label=bs["longest_pattern_label"],
+                med_turn_buy=bs["med_turn_buy"],
+                med_turn_sell=bs["med_turn_sell"],
+                long_turn_buy=bs["long_turn_buy"],
+                long_turn_sell=bs["long_turn_sell"],
+                longest_turn_buy=bs["longest_turn_buy"],
+                longest_turn_sell=bs["longest_turn_sell"],
+                computed_at=datetime.now(timezone.utc),
+            )
+            repo.upsert_for_industry(state)
+            succeeded += 1
+
+        FundamentalsRunRepository(conn).close(
+            run_id, status="SUCCESS",
+            succeeded=succeeded, failed=0, skipped=skipped,
+        )
+
+    logger.info(
+        "run_indicator_state_for_industry %s: succeeded=%d skipped=%d",
+        industry_name, succeeded, skipped,
+    )
+    return run_id
+
+
+def run_indicator_state_for_all_industries(
+    db_engine: Engine,
+    *,
+    force: bool = False,
+) -> dict:
+    """Compute indicator state for every active industry index that
+    has value rows.
+
+    Iterates over all active industries (from industry_index).
+    For each, calls run_indicator_state_for_industry in isolation —
+    if one industry raises, the next is still attempted. Returns a
+    report dict with the per-industry outcomes.
+
+    Industries with no value history are reported as skipped (not
+    failed). Industries with no `indicator_state`-relevant bars
+    after NaN filtering are reported as a successful empty run.
+
+    Returns a dict:
+      {
+        "succeeded": list[(industry_name, succeeded, skipped)],
+        "skipped":   list[(industry_name, reason)],
+        "failed":    list[(industry_name, error_message)],
+      }
+    """
+    from ..persistence.fundamentals_repo import (
+        IndustryIndexRepository,
+        IndustryIndexValueRepository,
+    )
+
+    with db_engine.connect() as conn:
+        indices = IndustryIndexRepository(conn).list_active()
+        value_repo = IndustryIndexValueRepository(conn)
+        # Pre-filter: industries with at least one value row.
+        with_values = set()
+        for name, count, _earliest, _latest in value_repo.coverage_summary():
+            if count > 0:
+                with_values.add(name)
+
+    succeeded: list[tuple[str, int, int]] = []
+    skipped: list[tuple[str, str]] = []
+    failed: list[tuple[str, str]] = []
+
+    for idx in indices:
+        name = idx.industry_name
+        if name not in with_values:
+            skipped.append((name, "no value rows"))
+            continue
+        try:
+            run_id = run_indicator_state_for_industry(
+                db_engine, name, force=force,
+            )
+            # Read the run row to get the counts.
+            with db_engine.connect() as conn:
+                r = FundamentalsRunRepository(conn).get(run_id)
+            if r is not None:
+                succeeded.append((name, r.succeeded, r.skipped))
+            else:
+                succeeded.append((name, 0, 0))
+        except Exception as e:
+            logger.exception(
+                "run_indicator_state_for_all_industries: failed for %s",
+                name,
+            )
+            failed.append((name, str(e)))
+
+    logger.info(
+        "run_indicator_state_for_all_industries: succeeded=%d "
+        "skipped=%d failed=%d",
+        len(succeeded), len(skipped), len(failed),
+    )
+    return {
+        "succeeded": succeeded,
+        "skipped": skipped,
+        "failed": failed,
+    }

@@ -1279,3 +1279,291 @@ class TestCmdFundamentalsStatusShowsIndices:
         out = capsys.readouterr().out
         assert rc == 0
         assert "Industry indices" not in out
+
+
+# ============================================================
+# Phase 5-4 CLI tests
+# ============================================================
+
+
+# ---------- cmd_compute_indicator_state ---------- #
+
+
+class TestCmdComputeIndicatorState:
+
+    def test_rejects_no_industry_and_no_all_industries(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_industries = False
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "industry" in err or "all-industries" in err
+
+    def test_rejects_both_industry_and_all_industries(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = "IT - Services"
+        args.all_industries = True
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "mutually exclusive" in err
+
+    def test_single_industry_unknown_returns_2(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = "Nonexistent Industry"
+        args.all_industries = False
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "does not exist" in err
+
+    def test_single_industry_no_values_returns_2(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        from trip_ema.persistence.fundamentals_repo import (
+            IndustryIndexRepository,
+        )
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                "Empty Industry", sector_name="Other",
+                base_date=date(2025, 10, 1),
+            )
+        args = type("A", (), {})()
+        args.industry = "Empty Industry"
+        args.all_industries = False
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "no value rows" in err
+
+    def test_single_industry_success_path(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        """Stub the runner so we don't need a fully-populated DB."""
+        def fake_runner(engine, name, *, force=False):
+            with transaction(engine) as conn:
+                rid = FundamentalsRunRepository(conn).open(
+                    phase="index_indicators", exchange="ALL",
+                )
+                FundamentalsRunRepository(conn).close(
+                    rid, status="SUCCESS",
+                    succeeded=60, failed=0, skipped=20,
+                )
+            return rid
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_indicator_state_for_industry",
+            fake_runner,
+        )
+        args = type("A", (), {})()
+        args.industry = "IT - Services"
+        args.all_industries = False
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "status=SUCCESS" in out
+        assert "succeeded=60" in out
+        assert "skipped=20" in out
+
+    def test_all_industries_success_path(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        def fake_runner(engine, *, force=False):
+            return {
+                "succeeded": [
+                    ("Industry A", 60, 20),
+                    ("Industry B", 60, 20),
+                ],
+                "skipped": [],
+                "failed": [],
+            }
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_indicator_state_for_all_industries",
+            fake_runner,
+        )
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_industries = True
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "succeeded: 2" in out
+        assert "Industry A" in out
+        assert "Industry B" in out
+
+    def test_all_industries_with_mixed_outcomes(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        """One succeeds, one skipped (no values), one fails. Should
+        return 1."""
+        def fake_runner(engine, *, force=False):
+            return {
+                "succeeded": [("Industry Good", 60, 20)],
+                "skipped": [("Industry Empty", "no value rows")],
+                "failed": [("Industry Bad", "compute error")],
+            }
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_indicator_state_for_all_industries",
+            fake_runner,
+        )
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_industries = True
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 1
+        # All three sections appear in output.
+        assert "Industry Good" in out
+        assert "Industry Empty" in out
+        assert "Industry Bad" in out
+
+    def test_all_industries_all_failed_returns_2(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        def fake_runner(engine, *, force=False):
+            return {
+                "succeeded": [],
+                "skipped": [],
+                "failed": [("Industry A", "error")],
+            }
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_indicator_state_for_all_industries",
+            fake_runner,
+        )
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_industries = True
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        assert rc == 2
+
+    def test_force_flag_passes_through(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        force_seen = []
+        def fake_runner(engine, name, *, force=False):
+            force_seen.append(force)
+            with transaction(engine) as conn:
+                rid = FundamentalsRunRepository(conn).open(
+                    phase="index_indicators", exchange="ALL",
+                )
+                FundamentalsRunRepository(conn).close(
+                    rid, status="SUCCESS",
+                    succeeded=10, failed=0, skipped=0,
+                )
+            return rid
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_indicator_state_for_industry",
+            fake_runner,
+        )
+        args = type("A", (), {})()
+        args.industry = "IT - Services"
+        args.all_industries = False
+        args.force = True
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        cmd_compute_indicator_state(args, fake_config)
+        assert force_seen == [True]
+
+
+class TestCmdFundamentalsStatusShowsIndicatorCoverage:
+
+    def test_shows_indicator_section_when_present(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, capsys,
+    ):
+        from trip_ema.fundamentals import IndicatorState
+        from trip_ema.persistence.fundamentals_repo import (
+            IndicatorStateRepository,
+            IndustryIndexRepository,
+        )
+        # Set up a minimal industry + one indicator_state row.
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                "IT - Services", sector_name="Technology",
+                base_date=date(2025, 10, 1),
+            )
+            state = IndicatorState(
+                ticker_id=None, timeframe=None,
+                industry_name="IT - Services",
+                trade_date=date(2026, 5, 22),
+                med_ema=840.0, long_ema=848.0, longest_ema=856.0,
+                atr=12.95,
+                upper_inner_band=859.0, lower_inner_band=830.0,
+                upper_mid_band=882.0, lower_mid_band=815.0,
+                upper_outer_band=915.0, lower_outer_band=798.0,
+                core_regime=-1, display_regime=-1,
+                pierces_upper_mid=False, pierces_lower_mid=False,
+                dist_to_med_in_hl_units=None,
+                dist_to_long_in_hl_units=None,
+                dist_to_longest_in_hl_units=None,
+                mean_dist_to_med_in_hl_units=None,
+                mean_dist_to_long_in_hl_units=None,
+                mean_dist_to_longest_in_hl_units=None,
+                bars_since_med_turn=None, bars_since_long_turn=None,
+                bars_since_longest_turn=None,
+                pct_change_since_med_turn=None,
+                pct_change_since_long_turn=None,
+                pct_change_since_longest_turn=None,
+                med_pattern_label="NA",
+                long_pattern_label="NA",
+                longest_pattern_label="NA",
+                med_turn_buy=False, med_turn_sell=False,
+                long_turn_buy=False, long_turn_sell=False,
+                longest_turn_buy=False, longest_turn_sell=False,
+                computed_at=datetime.now(timezone.utc),
+            )
+            IndicatorStateRepository(conn).upsert_for_industry(state)
+        args = type("A", (), {})()
+        args.exchange = None
+        args.phase = None
+        args.limit = 10
+        rc = cmd_fundamentals_status(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Indicator state coverage" in out
+        assert "IT - Services" in out
+
+    def test_omits_indicator_section_when_no_rows(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, capsys,
+    ):
+        # No indicator_state rows; an industry exists for the
+        # general status to print something.
+        with transaction(db_engine) as conn:
+            InstrumentIndustryRepository(conn).upsert(
+                reliance_ticker, sector="Energy", industry="Oil",
+            )
+        args = type("A", (), {})()
+        args.exchange = None
+        args.phase = None
+        args.limit = 10
+        rc = cmd_fundamentals_status(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Indicator state coverage" not in out

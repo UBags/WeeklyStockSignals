@@ -1149,3 +1149,245 @@ def compute_index_values_endpoint(
             f"all_active={all_active}) submitted."
         ),
     )
+
+
+# ============================================================
+# Phase 5-4 — indicator state endpoints
+# ============================================================
+
+
+from ....persistence.fundamentals_repo import IndicatorStateRepository
+
+
+# ---------- payload models ---------- #
+
+
+class IndicatorStatePayload(BaseModel):
+    """One indicator_state row, polymorphic on series identity."""
+    ticker_id: Optional[int] = None
+    timeframe: Optional[str] = None
+    industry_name: Optional[str] = None
+    trade_date: date
+    med_ema: float
+    long_ema: float
+    longest_ema: float
+    atr: float
+    upper_inner_band: float
+    lower_inner_band: float
+    upper_mid_band: float
+    lower_mid_band: float
+    upper_outer_band: float
+    lower_outer_band: float
+    core_regime: int
+    display_regime: int
+    pierces_upper_mid: bool
+    pierces_lower_mid: bool
+    dist_to_med_in_hl_units: Optional[float] = None
+    dist_to_long_in_hl_units: Optional[float] = None
+    dist_to_longest_in_hl_units: Optional[float] = None
+    mean_dist_to_med_in_hl_units: Optional[float] = None
+    mean_dist_to_long_in_hl_units: Optional[float] = None
+    mean_dist_to_longest_in_hl_units: Optional[float] = None
+    bars_since_med_turn: Optional[int] = None
+    bars_since_long_turn: Optional[int] = None
+    bars_since_longest_turn: Optional[int] = None
+    pct_change_since_med_turn: Optional[float] = None
+    pct_change_since_long_turn: Optional[float] = None
+    pct_change_since_longest_turn: Optional[float] = None
+    med_pattern_label: str
+    long_pattern_label: str
+    longest_pattern_label: str
+    med_turn_buy: bool
+    med_turn_sell: bool
+    long_turn_buy: bool
+    long_turn_sell: bool
+    longest_turn_buy: bool
+    longest_turn_sell: bool
+    computed_at: datetime
+
+
+class IndicatorStateListPayload(BaseModel):
+    industry_name: Optional[str] = None
+    ticker_id: Optional[int] = None
+    from_date: Optional[date] = None
+    to_date: Optional[date] = None
+    rows: list[IndicatorStatePayload]
+
+
+def _indicator_state_payload(s) -> IndicatorStatePayload:
+    return IndicatorStatePayload(
+        ticker_id=s.ticker_id,
+        timeframe=s.timeframe,
+        industry_name=s.industry_name,
+        trade_date=s.trade_date,
+        med_ema=s.med_ema,
+        long_ema=s.long_ema,
+        longest_ema=s.longest_ema,
+        atr=s.atr,
+        upper_inner_band=s.upper_inner_band,
+        lower_inner_band=s.lower_inner_band,
+        upper_mid_band=s.upper_mid_band,
+        lower_mid_band=s.lower_mid_band,
+        upper_outer_band=s.upper_outer_band,
+        lower_outer_band=s.lower_outer_band,
+        core_regime=s.core_regime,
+        display_regime=s.display_regime,
+        pierces_upper_mid=s.pierces_upper_mid,
+        pierces_lower_mid=s.pierces_lower_mid,
+        dist_to_med_in_hl_units=s.dist_to_med_in_hl_units,
+        dist_to_long_in_hl_units=s.dist_to_long_in_hl_units,
+        dist_to_longest_in_hl_units=s.dist_to_longest_in_hl_units,
+        mean_dist_to_med_in_hl_units=s.mean_dist_to_med_in_hl_units,
+        mean_dist_to_long_in_hl_units=s.mean_dist_to_long_in_hl_units,
+        mean_dist_to_longest_in_hl_units=s.mean_dist_to_longest_in_hl_units,
+        bars_since_med_turn=s.bars_since_med_turn,
+        bars_since_long_turn=s.bars_since_long_turn,
+        bars_since_longest_turn=s.bars_since_longest_turn,
+        pct_change_since_med_turn=s.pct_change_since_med_turn,
+        pct_change_since_long_turn=s.pct_change_since_long_turn,
+        pct_change_since_longest_turn=s.pct_change_since_longest_turn,
+        med_pattern_label=s.med_pattern_label,
+        long_pattern_label=s.long_pattern_label,
+        longest_pattern_label=s.longest_pattern_label,
+        med_turn_buy=s.med_turn_buy,
+        med_turn_sell=s.med_turn_sell,
+        long_turn_buy=s.long_turn_buy,
+        long_turn_sell=s.long_turn_sell,
+        longest_turn_buy=s.longest_turn_buy,
+        longest_turn_sell=s.longest_turn_sell,
+        computed_at=s.computed_at,
+    )
+
+
+# ---------- executor wrapper ---------- #
+
+
+def _run_indicator_state_safe(
+    db_engine: Engine, industry_name: Optional[str],
+    force: bool, all_industries: bool,
+) -> None:
+    """Runs either one industry or all industries indicator-state
+    backfill. Catches exceptions so the executor doesn't die."""
+    from ....fundamentals.runners import (
+        run_indicator_state_for_all_industries,
+        run_indicator_state_for_industry,
+    )
+    try:
+        if all_industries:
+            run_indicator_state_for_all_industries(db_engine, force=force)
+        else:
+            run_indicator_state_for_industry(
+                db_engine, industry_name, force=force,
+            )
+    except Exception:
+        logger.exception(
+            "Indicator state compute failed for industry=%s "
+            "all_industries=%s", industry_name, all_industries,
+        )
+
+
+# ---------- GET endpoints ---------- #
+
+
+@router.get("/indicator-state/industries/{industry_name:path}",
+            response_model=IndicatorStateListPayload)
+def get_industry_indicator_state(
+    industry_name: str,
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    limit: Optional[int] = Query(None, ge=1, le=5000),
+    db_engine: Engine = Depends(get_db_engine),
+) -> IndicatorStateListPayload:
+    """Get the indicator_state time series for one industry index.
+
+    Returns newest-first; pass from_date/to_date to restrict the
+    range, and limit to cap the row count."""
+    with db_engine.connect() as conn:
+        history = IndicatorStateRepository(conn).get_history_for_industry(
+            industry_name,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+        )
+    return IndicatorStateListPayload(
+        industry_name=industry_name,
+        from_date=from_date,
+        to_date=to_date,
+        rows=[_indicator_state_payload(s) for s in history],
+    )
+
+
+@router.get("/indicator-state/tickers/{ticker_id}",
+            response_model=IndicatorStateListPayload)
+def get_ticker_indicator_state(
+    ticker_id: int,
+    timeframe: str = Query(..., min_length=1, max_length=8),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    limit: Optional[int] = Query(None, ge=1, le=5000),
+    db_engine: Engine = Depends(get_db_engine),
+) -> IndicatorStateListPayload:
+    """Get the indicator_state time series for one ticker bar series.
+
+    Phase 5-4 ships the schema and route shape; per-ticker compute
+    isn't wired in yet (only per-industry). Empty results expected
+    until Phase 6+ adds per-ticker indicator compute."""
+    with db_engine.connect() as conn:
+        history = IndicatorStateRepository(conn).get_history_for_ticker(
+            ticker_id, timeframe,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+        )
+    return IndicatorStateListPayload(
+        ticker_id=ticker_id,
+        from_date=from_date,
+        to_date=to_date,
+        rows=[_indicator_state_payload(s) for s in history],
+    )
+
+
+# ---------- POST (fire-and-forget) endpoints ---------- #
+
+
+@router.post("/compute-indicator-state",
+             response_model=RefreshAcceptedPayload, status_code=202)
+def compute_indicator_state_endpoint(
+    industry: Optional[str] = Query(None),
+    all_industries: bool = Query(False),
+    force: bool = Query(False),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+    executor = Depends(get_etl_executor),
+) -> RefreshAcceptedPayload:
+    """Fire-and-forget indicator state compute. Pass either
+    industry=NAME or all_industries=true. Returns 202 immediately."""
+    _require_executor(executor)
+    if industry is None and not all_industries:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Must provide either industry=NAME or all_industries=true",
+        )
+    if industry is not None and all_industries:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="industry and all_industries are mutually exclusive",
+        )
+    logger.info(
+        "Admin: compute-indicator-state requested",
+        extra={"industry": industry, "all_industries": all_industries,
+               "force": force},
+    )
+    executor.submit(
+        _run_indicator_state_safe, db_engine,
+        industry, force, all_industries,
+    )
+    return RefreshAcceptedPayload(
+        action="compute-indicator-state",
+        run_id=None,
+        accepted_at=datetime.now(timezone.utc),
+        notes=(
+            f"Indicator state compute (industry={industry!r}, "
+            f"all_industries={all_industries}) submitted."
+        ),
+    )

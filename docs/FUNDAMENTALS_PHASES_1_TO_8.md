@@ -2060,3 +2060,131 @@ Runners + CLI + HTTP wrappers. Same shape as Phase 4 wrappers:
 
 Then Phase 5 is complete — full indicator pipeline from raw bars
 to rows in indicator_state, runnable by operators.
+
+---
+
+## 26. Phase 5-4 (operator-facing wrappers — Phase 5 complete)
+
+Phases 5-1 through 5-3 shipped the schema, compute primitives, and
+regime state machines. Phase 5-4 wraps them in operator-runnable
+surfaces: runners with skip-if-recent and error isolation, CLI
+command, HTTP endpoints, and an extended fundamentals-status.
+
+### Key design difference vs. Phase 4
+
+Phase 4's `compute-index-values` could backfill arbitrary date ranges
+because index value computation is bar-independent (each day's value
+only depends on that day's mcap data). The runner walked dates with
+a checkpoint-and-resume pattern.
+
+Phase 5's `compute-indicator-state` cannot do partial backfills. The
+regime state machines are sequential through time — bar N depends on
+bar N-1's state. Computing the last 30 days in isolation would seed
+the EMAs and regime from those 30 bars rather than the full history,
+producing different (wrong) values.
+
+So the runner is whole-history-per-industry, atomic-or-raise. No
+checkpoint, no resume — failures are unlikely (no network calls)
+and bulk operations get per-industry error isolation.
+
+### Shipped this session
+
+Runners (in `trip_ema/fundamentals/runners.py`):
+  - **run_indicator_state_for_industry(engine, name, *, force)**:
+    reads full value history, computes indicators + regime, upserts
+    all indicator-ready rows in a single transaction. Skip-if-recent
+    guard with 80-day threshold. Raises ValueError if industry
+    doesn't exist or has no values.
+  - **run_indicator_state_for_all_industries(engine, *, force)**:
+    iterates over all active industries. Per-industry error
+    isolation. Returns report dict with succeeded/skipped/failed
+    lists.
+
+CLI command:
+  - **compute-indicator-state**: `--industry NAME` or
+    `--all-industries`, plus `--force`. Tabular output with per-
+    industry written/skipped counts.
+
+HTTP endpoints:
+  - **GET /indicator-state/industries/{name}**: time series for one
+    industry, from_date/to_date/limit query params, newest-first.
+  - **GET /indicator-state/tickers/{id}?timeframe=X**: same shape
+    for tickers. Schema and route ship in 5-4; per-ticker compute
+    arrives in Phase 6+ (returns empty list for now).
+  - **POST /compute-indicator-state**: fire-and-forget, takes
+    industry/all_industries/force query params.
+
+fundamentals-status extension:
+  - "Indicator state coverage" section after "Industry indices",
+    listing per-industry row count and latest trade date.
+
+### Numpy float coercion fix
+
+Discovered during runner test development: `_bars_and_pct_since_turn`
+returned `np.float64` for the pct_change values. SQLAlchemy/psycopg2
+renders those as `np.float64(...)` literals in SQL, raising
+"schema 'np' does not exist". Fix: explicit `float(pct)` coercion
+in both branches of `_bars_and_pct_since_turn`. All other primitive
+outputs already used `_none_if_nan` which coerces to Python `float`,
+so the issue was localized.
+
+### Test counts
+
+37 new tests this session:
+  - 13 runner tests (`tests/fundamentals/test_indicator_state_runners.py`):
+    persisting rows, skipped count for NaN-leading bars, all
+    expected fields populated, idempotency, force flag, atomic-
+    on-exception, single-industry validation errors, multi-industry
+    succeed/skip/fail isolation, retired industries excluded.
+  - 11 CLI tests: mutual exclusion, validation errors, success
+    paths for both single-industry and all-industries, mixed
+    outcomes returning exit code 1, all-failed returning 2, force
+    flag pass-through, fundamentals-status indicator section.
+  - 13 HTTP tests: list-by-industry with history, date range
+    filter, limit, unknown industry returns empty, all fields
+    present, ticker endpoint structure, POST validation, POST
+    fire-and-forget for both modes, auth requirements.
+
+Total: 638 fundamentals + migration tests pass. All 601 prior tests
+still pass.
+
+### Operator-facing path now complete
+
+After this session, the operator can:
+```bash
+trip-ema-etl compute-indicator-state --all-industries
+trip-ema-etl fundamentals-status   # sees indicator coverage
+```
+
+…and have the full 38-field indicator state landed in `indicator_state`
+for all 60 industries, queryable via HTTP for downstream consumers.
+
+### Phase 5 closes here
+
+Phases 5-1 through 5-4 deliver:
+  - Schema + repo (Phase 5-1)
+  - Pine-Script-parity compute primitives (Phase 5-2)
+  - Regime state machines (Phase 5-3)
+  - Operator runners + CLI + HTTP (Phase 5-4)
+
+What works end-to-end:
+  - Read industry index value time series → produce indicator_state.
+  - Idempotent re-runs with skip-if-recent.
+  - Per-industry error isolation in bulk operations.
+  - Inspection via CLI, HTTP, and direct SQL.
+
+### Next phase candidates
+
+  - **Phase 6**: strategy + signal layer. The Pine Script includes
+    strategy entry/exit/take-profit logic that's been deferred from
+    Phase 5; this would land it. Builds on display_regime transitions.
+
+  - **Phase 5+: per-ticker indicators.** The Phase 5-1 schema already
+    supports ticker_id+timeframe rows. Wiring a runner that reads
+    from ohlcv_bars and writes indicator_state would parallel what
+    Phase 5-4 does for industries. Useful if strategy signals on
+    individual tickers (not just industry indices) become desired.
+
+  - **Phase 4C**: scheduler integration (deferred from Phase 4A).
+    Wire the bars-ingestion daemon to call compute-market-cap then
+    compute-index-values then compute-indicator-state on EoD.

@@ -231,12 +231,16 @@ def cmd_fundamentals_status(args, config: Config) -> int:
         # coverage: name, sector, status, base date, latest value
         # date, value row count. Only printed if any indices exist.
         from ..persistence.fundamentals_repo import (
+            IndicatorStateRepository,
             IndustryIndexRepository,
             IndustryIndexValueRepository,
         )
         with db_engine.connect() as conn:
             indices = IndustryIndexRepository(conn).list_all()
             value_summary = IndustryIndexValueRepository(conn).coverage_summary()
+            indicator_summary = IndicatorStateRepository(
+                conn,
+            ).coverage_summary_for_industries()
         if indices:
             # Build name → (rows, earliest, latest) from the summary
             # so we can join in-memory.
@@ -258,6 +262,28 @@ def cmd_fundamentals_status(args, config: Config) -> int:
                 print(
                     f"  {idx.industry_name[:42]:<42} {idx.status:<8} "
                     f"{idx.base_date!s:<12} {latest_s:<12} {rows:>5}"
+                )
+
+        # Indicator state section (Phase 5-4). Per-industry row
+        # count of indicator_state, plus latest trade date.
+        if indicator_summary:
+            ind_by_name = {
+                name: (rows, earliest, latest)
+                for name, rows, earliest, latest in indicator_summary
+            }
+            print()
+            print(
+                f"Indicator state coverage ({len(indicator_summary)} "
+                f"industries):"
+            )
+            print(
+                f"  {'INDUSTRY':<48} {'LATEST':<12} {'ROWS':>5}"
+            )
+            for name in sorted(ind_by_name):
+                rows, _earliest, latest = ind_by_name[name]
+                latest_s = str(latest) if latest else "(none)"
+                print(
+                    f"  {name[:48]:<48} {latest_s:<12} {rows:>5}"
                 )
 
         # Recent runs section.
@@ -681,6 +707,113 @@ def cmd_rebalance_industry_index(args, config: Config) -> int:
     return 0
 
 
+# ---------- compute-indicator-state (Phase 5-4) ---------- #
+
+
+def cmd_compute_indicator_state(args, config: Config) -> int:
+    """Compute indicator state for one industry or all industries.
+
+    The compute is whole-history per industry (regime state machines
+    are sequential through time, so partial backfills aren't
+    meaningful). For each industry:
+
+      1. Read full industry_index_value history.
+      2. Run the indicator pipeline (EMAs, ATR, bands, regimes).
+      3. Upsert all indicator-ready rows into indicator_state.
+
+    Either --industry NAME or --all-industries is required.
+    """
+    from .runners import (
+        run_indicator_state_for_all_industries,
+        run_indicator_state_for_industry,
+    )
+
+    if not args.industry and not args.all_industries:
+        print(
+            "error: must pass either --industry NAME or --all-industries",
+            file=sys.stderr,
+        )
+        return 2
+    if args.industry and args.all_industries:
+        print(
+            "error: --industry and --all-industries are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+
+    db_engine = create_engine_from_config(config)
+    try:
+        if args.industry:
+            # Single-industry path.
+            try:
+                run_id = run_indicator_state_for_industry(
+                    db_engine, args.industry, force=args.force,
+                )
+            except ValueError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 2
+            with db_engine.connect() as conn:
+                r = FundamentalsRunRepository(conn).get(run_id)
+            if r is None:
+                print(f"run_id={run_id} (no row found?)", file=sys.stderr)
+                return 1
+            print(
+                f"compute-indicator-state {args.industry}: "
+                f"run_id={r.run_id} status={r.status} "
+                f"succeeded={r.succeeded} failed={r.failed} "
+                f"skipped={r.skipped}"
+            )
+            if r.status == "SUCCESS":
+                return 0
+            if r.status == "PARTIAL":
+                return 1
+            return 2
+
+        # All-industries path.
+        report = run_indicator_state_for_all_industries(
+            db_engine, force=args.force,
+        )
+        print(
+            f"compute-indicator-state --all-industries:"
+        )
+        print(
+            f"  succeeded: {len(report['succeeded'])}, "
+            f"skipped: {len(report['skipped'])}, "
+            f"failed: {len(report['failed'])}"
+        )
+
+        if report["succeeded"]:
+            print()
+            print("Succeeded:")
+            print(f"  {'INDUSTRY':<48} {'WRITTEN':>8} {'SKIPPED':>8}")
+            for name, written, skipped in report["succeeded"]:
+                print(f"  {name[:48]:<48} {written:>8} {skipped:>8}")
+
+        if report["skipped"]:
+            print()
+            print("Skipped (no value rows; run compute-index-values first):")
+            for name, reason in report["skipped"]:
+                print(f"  {name[:48]:<48} {reason}")
+
+        if report["failed"]:
+            print()
+            print("Failed:")
+            for name, err in report["failed"]:
+                print(f"  {name[:48]:<48} {err[:60]}")
+
+        # Exit code:
+        #   0 — clean run (or every industry was already up-to-date)
+        #   1 — some industries succeeded, some failed
+        #   2 — fatal (no industries succeeded but some failed)
+        if report["failed"]:
+            if report["succeeded"]:
+                return 1
+            return 2
+        return 0
+    finally:
+        db_engine.dispose()
+
+
 # ---------- backfill-etf-classification ---------- #
 
 
@@ -1011,6 +1144,34 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
         help="Restrict picking to one exchange (default: no restriction).",
     )
 
+    # ---------- Phase 5-4 command ---------- #
+
+    cis = sub.add_parser(
+        "compute-indicator-state",
+        help="Compute Triple-EMA indicator state (3 EMAs, ATR, "
+             "bands, regimes) for one industry index or all "
+             "industries. Reads from industry_index_value, writes "
+             "to indicator_state. Whole-history per industry "
+             "(regime state machines are sequential).",
+    )
+    cis.add_argument(
+        "--industry", default=None, metavar="NAME",
+        help="Industry name to compute (e.g. \"Information "
+             "Technology Services\"). Mutually exclusive with "
+             "--all-industries.",
+    )
+    cis.add_argument(
+        "--all-industries", action="store_true", dest="all_industries",
+        help="Compute indicator state for every active industry "
+             "index that has value rows. Mutually exclusive with "
+             "--industry.",
+    )
+    cis.add_argument(
+        "--force", action="store_true",
+        help="Re-compute even if recent state exists "
+             "(within 80 days).",
+    )
+
     return {
         "refresh-industry":             cmd_refresh_industry,
         "set-industry-override":        cmd_set_industry_override,
@@ -1023,4 +1184,5 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
         "build-industry-indices":       cmd_build_industry_indices,
         "compute-index-values":         cmd_compute_index_values,
         "rebalance-industry-index":     cmd_rebalance_industry_index,
+        "compute-indicator-state":      cmd_compute_indicator_state,
     }

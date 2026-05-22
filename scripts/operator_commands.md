@@ -606,3 +606,345 @@ curl -s -X POST -H "Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN" \
 ```
 
 Returns the new `priming_completed_at` timestamp on success.
+
+---
+
+## 12. Fundamentals (Phases 1–4)
+
+The fundamentals layer enriches the ticker universe with sector / industry
+classification, shares outstanding, quarterly financials, daily market cap,
+and modified-Laspeyres industry indices. Each phase is independent — you
+can refresh one without re-running the others — but they have a natural
+ordering for an initial bring-up.
+
+Read the design doc at `docs/FUNDAMENTALS_PHASES_1_TO_8.md` for the
+why-behind-the-what.
+
+### 12.1 Initial bring-up sequence (one-shot, in order)
+
+For a fresh database or a new exchange. Each step takes a while (yfinance
+calls are serialized at ~2s/ticker for politeness):
+
+```bash
+# Phase 1: industry classification (~80 min for 2300 NSE tickers)
+trip-ema-etl --config config.yaml -v refresh-industry --exchange NSE
+
+# Phase 1 ETF subbranch (~10 min for 320 ETFs — quick because the
+# ETF path makes one call per ticker but mostly hits the cache)
+trip-ema-etl --config config.yaml -v backfill-etf-classification --exchange NSE
+
+# Phase 2: shares outstanding (~80 min)
+trip-ema-etl --config config.yaml -v refresh-shares --exchange NSE
+
+# Phase 3.A: quarterly financials (~90 min — slightly slower because
+# each yfinance call returns 4 quarters of data)
+trip-ema-etl --config config.yaml -v refresh-financials --exchange NSE
+
+# Phase 4A: daily market cap. Single-day mode populates today's mcap
+# using local data only (~5 seconds, no yfinance). Backfill mode does
+# a 1-year historical pull via yfinance (~60-90 min).
+trip-ema-etl --config config.yaml compute-market-cap --exchange NSE --date $(date +%Y-%m-%d)
+trip-ema-etl --config config.yaml -v compute-market-cap --exchange NSE --backfill-from 2025-05-22
+
+# Phase 4B: industry index construction (~5 seconds — no yfinance)
+trip-ema-etl --config config.yaml build-industry-indices --exchange NSE
+
+# Phase 4B: backfill daily index values across all built indices
+# (~2-5 min — no yfinance, all local computation)
+trip-ema-etl --config config.yaml compute-index-values --all-active
+```
+
+Each phase respects the 80-day skip-if-recent guard — re-running the same
+command won't redo work that's already been done. Use `--force` to override.
+
+### 12.2 Daily maintenance
+
+After EoD bars are ingested, run the daily mcap compute, then refresh the
+index values. Both are fast (no yfinance):
+
+```bash
+trip-ema-etl --config config.yaml compute-market-cap --exchange NSE --date $(date +%Y-%m-%d)
+trip-ema-etl --config config.yaml compute-index-values --all-active --force
+```
+
+`--force` is needed on the value refresh because the skip-if-recent guard
+otherwise skips runs less than 80 days old. We want daily refreshes.
+
+If you'd rather do it via HTTP (e.g. from a cron job on another host):
+
+```bash
+TOKEN="$TRIP_EMA_ADMIN_TOKEN"
+
+# Single-day mcap compute is CLI-only (cheap and local). Backfill / historical
+# work goes through HTTP:
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/compute-market-cap?exchange=NSE&backfill_from=$(date -d 'yesterday' +%Y-%m-%d)"
+
+# Refresh values for all indices
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/compute-index-values?all_active=true&force=true"
+```
+
+The HTTP endpoints are fire-and-forget (202 Accepted). They return
+immediately; the work happens in the background. Poll
+`/v1/fundamentals/runs` to track progress.
+
+### 12.3 Inspection — what's there
+
+```bash
+# Tabular summary: per-phase coverage + recent runs + index list
+trip-ema-etl --config config.yaml fundamentals-status
+
+# Same, filtered to one exchange
+trip-ema-etl --config config.yaml fundamentals-status --exchange NSE
+
+# Same, filtered to one phase
+trip-ema-etl --config config.yaml fundamentals-status --phase industry
+trip-ema-etl --config config.yaml fundamentals-status --phase market_cap
+trip-ema-etl --config config.yaml fundamentals-status --phase index_value
+```
+
+Via HTTP:
+
+```bash
+TOKEN="$TRIP_EMA_ADMIN_TOKEN"
+
+# List all active industry indices
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/industry-indices" | jq
+
+# One index's definition
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/industry-indices/Information%20Technology%20Services" | jq
+
+# Current constituents of an index
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/industry-indices/Information%20Technology%20Services/constituents" | jq
+
+# Constituents as of a historical date
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/industry-indices/Information%20Technology%20Services/constituents?as_of=2026-04-01" | jq
+
+# Daily value time series (newest first; default returns everything)
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/industry-indices/Information%20Technology%20Services/values?from_date=2026-01-01&limit=30" | jq
+```
+
+URL-escape industry names that contain spaces (`%20`), `&`, or other special
+characters. The names yfinance uses are sometimes verbose — e.g.
+"Information Technology Services" rather than the shorter "IT - Services".
+
+### 12.4 Direct SQL queries (read-only)
+
+Most operator inspection is faster via SQL than HTTP. Set up `~/.pgpass`
+once so you don't have to type the password:
+
+```bash
+cat > ~/.pgpass << 'PGEOF'
+localhost:5432:trip_ema:trip_ema_app:devpassword
+localhost:5432:trip_ema:trip_etl_user:devpassword
+localhost:5432:trip_ema:trip_gui_user:devpassword
+localhost:5432:*:postgres:devpassword
+PGEOF
+chmod 0600 ~/.pgpass
+```
+
+Then any libpq tool reads it automatically. Examples:
+
+```bash
+# First 10 days of an industry's index value series
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT trade_date, value, constituents_used, renormalized
+FROM industry_index_value
+WHERE industry_name = 'Information Technology Services'
+ORDER BY trade_date
+LIMIT 10;
+"
+
+# Latest 5 days of the same
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT trade_date, value, constituents_used
+FROM industry_index_value
+WHERE industry_name = 'Information Technology Services'
+ORDER BY trade_date DESC
+LIMIT 5;
+"
+
+# Coverage summary: rows per index
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT industry_name, COUNT(*) AS rows,
+       MIN(trade_date) AS earliest, MAX(trade_date) AS latest
+FROM industry_index_value
+GROUP BY industry_name
+ORDER BY industry_name;
+"
+
+# Industries that did NOT get indexed (and why we'd want to know)
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+WITH classified AS (
+    SELECT ii.industry, COUNT(*) AS tickers
+    FROM instrument_industry ii
+    JOIN tickers t ON t.ticker_id = ii.ticker_id
+    WHERE t.is_active AND t.instrument_type = 'EQ' AND t.exchange = 'NSE'
+    GROUP BY ii.industry
+)
+SELECT c.industry, c.tickers
+FROM classified c
+LEFT JOIN industry_index ix ON ix.industry_name = c.industry
+WHERE ix.industry_name IS NULL
+ORDER BY c.tickers DESC, c.industry;
+"
+
+# Latest daily market cap top-20 NSE EQ tickers
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT t.symbol, mc.market_cap / 1e12 AS mcap_lakh_crore
+FROM daily_market_cap mc
+JOIN tickers t ON t.ticker_id = mc.ticker_id
+WHERE mc.trade_date = (SELECT MAX(trade_date) FROM daily_market_cap)
+  AND t.exchange = 'NSE'
+ORDER BY mc.market_cap DESC
+LIMIT 20;
+"
+```
+
+### 12.5 Recovery — overrides and re-runs
+
+```bash
+# Operator override: reclassify a ticker into a different industry.
+# This beats the yfinance auto-classification for both Phase 1 and
+# the Phase 4B index selector.
+trip-ema-etl --config config.yaml set-industry-override \
+    --exchange NSE --symbol RELIANCE \
+    --sector Energy --industry "Oil & Gas Integrated"
+
+# Remove an override (revert to yfinance's classification)
+trip-ema-etl --config config.yaml delete-industry-override \
+    --exchange NSE --symbol RELIANCE
+
+# Re-run a Phase 1-3 refresh that crashed mid-flight
+trip-ema-etl --config config.yaml refresh-industry --exchange NSE --resume 42
+trip-ema-etl --config config.yaml refresh-shares --exchange NSE --resume 43
+
+# Force a Phase 1-4A re-run within the 80-day window
+trip-ema-etl --config config.yaml refresh-industry --exchange NSE --force
+
+# Operator-driven rebalance for one industry on a specific date
+# (e.g. recovering from a partial rebalance or after override changes)
+trip-ema-etl --config config.yaml rebalance-industry-index \
+    --industry "Information Technology Services" --date 2026-04-01
+```
+
+### 12.6 Exit codes
+
+The fundamentals CLI commands return:
+
+- **0**: clean success
+- **1**: PARTIAL — some work succeeded, some failed (typical when yfinance
+  returns errors for a handful of tickers)
+- **2**: fatal — couldn't run at all (bad arguments, exchange not configured,
+  index not found)
+
+In particular, `compute-market-cap --date today` returns 1 if no rows were
+written. The usual cause is that EoD bars haven't been ingested yet for
+the date — try yesterday's date or wait for the daily bars ingestion.
+
+### 12.7 Indicator state (Phase 5)
+
+After computing index values, you can compute the Triple-EMA indicator stack
+for each industry index: 3 EMAs (medium/long/longest), ATR, 6 ATR bands, 2
+regime states (`core_regime` and `display_regime`), bars-since-turn metrics,
+and "higher valleys / lower tops" pattern labels. Output lands in the
+`indicator_state` table, one wide row per (industry, trade_date).
+
+Per-ticker indicator state isn't wired in yet (Phase 6+); only per-industry
+works in this phase.
+
+```bash
+# Compute for one industry (replaces the temp.py scratch script)
+trip-ema-etl --config config.yaml compute-indicator-state \
+    --industry "Information Technology Services"
+
+# All active industries with value rows
+trip-ema-etl --config config.yaml compute-indicator-state --all-industries
+
+# Force re-compute (skip-if-recent guard bypass)
+trip-ema-etl --config config.yaml compute-indicator-state --all-industries --force
+```
+
+The compute is fast (no yfinance, no network — pure Python over local DB
+reads). All 60 industries take ~30 seconds on a workstation.
+
+Why no `--from-date` / `--to-date`: the regime state machine is sequential
+through time. Computing the last 30 days alone would seed the EMAs and
+regime from those 30 bars rather than the full history, producing different
+(wrong) values. The runner always computes whole-history per industry.
+
+Via HTTP:
+
+```bash
+TOKEN="$TRIP_EMA_ADMIN_TOKEN"
+
+# Read indicator history for an industry
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/indicator-state/industries/Information%20Technology%20Services?from_date=2026-04-01&limit=10" | jq
+
+# Trigger fire-and-forget compute
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/compute-indicator-state?all_industries=true"
+```
+
+Inspecting via SQL:
+
+```bash
+# Latest regime per industry
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT i1.industry_name,
+       i1.trade_date,
+       i1.core_regime,
+       i1.display_regime,
+       round(i1.med_ema::numeric, 2) AS med_ema,
+       round(i1.long_ema::numeric, 2) AS long_ema,
+       round(i1.atr::numeric, 2) AS atr
+FROM indicator_state i1
+WHERE i1.industry_name IS NOT NULL
+  AND i1.trade_date = (
+      SELECT MAX(trade_date) FROM indicator_state
+      WHERE industry_name = i1.industry_name
+  )
+ORDER BY i1.display_regime DESC, i1.industry_name;
+"
+
+# Industries currently in bullish display regime (display=+1)
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT industry_name, trade_date,
+       round(med_ema::numeric, 2) AS med_ema
+FROM indicator_state
+WHERE industry_name IS NOT NULL
+  AND display_regime = 1
+  AND trade_date = (SELECT MAX(trade_date) FROM indicator_state
+                    WHERE industry_name IS NOT NULL)
+ORDER BY industry_name;
+"
+
+# Recent buy turns on medium EMA across all industries
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT industry_name, trade_date,
+       round(med_ema::numeric, 2) AS med_ema
+FROM indicator_state
+WHERE industry_name IS NOT NULL
+  AND med_turn_buy = TRUE
+  AND trade_date >= CURRENT_DATE - INTERVAL '30 days'
+ORDER BY trade_date DESC, industry_name;
+"
+```
+
+For the IT industry on a recent date, you should see something like:
+
+```
+ industry_name                    | trade_date | core_regime | display_regime | med_ema | long_ema | atr
+----------------------------------+------------+-------------+----------------+---------+----------+-------
+ Information Technology Services  | 2026-05-22 |          -1 |             -1 |  839.60 |   848.29 | 12.95
+```
+
+`fundamentals-status` now includes an "Indicator state coverage" section
+after the "Industry indices" section, showing per-industry row counts.

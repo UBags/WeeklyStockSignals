@@ -961,7 +961,7 @@ def _bars_and_pct_since_turn(
         if turn_close == 0:
             return n_bars, None
         pct = (close.iloc[i] - turn_close) / turn_close * 100.0
-        return n_bars, pct
+        return n_bars, float(pct)
     elif ema_now < prev_ema:
         if state.last_sell_bar_idx is None:
             return None, None
@@ -970,7 +970,7 @@ def _bars_and_pct_since_turn(
         if turn_close == 0:
             return n_bars, None
         pct = -(close.iloc[i] - turn_close) / turn_close * 100.0
-        return n_bars, pct
+        return n_bars, float(pct)
     else:
         # Flat EMA — no direction to report.
         return None, None
