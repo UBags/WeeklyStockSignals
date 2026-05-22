@@ -52,6 +52,7 @@ from ..persistence.fundamentals_repo import (
     FundamentalsRunRepository,
     IndustryOverrideRepository,
     InstrumentIndustryRepository,
+    InstrumentSharesRepository,
 )
 from .industry_fetch import (
     IndustryFetchPermanent,
@@ -431,7 +432,7 @@ def _load_active_tickers_for_exchange(
 
 
 def _resume_from_checkpoint(
-    db_engine: Engine, run_id: int,
+    db_engine: Engine, run_id: int, *, expected_phase: str = "industry",
 ) -> tuple[int, list[dict], int]:
     """Read the previous run's checkpoint and return (run_id,
     ticker_list, cursor_index) to resume from.
@@ -448,9 +449,10 @@ def _resume_from_checkpoint(
             f"Run {run_id} is in terminal status {run.status} — "
             f"can't resume. Start a new run with --force instead."
         )
-    if run.phase != "industry":
+    if run.phase != expected_phase:
         raise ValueError(
-            f"Run {run_id} is for phase {run.phase!r}, not 'industry'"
+            f"Run {run_id} is for phase {run.phase!r}, "
+            f"not {expected_phase!r}"
         )
     pj = run.progress_json or {}
     ticker_list = pj.get("ticker_list")
@@ -499,3 +501,215 @@ def _terminal_status(succeeded: int, failed: int) -> str:
     if succeeded == 0:
         return "FAILED"
     return "PARTIAL"
+
+
+# ============================================================
+# Phase 2 — shares-outstanding refresh
+# ============================================================
+#
+# Mirrors run_industry_refresh's shape: serial yfinance calls,
+# checkpointed every 50 tickers, resumable via progress_json,
+# fundamentals_run row tracks the run. The differences from the
+# industry runner are:
+#
+#   - No instrument-type branching. ETFs DO have sharesOutstanding
+#     (it's the count of ETF units issued, which is meaningful for
+#     AUM analytics); we fetch and store it the same way.
+#
+#   - No operator-override skip mechanism. There's no
+#     "shares_outstanding_override" table because the override path
+#     for shares is "insert a row with shares_source='MANUAL_OVERRIDE'"
+#     — the time-series shape already accommodates operator-set
+#     values without a separate override table.
+#
+#   - One row per refresh (time series), not upsert-in-place. The
+#     `as_of_date` is today's UTC date when the runner is invoked.
+#
+# Calls the existing _checkpoint / _resume_from_checkpoint /
+# _terminal_status helpers from above, with expected_phase='shares'.
+
+
+def run_shares_refresh(
+    db_engine: Engine,
+    exchange: str,
+    *,
+    resume_run_id: Optional[int] = None,
+    force: bool = False,
+    request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
+    fetch_fn=None,
+) -> int:
+    """Refresh shares-outstanding for every active ticker on `exchange`.
+
+    Inserts ONE new instrument_shares row per ticker with
+    `as_of_date = today` (UTC). The composite PK on (ticker_id,
+    as_of_date) means re-running on the same day is idempotent
+    (UPDATE-on-conflict via the repo's insert_snapshot).
+
+    Returns the run_id of the fundamentals_run row.
+
+    Parameters:
+      db_engine, exchange — as run_industry_refresh.
+      resume_run_id — resume from a PARTIAL run's checkpoint.
+      force — bypass the 80-day skip-if-recent guard.
+      request_delay_s — sleep between yfinance calls.
+      fetch_fn — injected for testability; defaults to the real
+                  fetch_shares from shares_fetch.
+    """
+    from .shares_fetch import (
+        SharesFetchPermanent,
+        SharesFetchRateLimited,
+        SharesFetchTransient,
+        fetch_shares,
+    )
+
+    if fetch_fn is None:
+        fetch_fn = fetch_shares
+
+    today = datetime.now(timezone.utc).date()
+
+    # ----- 0. Skip-if-recent guard ----- #
+    if not force and resume_run_id is None:
+        with db_engine.connect() as conn:
+            last = FundamentalsRunRepository(conn).last_success(
+                phase="shares", exchange=exchange,
+            )
+        if last is not None and last.completed_at is not None:
+            age = (datetime.now(timezone.utc) - last.completed_at).days
+            if age < 80:
+                logger.info(
+                    "Skipping shares refresh for %s: last SUCCESS "
+                    "run %d completed %d days ago (use force=True to override)",
+                    exchange, last.run_id, age,
+                )
+                return last.run_id
+
+    # ----- 1. Determine the ticker list ----- #
+    if resume_run_id is not None:
+        run_id, ticker_list, cursor_index = _resume_from_checkpoint(
+            db_engine, resume_run_id, expected_phase="shares",
+        )
+        logger.info(
+            "Resuming shares refresh run %d at index %d/%d",
+            run_id, cursor_index, len(ticker_list),
+        )
+    else:
+        ticker_list = _load_active_tickers_for_exchange(db_engine, exchange)
+        if not ticker_list:
+            logger.warning(
+                "No active tickers for exchange %s — skipping shares refresh",
+                exchange,
+            )
+            with transaction(db_engine) as conn:
+                run_id = FundamentalsRunRepository(conn).open(
+                    phase="shares", exchange=exchange,
+                    notes="No active tickers",
+                )
+                FundamentalsRunRepository(conn).close(
+                    run_id, status="SUCCESS", succeeded=0, failed=0, skipped=0,
+                )
+            return run_id
+        with transaction(db_engine) as conn:
+            run_id = FundamentalsRunRepository(conn).open(
+                phase="shares", exchange=exchange,
+                notes=f"Shares refresh of {len(ticker_list)} active tickers",
+            )
+            FundamentalsRunRepository(conn).update_progress(
+                run_id,
+                progress_json={
+                    "ticker_list": [
+                        {"id": t["id"], "symbol": t["symbol"],
+                         "instrument_type": t.get("instrument_type", "EQ")}
+                        for t in ticker_list
+                    ],
+                    "cursor_index": 0,
+                },
+            )
+        cursor_index = 0
+
+    # ----- 2. Main loop ----- #
+    succeeded = 0
+    failed = 0
+    skipped = 0  # always 0 for shares (no override table)
+
+    try:
+        for idx in range(cursor_index, len(ticker_list)):
+            t = ticker_list[idx]
+            tid, symbol = t["id"], t["symbol"]
+
+            try:
+                info = fetch_fn(symbol, exchange)
+                with transaction(db_engine) as conn:
+                    InstrumentSharesRepository(conn).insert_snapshot(
+                        tid,
+                        as_of_date=today,
+                        shares_outstanding=info.shares_outstanding,
+                        shares_source=info.source,
+                    )
+                succeeded += 1
+            except SharesFetchRateLimited as e:
+                logger.warning(
+                    "Rate limited on %s (%s): sleeping %.1fs",
+                    symbol, e, RATE_LIMIT_COOLOFF_S,
+                )
+                _checkpoint(db_engine, run_id, ticker_list, idx,
+                            succeeded, failed, skipped)
+                time.sleep(RATE_LIMIT_COOLOFF_S)
+                # Retry once after cool-off; if it still fails, count
+                # as failed and move on.
+                try:
+                    info = fetch_fn(symbol, exchange)
+                    with transaction(db_engine) as conn:
+                        InstrumentSharesRepository(conn).insert_snapshot(
+                            tid,
+                            as_of_date=today,
+                            shares_outstanding=info.shares_outstanding,
+                            shares_source=info.source,
+                        )
+                    succeeded += 1
+                except Exception as e2:
+                    logger.error(
+                        "Failed retry after rate-limit cool-off for %s: %s",
+                        symbol, e2,
+                    )
+                    failed += 1
+            except (SharesFetchTransient, SharesFetchPermanent) as e:
+                logger.warning("Failed to fetch shares for %s: %s", symbol, e)
+                failed += 1
+            except Exception as e:
+                logger.exception("Unexpected error fetching shares for %s: %s", symbol, e)
+                failed += 1
+
+            if (idx + 1) % CHECKPOINT_EVERY == 0:
+                _checkpoint(db_engine, run_id, ticker_list, idx + 1,
+                            succeeded, failed, skipped)
+                logger.info(
+                    "Checkpoint: %d/%d processed (s=%d f=%d) on %s",
+                    idx + 1, len(ticker_list),
+                    succeeded, failed, exchange,
+                )
+
+            if request_delay_s > 0:
+                time.sleep(request_delay_s)
+
+    except KeyboardInterrupt:
+        logger.warning("KeyboardInterrupt — closing shares run %d as PARTIAL", run_id)
+        with transaction(db_engine) as conn:
+            FundamentalsRunRepository(conn).close(
+                run_id, status="PARTIAL",
+                succeeded=succeeded, failed=failed, skipped=skipped,
+                notes="Interrupted by KeyboardInterrupt",
+            )
+        raise
+
+    # ----- 3. Close out ----- #
+    status = _terminal_status(succeeded, failed)
+    with transaction(db_engine) as conn:
+        FundamentalsRunRepository(conn).close(
+            run_id, status=status,
+            succeeded=succeeded, failed=failed, skipped=skipped,
+        )
+    logger.info(
+        "Shares refresh run %d (%s) finished: status=%s s=%d f=%d",
+        run_id, exchange, status, succeeded, failed,
+    )
+    return run_id
