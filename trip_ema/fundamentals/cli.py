@@ -186,6 +186,26 @@ def cmd_fundamentals_status(args, config: Config) -> int:
                     f"{with_shares:>12} {pct:>5.1f}%"
                 )
 
+        # Financials coverage section (Phase 3). Same shape as shares
+        # but with TWO data columns (revenue, ebitda) because the
+        # important quality signal is the revenue/EBITDA gap — yfinance
+        # often has revenue but not EBITDA for Indian mid/small caps.
+        from ..persistence.fundamentals_repo import QuarterlyFinancialsRepository
+        with db_engine.connect() as conn:
+            fin_counts = QuarterlyFinancialsRepository(conn).coverage_counts_by_type()
+        if any(w_r > 0 or w_e > 0 for _, _, _, w_r, w_e in fin_counts):
+            print()
+            print("Quarterly financials coverage (by instrument type):")
+            print(
+                f"  {'EXCHANGE':<10} {'TYPE':<6} {'TOTAL':>8} "
+                f"{'W/REVENUE':>10} {'W/EBITDA':>10}"
+            )
+            for ex, itype, total, with_rev, with_ebt in fin_counts:
+                print(
+                    f"  {ex:<10} {itype:<6} {total:>8} "
+                    f"{with_rev:>10} {with_ebt:>10}"
+                )
+
         # Recent runs section.
         with db_engine.connect() as conn:
             runs = FundamentalsRunRepository(conn).list_recent(
@@ -233,6 +253,45 @@ def cmd_refresh_shares(args, config: Config) -> int:
     db_engine = create_engine_from_config(config)
     try:
         run_id = run_shares_refresh(
+            db_engine,
+            args.exchange,
+            resume_run_id=args.resume,
+            force=args.force,
+        )
+        with db_engine.connect() as conn:
+            r = FundamentalsRunRepository(conn).get(run_id)
+        if r is None:
+            print(f"run_id={run_id} (no row found?)", file=sys.stderr)
+            return 1
+        print(
+            f"run_id={r.run_id} status={r.status} "
+            f"succeeded={r.succeeded} failed={r.failed}"
+        )
+        if r.status == "SUCCESS":
+            return 0
+        if r.status == "PARTIAL":
+            return 1
+        return 2
+    finally:
+        db_engine.dispose()
+
+
+# ---------- refresh-financials (Phase 3.A) ---------- #
+
+
+def cmd_refresh_financials(args, config: Config) -> int:
+    """Yfinance quarterly-financials refresh for an exchange.
+
+    Mirrors cmd_refresh_industry / cmd_refresh_shares — same exit-
+    code conventions, same --resume / --force semantics, same
+    fundamentals_run audit trail. Per-ticker yfinance HTTP cost is
+    the same as the others (~2s per ticker × 2300 tickers ≈ 60 min).
+    """
+    from .runners import run_financials_refresh
+    validate_exchange(args.exchange, config)
+    db_engine = create_engine_from_config(config)
+    try:
+        run_id = run_financials_refresh(
             db_engine,
             args.exchange,
             resume_run_id=args.resume,
@@ -448,6 +507,23 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
         help="Resume a previously-interrupted shares run from its checkpoint",
     )
 
+    rf = sub.add_parser(
+        "refresh-financials",
+        help="Fetch quarterly revenue + EBITDA from yfinance for every "
+             "active ticker. Time-series PK; up to 4 quarters per "
+             "ticker per run. Phase 3.A stores yfinance's reported "
+             "EBITDA, NULL when missing (no computation).",
+    )
+    _add_exchange_arg(rf)
+    rf.add_argument(
+        "--force", action="store_true",
+        help="Re-run even if a successful refresh exists from the last 80 days",
+    )
+    rf.add_argument(
+        "--resume", type=int, default=None, metavar="RUN_ID",
+        help="Resume a previously-interrupted financials run from its checkpoint",
+    )
+
     return {
         "refresh-industry":             cmd_refresh_industry,
         "set-industry-override":        cmd_set_industry_override,
@@ -455,4 +531,5 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
         "fundamentals-status":          cmd_fundamentals_status,
         "backfill-etf-classification":  cmd_backfill_etf_classification,
         "refresh-shares":               cmd_refresh_shares,
+        "refresh-financials":           cmd_refresh_financials,
     }

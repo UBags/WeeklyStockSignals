@@ -480,3 +480,171 @@ def test_shares_endpoints_require_auth(real_db_client):
     """No Authorization → 401, matching the rest of /v1/fundamentals/*."""
     r = real_db_client.get("/v1/fundamentals/shares?exchange=NSE")
     assert r.status_code == 401
+
+
+# ============================================================
+# Phase 3 — quarterly financials endpoints
+# ============================================================
+
+
+from trip_ema.persistence.fundamentals_repo import QuarterlyFinancialsRepository
+
+
+class TestListFinancials:
+
+    def test_returns_empty_for_exchange_with_no_data(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/financials?exchange=NSE",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        assert r.json() == {"exchange": "NSE", "rows": []}
+
+    def test_returns_latest_quarter_per_ticker(
+        self, real_db_client, db_engine, reliance_ticker,
+    ):
+        with transaction(db_engine) as conn:
+            r = QuarterlyFinancialsRepository(conn)
+            r.insert_snapshot(
+                reliance_ticker, fiscal_quarter=date(2025, 9, 30),
+                revenue=2400e9, ebitda=340e9,
+            )
+            r.insert_snapshot(
+                reliance_ticker, fiscal_quarter=date(2025, 12, 31),
+                revenue=2500e9, ebitda=350e9,
+            )
+        r = real_db_client.get(
+            "/v1/fundamentals/financials?exchange=NSE",
+            headers=AUTH_HEADERS,
+        )
+        body = r.json()
+        assert r.status_code == 200
+        assert len(body["rows"]) == 1
+        row = body["rows"][0]
+        assert row["ticker_id"] == reliance_ticker
+        # Latest quarter wins.
+        assert row["fiscal_quarter"] == "2025-12-31"
+        assert row["revenue"] == 2500e9
+
+    def test_rejects_invalid_exchange(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/financials?exchange=BOGUS",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+
+class TestGetLatestNQuarters:
+
+    def test_returns_n_quarters_newest_first(
+        self, real_db_client, db_engine, reliance_ticker,
+    ):
+        with transaction(db_engine) as conn:
+            r = QuarterlyFinancialsRepository(conn)
+            for fq, rev in [
+                (date(2025, 3, 31),   100.0),
+                (date(2025, 6, 30),   110.0),
+                (date(2025, 9, 30),   120.0),
+                (date(2025, 12, 31),  130.0),
+            ]:
+                r.insert_snapshot(
+                    reliance_ticker, fiscal_quarter=fq,
+                    revenue=rev, ebitda=None,
+                )
+        r = real_db_client.get(
+            f"/v1/fundamentals/financials/{reliance_ticker}/quarters?n=4",
+            headers=AUTH_HEADERS,
+        )
+        body = r.json()
+        assert r.status_code == 200
+        revs = [row["revenue"] for row in body["rows"]]
+        assert revs == [130.0, 120.0, 110.0, 100.0]
+
+    def test_n_default_is_4(
+        self, real_db_client, db_engine, reliance_ticker,
+    ):
+        with transaction(db_engine) as conn:
+            r = QuarterlyFinancialsRepository(conn)
+            for m in (1, 2, 3, 4, 5):
+                r.insert_snapshot(
+                    reliance_ticker, fiscal_quarter=date(2026, m, 1),
+                    revenue=m * 1.0, ebitda=None,
+                )
+        r = real_db_client.get(
+            f"/v1/fundamentals/financials/{reliance_ticker}/quarters",
+            headers=AUTH_HEADERS,
+        )
+        body = r.json()
+        assert len(body["rows"]) == 4
+
+    def test_rejects_n_above_20(self, real_db_client, reliance_ticker):
+        r = real_db_client.get(
+            f"/v1/fundamentals/financials/{reliance_ticker}/quarters?n=100",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+
+
+class TestGetQuarterHistory:
+
+    def test_returns_history_newest_first(
+        self, real_db_client, db_engine, reliance_ticker,
+    ):
+        import time as _t
+        with transaction(db_engine) as conn:
+            QuarterlyFinancialsRepository(conn).insert_snapshot(
+                reliance_ticker, fiscal_quarter=date(2025, 9, 30),
+                revenue=100.0, ebitda=15.0,
+            )
+        _t.sleep(0.01)
+        with transaction(db_engine) as conn:
+            QuarterlyFinancialsRepository(conn).insert_snapshot(
+                reliance_ticker, fiscal_quarter=date(2025, 9, 30),
+                revenue=99.0, ebitda=14.5,  # restated
+            )
+        r = real_db_client.get(
+            f"/v1/fundamentals/financials/{reliance_ticker}"
+            f"/quarter/2025-09-30/history",
+            headers=AUTH_HEADERS,
+        )
+        body = r.json()
+        assert r.status_code == 200
+        assert len(body["rows"]) == 2
+        # Newest first.
+        assert body["rows"][0]["revenue"] == 99.0
+        assert body["rows"][1]["revenue"] == 100.0
+
+
+class TestRefreshFinancials:
+
+    def test_returns_202_and_kicks_runner(
+        self, real_db_client, db_engine, reliance_ticker, monkeypatch,
+    ):
+        called = []
+        def fake_runner(engine, exchange, *, force=False, **kw):
+            called.append((exchange, force))
+            return 0
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_financials_refresh",
+            fake_runner,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/refresh-financials?exchange=NSE&force=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        body = r.json()
+        assert body["action"] == "refresh-financials"
+        assert called == [("NSE", True)]
+
+    def test_rejects_invalid_exchange(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/refresh-financials?exchange=BOGUS",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+
+def test_financials_endpoints_require_auth(real_db_client):
+    r = real_db_client.get("/v1/fundamentals/financials?exchange=NSE")
+    assert r.status_code == 401

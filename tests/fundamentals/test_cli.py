@@ -605,3 +605,101 @@ class TestCmdFundamentalsStatusShowsShares:
         out = capsys.readouterr().out
         assert rc == 0
         assert "Shares-outstanding coverage" not in out
+
+
+# ---------- cmd_refresh_financials ---------- #
+
+
+class TestCmdRefreshFinancials:
+
+    def test_returns_0_on_success(
+        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        capsys, monkeypatch,
+    ):
+        from trip_ema.fundamentals.cli import cmd_refresh_financials
+        with transaction(db_engine) as conn:
+            rid = FundamentalsRunRepository(conn).open(
+                phase="financials", exchange="NSE",
+            )
+            FundamentalsRunRepository(conn).close(
+                rid, status="SUCCESS", succeeded=1, failed=0, skipped=0,
+            )
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_financials_refresh",
+            lambda *a, **kw: rid,
+        )
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.force = False
+        args.resume = None
+        rc = cmd_refresh_financials(args, fake_config)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "status=SUCCESS" in out
+
+    def test_returns_1_on_partial(
+        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        monkeypatch,
+    ):
+        from trip_ema.fundamentals.cli import cmd_refresh_financials
+        with transaction(db_engine) as conn:
+            rid = FundamentalsRunRepository(conn).open(
+                phase="financials", exchange="NSE",
+            )
+            FundamentalsRunRepository(conn).close(
+                rid, status="PARTIAL", succeeded=3, failed=2, skipped=0,
+            )
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_financials_refresh",
+            lambda *a, **kw: rid,
+        )
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.force = False
+        args.resume = None
+        rc = cmd_refresh_financials(args, fake_config)
+        assert rc == 1
+
+
+class TestCmdFundamentalsStatusShowsFinancials:
+
+    def test_shows_financials_coverage_when_present(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, capsys,
+    ):
+        from trip_ema.persistence.fundamentals_repo import (
+            QuarterlyFinancialsRepository,
+        )
+        with transaction(db_engine) as conn:
+            QuarterlyFinancialsRepository(conn).insert_snapshot(
+                reliance_ticker,
+                fiscal_quarter=date(2025, 12, 31),
+                revenue=2500e9, ebitda=350e9,
+            )
+        args = type("A", (), {})()
+        args.exchange = None
+        args.phase = None
+        args.limit = 10
+        rc = cmd_fundamentals_status(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Quarterly financials coverage" in out
+        assert "W/REVENUE" in out
+        assert "W/EBITDA" in out
+
+    def test_omits_financials_section_when_no_data(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, capsys,
+    ):
+        with transaction(db_engine) as conn:
+            InstrumentIndustryRepository(conn).upsert(
+                reliance_ticker, sector="Energy", industry="Oil",
+            )
+        args = type("A", (), {})()
+        args.exchange = None
+        args.phase = None
+        args.limit = 10
+        rc = cmd_fundamentals_status(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Quarterly financials coverage" not in out

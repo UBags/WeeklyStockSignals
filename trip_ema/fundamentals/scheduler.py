@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # the same yfinance connection pool — that would just trigger rate
 # limits faster). Phases that don't exist in this tuple aren't
 # scheduled; the operator can still trigger them manually via CLI/HTTP.
-SCHEDULED_PHASES = ("industry", "shares")
+SCHEDULED_PHASES = ("industry", "shares", "financials")
 
 # Refresh-eligible filing window: quarter-end + 1 month. We use these
 # (month, day) tuples as the "from" cutoff — once the IST date is on
@@ -198,6 +198,9 @@ class QuarterlyFundamentalsScheduler:
         elif phase == "shares":
             from .runners import run_shares_refresh
             runner = run_shares_refresh
+        elif phase == "financials":
+            from .runners import run_financials_refresh
+            runner = run_financials_refresh
         else:
             # Unknown phase — defensive guard. SCHEDULED_PHASES should
             # only contain phases we have runners for.

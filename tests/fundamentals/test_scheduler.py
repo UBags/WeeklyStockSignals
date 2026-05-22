@@ -350,3 +350,56 @@ class TestSchedulerFiresShares:
         ):
             # Should not raise.
             sched._tick()
+
+
+# ---------- Phase 3: financials scheduling ---------- #
+
+
+class TestSchedulerFiresFinancials:
+    """The scheduler now fires industry, shares, AND financials at
+    each quarterly window."""
+
+    def test_tick_fires_all_three_phases_per_exchange(
+        self, db_engine, fake_config,
+    ):
+        """In a refresh window, with two configured exchanges and no
+        prior runs: 2 industry + 2 shares + 2 financials = 6 calls."""
+        sched = QuarterlyFundamentalsScheduler(
+            db_engine, fake_config,
+            now_fn=lambda: _at(2026, 4, 30),
+        )
+        with patch(
+            "trip_ema.fundamentals.scheduler.run_industry_refresh",
+        ) as ind_mock, patch(
+            "trip_ema.fundamentals.runners.run_shares_refresh",
+        ) as shr_mock, patch(
+            "trip_ema.fundamentals.runners.run_financials_refresh",
+        ) as fin_mock:
+            sched._tick()
+        assert ind_mock.call_count == 2
+        assert shr_mock.call_count == 2
+        assert fin_mock.call_count == 2
+
+    def test_financials_phase_respects_skip_if_recent(
+        self, db_engine, fake_config,
+    ):
+        with transaction(db_engine) as conn:
+            r = FundamentalsRunRepository(conn)
+            rid = r.open(phase="financials", exchange="NSE")
+            r.close(rid, status="SUCCESS",
+                    succeeded=5, failed=0, skipped=0)
+        sched = QuarterlyFundamentalsScheduler(
+            db_engine, fake_config,
+            now_fn=lambda: _at(2026, 4, 30),
+        )
+        with patch(
+            "trip_ema.fundamentals.scheduler.run_industry_refresh",
+        ), patch(
+            "trip_ema.fundamentals.runners.run_shares_refresh",
+        ), patch(
+            "trip_ema.fundamentals.runners.run_financials_refresh",
+        ) as fin_mock:
+            sched._tick()
+        # Financials fires only for BSE.
+        assert fin_mock.call_count == 1
+        assert fin_mock.call_args_list[0].args[1] == "BSE"

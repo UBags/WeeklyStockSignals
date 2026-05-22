@@ -479,3 +479,156 @@ def refresh_shares(
             f"check /v1/fundamentals/runs for progress."
         ),
     )
+
+
+# ============================================================
+# Phase 3 — quarterly financials endpoints
+# ============================================================
+
+
+from ....persistence.fundamentals_repo import QuarterlyFinancialsRepository
+
+
+class FinancialRowPayload(BaseModel):
+    ticker_id: int
+    fiscal_quarter: "date"
+    fetched_at: datetime
+    revenue: Optional[float] = None
+    ebitda: Optional[float] = None
+    currency: str
+    source: str
+
+
+class FinancialListPayload(BaseModel):
+    exchange: str
+    rows: list[FinancialRowPayload]
+
+
+class FinancialHistoryPayload(BaseModel):
+    ticker_id: int
+    fiscal_quarter: "date"
+    rows: list[FinancialRowPayload]  # newest fetched_at first
+
+
+class FinancialQuartersPayload(BaseModel):
+    """Last N quarters for one ticker, newest quarter first."""
+    ticker_id: int
+    rows: list[FinancialRowPayload]
+
+
+def _run_financials_refresh_safe(
+    db_engine: Engine, config: Config, exchange: str, force: bool,
+) -> None:
+    """Executor wrapper — catches exceptions so the executor thread
+    doesn't die silently. Errors are logged; run row carries the
+    real outcome."""
+    from ....fundamentals.runners import run_financials_refresh
+    try:
+        run_financials_refresh(db_engine, exchange, force=force)
+    except Exception:
+        logger.exception(
+            "Financials refresh failed for exchange=%s", exchange,
+        )
+
+
+def _finrow_payload(r) -> FinancialRowPayload:
+    return FinancialRowPayload(
+        ticker_id=r.ticker_id,
+        fiscal_quarter=r.fiscal_quarter,
+        fetched_at=r.fetched_at,
+        revenue=r.revenue,
+        ebitda=r.ebitda,
+        currency=r.currency,
+        source=r.source,
+    )
+
+
+@router.get("/financials", response_model=FinancialListPayload)
+def list_financials(
+    exchange: str = Query(..., min_length=2, max_length=10),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+) -> FinancialListPayload:
+    """Latest-quarter snapshot per active ticker on `exchange`. For
+    a specific quarter, use ?fiscal_quarter=YYYY-MM-DD.
+
+    Phase 4 will call this with the most recent quarter to build
+    the universe-wide snapshot for index construction.
+    """
+    _validate_exchange_or_400(exchange, config)
+    with db_engine.connect() as conn:
+        rows = QuarterlyFinancialsRepository(conn).list_latest_for_exchange(
+            exchange,
+        )
+    return FinancialListPayload(
+        exchange=exchange,
+        rows=[_finrow_payload(r) for r in rows],
+    )
+
+
+@router.get("/financials/{ticker_id}/quarters",
+            response_model=FinancialQuartersPayload)
+def get_latest_n_quarters(
+    ticker_id: int,
+    n: int = Query(4, ge=1, le=20),
+    db_engine: Engine = Depends(get_db_engine),
+) -> FinancialQuartersPayload:
+    """The last N quarters for one ticker, newest first. This is the
+    Phase 7 'show Q-4 .. Q-1' query."""
+    with db_engine.connect() as conn:
+        quarters = QuarterlyFinancialsRepository(conn).get_latest_n_quarters(
+            ticker_id, n=n,
+        )
+    return FinancialQuartersPayload(
+        ticker_id=ticker_id,
+        rows=[_finrow_payload(q) for q in quarters],
+    )
+
+
+@router.get("/financials/{ticker_id}/quarter/{fiscal_quarter}/history",
+            response_model=FinancialHistoryPayload)
+def get_quarter_history(
+    ticker_id: int,
+    fiscal_quarter: "date",
+    db_engine: Engine = Depends(get_db_engine),
+) -> FinancialHistoryPayload:
+    """All snapshots for one (ticker, quarter) pair — used for
+    restatement detection. Newest fetched_at first."""
+    with db_engine.connect() as conn:
+        history = QuarterlyFinancialsRepository(conn).get_history(
+            ticker_id, fiscal_quarter,
+        )
+    return FinancialHistoryPayload(
+        ticker_id=ticker_id,
+        fiscal_quarter=fiscal_quarter,
+        rows=[_finrow_payload(r) for r in history],
+    )
+
+
+@router.post("/refresh-financials",
+             response_model=RefreshAcceptedPayload, status_code=202)
+def refresh_financials(
+    exchange: str = Query(..., min_length=2, max_length=10),
+    force: bool = Query(False),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+    executor = Depends(get_etl_executor),
+) -> RefreshAcceptedPayload:
+    """Fire-and-forget financials refresh. Returns 202 immediately;
+    poll /runs for the result."""
+    _require_executor(executor)
+    _validate_exchange_or_400(exchange, config)
+    logger.info(
+        "Admin: refresh-financials requested",
+        extra={"exchange": exchange, "force": force},
+    )
+    executor.submit(_run_financials_refresh_safe, db_engine, config, exchange, force)
+    return RefreshAcceptedPayload(
+        action="refresh-financials",
+        run_id=None,
+        accepted_at=datetime.now(timezone.utc),
+        notes=(
+            f"Financials refresh ({exchange}, force={force}) submitted; "
+            f"check /v1/fundamentals/runs for progress."
+        ),
+    )
