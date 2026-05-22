@@ -850,3 +850,432 @@ class TestCmdFundamentalsStatusShowsMarketCap:
         out = capsys.readouterr().out
         assert rc == 0
         assert "Daily market cap coverage" not in out
+
+
+# ============================================================
+# Phase 4B-3 CLI tests
+# ============================================================
+
+
+# ---------- cmd_build_industry_indices ---------- #
+
+
+class TestCmdBuildIndustryIndices:
+
+    def test_calls_runner_and_prints_summary(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        """The handler delegates to run_industry_index_build and
+        prints a tabular summary. Stub the runner to return a
+        predictable shape."""
+        def fake_build(engine, exchange, *, min_constituents, n, base_value):
+            return {
+                "qualified": [
+                    ("Banks - Regional", "Financials", 41),
+                    ("IT - Services", "Technology", 15),
+                ],
+                "unqualified": [
+                    ("Restaurants", "Consumer Cyclical", 9),
+                ],
+                "indexed": [
+                    ("Banks - Regional", date(2025, 10, 1), 10),
+                    ("IT - Services", date(2025, 10, 1), 10),
+                ],
+                "failed": [],
+            }
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_industry_index_build",
+            fake_build,
+        )
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.min_constituents = 10
+        args.n = 10
+        args.base_value = 1000.0
+        from trip_ema.fundamentals.cli import cmd_build_industry_indices
+        rc = cmd_build_industry_indices(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Qualified industries" in out
+        assert "Newly indexed" in out
+        # Tabular output contains the industry names.
+        assert "Banks - Regional" in out
+        assert "IT - Services" in out
+
+    def test_returns_1_when_some_failed(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        def fake_build(engine, exchange, *, min_constituents, n, base_value):
+            return {
+                "qualified": [("A", "S", 10)],
+                "unqualified": [],
+                "indexed": [],
+                "failed": [("A", "below threshold on rebalance date")],
+            }
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_industry_index_build",
+            fake_build,
+        )
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.min_constituents = 10
+        args.n = 10
+        args.base_value = 1000.0
+        from trip_ema.fundamentals.cli import cmd_build_industry_indices
+        rc = cmd_build_industry_indices(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Failed" in out
+
+    def test_rejects_invalid_exchange(
+        self, db_engine, fake_config, patched_engine_factory,
+    ):
+        from trip_ema.etl.exchanges import UnsupportedExchangeError
+        args = type("A", (), {})()
+        args.exchange = "BOGUS"
+        args.min_constituents = 10
+        args.n = 10
+        args.base_value = 1000.0
+        from trip_ema.fundamentals.cli import cmd_build_industry_indices
+        with pytest.raises(UnsupportedExchangeError):
+            cmd_build_industry_indices(args, fake_config)
+
+
+# ---------- cmd_compute_index_values ---------- #
+
+
+class TestCmdComputeIndexValues:
+
+    def _setup_one_index(self, db_engine, name="IT - Services"):
+        from trip_ema.persistence.fundamentals_repo import (
+            IndustryIndexRepository,
+        )
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                name, sector_name="Technology",
+                base_date=date(2025, 10, 1),
+            )
+
+    def test_rejects_no_industry_and_no_all_active(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_active = False
+        args.from_ = None
+        args.to = None
+        args.force = False
+        args.resume = None
+        from trip_ema.fundamentals.cli import cmd_compute_index_values
+        rc = cmd_compute_index_values(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "--industry" in err or "all-active" in err
+
+    def test_rejects_both_industry_and_all_active(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = "IT - Services"
+        args.all_active = True
+        args.from_ = None
+        args.to = None
+        args.force = False
+        args.resume = None
+        from trip_ema.fundamentals.cli import cmd_compute_index_values
+        rc = cmd_compute_index_values(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "mutually exclusive" in err
+
+    def test_single_industry_unknown_returns_2(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = "Nonexistent"
+        args.all_active = False
+        args.from_ = None
+        args.to = None
+        args.force = False
+        args.resume = None
+        from trip_ema.fundamentals.cli import cmd_compute_index_values
+        rc = cmd_compute_index_values(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "is not indexed" in err
+
+    def test_single_industry_calls_runner(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        """Set up one index, stub the runner, confirm it gets called
+        with the right args and rc=0 on SUCCESS."""
+        self._setup_one_index(db_engine, "IT - Services")
+        # Stub the runner to open+close a SUCCESS run, returning its id.
+        called = []
+        def fake_backfill(engine, industry_name, *, from_date, to_date,
+                          resume_run_id=None, force=False):
+            called.append((industry_name, from_date, to_date, force))
+            with transaction(engine) as conn:
+                rid = FundamentalsRunRepository(conn).open(
+                    phase="index_value", exchange="ALL",
+                )
+                FundamentalsRunRepository(conn).close(
+                    rid, status="SUCCESS",
+                    succeeded=10, failed=0, skipped=2,
+                )
+            return rid
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_index_value_backfill",
+            fake_backfill,
+        )
+        args = type("A", (), {})()
+        args.industry = "IT - Services"
+        args.all_active = False
+        args.from_ = "2025-10-01"
+        args.to = "2026-05-01"
+        args.force = False
+        args.resume = None
+        from trip_ema.fundamentals.cli import cmd_compute_index_values
+        rc = cmd_compute_index_values(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        # The runner was called with the right industry and dates.
+        assert len(called) == 1
+        industry_called, from_called, to_called, force_called = called[0]
+        assert industry_called == "IT - Services"
+        # from_date = max(cli_from, base_date). base_date is 2025-10-01,
+        # cli_from is 2025-10-01 → 2025-10-01.
+        assert from_called == date(2025, 10, 1)
+        assert to_called == date(2026, 5, 1)
+        assert force_called is False
+        assert "status=SUCCESS" in out
+
+    def test_all_active_iterates_indices(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        """--all-active calls the runner once per active index."""
+        self._setup_one_index(db_engine, "Index A")
+        self._setup_one_index(db_engine, "Index B")
+        called = []
+        def fake_backfill(engine, industry_name, **kw):
+            called.append(industry_name)
+            with transaction(engine) as conn:
+                rid = FundamentalsRunRepository(conn).open(
+                    phase="index_value", exchange="ALL",
+                )
+                FundamentalsRunRepository(conn).close(
+                    rid, status="SUCCESS",
+                    succeeded=1, failed=0, skipped=0,
+                )
+            return rid
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_index_value_backfill",
+            fake_backfill,
+        )
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_active = True
+        args.from_ = None
+        args.to = None
+        args.force = False
+        args.resume = None
+        from trip_ema.fundamentals.cli import cmd_compute_index_values
+        rc = cmd_compute_index_values(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        # Both indices got backfilled.
+        assert set(called) == {"Index A", "Index B"}
+        assert "2 SUCCESS" in out
+
+    def test_all_active_when_no_indices_returns_1(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_active = True
+        args.from_ = None
+        args.to = None
+        args.force = False
+        args.resume = None
+        from trip_ema.fundamentals.cli import cmd_compute_index_values
+        rc = cmd_compute_index_values(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "build-industry-indices" in err
+
+    def test_partial_status_returns_1(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        self._setup_one_index(db_engine, "IT - Services")
+        def fake_backfill(engine, industry_name, **kw):
+            with transaction(engine) as conn:
+                rid = FundamentalsRunRepository(conn).open(
+                    phase="index_value", exchange="ALL",
+                )
+                FundamentalsRunRepository(conn).close(
+                    rid, status="PARTIAL",
+                    succeeded=5, failed=2, skipped=1,
+                )
+            return rid
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_index_value_backfill",
+            fake_backfill,
+        )
+        args = type("A", (), {})()
+        args.industry = "IT - Services"
+        args.all_active = False
+        args.from_ = None
+        args.to = None
+        args.force = False
+        args.resume = None
+        from trip_ema.fundamentals.cli import cmd_compute_index_values
+        rc = cmd_compute_index_values(args, fake_config)
+        assert rc == 1
+
+
+# ---------- cmd_rebalance_industry_index ---------- #
+
+
+class TestCmdRebalanceIndustryIndex:
+
+    def test_returns_0_on_successful_rebalance(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        from trip_ema.fundamentals.runners import RebalanceResult
+        def fake_run(engine, industry, rebalance_date, **kw):
+            return RebalanceResult(
+                industry_name=industry,
+                rebalance_date=rebalance_date,
+                constituents_picked=10,
+                constituents_closed=10,
+                rebalance_skipped=False,
+                skip_reason=None,
+            )
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_rebalance", fake_run,
+        )
+        args = type("A", (), {})()
+        args.industry = "IT - Services"
+        args.date = "2026-04-01"
+        args.n = 10
+        args.min_constituents = None
+        args.exchange = None
+        from trip_ema.fundamentals.cli import cmd_rebalance_industry_index
+        rc = cmd_rebalance_industry_index(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "picked=10" in out
+        assert "closed_prior=10" in out
+
+    def test_returns_1_when_skipped(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        from trip_ema.fundamentals.runners import RebalanceResult
+        def fake_run(engine, industry, rebalance_date, **kw):
+            return RebalanceResult(
+                industry_name=industry,
+                rebalance_date=rebalance_date,
+                constituents_picked=5,
+                constituents_closed=0,
+                rebalance_skipped=True,
+                skip_reason="picked 5 < min_constituents 10",
+            )
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_rebalance", fake_run,
+        )
+        args = type("A", (), {})()
+        args.industry = "Sparse Industry"
+        args.date = "2026-04-01"
+        args.n = 10
+        args.min_constituents = None
+        args.exchange = None
+        from trip_ema.fundamentals.cli import cmd_rebalance_industry_index
+        rc = cmd_rebalance_industry_index(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "SKIPPED" in out
+        assert "min_constituents" in out
+
+    def test_returns_2_when_index_unknown(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        def fake_run(engine, industry, rebalance_date, **kw):
+            raise ValueError(f"index {industry!r} does not exist")
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_rebalance", fake_run,
+        )
+        args = type("A", (), {})()
+        args.industry = "Nonexistent"
+        args.date = "2026-04-01"
+        args.n = 10
+        args.min_constituents = None
+        args.exchange = None
+        from trip_ema.fundamentals.cli import cmd_rebalance_industry_index
+        rc = cmd_rebalance_industry_index(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "does not exist" in err
+
+
+# ---------- fundamentals-status with indices ---------- #
+
+
+class TestCmdFundamentalsStatusShowsIndices:
+
+    def test_shows_indices_section_when_present(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, capsys,
+    ):
+        from trip_ema.persistence.fundamentals_repo import (
+            IndustryIndexRepository,
+            IndustryIndexValueRepository,
+        )
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                "Banks - Regional", sector_name="Financials",
+                base_date=date(2025, 10, 1),
+            )
+            IndustryIndexValueRepository(conn).upsert_value(
+                "Banks - Regional",
+                trade_date=date(2025, 10, 1),
+                value=1000.0,
+                constituents_used=10, constituents_missing=0,
+                renormalized=False,
+                effective_rebalance_date=date(2025, 10, 1),
+            )
+        args = type("A", (), {})()
+        args.exchange = None
+        args.phase = None
+        args.limit = 10
+        rc = cmd_fundamentals_status(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Industry indices" in out
+        assert "Banks - Regional" in out
+
+    def test_omits_indices_section_when_none_exist(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, capsys,
+    ):
+        # No indices set up; just an industry classification so
+        # something prints (the status checks for at-least-some-data).
+        with transaction(db_engine) as conn:
+            InstrumentIndustryRepository(conn).upsert(
+                reliance_ticker, sector="Energy", industry="Oil",
+            )
+        args = type("A", (), {})()
+        args.exchange = None
+        args.phase = None
+        args.limit = 10
+        rc = cmd_fundamentals_status(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Industry indices" not in out

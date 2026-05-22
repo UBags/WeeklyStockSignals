@@ -795,3 +795,357 @@ def compute_market_cap_endpoint(
             f"/v1/fundamentals/runs for progress."
         ),
     )
+
+
+# ============================================================
+# Phase 4B-3 — industry index endpoints
+# ============================================================
+
+
+from ....persistence.fundamentals_repo import (
+    IndustryIndexConstituentRepository,
+    IndustryIndexRepository,
+    IndustryIndexValueRepository,
+)
+
+
+# ---------- payload models ---------- #
+
+
+class IndustryIndexPayload(BaseModel):
+    industry_name: str
+    sector_name: str
+    methodology: str
+    base_value: float
+    base_date: date
+    rebalance_schedule: str
+    min_constituents: int
+    status: str
+    notes: Optional[str] = None
+
+
+class IndustryIndexListPayload(BaseModel):
+    rows: list[IndustryIndexPayload]
+
+
+class IndustryIndexConstituentPayload(BaseModel):
+    industry_name: str
+    ticker_id: int
+    rebalance_date: date
+    effective_from: date
+    effective_to: Optional[date] = None
+    weight_at_rebalance: float
+    market_cap_at_rebalance: float
+    close_at_rebalance: float
+    removed_reason: Optional[str] = None
+
+
+class IndustryIndexConstituentListPayload(BaseModel):
+    industry_name: str
+    as_of: Optional[date] = None
+    rows: list[IndustryIndexConstituentPayload]
+
+
+class IndustryIndexValuePayload(BaseModel):
+    industry_name: str
+    trade_date: date
+    value: float
+    constituents_used: int
+    constituents_missing: int
+    renormalized: bool
+    effective_rebalance_date: date
+    computed_at: datetime
+
+
+class IndustryIndexValueListPayload(BaseModel):
+    industry_name: str
+    from_date: Optional[date] = None
+    to_date: Optional[date] = None
+    rows: list[IndustryIndexValuePayload]
+
+
+def _index_payload(idx) -> IndustryIndexPayload:
+    return IndustryIndexPayload(
+        industry_name=idx.industry_name,
+        sector_name=idx.sector_name,
+        methodology=idx.methodology,
+        base_value=idx.base_value,
+        base_date=idx.base_date,
+        rebalance_schedule=idx.rebalance_schedule,
+        min_constituents=idx.min_constituents,
+        status=idx.status,
+        notes=idx.notes,
+    )
+
+
+def _constituent_payload(c) -> IndustryIndexConstituentPayload:
+    return IndustryIndexConstituentPayload(
+        industry_name=c.industry_name,
+        ticker_id=c.ticker_id,
+        rebalance_date=c.rebalance_date,
+        effective_from=c.effective_from,
+        effective_to=c.effective_to,
+        weight_at_rebalance=c.weight_at_rebalance,
+        market_cap_at_rebalance=c.market_cap_at_rebalance,
+        close_at_rebalance=c.close_at_rebalance,
+        removed_reason=c.removed_reason,
+    )
+
+
+def _value_payload(v) -> IndustryIndexValuePayload:
+    return IndustryIndexValuePayload(
+        industry_name=v.industry_name,
+        trade_date=v.trade_date,
+        value=v.value,
+        constituents_used=v.constituents_used,
+        constituents_missing=v.constituents_missing,
+        renormalized=v.renormalized,
+        effective_rebalance_date=v.effective_rebalance_date,
+        computed_at=v.computed_at,
+    )
+
+
+# ---------- executor wrappers (for fire-and-forget endpoints) ---------- #
+
+
+def _run_industry_index_build_safe(
+    db_engine: Engine, config: Config, exchange: str,
+    min_constituents: int, n: int, base_value: float,
+) -> None:
+    from ....fundamentals.runners import run_industry_index_build
+    try:
+        run_industry_index_build(
+            db_engine, exchange,
+            min_constituents=min_constituents,
+            n=n,
+            base_value=base_value,
+        )
+    except Exception:
+        logger.exception(
+            "Industry index build failed for exchange=%s", exchange,
+        )
+
+
+def _run_index_value_backfill_safe(
+    db_engine: Engine, industry_name: str,
+    from_date_param: Optional[date], to_date_param: Optional[date],
+    force: bool, all_active: bool,
+) -> None:
+    """Runs either one industry or all active industries."""
+    from ....fundamentals.runners import run_index_value_backfill
+    try:
+        with db_engine.connect() as conn:
+            ir = IndustryIndexRepository(conn)
+            if all_active:
+                indices = ir.list_active()
+            else:
+                idx = ir.get(industry_name)
+                indices = [idx] if idx else []
+
+        effective_to = to_date_param or date.today()
+        for idx in indices:
+            effective_from = (
+                max(from_date_param, idx.base_date)
+                if from_date_param else idx.base_date
+            )
+            if effective_from > effective_to:
+                continue
+            run_index_value_backfill(
+                db_engine, idx.industry_name,
+                from_date=effective_from,
+                to_date=effective_to,
+                force=force,
+            )
+    except Exception:
+        logger.exception(
+            "Index value backfill failed for industry=%s "
+            "all_active=%s", industry_name, all_active,
+        )
+
+
+# ---------- GET endpoints ---------- #
+
+
+@router.get("/industry-indices", response_model=IndustryIndexListPayload)
+def list_industry_indices(
+    include_retired: bool = Query(False),
+    db_engine: Engine = Depends(get_db_engine),
+) -> IndustryIndexListPayload:
+    """List all industry indices. By default returns only ACTIVE
+    ones; pass include_retired=true to include RETIRED."""
+    with db_engine.connect() as conn:
+        ir = IndustryIndexRepository(conn)
+        if include_retired:
+            indices = ir.list_all()
+        else:
+            indices = ir.list_active()
+    return IndustryIndexListPayload(
+        rows=[_index_payload(i) for i in indices],
+    )
+
+
+@router.get("/industry-indices/{industry_name:path}/constituents",
+            response_model=IndustryIndexConstituentListPayload)
+def get_industry_index_constituents(
+    industry_name: str,
+    as_of: Optional[date] = Query(None),
+    db_engine: Engine = Depends(get_db_engine),
+) -> IndustryIndexConstituentListPayload:
+    """List constituents of an index. Without as_of, returns the
+    currently-active constituents (effective_to IS NULL). With
+    as_of=YYYY-MM-DD, returns constituents whose effective period
+    contains that date."""
+    with db_engine.connect() as conn:
+        cr = IndustryIndexConstituentRepository(conn)
+        if as_of is not None:
+            rows = cr.list_as_of(industry_name, as_of)
+        else:
+            rows = cr.list_active_for_index(industry_name)
+    return IndustryIndexConstituentListPayload(
+        industry_name=industry_name,
+        as_of=as_of,
+        rows=[_constituent_payload(c) for c in rows],
+    )
+
+
+@router.get("/industry-indices/{industry_name:path}/values",
+            response_model=IndustryIndexValueListPayload)
+def get_industry_index_values(
+    industry_name: str,
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    limit: Optional[int] = Query(None, ge=1, le=5000),
+    db_engine: Engine = Depends(get_db_engine),
+) -> IndustryIndexValueListPayload:
+    """Get the daily value time series for an index. Returns
+    newest-first; pass from_date/to_date to restrict the range,
+    and limit to cap the row count."""
+    with db_engine.connect() as conn:
+        history = IndustryIndexValueRepository(conn).get_history(
+            industry_name,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+        )
+    return IndustryIndexValueListPayload(
+        industry_name=industry_name,
+        from_date=from_date,
+        to_date=to_date,
+        rows=[_value_payload(v) for v in history],
+    )
+
+
+# Note: GET /industry-indices/{name} for the index definition is
+# served by /industry-indices?industry_name=NAME — but FastAPI's
+# routing with the {path} subroutes above means a name-with-slash
+# (none currently exist in yfinance Indian industries but defensive)
+# could conflict. Adding an explicit single-index endpoint:
+
+
+@router.get("/industry-indices/{industry_name:path}",
+            response_model=IndustryIndexPayload)
+def get_industry_index(
+    industry_name: str,
+    db_engine: Engine = Depends(get_db_engine),
+) -> IndustryIndexPayload:
+    """Get the definition of one index."""
+    with db_engine.connect() as conn:
+        idx = IndustryIndexRepository(conn).get(industry_name)
+    if idx is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Industry {industry_name!r} is not indexed",
+        )
+    return _index_payload(idx)
+
+
+# ---------- POST (fire-and-forget) endpoints ---------- #
+
+
+@router.post("/build-industry-indices",
+             response_model=RefreshAcceptedPayload, status_code=202)
+def build_industry_indices_endpoint(
+    exchange: str = Query(..., min_length=2, max_length=10),
+    min_constituents: int = Query(10, ge=1),
+    n: int = Query(10, ge=1),
+    base_value: float = Query(1000.0, gt=0),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+    executor = Depends(get_etl_executor),
+) -> RefreshAcceptedPayload:
+    """Fire-and-forget auto-discovery + initial rebalance for all
+    qualifying industries on the exchange. Returns 202 immediately.
+    Idempotent: indices that already exist with constituents are
+    left alone."""
+    _require_executor(executor)
+    _validate_exchange_or_400(exchange, config)
+    logger.info(
+        "Admin: build-industry-indices requested",
+        extra={"exchange": exchange,
+               "min_constituents": min_constituents,
+               "n": n, "base_value": base_value},
+    )
+    executor.submit(
+        _run_industry_index_build_safe, db_engine, config, exchange,
+        min_constituents, n, base_value,
+    )
+    return RefreshAcceptedPayload(
+        action="build-industry-indices",
+        run_id=None,
+        accepted_at=datetime.now(timezone.utc),
+        notes=(
+            f"Industry index build ({exchange}, "
+            f"min_constituents={min_constituents}) submitted."
+        ),
+    )
+
+
+@router.post("/compute-index-values",
+             response_model=RefreshAcceptedPayload, status_code=202)
+def compute_index_values_endpoint(
+    industry: Optional[str] = Query(None),
+    all_active: bool = Query(False),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    force: bool = Query(False),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+    executor = Depends(get_etl_executor),
+) -> RefreshAcceptedPayload:
+    """Fire-and-forget index value backfill. Pass either industry=NAME
+    or all_active=true. Returns 202 immediately."""
+    _require_executor(executor)
+    if industry is None and not all_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Must provide either industry=NAME or all_active=true",
+        )
+    if industry is not None and all_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="industry and all_active are mutually exclusive",
+        )
+    if from_date is not None and to_date is not None and from_date > to_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"from_date {from_date} must be <= to_date {to_date}",
+        )
+    logger.info(
+        "Admin: compute-index-values requested",
+        extra={"industry": industry, "all_active": all_active,
+               "from_date": str(from_date), "to_date": str(to_date),
+               "force": force},
+    )
+    executor.submit(
+        _run_index_value_backfill_safe, db_engine,
+        industry or "", from_date, to_date, force, all_active,
+    )
+    return RefreshAcceptedPayload(
+        action="compute-index-values",
+        run_id=None,
+        accepted_at=datetime.now(timezone.utc),
+        notes=(
+            f"Index value backfill (industry={industry!r}, "
+            f"all_active={all_active}) submitted."
+        ),
+    )

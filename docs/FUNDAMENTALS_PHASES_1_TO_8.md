@@ -1503,3 +1503,117 @@ After Phase 4B-3 the operator can run:
   `trip-ema-etl build-industry-indices --exchange NSE`
   `trip-ema-etl compute-index-values --industry "IT - Services" --from 2025-10-01 --to 2026-05-22`
 to actually produce the index time series Phase 5+ depends on.
+
+---
+
+## 22. Phase 4B-3 (CLI + HTTP — Phase 4B complete)
+
+Continuing from §21. Phase 4B-2 shipped the algorithmic core
+(picker, computer, runners). This session wraps them in operator-
+facing surfaces: CLI commands and HTTP endpoints.
+
+After this session, the operator can:
+  trip-ema-etl build-industry-indices --exchange NSE
+  trip-ema-etl compute-index-values --industry "Information Technology Services"
+  trip-ema-etl compute-index-values --all-active
+  trip-ema-etl rebalance-industry-index --industry "..." --date 2026-04-01
+  trip-ema-etl fundamentals-status  # now shows index coverage too
+
+…with no Python-paste-at-bash needed. Phase 4 is then a complete,
+operator-runnable vertical slice from raw exchange data to
+industry-index time series.
+
+### Empirical context (this session)
+
+The operator ran the algorithmic core against real data between
+Phase 4B-2 and Phase 4B-3:
+
+- **57 of 60 qualified industries** got built (95% success).
+  3 industries had between 8 and 9 constituents-with-mcap on
+  the rebalance date (Oct 1 2025), falling short of the
+  min_constituents=10 threshold.
+- **64 industries are unqualified** at the 10-ticker threshold —
+  yfinance's Indian classification is granular (e.g. "Tools &
+  Accessories", "Restaurants").
+- **9480 value rows produced** = 158 trading days × 60 indices.
+  Zero missing days, zero renormalized days for the IT index
+  sampled — data quality is high.
+- **IT index trajectory** Oct 2025 → May 2026: 1000.0 → 844.27
+  (down 15.6%), consistent with the actual Indian IT sectoral
+  decline in that window. Math verified against real data.
+
+### Shipped this session
+
+CLI commands (in `trip_ema/fundamentals/cli.py`):
+  - **build-industry-indices**: auto-discovery + initial rebalance
+    for all qualifying industries on an exchange. Tabular output
+    summarizing qualified / unqualified / indexed / failed.
+    Exit 0 = clean run, 1 = some failures.
+  - **compute-index-values**: backfill values. Either --industry
+    NAME or --all-active. Date range defaults to each index's
+    base_date → today. Status line per index; exit 0 = all SUCCESS,
+    1 = some PARTIAL, 2 = some FAILED.
+  - **rebalance-industry-index**: manual operator-driven rebalance
+    for one industry on one date. Useful for recovery / re-running
+    after operator override changes.
+  - **fundamentals-status**: extended with an "Industry indices"
+    section showing per-index status, base_date, latest value
+    date, row count.
+
+HTTP endpoints (in `trip_ema/transports/http/routes/fundamentals.py`):
+  - **GET /industry-indices**: list (defaults to ACTIVE,
+    ?include_retired=true for all).
+  - **GET /industry-indices/{name}**: one index definition. 404
+    when unknown.
+  - **GET /industry-indices/{name}/constituents**: active or
+    as-of constituents (?as_of=YYYY-MM-DD).
+  - **GET /industry-indices/{name}/values**: time series with
+    optional from_date / to_date / limit. Newest first.
+  - **POST /build-industry-indices**: fire-and-forget build for
+    one exchange. 202 immediately.
+  - **POST /compute-index-values**: fire-and-forget value backfill.
+    Either industry=NAME or all_active=true (mutually exclusive).
+    400 on invalid combinations.
+
+### Routing note
+
+The `/industry-indices/{name:path}` routes use FastAPI's `path`
+converter because some industry names could contain special
+characters (none currently in yfinance's Indian list, but
+defensive). Route order is precise: `/constituents` and `/values`
+suffixed routes come before the bare `/{name}` catch-all, so
+FastAPI matches the more-specific routes first.
+
+### Test counts
+
+38 new tests (15 CLI + 23 HTTP). All 430 prior fundamentals tests
+still pass.
+
+  Total: 468 fundamentals + migration tests.
+
+### Phase 4 complete
+
+After this session, Phase 4 (the daily market cap + industry
+index vertical slice) is functionally complete:
+
+- Phase 4A: daily market cap layer (migration 0010, repo, compute,
+  fetcher, runner, CLI, HTTP, tests).
+- Phase 4B-1: industry index schema (migrations 0011/0012/0013,
+  repos, domain types, tests).
+- Phase 4B-2: picker + computer + runners (compute logic, modified
+  Laspeyres, drop-and-renormalize, auto-discovery).
+- Phase 4B-3 (this session): CLI + HTTP wrappers.
+
+What works end-to-end against real Indian equity data:
+  - Index discovery and initial rebalancing
+  - Daily value computation
+  - Constituent tracking with history
+  - Operator-friendly CLI and HTTP surfaces
+
+### Next phase candidates
+
+Phase 5 (Indicators) is the natural next step — building indicator
+signals from the industry index time series. Or Phase 4C if the
+operator wants to address the deferred daily-mcap scheduler
+integration (bars-ingestion daemon → mcap compute → index value
+update, all in one EoD pipeline).

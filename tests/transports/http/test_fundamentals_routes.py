@@ -828,3 +828,364 @@ def test_market_cap_endpoints_require_auth(real_db_client):
         "/v1/fundamentals/market-cap?trade_date=2026-05-22"
     )
     assert r.status_code == 401
+
+
+# ============================================================
+# Phase 4B-3 — industry index endpoints
+# ============================================================
+
+
+from trip_ema.persistence.fundamentals_repo import (
+    IndustryIndexConstituentRepository,
+    IndustryIndexRepository,
+    IndustryIndexValueRepository,
+)
+
+
+# ---------- helpers ---------- #
+
+
+def _create_index(db_engine, industry="IT - Services",
+                  sector="Technology",
+                  base_date=date(2025, 10, 1)):
+    with transaction(db_engine) as conn:
+        IndustryIndexRepository(conn).upsert(
+            industry, sector_name=sector, base_date=base_date,
+        )
+
+
+# ---------- GET /industry-indices ---------- #
+
+
+class TestListIndustryIndices:
+
+    def test_returns_empty_when_no_indices(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        assert r.json() == {"rows": []}
+
+    def test_returns_active_indices(self, real_db_client, db_engine):
+        _create_index(db_engine, "IT - Services")
+        _create_index(db_engine, "Banks - Regional", sector="Financials")
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        names = {row["industry_name"] for row in r.json()["rows"]}
+        assert names == {"IT - Services", "Banks - Regional"}
+
+    def test_excludes_retired_by_default(self, real_db_client, db_engine):
+        _create_index(db_engine, "IT - Services")
+        _create_index(db_engine, "Old Industry")
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).set_status(
+                "Old Industry", "RETIRED",
+            )
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices",
+            headers=AUTH_HEADERS,
+        )
+        names = {row["industry_name"] for row in r.json()["rows"]}
+        assert names == {"IT - Services"}
+
+    def test_include_retired_param(self, real_db_client, db_engine):
+        _create_index(db_engine, "IT - Services")
+        _create_index(db_engine, "Old Industry")
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).set_status(
+                "Old Industry", "RETIRED",
+            )
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices?include_retired=true",
+            headers=AUTH_HEADERS,
+        )
+        names = {row["industry_name"] for row in r.json()["rows"]}
+        assert names == {"IT - Services", "Old Industry"}
+
+    def test_requires_auth(self, real_db_client):
+        r = real_db_client.get("/v1/fundamentals/industry-indices")
+        assert r.status_code == 401
+
+
+# ---------- GET /industry-indices/{name} ---------- #
+
+
+class TestGetIndustryIndex:
+
+    def test_returns_404_for_unknown(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices/Nonexistent",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 404
+
+    def test_returns_known_index(self, real_db_client, db_engine):
+        _create_index(db_engine, "IT - Services")
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices/IT - Services",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["industry_name"] == "IT - Services"
+        assert body["base_value"] == 1000.0
+        assert body["status"] == "ACTIVE"
+        assert body["methodology"] == "MODIFIED_LASPEYRES"
+
+
+# ---------- GET /industry-indices/{name}/constituents ---------- #
+
+
+class TestGetIndustryIndexConstituents:
+
+    def _setup_with_constituents(self, db_engine, reliance_ticker):
+        _create_index(db_engine, "IT - Services")
+        with transaction(db_engine) as conn:
+            IndustryIndexConstituentRepository(conn).insert_constituent(
+                "IT - Services",
+                ticker_id=reliance_ticker,
+                rebalance_date=date(2025, 10, 1),
+                weight_at_rebalance=1.0,
+                market_cap_at_rebalance=1e12,
+                close_at_rebalance=1500.0,
+            )
+
+    def test_returns_active_constituents(
+        self, real_db_client, db_engine, reliance_ticker,
+    ):
+        self._setup_with_constituents(db_engine, reliance_ticker)
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices/IT - Services/constituents",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["industry_name"] == "IT - Services"
+        assert body["as_of"] is None
+        assert len(body["rows"]) == 1
+        row = body["rows"][0]
+        assert row["ticker_id"] == reliance_ticker
+        assert row["weight_at_rebalance"] == 1.0
+        assert row["effective_to"] is None
+
+    def test_as_of_parameter(
+        self, real_db_client, db_engine, reliance_ticker,
+    ):
+        self._setup_with_constituents(db_engine, reliance_ticker)
+        # Trade date within the effective period.
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices/IT - Services/constituents"
+            "?as_of=2025-12-01",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["as_of"] == "2025-12-01"
+        assert len(body["rows"]) == 1
+
+    def test_as_of_before_effective_returns_empty(
+        self, real_db_client, db_engine, reliance_ticker,
+    ):
+        self._setup_with_constituents(db_engine, reliance_ticker)
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices/IT - Services/constituents"
+            "?as_of=2025-01-01",
+            headers=AUTH_HEADERS,
+        )
+        body = r.json()
+        assert body["rows"] == []
+
+
+# ---------- GET /industry-indices/{name}/values ---------- #
+
+
+class TestGetIndustryIndexValues:
+
+    def _setup_with_values(self, db_engine):
+        _create_index(db_engine, "IT - Services")
+        with transaction(db_engine) as conn:
+            r = IndustryIndexValueRepository(conn)
+            for td, v in [
+                (date(2025, 10, 1), 1000.0),
+                (date(2025, 10, 2), 1010.0),
+                (date(2025, 10, 3), 1020.0),
+            ]:
+                r.upsert_value(
+                    "IT - Services", trade_date=td, value=v,
+                    constituents_used=10, constituents_missing=0,
+                    renormalized=False,
+                    effective_rebalance_date=date(2025, 10, 1),
+                )
+
+    def test_returns_history_newest_first(
+        self, real_db_client, db_engine,
+    ):
+        self._setup_with_values(db_engine)
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices/IT - Services/values",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        rows = r.json()["rows"]
+        dates = [r["trade_date"] for r in rows]
+        assert dates == ["2025-10-03", "2025-10-02", "2025-10-01"]
+        # Values match.
+        assert rows[0]["value"] == 1020.0
+        assert rows[2]["value"] == 1000.0
+
+    def test_date_range_filter(self, real_db_client, db_engine):
+        self._setup_with_values(db_engine)
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices/IT - Services/values"
+            "?from_date=2025-10-02&to_date=2025-10-02",
+            headers=AUTH_HEADERS,
+        )
+        body = r.json()
+        assert len(body["rows"]) == 1
+        assert body["rows"][0]["trade_date"] == "2025-10-02"
+        assert body["from_date"] == "2025-10-02"
+
+    def test_limit_param(self, real_db_client, db_engine):
+        self._setup_with_values(db_engine)
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices/IT - Services/values?limit=2",
+            headers=AUTH_HEADERS,
+        )
+        body = r.json()
+        assert len(body["rows"]) == 2
+
+    def test_unknown_index_returns_empty(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/industry-indices/Nonexistent/values",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        assert r.json()["rows"] == []
+
+
+# ---------- POST /build-industry-indices ---------- #
+
+
+class TestBuildIndustryIndicesEndpoint:
+
+    def test_returns_202_and_kicks_runner(
+        self, real_db_client, db_engine, monkeypatch,
+    ):
+        called = []
+        def fake_build(engine, exchange, *, min_constituents, n, base_value):
+            called.append((exchange, min_constituents, n, base_value))
+            return {
+                "qualified": [], "unqualified": [],
+                "indexed": [], "failed": [],
+            }
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_industry_index_build",
+            fake_build,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/build-industry-indices?exchange=NSE"
+            "&min_constituents=10&n=10&base_value=1000.0",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        body = r.json()
+        assert body["action"] == "build-industry-indices"
+        # The synchronous executor in the test fixture ran the task.
+        assert called == [("NSE", 10, 10, 1000.0)]
+
+    def test_rejects_invalid_exchange(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/build-industry-indices?exchange=BOGUS",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+    def test_requires_auth(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/build-industry-indices?exchange=NSE"
+        )
+        assert r.status_code == 401
+
+
+# ---------- POST /compute-index-values ---------- #
+
+
+class TestComputeIndexValuesEndpoint:
+
+    def test_rejects_no_industry_and_no_all_active(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-index-values",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+        assert "industry" in r.json()["detail"]
+
+    def test_rejects_both_industry_and_all_active(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-index-values"
+            "?industry=IT - Services&all_active=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+    def test_rejects_inverted_date_range(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-index-values"
+            "?industry=IT - Services"
+            "&from_date=2026-05-01&to_date=2025-10-01",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+    def test_returns_202_for_industry(
+        self, real_db_client, db_engine, monkeypatch,
+    ):
+        _create_index(db_engine, "IT - Services")
+        called = []
+        def fake_backfill(engine, industry_name, **kw):
+            called.append((industry_name, kw))
+            return 1
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_index_value_backfill",
+            fake_backfill,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-index-values"
+            "?industry=IT - Services&from_date=2025-10-01",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        # Sync executor invoked the runner.
+        assert len(called) == 1
+        assert called[0][0] == "IT - Services"
+
+    def test_returns_202_for_all_active(
+        self, real_db_client, db_engine, monkeypatch,
+    ):
+        _create_index(db_engine, "IT - Services")
+        _create_index(db_engine, "Banks - Regional", sector="Financials")
+        called = []
+        def fake_backfill(engine, industry_name, **kw):
+            called.append(industry_name)
+            return 1
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_index_value_backfill",
+            fake_backfill,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-index-values?all_active=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        # Both indices got backfilled.
+        assert set(called) == {"IT - Services", "Banks - Regional"}
+
+    def test_requires_auth(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-index-values?all_active=true"
+        )
+        assert r.status_code == 401
