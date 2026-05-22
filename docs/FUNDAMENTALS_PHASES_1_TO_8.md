@@ -1049,3 +1049,91 @@ These are settled and will be threaded through Phase 4B/C:
   via a runtime parameter, not a hardcode.
 - **ETFs excluded from constituent selection** via
   `WHERE instrument_type = 'EQ'`.
+
+---
+
+## 18. Phase 4A part 2 (repo + compute layer)
+
+Continuing from §17 (Phase 4A foundation). This session added the
+repository, the COMPUTED-row compute logic, and the probe script
+for the yfinance historical mcap API shape.
+
+### Shipped this session
+
+- **DailyMarketCapRepository** in fundamentals_repo.py: get_latest,
+  get_at, list_for_date (the Phase 4B hot path, supporting both
+  exchange filter and top-N limit), list_history,
+  coverage_counts_by_date (per-date breakdown of COMPUTED vs
+  YFINANCE_HIST_MCAP source counts), upsert_snapshot (idempotent
+  via ON CONFLICT DO UPDATE), delete_for_date, delete_for_ticker.
+
+  upsert_snapshot validates:
+    - source is in MARKET_CAP_SOURCES;
+    - market_cap >= 0;
+    - shares_used is non-None for COMPUTED / APPROX_TODAYS_SHARES /
+      MANUAL_OVERRIDE (audit trail requirement).
+
+- **compute_market_cap_for_date()** in market_cap_compute.py:
+  iterates active EQ tickers on an exchange, joins ohlcv_bars × 
+  instrument_shares, writes daily_market_cap rows. Returns a
+  ComputeResult with per-category counts (computed, approx,
+  skipped_no_close, skipped_no_shares).
+
+  Source policy in the compute layer:
+    - Shares known as-of trade_date or earlier → COMPUTED row.
+    - Shares known ONLY from a later date → APPROX_TODAYS_SHARES
+      row (low-trust, marked for downstream filter). Operator-
+      configurable via allow_approx_fallback parameter.
+    - No shares at all → skipped_no_shares.
+    - No bar for the date → skipped_no_close.
+
+  ETFs excluded via WHERE instrument_type = 'EQ' in the selection
+  query, matching the Phase 4 design decision in §17.
+
+- **probe script** for yfinance historical mcap (scripts/
+  probe_yfinance_hist_mcap.py). Tests 5 NSE tickers across cap
+  tiers and reports which yfinance approaches surface a usable
+  historical shares series:
+    - Ticker.history() for prices
+    - Ticker.info['marketCap'] for current snapshot
+    - Ticker.get_shares_full() for historical shares (recently
+      added; may not exist on older yfinance versions)
+    - Manual close × current shares sanity check
+  The probe runs against real yfinance and the operator pastes the
+  output back; the fetcher design (next session) depends on which
+  approach returns usable data.
+
+### Test counts
+
+- 15 new repo tests in test_fundamentals_repos.py
+- 10 new integration tests in test_market_cap_compute.py
+  (exercising the real ohlcv_bars × instrument_shares JOIN paths)
+- All 270 prior fundamentals tests still pass
+
+Total: 295 fundamentals-domain + migration tests pass.
+
+### Still pending for Phase 4A (next session)
+
+- Operator runs the yfinance hist-mcap probe; reports back the
+  output.
+- Design and build the historical mcap fetcher based on probe
+  outcomes:
+    - If get_shares_full works → fetch historical shares + history
+      prices → compute COMPUTED-style rows even for backfill dates.
+    - If get_shares_full fails → use yfinance's pre-baked
+      historical mcap series (if available) or fall back to
+      APPROX_TODAYS_SHARES.
+- Runner `run_market_cap_backfill(db_engine, exchange, from_date,
+  to_date)` walking the date range. Per-ticker outer loop so
+  resume can pick up mid-backfill. Fundamentals_run row tracks
+  progress.
+- CLI command `compute-market-cap --exchange NSE [--date YYYY-MM-DD]
+  [--backfill-from YYYY-MM-DD]`. Update fundamentals-status to
+  show mcap coverage section.
+- HTTP routes: GET /v1/fundamentals/market-cap?exchange=NSE&
+  date=YYYY-MM-DD&limit=100&order=desc, GET /v1/fundamentals/
+  market-cap/{ticker_id}/history, POST /v1/fundamentals/
+  compute-market-cap.
+- Per the §17 scheduler decision: mcap compute is operator-
+  triggered for Phase 4A. Daily scheduling is a Phase 4C concern
+  alongside bars-ingestion-daemon integration.

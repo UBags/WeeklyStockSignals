@@ -985,3 +985,263 @@ def _qfinancial_from_row(row):
         currency=row[5],
         source=row[6],
     )
+
+
+# ---------- DailyMarketCap (Phase 4A) ---------- #
+
+
+class DailyMarketCapRepository:
+    """Daily per-ticker market cap.
+
+    PK is (ticker_id, trade_date) — same shape as ohlcv_bars but
+    aggregated to daily-only resolution and combined with shares
+    data. Reads default to "latest" per ticker; the
+    list_for_date(date, exchange) query is the Phase 4B hot path
+    (top-N by mcap on a specific date).
+
+    Pattern matches InstrumentSharesRepository: connection in
+    constructor, no transaction management, returns domain
+    dataclasses.
+
+    A few non-obvious semantics:
+      - upsert_snapshot is idempotent on (ticker_id, trade_date).
+        Re-running the compute for a date overwrites whatever was
+        previously stored. This is intentional — if the operator
+        re-runs because shares-outstanding was corrected, the
+        newer COMPUTED mcap should replace the older one.
+      - shares_used is required to be NULL when source is
+        YFINANCE_HIST_MCAP and required to be NOT NULL otherwise.
+        We don't enforce that at the DB level (would need a complex
+        CHECK constraint); the runner enforces it via type
+        signatures.
+    """
+
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    # ----- reads ----- #
+
+    def get_latest(self, ticker_id: int):
+        """The most recent trade_date row for this ticker. None if
+        no rows. Used by analytics for "what's the current mcap"."""
+        row = self._conn.execute(
+            text("""
+                SELECT ticker_id, trade_date, close_price, shares_used,
+                       market_cap, source, computed_at
+                FROM daily_market_cap
+                WHERE ticker_id = :tid
+                ORDER BY trade_date DESC
+                LIMIT 1
+            """),
+            {"tid": ticker_id},
+        ).fetchone()
+        return _mcap_from_row(row) if row else None
+
+    def get_at(self, ticker_id: int, trade_date: "date"):
+        """The row for an exact (ticker, date) pair, or None.
+
+        Used by the runner to skip-if-already-computed (re-running
+        a date is expensive if it triggers yfinance calls). Also
+        used by tests."""
+        row = self._conn.execute(
+            text("""
+                SELECT ticker_id, trade_date, close_price, shares_used,
+                       market_cap, source, computed_at
+                FROM daily_market_cap
+                WHERE ticker_id = :tid AND trade_date = :td
+            """),
+            {"tid": ticker_id, "td": trade_date},
+        ).fetchone()
+        return _mcap_from_row(row) if row else None
+
+    def list_for_date(
+        self, trade_date: "date", *, exchange: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list:
+        """All market cap rows for a specific trade_date, ordered
+        by market_cap DESC. Optionally scoped to a single exchange
+        and/or top-N.
+
+        This is the Phase 4B hot path for "top 20 stocks by mcap
+        in industry X on rebalance date Y" — Phase 4B will further
+        filter by industry; the repo just provides the date-axis
+        scan.
+
+        The (trade_date, market_cap DESC) index covers this; no
+        sort needed at the DB level."""
+        if exchange is None:
+            sql = """
+                SELECT mc.ticker_id, mc.trade_date, mc.close_price,
+                       mc.shares_used, mc.market_cap, mc.source, mc.computed_at
+                FROM daily_market_cap mc
+                WHERE mc.trade_date = :td
+                ORDER BY mc.market_cap DESC
+            """
+            params = {"td": trade_date}
+        else:
+            sql = """
+                SELECT mc.ticker_id, mc.trade_date, mc.close_price,
+                       mc.shares_used, mc.market_cap, mc.source, mc.computed_at
+                FROM daily_market_cap mc
+                JOIN tickers t ON t.ticker_id = mc.ticker_id
+                WHERE mc.trade_date = :td AND t.exchange = :ex
+                ORDER BY mc.market_cap DESC
+            """
+            params = {"td": trade_date, "ex": exchange}
+        if limit is not None:
+            sql += " LIMIT :lim"
+            params["lim"] = limit
+        rows = self._conn.execute(text(sql), params)
+        return [_mcap_from_row(r) for r in rows]
+
+    def list_history(self, ticker_id: int, *, limit: int = 365) -> list:
+        """All daily mcap rows for one ticker, newest first.
+
+        Default limit is 365 days — covers a year of backtest.
+        Used for analytics that want to inspect mcap drift for a
+        specific name. Phase 4B's index computation does not use
+        this — it walks dates with list_for_date."""
+        rows = self._conn.execute(
+            text("""
+                SELECT ticker_id, trade_date, close_price, shares_used,
+                       market_cap, source, computed_at
+                FROM daily_market_cap
+                WHERE ticker_id = :tid
+                ORDER BY trade_date DESC
+                LIMIT :lim
+            """),
+            {"tid": ticker_id, "lim": limit},
+        )
+        return [_mcap_from_row(r) for r in rows]
+
+    def coverage_counts_by_date(
+        self, *, exchange: Optional[str] = None,
+    ) -> list[tuple["date", int, int, int]]:
+        """For each trade_date that has mcap rows, return
+        (date, total, computed, hist_mcap) — where:
+          total       = total mcap rows on that date
+          computed    = rows with source=COMPUTED
+          hist_mcap   = rows with source=YFINANCE_HIST_MCAP
+
+        Used by `fundamentals-status` to show backfill coverage.
+        Newest dates first; caller typically limits to the latest
+        ~30 dates."""
+        if exchange is None:
+            sql = """
+                SELECT
+                    mc.trade_date,
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE mc.source = 'COMPUTED') AS computed,
+                    COUNT(*) FILTER (WHERE mc.source = 'YFINANCE_HIST_MCAP') AS hist
+                FROM daily_market_cap mc
+                GROUP BY mc.trade_date
+                ORDER BY mc.trade_date DESC
+            """
+            params = {}
+        else:
+            sql = """
+                SELECT
+                    mc.trade_date,
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE mc.source = 'COMPUTED') AS computed,
+                    COUNT(*) FILTER (WHERE mc.source = 'YFINANCE_HIST_MCAP') AS hist
+                FROM daily_market_cap mc
+                JOIN tickers t ON t.ticker_id = mc.ticker_id
+                WHERE t.exchange = :ex
+                GROUP BY mc.trade_date
+                ORDER BY mc.trade_date DESC
+            """
+            params = {"ex": exchange}
+        rows = self._conn.execute(text(sql), params)
+        return [(r[0], int(r[1]), int(r[2]), int(r[3])) for r in rows]
+
+    # ----- writes ----- #
+
+    def upsert_snapshot(
+        self,
+        ticker_id: int,
+        *,
+        trade_date: "date",
+        close_price: float,
+        shares_used: Optional[int],
+        market_cap: float,
+        source: str,
+    ) -> None:
+        """Insert or update a mcap row. Idempotent on (ticker_id,
+        trade_date) via ON CONFLICT DO UPDATE.
+
+        Validates that:
+          - source is in MARKET_CAP_SOURCES.
+          - market_cap >= 0.
+          - For COMPUTED / APPROX_TODAYS_SHARES / MANUAL_OVERRIDE,
+            shares_used must NOT be None (we use it for the
+            derivation).
+          - For YFINANCE_HIST_MCAP, shares_used should be None
+            (yfinance doesn't expose it). We accept non-None and
+            store as-is; this is a soft contract, not enforced."""
+        from ..fundamentals import MARKET_CAP_SOURCES
+        if source not in MARKET_CAP_SOURCES:
+            raise ValueError(
+                f"source must be one of {MARKET_CAP_SOURCES}, "
+                f"got {source!r}"
+            )
+        if market_cap < 0:
+            raise ValueError(
+                f"market_cap must be >= 0, got {market_cap!r}"
+            )
+        if source in ("COMPUTED", "APPROX_TODAYS_SHARES",
+                      "MANUAL_OVERRIDE") and shares_used is None:
+            raise ValueError(
+                f"shares_used is required when source={source!r}; "
+                f"it is the multiplicand used to derive market_cap"
+            )
+
+        self._conn.execute(
+            text("""
+                INSERT INTO daily_market_cap
+                    (ticker_id, trade_date, close_price, shares_used,
+                     market_cap, source, computed_at)
+                VALUES (:tid, :td, :cp, :su, :mc, :src, NOW())
+                ON CONFLICT (ticker_id, trade_date) DO UPDATE SET
+                    close_price = EXCLUDED.close_price,
+                    shares_used = EXCLUDED.shares_used,
+                    market_cap = EXCLUDED.market_cap,
+                    source = EXCLUDED.source,
+                    computed_at = NOW()
+            """),
+            {"tid": ticker_id, "td": trade_date, "cp": close_price,
+             "su": shares_used, "mc": market_cap, "src": source},
+        )
+
+    def delete_for_date(self, trade_date: "date") -> int:
+        """Remove all mcap rows for one trade_date. Used by tests
+        and by the runner's "wipe and rebuild this date" admin
+        path. Returns count deleted."""
+        result = self._conn.execute(
+            text("DELETE FROM daily_market_cap WHERE trade_date = :td"),
+            {"td": trade_date},
+        )
+        return result.rowcount
+
+    def delete_for_ticker(self, ticker_id: int) -> int:
+        """Remove all mcap rows for one ticker. Used by tests."""
+        result = self._conn.execute(
+            text(
+                "DELETE FROM daily_market_cap WHERE ticker_id = :tid"
+            ),
+            {"tid": ticker_id},
+        )
+        return result.rowcount
+
+
+def _mcap_from_row(row):
+    from ..fundamentals import DailyMarketCap
+    return DailyMarketCap(
+        ticker_id=row[0],
+        trade_date=row[1],
+        close_price=float(row[2]),
+        shares_used=int(row[3]) if row[3] is not None else None,
+        market_cap=float(row[4]),
+        source=row[5],
+        computed_at=row[6],
+    )

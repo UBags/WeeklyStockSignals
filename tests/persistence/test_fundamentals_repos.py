@@ -1069,3 +1069,294 @@ class TestFinancialsDelete:
             assert QuarterlyFinancialsRepository(conn).get_latest(
                 tid, date(2025, 12, 31),
             ) is None
+
+
+# ---------- DailyMarketCapRepository (Phase 4A) ---------- #
+
+
+from trip_ema.persistence.fundamentals_repo import (
+    DailyMarketCapRepository,
+)
+
+
+class TestMarketCapInsertAndRead:
+    """Basic insertion, idempotency, validation."""
+
+    def test_insert_and_get_latest(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            DailyMarketCapRepository(conn).upsert_snapshot(
+                tid,
+                trade_date=date(2026, 5, 22),
+                close_price=1450.5,
+                shares_used=6_700_000_000,
+                market_cap=9_718_350_000_000.0,
+                source="COMPUTED",
+            )
+        with db_engine.connect() as conn:
+            row = DailyMarketCapRepository(conn).get_latest(tid)
+        assert row is not None
+        assert row.ticker_id == tid
+        assert row.trade_date == date(2026, 5, 22)
+        assert row.close_price == 1450.5
+        assert row.shares_used == 6_700_000_000
+        assert row.market_cap == pytest.approx(9_718_350_000_000.0)
+        assert row.source == "COMPUTED"
+
+    def test_get_latest_returns_None_for_unknown(self, db_engine):
+        with db_engine.connect() as conn:
+            assert DailyMarketCapRepository(conn).get_latest(999_999) is None
+
+    def test_upsert_is_idempotent_on_same_date(self, db_engine, ticker_ids):
+        """Re-running the compute for a date should overwrite, not
+        produce a PK violation."""
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            r = DailyMarketCapRepository(conn)
+            r.upsert_snapshot(
+                tid, trade_date=date(2026, 5, 22),
+                close_price=1400.0, shares_used=1_000,
+                market_cap=1_400_000.0, source="COMPUTED",
+            )
+            r.upsert_snapshot(
+                tid, trade_date=date(2026, 5, 22),
+                close_price=1450.0, shares_used=1_000,  # corrected close
+                market_cap=1_450_000.0, source="COMPUTED",
+            )
+        with db_engine.connect() as conn:
+            history = DailyMarketCapRepository(conn).list_history(tid)
+        # One row, second value wins.
+        assert len(history) == 1
+        assert history[0].close_price == 1450.0
+        assert history[0].market_cap == pytest.approx(1_450_000.0)
+
+    def test_rejects_bad_source(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="source"):
+                DailyMarketCapRepository(conn).upsert_snapshot(
+                    tid, trade_date=date(2026, 5, 22),
+                    close_price=1.0, shares_used=1,
+                    market_cap=1.0, source="BOGUS",
+                )
+
+    def test_rejects_negative_market_cap(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="market_cap"):
+                DailyMarketCapRepository(conn).upsert_snapshot(
+                    tid, trade_date=date(2026, 5, 22),
+                    close_price=1.0, shares_used=1,
+                    market_cap=-1.0, source="COMPUTED",
+                )
+
+    def test_requires_shares_used_for_COMPUTED(self, db_engine, ticker_ids):
+        """For COMPUTED, the shares_used field is the multiplicand —
+        recording it is essential for audit. shares_used=None on a
+        COMPUTED row would mean we lost the audit trail."""
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="shares_used"):
+                DailyMarketCapRepository(conn).upsert_snapshot(
+                    tid, trade_date=date(2026, 5, 22),
+                    close_price=1.0, shares_used=None,
+                    market_cap=1.0, source="COMPUTED",
+                )
+
+    def test_allows_None_shares_used_for_YFINANCE_HIST_MCAP(
+        self, db_engine, ticker_ids,
+    ):
+        """For YFINANCE_HIST_MCAP, yfinance gives us the mcap directly
+        and we don't know what shares-count it used. None is correct."""
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            DailyMarketCapRepository(conn).upsert_snapshot(
+                tid, trade_date=date(2025, 6, 1),
+                close_price=1400.0, shares_used=None,
+                market_cap=9_380_000_000_000.0,
+                source="YFINANCE_HIST_MCAP",
+            )
+        with db_engine.connect() as conn:
+            row = DailyMarketCapRepository(conn).get_latest(tid)
+        assert row.shares_used is None
+        assert row.source == "YFINANCE_HIST_MCAP"
+
+    def test_zero_market_cap_allowed(self, db_engine, ticker_ids):
+        """The CHECK constraint allows zero (newly listed company
+        could have shares=0 on first day, or close=0 if data was
+        weird). The dataclass test established this; verify it
+        round-trips through the DB."""
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            DailyMarketCapRepository(conn).upsert_snapshot(
+                tid, trade_date=date(2026, 5, 22),
+                close_price=0.0, shares_used=0,
+                market_cap=0.0, source="COMPUTED",
+            )
+        with db_engine.connect() as conn:
+            row = DailyMarketCapRepository(conn).get_latest(tid)
+        assert row.market_cap == 0.0
+
+
+class TestMarketCapGetAt:
+
+    def test_get_at_exact_date(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            r = DailyMarketCapRepository(conn)
+            r.upsert_snapshot(
+                tid, trade_date=date(2026, 5, 21),
+                close_price=1.0, shares_used=1,
+                market_cap=1.0, source="COMPUTED",
+            )
+            r.upsert_snapshot(
+                tid, trade_date=date(2026, 5, 22),
+                close_price=2.0, shares_used=1,
+                market_cap=2.0, source="COMPUTED",
+            )
+        with db_engine.connect() as conn:
+            r = DailyMarketCapRepository(conn)
+            row = r.get_at(tid, date(2026, 5, 21))
+            assert row is not None
+            assert row.close_price == 1.0
+            # Date that doesn't exist → None.
+            assert r.get_at(tid, date(2026, 5, 20)) is None
+
+
+class TestMarketCapListForDate:
+
+    def test_returns_rows_sorted_by_mcap_desc(self, db_engine, ticker_ids):
+        """The Phase 4B hot path: top-N by mcap on a date."""
+        td = date(2026, 5, 22)
+        with transaction(db_engine) as conn:
+            r = DailyMarketCapRepository(conn)
+            # Insert with deliberately unsorted mcaps.
+            for sym, mc in [
+                ("RELIANCE", 9_000_000_000_000.0),
+                ("TCS",      6_000_000_000_000.0),
+                ("HDFCBANK", 12_000_000_000_000.0),
+            ]:
+                r.upsert_snapshot(
+                    ticker_ids[("NSE", sym)],
+                    trade_date=td, close_price=1.0, shares_used=1,
+                    market_cap=mc, source="COMPUTED",
+                )
+        with db_engine.connect() as conn:
+            rows = DailyMarketCapRepository(conn).list_for_date(td)
+        # Sorted DESC by market_cap.
+        mcaps = [r.market_cap for r in rows]
+        assert mcaps == sorted(mcaps, reverse=True)
+        assert mcaps[0] == 12_000_000_000_000.0
+
+    def test_limit_returns_top_N(self, db_engine, ticker_ids):
+        td = date(2026, 5, 22)
+        with transaction(db_engine) as conn:
+            r = DailyMarketCapRepository(conn)
+            for sym, mc in [
+                ("RELIANCE", 100.0),
+                ("TCS",      200.0),
+                ("HDFCBANK", 300.0),
+            ]:
+                r.upsert_snapshot(
+                    ticker_ids[("NSE", sym)],
+                    trade_date=td, close_price=1.0, shares_used=1,
+                    market_cap=mc, source="COMPUTED",
+                )
+        with db_engine.connect() as conn:
+            top2 = DailyMarketCapRepository(conn).list_for_date(td, limit=2)
+        assert len(top2) == 2
+        assert top2[0].market_cap == 300.0
+        assert top2[1].market_cap == 200.0
+
+    def test_exchange_filter_scopes_correctly(self, db_engine, ticker_ids):
+        """The fixture has 3 NSE EQ + 1 BSE EQ. Date-only query
+        returns all 4; exchange='NSE' returns only the 3."""
+        td = date(2026, 5, 22)
+        with transaction(db_engine) as conn:
+            r = DailyMarketCapRepository(conn)
+            for key in ticker_ids:
+                r.upsert_snapshot(
+                    ticker_ids[key],
+                    trade_date=td, close_price=1.0, shares_used=1,
+                    market_cap=1.0, source="COMPUTED",
+                )
+        with db_engine.connect() as conn:
+            r = DailyMarketCapRepository(conn)
+            all_rows = r.list_for_date(td)
+            nse_rows = r.list_for_date(td, exchange="NSE")
+        assert len(all_rows) == 4
+        assert len(nse_rows) == 3
+
+
+class TestMarketCapCoverage:
+
+    def test_coverage_reports_per_date(self, db_engine, ticker_ids):
+        """Two dates of data, one with mixed sources, the other
+        all-COMPUTED."""
+        with transaction(db_engine) as conn:
+            r = DailyMarketCapRepository(conn)
+            # 2026-05-22: 3 rows, all COMPUTED
+            for sym in ("RELIANCE", "TCS", "HDFCBANK"):
+                r.upsert_snapshot(
+                    ticker_ids[("NSE", sym)],
+                    trade_date=date(2026, 5, 22),
+                    close_price=1.0, shares_used=1,
+                    market_cap=1.0, source="COMPUTED",
+                )
+            # 2025-06-01: 2 COMPUTED, 1 YFINANCE_HIST_MCAP
+            r.upsert_snapshot(
+                ticker_ids[("NSE", "RELIANCE")],
+                trade_date=date(2025, 6, 1),
+                close_price=1.0, shares_used=1,
+                market_cap=1.0, source="COMPUTED",
+            )
+            r.upsert_snapshot(
+                ticker_ids[("NSE", "TCS")],
+                trade_date=date(2025, 6, 1),
+                close_price=1.0, shares_used=1,
+                market_cap=1.0, source="COMPUTED",
+            )
+            r.upsert_snapshot(
+                ticker_ids[("NSE", "HDFCBANK")],
+                trade_date=date(2025, 6, 1),
+                close_price=1.0, shares_used=None,
+                market_cap=1.0, source="YFINANCE_HIST_MCAP",
+            )
+        with db_engine.connect() as conn:
+            counts = DailyMarketCapRepository(conn).coverage_counts_by_date()
+        # Newest first.
+        assert counts[0][0] == date(2026, 5, 22)
+        assert counts[0] == (date(2026, 5, 22), 3, 3, 0)
+        assert counts[1] == (date(2025, 6, 1), 3, 2, 1)
+
+
+class TestMarketCapDelete:
+
+    def test_delete_for_date(self, db_engine, ticker_ids):
+        td = date(2026, 5, 22)
+        with transaction(db_engine) as conn:
+            r = DailyMarketCapRepository(conn)
+            for sym in ("RELIANCE", "TCS"):
+                r.upsert_snapshot(
+                    ticker_ids[("NSE", sym)],
+                    trade_date=td, close_price=1.0, shares_used=1,
+                    market_cap=1.0, source="COMPUTED",
+                )
+        with transaction(db_engine) as conn:
+            n = DailyMarketCapRepository(conn).delete_for_date(td)
+        assert n == 2
+        with db_engine.connect() as conn:
+            assert DailyMarketCapRepository(conn).list_for_date(td) == []
+
+    def test_delete_for_ticker(self, db_engine, ticker_ids):
+        tid = ticker_ids[("NSE", "RELIANCE")]
+        with transaction(db_engine) as conn:
+            r = DailyMarketCapRepository(conn)
+            for td in (date(2026, 5, 21), date(2026, 5, 22)):
+                r.upsert_snapshot(
+                    tid, trade_date=td, close_price=1.0, shares_used=1,
+                    market_cap=1.0, source="COMPUTED",
+                )
+        with transaction(db_engine) as conn:
+            n = DailyMarketCapRepository(conn).delete_for_ticker(tid)
+        assert n == 2
