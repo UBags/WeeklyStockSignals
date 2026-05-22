@@ -273,3 +273,80 @@ class TestLifecycle:
         elapsed = time.monotonic() - t0
         # Should return well under 1 second despite the 10-minute wakeup.
         assert elapsed < 1.0, f"stop() took {elapsed:.2f}s; expected <1s"
+
+
+# ---------- Phase 2: shares scheduling ---------- #
+
+
+class TestSchedulerFiresShares:
+    """The scheduler now fires BOTH industry and shares refreshes
+    at each quarterly window. These tests exercise the new branch."""
+
+    def test_tick_fires_both_industry_and_shares_per_exchange(
+        self, db_engine, fake_config,
+    ):
+        """In a refresh window, with no prior runs and two configured
+        exchanges, we expect 2 industry fires + 2 shares fires = 4
+        runner calls in total."""
+        sched = QuarterlyFundamentalsScheduler(
+            db_engine, fake_config,
+            now_fn=lambda: _at(2026, 4, 30),
+        )
+        with patch(
+            "trip_ema.fundamentals.scheduler.run_industry_refresh",
+        ) as ind_mock, patch(
+            "trip_ema.fundamentals.runners.run_shares_refresh",
+        ) as shr_mock:
+            sched._tick()
+        assert ind_mock.call_count == 2  # NSE + BSE
+        assert shr_mock.call_count == 2  # NSE + BSE
+
+    def test_shares_phase_respects_skip_if_recent(self, db_engine, fake_config):
+        """A recent SUCCESS shares run for NSE means the scheduler
+        should fire shares only for BSE (not NSE). Industry should
+        still fire for both since the recent run was for the shares
+        phase."""
+        with transaction(db_engine) as conn:
+            r = FundamentalsRunRepository(conn)
+            rid = r.open(phase="shares", exchange="NSE")
+            r.close(rid, status="SUCCESS",
+                    succeeded=5, failed=0, skipped=0)
+        sched = QuarterlyFundamentalsScheduler(
+            db_engine, fake_config,
+            now_fn=lambda: _at(2026, 4, 30),
+        )
+        with patch(
+            "trip_ema.fundamentals.scheduler.run_industry_refresh",
+        ) as ind_mock, patch(
+            "trip_ema.fundamentals.runners.run_shares_refresh",
+        ) as shr_mock:
+            sched._tick()
+        # Industry fires for both — no industry recent runs.
+        assert ind_mock.call_count == 2
+        # Shares fires only for BSE — NSE was just done.
+        assert shr_mock.call_count == 1
+        assert shr_mock.call_args_list[0].args[1] == "BSE"
+
+    def test_unknown_phase_in_scheduled_phases_is_skipped_safely(
+        self, db_engine, fake_config, monkeypatch,
+    ):
+        """Defensive: if SCHEDULED_PHASES were ever to grow a phase
+        for which there's no runner, _fire() should warn and skip
+        rather than crash."""
+        # Temporarily extend SCHEDULED_PHASES to include something
+        # we don't have a runner for.
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.scheduler.SCHEDULED_PHASES",
+            ("industry", "shares", "nonexistent_phase"),
+        )
+        sched = QuarterlyFundamentalsScheduler(
+            db_engine, fake_config,
+            now_fn=lambda: _at(2026, 4, 30),
+        )
+        with patch(
+            "trip_ema.fundamentals.scheduler.run_industry_refresh",
+        ), patch(
+            "trip_ema.fundamentals.runners.run_shares_refresh",
+        ):
+            # Should not raise.
+            sched._tick()

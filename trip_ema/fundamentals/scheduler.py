@@ -42,7 +42,13 @@ logger = logging.getLogger(__name__)
 
 # Phase 1: only the industry phase is scheduled. Phases 2/3 will add
 # their own scheduler hooks once their runners exist.
-SCHEDULED_PHASES = ("industry",)
+# Phases the scheduler fires automatically at quarter-end+1month.
+# Each phase is fired serially per exchange (so a 30-minute industry
+# refresh doesn't run concurrent with a 30-minute shares refresh on
+# the same yfinance connection pool — that would just trigger rate
+# limits faster). Phases that don't exist in this tuple aren't
+# scheduled; the operator can still trigger them manually via CLI/HTTP.
+SCHEDULED_PHASES = ("industry", "shares")
 
 # Refresh-eligible filing window: quarter-end + 1 month. We use these
 # (month, day) tuples as the "from" cutoff — once the IST date is on
@@ -187,15 +193,21 @@ class QuarterlyFundamentalsScheduler:
         return age_days < RECENT_RUN_DAYS
 
     def _fire(self, phase: str, exchange: str) -> None:
-        if phase != "industry":
-            # Phase 1 only knows about industry.
+        if phase == "industry":
+            runner = run_industry_refresh
+        elif phase == "shares":
+            from .runners import run_shares_refresh
+            runner = run_shares_refresh
+        else:
+            # Unknown phase — defensive guard. SCHEDULED_PHASES should
+            # only contain phases we have runners for.
+            logger.warning("Scheduler: no runner for phase %r; skipping", phase)
             return
         logger.info(
-            "Scheduler: firing industry refresh for %s",
-            exchange,
+            "Scheduler: firing %s refresh for %s", phase, exchange,
         )
         try:
-            run_industry_refresh(self._db_engine, exchange)
+            runner(self._db_engine, exchange)
         except UnsupportedExchangeError:
             logger.warning(
                 "Scheduler: exchange %s not supported by codebase; skipping",
@@ -203,6 +215,5 @@ class QuarterlyFundamentalsScheduler:
             )
         except Exception:
             logger.exception(
-                "Scheduler: industry refresh failed for %s",
-                exchange,
+                "Scheduler: %s refresh failed for %s", phase, exchange,
             )

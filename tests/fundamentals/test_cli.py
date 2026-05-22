@@ -6,7 +6,7 @@ We patch the runner so we don't make HTTP calls.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from io import StringIO
 from unittest.mock import patch
 
@@ -465,3 +465,143 @@ class TestCmdBackfillEtfClassification:
         args.exchange = "NSE"
         rc = cmd_backfill_etf_classification(args, fake_config)
         assert rc == 1  # PARTIAL
+
+
+# ---------- cmd_refresh_shares ---------- #
+
+
+class TestCmdRefreshShares:
+
+    def test_returns_0_on_success(
+        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        capsys, monkeypatch,
+    ):
+        """Patch the runner to simulate a SUCCESS run and verify
+        the CLI handler returns rc=0 and prints the summary."""
+        from trip_ema.fundamentals.cli import cmd_refresh_shares
+        with transaction(db_engine) as conn:
+            rid = FundamentalsRunRepository(conn).open(
+                phase="shares", exchange="NSE",
+            )
+            FundamentalsRunRepository(conn).close(
+                rid, status="SUCCESS", succeeded=1, failed=0, skipped=0,
+            )
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.cli.run_shares_refresh",
+            lambda *a, **kw: rid,
+            raising=False,
+        )
+        # cmd_refresh_shares imports run_shares_refresh inside the
+        # function body, so monkeypatching that attribute on the
+        # module doesn't work — we patch the runner's source instead.
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_shares_refresh",
+            lambda *a, **kw: rid,
+        )
+
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.force = False
+        args.resume = None
+        rc = cmd_refresh_shares(args, fake_config)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "status=SUCCESS" in out
+        assert "succeeded=1" in out
+
+    def test_returns_1_on_partial(
+        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        monkeypatch,
+    ):
+        from trip_ema.fundamentals.cli import cmd_refresh_shares
+        with transaction(db_engine) as conn:
+            rid = FundamentalsRunRepository(conn).open(
+                phase="shares", exchange="NSE",
+            )
+            FundamentalsRunRepository(conn).close(
+                rid, status="PARTIAL", succeeded=3, failed=2, skipped=0,
+            )
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_shares_refresh",
+            lambda *a, **kw: rid,
+        )
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.force = False
+        args.resume = None
+        rc = cmd_refresh_shares(args, fake_config)
+        assert rc == 1
+
+    def test_returns_2_on_failed(
+        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        monkeypatch,
+    ):
+        from trip_ema.fundamentals.cli import cmd_refresh_shares
+        with transaction(db_engine) as conn:
+            rid = FundamentalsRunRepository(conn).open(
+                phase="shares", exchange="NSE",
+            )
+            FundamentalsRunRepository(conn).close(
+                rid, status="FAILED", succeeded=0, failed=5, skipped=0,
+            )
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_shares_refresh",
+            lambda *a, **kw: rid,
+        )
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.force = False
+        args.resume = None
+        rc = cmd_refresh_shares(args, fake_config)
+        assert rc == 2
+
+
+class TestCmdFundamentalsStatusShowsShares:
+    """The status command should report shares coverage alongside
+    industry coverage when shares data exists."""
+
+    def test_shows_shares_coverage_when_present(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, capsys,
+    ):
+        from trip_ema.persistence.fundamentals_repo import (
+            InstrumentSharesRepository,
+        )
+        # Populate both industry and shares.
+        with transaction(db_engine) as conn:
+            InstrumentIndustryRepository(conn).upsert(
+                reliance_ticker, sector="Energy", industry="Oil",
+            )
+            InstrumentSharesRepository(conn).insert_snapshot(
+                reliance_ticker,
+                as_of_date=date(2026, 5, 22),
+                shares_outstanding=6_700_000_000,
+                shares_source="YFINANCE",
+            )
+        args = type("A", (), {})()
+        args.exchange = None
+        args.phase = None
+        args.limit = 10
+        rc = cmd_fundamentals_status(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Shares-outstanding coverage" in out
+        assert "WITH_SHARES" in out
+
+    def test_omits_shares_section_when_no_data(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, capsys,
+    ):
+        """If no shares data, don't print an empty shares section."""
+        with transaction(db_engine) as conn:
+            InstrumentIndustryRepository(conn).upsert(
+                reliance_ticker, sector="Energy", industry="Oil",
+            )
+        args = type("A", (), {})()
+        args.exchange = None
+        args.phase = None
+        args.limit = 10
+        rc = cmd_fundamentals_status(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Shares-outstanding coverage" not in out

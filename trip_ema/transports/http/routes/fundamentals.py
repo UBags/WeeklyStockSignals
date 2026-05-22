@@ -25,7 +25,7 @@ to keep yfinance + DB from getting overwhelmed.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -325,3 +325,157 @@ def delete_override(
             detail=f"No override for ticker_id={ticker_id}",
         )
     return OverrideAckPayload(ticker_id=ticker_id, status="removed")
+
+
+# ============================================================
+# Phase 2 — shares-outstanding endpoints
+# ============================================================
+
+
+from ....persistence.fundamentals_repo import InstrumentSharesRepository
+
+
+class SharesRowPayload(BaseModel):
+    ticker_id: int
+    as_of_date: "date"
+    shares_outstanding: Optional[int] = None
+    free_float_factor: Optional[float] = None
+    shares_source: str
+    fetched_at: datetime
+    xbrl_url: Optional[str] = None
+
+
+class SharesListPayload(BaseModel):
+    exchange: str
+    rows: list[SharesRowPayload]
+
+
+class SharesHistoryPayload(BaseModel):
+    ticker_id: int
+    rows: list[SharesRowPayload]  # newest first
+
+
+def _run_shares_refresh_safe(
+    db_engine: Engine, config: Config, exchange: str, force: bool,
+) -> None:
+    """Wrapper for the executor — catches exceptions so the executor
+    thread doesn't die silently. Errors are logged; the run row
+    carries the real outcome."""
+    from ....fundamentals.runners import run_shares_refresh
+    try:
+        run_shares_refresh(db_engine, exchange, force=force)
+    except Exception:
+        logger.exception(
+            "Shares refresh failed for exchange=%s", exchange,
+        )
+
+
+@router.get("/shares", response_model=SharesListPayload)
+def list_shares(
+    exchange: str = Query(..., min_length=2, max_length=10),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+) -> SharesListPayload:
+    """Latest shares-outstanding snapshot per active ticker on
+    `exchange`. For historical lookups use /shares/{ticker_id}/history."""
+    _validate_exchange_or_400(exchange, config)
+    with db_engine.connect() as conn:
+        rows = InstrumentSharesRepository(conn).list_latest_for_exchange(exchange)
+    return SharesListPayload(
+        exchange=exchange,
+        rows=[
+            SharesRowPayload(
+                ticker_id=r.ticker_id,
+                as_of_date=r.as_of_date,
+                shares_outstanding=r.shares_outstanding,
+                free_float_factor=r.free_float_factor,
+                shares_source=r.shares_source,
+                fetched_at=r.fetched_at,
+                xbrl_url=r.xbrl_url,
+            )
+            for r in rows
+        ],
+    )
+
+
+@router.get("/shares/{ticker_id}", response_model=SharesRowPayload)
+def get_latest_shares(
+    ticker_id: int,
+    db_engine: Engine = Depends(get_db_engine),
+) -> SharesRowPayload:
+    with db_engine.connect() as conn:
+        row = InstrumentSharesRepository(conn).get_latest(ticker_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No shares data for ticker_id={ticker_id}",
+        )
+    return SharesRowPayload(
+        ticker_id=row.ticker_id,
+        as_of_date=row.as_of_date,
+        shares_outstanding=row.shares_outstanding,
+        free_float_factor=row.free_float_factor,
+        shares_source=row.shares_source,
+        fetched_at=row.fetched_at,
+        xbrl_url=row.xbrl_url,
+    )
+
+
+@router.get("/shares/{ticker_id}/history", response_model=SharesHistoryPayload)
+def get_shares_history(
+    ticker_id: int,
+    limit: int = Query(100, ge=1, le=1000),
+    db_engine: Engine = Depends(get_db_engine),
+) -> SharesHistoryPayload:
+    """Full shares-outstanding history for one ticker, newest first.
+
+    Used by analytics that need to see splits/buybacks/issues
+    reflected in the shares count over time.
+    """
+    with db_engine.connect() as conn:
+        history = InstrumentSharesRepository(conn).list_history(
+            ticker_id, limit=limit,
+        )
+    return SharesHistoryPayload(
+        ticker_id=ticker_id,
+        rows=[
+            SharesRowPayload(
+                ticker_id=r.ticker_id,
+                as_of_date=r.as_of_date,
+                shares_outstanding=r.shares_outstanding,
+                free_float_factor=r.free_float_factor,
+                shares_source=r.shares_source,
+                fetched_at=r.fetched_at,
+                xbrl_url=r.xbrl_url,
+            )
+            for r in history
+        ],
+    )
+
+
+@router.post("/refresh-shares", response_model=RefreshAcceptedPayload, status_code=202)
+def refresh_shares(
+    exchange: str = Query(..., min_length=2, max_length=10),
+    force: bool = Query(False),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+    executor = Depends(get_etl_executor),
+) -> RefreshAcceptedPayload:
+    """Fire-and-forget shares refresh. Returns 202 immediately;
+    poll /runs for the result."""
+    _require_executor(executor)
+    _validate_exchange_or_400(exchange, config)
+    logger.info(
+        "Admin: refresh-shares requested",
+        extra={"exchange": exchange, "force": force},
+    )
+    executor.submit(_run_shares_refresh_safe, db_engine, config, exchange, force)
+    return RefreshAcceptedPayload(
+        action="refresh-shares",
+        run_id=None,
+        accepted_at=datetime.now(timezone.utc),
+        notes=(
+            f"Shares refresh ({exchange}, force={force}) submitted; "
+            f"check /v1/fundamentals/runs for progress."
+        ),
+    )
