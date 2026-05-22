@@ -1736,3 +1736,575 @@ def _value_from_row(row):
         effective_rebalance_date=row[6],
         computed_at=row[7],
     )
+
+
+# ---------- IndicatorState (Phase 5-1) ---------- #
+
+
+class IndicatorStateRepository:
+    """Per-bar Triple-EMA indicator state.
+
+    Polymorphic series identity: each row is either ticker-keyed
+    (ticker_id + timeframe) or industry-keyed (industry_name).
+    The repo's read methods take a `series_key` parameter
+    encoded as either a (ticker_id, timeframe) tuple OR a string
+    (treated as industry_name). The write methods take explicit
+    keyword args because typos like get vs upsert are common.
+
+    Two hot read paths:
+      - get_latest_for_series / get_history_for_series — the
+        Phase 6+ strategy engine reads "yesterday's state" per
+        series.
+      - list_for_date — cross-series snapshot, "all series with
+        display_regime=+1 on date D".
+    """
+
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    # ----- reads ----- #
+
+    def get_at_for_ticker(
+        self, ticker_id: int, timeframe: str, trade_date: "date",
+    ):
+        row = self._conn.execute(text("""
+            SELECT * FROM indicator_state
+            WHERE ticker_id = :tid
+              AND timeframe = :tf
+              AND trade_date = :td
+        """), {"tid": ticker_id, "tf": timeframe, "td": trade_date}).fetchone()
+        return _indicator_from_row(row) if row else None
+
+    def get_at_for_industry(
+        self, industry_name: str, trade_date: "date",
+    ):
+        row = self._conn.execute(text("""
+            SELECT * FROM indicator_state
+            WHERE industry_name = :n
+              AND trade_date = :td
+        """), {"n": industry_name, "td": trade_date}).fetchone()
+        return _indicator_from_row(row) if row else None
+
+    def get_latest_for_ticker(self, ticker_id: int, timeframe: str):
+        row = self._conn.execute(text("""
+            SELECT * FROM indicator_state
+            WHERE ticker_id = :tid AND timeframe = :tf
+            ORDER BY trade_date DESC
+            LIMIT 1
+        """), {"tid": ticker_id, "tf": timeframe}).fetchone()
+        return _indicator_from_row(row) if row else None
+
+    def get_latest_for_industry(self, industry_name: str):
+        row = self._conn.execute(text("""
+            SELECT * FROM indicator_state
+            WHERE industry_name = :n
+            ORDER BY trade_date DESC
+            LIMIT 1
+        """), {"n": industry_name}).fetchone()
+        return _indicator_from_row(row) if row else None
+
+    def get_history_for_ticker(
+        self, ticker_id: int, timeframe: str, *,
+        from_date: Optional["date"] = None,
+        to_date: Optional["date"] = None,
+        limit: Optional[int] = None,
+    ) -> list:
+        """Time series for one ticker, newest first."""
+        conditions = ["ticker_id = :tid", "timeframe = :tf"]
+        params: dict = {"tid": ticker_id, "tf": timeframe}
+        if from_date is not None:
+            conditions.append("trade_date >= :fd")
+            params["fd"] = from_date
+        if to_date is not None:
+            conditions.append("trade_date <= :td")
+            params["td"] = to_date
+        sql = f"""
+            SELECT * FROM indicator_state
+            WHERE {' AND '.join(conditions)}
+            ORDER BY trade_date DESC
+        """
+        if limit is not None:
+            sql += " LIMIT :lim"
+            params["lim"] = limit
+        rows = self._conn.execute(text(sql), params)
+        return [_indicator_from_row(r) for r in rows]
+
+    def get_history_for_industry(
+        self, industry_name: str, *,
+        from_date: Optional["date"] = None,
+        to_date: Optional["date"] = None,
+        limit: Optional[int] = None,
+    ) -> list:
+        """Time series for one industry index, newest first."""
+        conditions = ["industry_name = :n"]
+        params: dict = {"n": industry_name}
+        if from_date is not None:
+            conditions.append("trade_date >= :fd")
+            params["fd"] = from_date
+        if to_date is not None:
+            conditions.append("trade_date <= :td")
+            params["td"] = to_date
+        sql = f"""
+            SELECT * FROM indicator_state
+            WHERE {' AND '.join(conditions)}
+            ORDER BY trade_date DESC
+        """
+        if limit is not None:
+            sql += " LIMIT :lim"
+            params["lim"] = limit
+        rows = self._conn.execute(text(sql), params)
+        return [_indicator_from_row(r) for r in rows]
+
+    def list_for_date(
+        self, trade_date: "date", *,
+        series_kind: Optional[str] = None,  # 'TICKER' | 'INDUSTRY' | None
+        display_regime: Optional[int] = None,
+        core_regime: Optional[int] = None,
+    ) -> list:
+        """Cross-series snapshot on a single date, optionally filtered
+        by series kind and/or regime. Used by Phase 6+ "what fired
+        today" queries.
+
+        series_kind:
+          - 'TICKER' → only ticker rows (industry_name IS NULL)
+          - 'INDUSTRY' → only industry rows (ticker_id IS NULL)
+          - None → both
+
+        Ordering: industries alphabetically, then tickers by id.
+        Stable enough for snapshot reports."""
+        conditions = ["trade_date = :td"]
+        params: dict = {"td": trade_date}
+        if series_kind == "TICKER":
+            conditions.append("ticker_id IS NOT NULL")
+        elif series_kind == "INDUSTRY":
+            conditions.append("industry_name IS NOT NULL")
+        elif series_kind is not None:
+            raise ValueError(
+                f"series_kind must be 'TICKER', 'INDUSTRY', or None; "
+                f"got {series_kind!r}"
+            )
+        if display_regime is not None:
+            conditions.append("display_regime = :dr")
+            params["dr"] = display_regime
+        if core_regime is not None:
+            conditions.append("core_regime = :cr")
+            params["cr"] = core_regime
+        sql = f"""
+            SELECT * FROM indicator_state
+            WHERE {' AND '.join(conditions)}
+            ORDER BY industry_name NULLS LAST, ticker_id NULLS LAST
+        """
+        rows = self._conn.execute(text(sql), params)
+        return [_indicator_from_row(r) for r in rows]
+
+    def list_recent_turns(
+        self, *,
+        kind: str = "buy",  # 'buy' or 'sell'
+        ema: str = "med",   # 'med' / 'long' / 'longest'
+        days: int = 7,
+        limit: int = 100,
+    ) -> list:
+        """List bars where the specified EMA printed a turn in the
+        last N days. Used by Phase 6+ scanner "show me recent
+        medium-EMA buy signals across all tickers".
+
+        Returns newest first."""
+        if kind not in ("buy", "sell"):
+            raise ValueError(f"kind must be 'buy' or 'sell'; got {kind!r}")
+        if ema not in ("med", "long", "longest"):
+            raise ValueError(
+                f"ema must be 'med', 'long', or 'longest'; got {ema!r}"
+            )
+        column = f"{ema}_turn_{kind}"
+        sql = f"""
+            SELECT * FROM indicator_state
+            WHERE {column} = TRUE
+              AND trade_date >= CURRENT_DATE - INTERVAL '{int(days)} days'
+            ORDER BY trade_date DESC, industry_name NULLS LAST, ticker_id NULLS LAST
+            LIMIT :lim
+        """
+        rows = self._conn.execute(text(sql), {"lim": limit})
+        return [_indicator_from_row(r) for r in rows]
+
+    def coverage_summary_for_industries(
+        self,
+    ) -> list[tuple[str, int, "date", "date"]]:
+        """Per-industry (name, row_count, earliest, latest). Used
+        by fundamentals-status (extended in Phase 5-4)."""
+        rows = self._conn.execute(text("""
+            SELECT industry_name, COUNT(*),
+                   MIN(trade_date), MAX(trade_date)
+            FROM indicator_state
+            WHERE industry_name IS NOT NULL
+            GROUP BY industry_name
+            ORDER BY industry_name
+        """))
+        return [
+            (r[0], int(r[1]), r[2], r[3])
+            for r in rows
+        ]
+
+    def coverage_summary_for_tickers(
+        self, *, timeframe: Optional[str] = None,
+    ) -> list[tuple[int, str, int, "date", "date"]]:
+        """Per-ticker (ticker_id, timeframe, row_count, earliest,
+        latest). Filterable by timeframe."""
+        if timeframe is None:
+            sql = """
+                SELECT ticker_id, timeframe, COUNT(*),
+                       MIN(trade_date), MAX(trade_date)
+                FROM indicator_state
+                WHERE ticker_id IS NOT NULL
+                GROUP BY ticker_id, timeframe
+                ORDER BY ticker_id, timeframe
+            """
+            params = {}
+        else:
+            sql = """
+                SELECT ticker_id, timeframe, COUNT(*),
+                       MIN(trade_date), MAX(trade_date)
+                FROM indicator_state
+                WHERE ticker_id IS NOT NULL AND timeframe = :tf
+                GROUP BY ticker_id, timeframe
+                ORDER BY ticker_id
+            """
+            params = {"tf": timeframe}
+        rows = self._conn.execute(text(sql), params)
+        return [
+            (int(r[0]), r[1], int(r[2]), r[3], r[4])
+            for r in rows
+        ]
+
+    # ----- writes ----- #
+
+    def upsert_for_ticker(self, state) -> None:
+        """Upsert one indicator state row keyed by ticker.
+
+        Idempotent on (ticker_id, timeframe, trade_date). The
+        callsite passes an IndicatorState dataclass whose ticker_id
+        and timeframe are populated, industry_name=None.
+
+        Validates:
+          - regime values ∈ {-1, 0, +1}.
+          - pattern labels ∈ PATTERN_LABELS.
+          - ATR >= 0; EMA values > 0.
+          - For ticker rows: industry_name must be None.
+        """
+        self._validate_state_for_write(state, expect_ticker=True)
+        self._conn.execute(text("""
+            INSERT INTO indicator_state (
+                ticker_id, timeframe, industry_name, trade_date,
+                med_ema, long_ema, longest_ema,
+                atr, upper_inner_band, lower_inner_band,
+                upper_mid_band, lower_mid_band,
+                upper_outer_band, lower_outer_band,
+                core_regime, display_regime,
+                pierces_upper_mid, pierces_lower_mid,
+                dist_to_med_in_hl_units, dist_to_long_in_hl_units,
+                dist_to_longest_in_hl_units,
+                mean_dist_to_med_in_hl_units, mean_dist_to_long_in_hl_units,
+                mean_dist_to_longest_in_hl_units,
+                bars_since_med_turn, bars_since_long_turn,
+                bars_since_longest_turn,
+                pct_change_since_med_turn, pct_change_since_long_turn,
+                pct_change_since_longest_turn,
+                med_pattern_label, long_pattern_label, longest_pattern_label,
+                med_turn_buy, med_turn_sell,
+                long_turn_buy, long_turn_sell,
+                longest_turn_buy, longest_turn_sell,
+                computed_at
+            ) VALUES (
+                :tid, :tf, NULL, :td,
+                :med, :long, :longest,
+                :atr, :uib, :lib, :umb, :lmb, :uob, :lob,
+                :cr, :dr,
+                :pum, :plm,
+                :dmh, :dlh, :dxh, :mdmh, :mdlh, :mdxh,
+                :bmt, :blt, :bxt,
+                :pcmt, :pclt, :pcxt,
+                :mpl, :lpl, :xpl,
+                :mtb, :mts, :ltb, :lts, :xtb, :xts,
+                NOW()
+            )
+            ON CONFLICT (ticker_id, timeframe, trade_date)
+            WHERE ticker_id IS NOT NULL
+            DO UPDATE SET
+                med_ema = EXCLUDED.med_ema,
+                long_ema = EXCLUDED.long_ema,
+                longest_ema = EXCLUDED.longest_ema,
+                atr = EXCLUDED.atr,
+                upper_inner_band = EXCLUDED.upper_inner_band,
+                lower_inner_band = EXCLUDED.lower_inner_band,
+                upper_mid_band = EXCLUDED.upper_mid_band,
+                lower_mid_band = EXCLUDED.lower_mid_band,
+                upper_outer_band = EXCLUDED.upper_outer_band,
+                lower_outer_band = EXCLUDED.lower_outer_band,
+                core_regime = EXCLUDED.core_regime,
+                display_regime = EXCLUDED.display_regime,
+                pierces_upper_mid = EXCLUDED.pierces_upper_mid,
+                pierces_lower_mid = EXCLUDED.pierces_lower_mid,
+                dist_to_med_in_hl_units = EXCLUDED.dist_to_med_in_hl_units,
+                dist_to_long_in_hl_units = EXCLUDED.dist_to_long_in_hl_units,
+                dist_to_longest_in_hl_units = EXCLUDED.dist_to_longest_in_hl_units,
+                mean_dist_to_med_in_hl_units = EXCLUDED.mean_dist_to_med_in_hl_units,
+                mean_dist_to_long_in_hl_units = EXCLUDED.mean_dist_to_long_in_hl_units,
+                mean_dist_to_longest_in_hl_units = EXCLUDED.mean_dist_to_longest_in_hl_units,
+                bars_since_med_turn = EXCLUDED.bars_since_med_turn,
+                bars_since_long_turn = EXCLUDED.bars_since_long_turn,
+                bars_since_longest_turn = EXCLUDED.bars_since_longest_turn,
+                pct_change_since_med_turn = EXCLUDED.pct_change_since_med_turn,
+                pct_change_since_long_turn = EXCLUDED.pct_change_since_long_turn,
+                pct_change_since_longest_turn = EXCLUDED.pct_change_since_longest_turn,
+                med_pattern_label = EXCLUDED.med_pattern_label,
+                long_pattern_label = EXCLUDED.long_pattern_label,
+                longest_pattern_label = EXCLUDED.longest_pattern_label,
+                med_turn_buy = EXCLUDED.med_turn_buy,
+                med_turn_sell = EXCLUDED.med_turn_sell,
+                long_turn_buy = EXCLUDED.long_turn_buy,
+                long_turn_sell = EXCLUDED.long_turn_sell,
+                longest_turn_buy = EXCLUDED.longest_turn_buy,
+                longest_turn_sell = EXCLUDED.longest_turn_sell,
+                computed_at = NOW()
+        """), self._params_for_state(state))
+
+    def upsert_for_industry(self, state) -> None:
+        """Upsert one indicator state row keyed by industry."""
+        self._validate_state_for_write(state, expect_ticker=False)
+        self._conn.execute(text("""
+            INSERT INTO indicator_state (
+                ticker_id, timeframe, industry_name, trade_date,
+                med_ema, long_ema, longest_ema,
+                atr, upper_inner_band, lower_inner_band,
+                upper_mid_band, lower_mid_band,
+                upper_outer_band, lower_outer_band,
+                core_regime, display_regime,
+                pierces_upper_mid, pierces_lower_mid,
+                dist_to_med_in_hl_units, dist_to_long_in_hl_units,
+                dist_to_longest_in_hl_units,
+                mean_dist_to_med_in_hl_units, mean_dist_to_long_in_hl_units,
+                mean_dist_to_longest_in_hl_units,
+                bars_since_med_turn, bars_since_long_turn,
+                bars_since_longest_turn,
+                pct_change_since_med_turn, pct_change_since_long_turn,
+                pct_change_since_longest_turn,
+                med_pattern_label, long_pattern_label, longest_pattern_label,
+                med_turn_buy, med_turn_sell,
+                long_turn_buy, long_turn_sell,
+                longest_turn_buy, longest_turn_sell,
+                computed_at
+            ) VALUES (
+                NULL, NULL, :ind, :td,
+                :med, :long, :longest,
+                :atr, :uib, :lib, :umb, :lmb, :uob, :lob,
+                :cr, :dr,
+                :pum, :plm,
+                :dmh, :dlh, :dxh, :mdmh, :mdlh, :mdxh,
+                :bmt, :blt, :bxt,
+                :pcmt, :pclt, :pcxt,
+                :mpl, :lpl, :xpl,
+                :mtb, :mts, :ltb, :lts, :xtb, :xts,
+                NOW()
+            )
+            ON CONFLICT (industry_name, trade_date)
+            WHERE industry_name IS NOT NULL
+            DO UPDATE SET
+                med_ema = EXCLUDED.med_ema,
+                long_ema = EXCLUDED.long_ema,
+                longest_ema = EXCLUDED.longest_ema,
+                atr = EXCLUDED.atr,
+                upper_inner_band = EXCLUDED.upper_inner_band,
+                lower_inner_band = EXCLUDED.lower_inner_band,
+                upper_mid_band = EXCLUDED.upper_mid_band,
+                lower_mid_band = EXCLUDED.lower_mid_band,
+                upper_outer_band = EXCLUDED.upper_outer_band,
+                lower_outer_band = EXCLUDED.lower_outer_band,
+                core_regime = EXCLUDED.core_regime,
+                display_regime = EXCLUDED.display_regime,
+                pierces_upper_mid = EXCLUDED.pierces_upper_mid,
+                pierces_lower_mid = EXCLUDED.pierces_lower_mid,
+                dist_to_med_in_hl_units = EXCLUDED.dist_to_med_in_hl_units,
+                dist_to_long_in_hl_units = EXCLUDED.dist_to_long_in_hl_units,
+                dist_to_longest_in_hl_units = EXCLUDED.dist_to_longest_in_hl_units,
+                mean_dist_to_med_in_hl_units = EXCLUDED.mean_dist_to_med_in_hl_units,
+                mean_dist_to_long_in_hl_units = EXCLUDED.mean_dist_to_long_in_hl_units,
+                mean_dist_to_longest_in_hl_units = EXCLUDED.mean_dist_to_longest_in_hl_units,
+                bars_since_med_turn = EXCLUDED.bars_since_med_turn,
+                bars_since_long_turn = EXCLUDED.bars_since_long_turn,
+                bars_since_longest_turn = EXCLUDED.bars_since_longest_turn,
+                pct_change_since_med_turn = EXCLUDED.pct_change_since_med_turn,
+                pct_change_since_long_turn = EXCLUDED.pct_change_since_long_turn,
+                pct_change_since_longest_turn = EXCLUDED.pct_change_since_longest_turn,
+                med_pattern_label = EXCLUDED.med_pattern_label,
+                long_pattern_label = EXCLUDED.long_pattern_label,
+                longest_pattern_label = EXCLUDED.longest_pattern_label,
+                med_turn_buy = EXCLUDED.med_turn_buy,
+                med_turn_sell = EXCLUDED.med_turn_sell,
+                long_turn_buy = EXCLUDED.long_turn_buy,
+                long_turn_sell = EXCLUDED.long_turn_sell,
+                longest_turn_buy = EXCLUDED.longest_turn_buy,
+                longest_turn_sell = EXCLUDED.longest_turn_sell,
+                computed_at = NOW()
+        """), self._params_for_state(state))
+
+    def delete_for_ticker(
+        self, ticker_id: int, timeframe: str,
+    ) -> int:
+        """Wipe all indicator state for one (ticker, timeframe).
+        Used by the runner's full-recompute admin path."""
+        result = self._conn.execute(text("""
+            DELETE FROM indicator_state
+            WHERE ticker_id = :tid AND timeframe = :tf
+        """), {"tid": ticker_id, "tf": timeframe})
+        return result.rowcount
+
+    def delete_for_industry(self, industry_name: str) -> int:
+        """Wipe all indicator state for one industry."""
+        result = self._conn.execute(text("""
+            DELETE FROM indicator_state
+            WHERE industry_name = :n
+        """), {"n": industry_name})
+        return result.rowcount
+
+    # ----- validation + params helpers ----- #
+
+    def _validate_state_for_write(self, state, *, expect_ticker: bool) -> None:
+        from ..fundamentals import PATTERN_LABELS
+        if expect_ticker:
+            if state.ticker_id is None or state.timeframe is None:
+                raise ValueError(
+                    "upsert_for_ticker requires ticker_id and timeframe"
+                )
+            if state.industry_name is not None:
+                raise ValueError(
+                    "upsert_for_ticker requires industry_name=None"
+                )
+        else:
+            if state.industry_name is None:
+                raise ValueError(
+                    "upsert_for_industry requires industry_name"
+                )
+            if state.ticker_id is not None or state.timeframe is not None:
+                raise ValueError(
+                    "upsert_for_industry requires ticker_id=None and "
+                    "timeframe=None"
+                )
+        if state.core_regime not in (-1, 0, 1):
+            raise ValueError(
+                f"core_regime must be in {{-1, 0, 1}}; "
+                f"got {state.core_regime!r}"
+            )
+        if state.display_regime not in (-1, 0, 1):
+            raise ValueError(
+                f"display_regime must be in {{-1, 0, 1}}; "
+                f"got {state.display_regime!r}"
+            )
+        if state.atr < 0:
+            raise ValueError(f"atr must be >= 0; got {state.atr!r}")
+        if state.med_ema <= 0 or state.long_ema <= 0 or state.longest_ema <= 0:
+            raise ValueError("EMA values must be > 0")
+        for label_name, label_val in (
+            ("med_pattern_label", state.med_pattern_label),
+            ("long_pattern_label", state.long_pattern_label),
+            ("longest_pattern_label", state.longest_pattern_label),
+        ):
+            if label_val not in PATTERN_LABELS:
+                raise ValueError(
+                    f"{label_name} must be in {PATTERN_LABELS}; "
+                    f"got {label_val!r}"
+                )
+
+    def _params_for_state(self, state) -> dict:
+        """Pack an IndicatorState into the dict of SQL bind params."""
+        return {
+            "tid": state.ticker_id,
+            "tf": state.timeframe,
+            "ind": state.industry_name,
+            "td": state.trade_date,
+            "med": state.med_ema,
+            "long": state.long_ema,
+            "longest": state.longest_ema,
+            "atr": state.atr,
+            "uib": state.upper_inner_band,
+            "lib": state.lower_inner_band,
+            "umb": state.upper_mid_band,
+            "lmb": state.lower_mid_band,
+            "uob": state.upper_outer_band,
+            "lob": state.lower_outer_band,
+            "cr": state.core_regime,
+            "dr": state.display_regime,
+            "pum": state.pierces_upper_mid,
+            "plm": state.pierces_lower_mid,
+            "dmh": state.dist_to_med_in_hl_units,
+            "dlh": state.dist_to_long_in_hl_units,
+            "dxh": state.dist_to_longest_in_hl_units,
+            "mdmh": state.mean_dist_to_med_in_hl_units,
+            "mdlh": state.mean_dist_to_long_in_hl_units,
+            "mdxh": state.mean_dist_to_longest_in_hl_units,
+            "bmt": state.bars_since_med_turn,
+            "blt": state.bars_since_long_turn,
+            "bxt": state.bars_since_longest_turn,
+            "pcmt": state.pct_change_since_med_turn,
+            "pclt": state.pct_change_since_long_turn,
+            "pcxt": state.pct_change_since_longest_turn,
+            "mpl": state.med_pattern_label,
+            "lpl": state.long_pattern_label,
+            "xpl": state.longest_pattern_label,
+            "mtb": state.med_turn_buy,
+            "mts": state.med_turn_sell,
+            "ltb": state.long_turn_buy,
+            "lts": state.long_turn_sell,
+            "xtb": state.longest_turn_buy,
+            "xts": state.longest_turn_sell,
+        }
+
+
+def _indicator_from_row(row):
+    """Unpack a row of indicator_state SELECT * into IndicatorState.
+
+    Column order matters and must match the CREATE TABLE exactly.
+    If a future migration adds a column, the column count here
+    must be updated.
+    """
+    from ..fundamentals import IndicatorState
+    return IndicatorState(
+        ticker_id=int(row[0]) if row[0] is not None else None,
+        timeframe=row[1],
+        industry_name=row[2],
+        trade_date=row[3],
+        med_ema=float(row[4]),
+        long_ema=float(row[5]),
+        longest_ema=float(row[6]),
+        atr=float(row[7]),
+        upper_inner_band=float(row[8]),
+        lower_inner_band=float(row[9]),
+        upper_mid_band=float(row[10]),
+        lower_mid_band=float(row[11]),
+        upper_outer_band=float(row[12]),
+        lower_outer_band=float(row[13]),
+        core_regime=int(row[14]),
+        display_regime=int(row[15]),
+        pierces_upper_mid=bool(row[16]),
+        pierces_lower_mid=bool(row[17]),
+        dist_to_med_in_hl_units=(float(row[18]) if row[18] is not None else None),
+        dist_to_long_in_hl_units=(float(row[19]) if row[19] is not None else None),
+        dist_to_longest_in_hl_units=(float(row[20]) if row[20] is not None else None),
+        mean_dist_to_med_in_hl_units=(float(row[21]) if row[21] is not None else None),
+        mean_dist_to_long_in_hl_units=(float(row[22]) if row[22] is not None else None),
+        mean_dist_to_longest_in_hl_units=(float(row[23]) if row[23] is not None else None),
+        bars_since_med_turn=(int(row[24]) if row[24] is not None else None),
+        bars_since_long_turn=(int(row[25]) if row[25] is not None else None),
+        bars_since_longest_turn=(int(row[26]) if row[26] is not None else None),
+        pct_change_since_med_turn=(float(row[27]) if row[27] is not None else None),
+        pct_change_since_long_turn=(float(row[28]) if row[28] is not None else None),
+        pct_change_since_longest_turn=(float(row[29]) if row[29] is not None else None),
+        med_pattern_label=row[30],
+        long_pattern_label=row[31],
+        longest_pattern_label=row[32],
+        med_turn_buy=bool(row[33]),
+        med_turn_sell=bool(row[34]),
+        long_turn_buy=bool(row[35]),
+        long_turn_sell=bool(row[36]),
+        longest_turn_buy=bool(row[37]),
+        longest_turn_sell=bool(row[38]),
+        computed_at=row[39],
+    )

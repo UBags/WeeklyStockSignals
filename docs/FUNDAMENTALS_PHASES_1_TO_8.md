@@ -2,6 +2,8 @@
 
 **Phases 1–8 design document. Phase 9 (per-stock corporate-filings panel) is deferred to its own design session.**
 
+> **Operator commands**: for day-to-day usage (initial bring-up, daily refresh, inspection queries, recovery), see [`scripts/operator_commands.md`](../scripts/operator_commands.md) §12.
+
 ---
 
 ## 1. Purpose and scope
@@ -1617,3 +1619,123 @@ signals from the industry index time series. Or Phase 4C if the
 operator wants to address the deferred daily-mcap scheduler
 integration (bars-ingestion daemon → mcap compute → index value
 update, all in one EoD pipeline).
+
+---
+
+## 23. Phase 5-1 (indicator state data layer)
+
+Phase 4 closed with industry index value time series. Phase 5
+builds the indicator stack on top — the Triple-EMA, ATR bands,
+regime state, and turn-detection logic from the operator's Pine
+Script "Weekly - Triple EMA with Background Strategy".
+
+The Pine Script bundles indicator computation AND strategy
+execution. **Phase 5 covers only the indicator half.** Strategy
+entry/exit, take-profit, position management live in a future
+phase (probably Phase 6 or 7).
+
+### Decisions made this session
+
+- **Indices use synthetic OHLC**: for industry index series (which
+  have only `value` per day), treat O=H=L=C=value, vol=1. The
+  volume-weighted EMA degenerates to plain EMA (vol cancels in
+  the ratio). For ATR specifically, use synthetic ATR =
+  |Δclose| × √2 — the √2 factor compensates for the missing
+  intra-day range. Mathematically, for a random walk with σ in
+  close-to-close changes, expected daily range is σ × √2; the
+  synthetic recovers what a true ATR would have measured.
+
+- **Phase 5 is indicators only**: no strategy execution, no
+  backtest. The operator-provided Pine Script has both, but
+  only the indicator state is wanted in this application.
+
+- **One wide row per (series, trade_date)**: ~30 columns.
+  Indicators are always computed together; vertical decomposition
+  buys nothing. Hot read path is "give me yesterday's full state
+  for series X" → one row.
+
+- **Polymorphic series identity**: nullable `ticker_id` +
+  `timeframe` OR nullable `industry_name`, CHECK constraint
+  enforces exactly one set. Downstream JOINs become explicit.
+  Alternative ("discriminator + string ref") was rejected because
+  it would require application-level interpretation everywhere.
+
+- **DB constraints enforce data integrity at the row level**:
+  CHECK on regime values (-1/0/+1), ATR ≥ 0, EMAs > 0, and the
+  polymorphic XOR. The repo layer adds an application-level layer
+  for things the DB can't validate easily (pattern label values,
+  positional consistency between expected_ticker / expected_industry
+  upserts).
+
+### Shipped this session
+
+- **Migration 0014** `indicator_state`: 40 columns, two partial
+  unique indexes (one per series kind), date-axis index for
+  cross-series queries.
+
+- **Legacy parity SQL** `migrations/legacy/021_indicator_state.sql`.
+
+- **Domain types**:
+  - `REGIME_VALUES = (-1, 0, 1)`.
+  - `PATTERN_LABELS = ("NA", "1 SUCCESSIVE HIGHER VALLEY",
+    "2 SUCCESSIVE HIGHER VALLEYS", "1 SUCCESSIVE LOWER TOP",
+    "2 SUCCESSIVE LOWER TOPS")`.
+  - `IndicatorState` dataclass (frozen, slots) with all 40 fields.
+
+- **IndicatorStateRepository**:
+  - Reads: get_at_for_ticker / get_at_for_industry, get_latest_for_*,
+    get_history_for_* (with from/to/limit), list_for_date (with
+    series_kind + regime filters), list_recent_turns (kind + ema +
+    days), coverage_summary_for_{tickers, industries}.
+  - Writes: upsert_for_ticker, upsert_for_industry (both validate
+    series shape, regime values, ATR, EMAs, pattern labels).
+  - Admin: delete_for_ticker, delete_for_industry.
+
+### Test counts
+
+39 new tests this session:
+- 9 in `tests/fundamentals/test_indicator_domain.py` covering the
+  REGIME_VALUES / PATTERN_LABELS constants, dataclass construction
+  for both keying modes, frozen+slots semantics, optional fields.
+- 30 in `tests/persistence/test_fundamentals_repos.py` covering
+  ticker writes (upsert, idempotency, separate timeframes coexist,
+  get_latest), industry writes (with industry_index parent setup),
+  application-layer validation (8 ValueError cases), history
+  queries (range + limit), cross-series queries (series_kind +
+  regime filters), recent turns (buy/sell × ema), coverage summaries,
+  deletes, and 3 DB-level CHECK constraint tests confirming the
+  integrity wall holds even if the repo layer is bypassed.
+
+Total: 507 fundamentals + migration tests pass. Up from 468 at
+end of Phase 4.
+
+### Phase 5-2 (next session)
+
+The numerical heart. Pure compute primitives:
+
+- `volume_weighted_ema(close, volume, n)` — base primitive,
+  `ema(close × vol, n) / ema(vol, n)`.
+- `hull_smoothing(series, n)` — the
+  `wma(2*wma(x, n/2) - wma(x, n), sqrt(n))` transform.
+- `triple_ema_stack(close, volume, *, params)` — chains the
+  base primitive with hull smoothing for med/long/longest.
+- `atr(high, low, close, n)` — standard ATR with the `|Δclose|×√2`
+  synthetic path when high=low=close.
+- `compute_bar_indicator_state(...)` — assembles one bar's worth
+  of state given a buffer of prior bars. Returns the
+  IndicatorState dataclass.
+
+Testing approach: hand-computed expected values on small input
+series (10-20 bars) for each primitive. The operator confirmed
+Phase 4 numerical work matched real production data; same
+discipline applied here.
+
+### Phase 5-3 (session after)
+
+The regime state machine. `core_regime` and `display_regime` are
+sequential through time — can't be computed bar-independently.
+Walk the time series, maintain state.
+
+### Phase 5-4
+
+Runners + CLI + HTTP. Same shape as Phase 4 wrappers.
