@@ -713,3 +713,220 @@ def run_shares_refresh(
         run_id, exchange, status, succeeded, failed,
     )
     return run_id
+
+
+# ============================================================
+# Phase 3 — quarterly financials refresh
+# ============================================================
+#
+# Same shape as run_shares_refresh: serial yfinance calls,
+# checkpointed every 50 tickers, resumable via progress_json.
+# Differences from shares:
+#
+#   - Each ticker returns 0-4 quarters (a list), not a scalar. The
+#     runner writes one row per quarter for each ticker.
+#
+#   - "Success" means "the fetcher returned at least one quarter
+#     with at least one of revenue/ebitda populated". Quarters with
+#     both fields NULL are filtered out by the fetcher; if the
+#     fetcher returns the empty list, that's a permanent failure
+#     for this refresh of this ticker.
+#
+#   - ETFs DO get queried. yfinance has financials for ETFs only
+#     occasionally (essentially never for Indian ETFs based on the
+#     probe), but the runner doesn't skip them — same uniform path
+#     for all tickers. ETFs will just produce a high failure rate
+#     in the ETF row of fundamentals-status, which is cosmetically
+#     ugly but functionally fine. (Same call we made on shares.)
+
+
+def run_financials_refresh(
+    db_engine: Engine,
+    exchange: str,
+    *,
+    resume_run_id: Optional[int] = None,
+    force: bool = False,
+    request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
+    fetch_fn=None,
+    max_quarters: int = 4,
+) -> int:
+    """Refresh quarterly financials for every active ticker on `exchange`.
+
+    For each ticker, fetches up to `max_quarters` of revenue + EBITDA
+    from yfinance and inserts one quarterly_financials row per quarter.
+    The composite PK (ticker_id, fiscal_quarter, fetched_at) means
+    re-running on the same day inserts new rows (not idempotent at
+    DB level) — the runner relies on the skip-if-recent guard for
+    de-duplication.
+
+    Returns run_id.
+    """
+    from .financials_fetch import (
+        FinancialsFetchPermanent,
+        FinancialsFetchRateLimited,
+        FinancialsFetchTransient,
+        fetch_quarterly_financials,
+    )
+    from ..persistence.fundamentals_repo import QuarterlyFinancialsRepository
+
+    if fetch_fn is None:
+        fetch_fn = fetch_quarterly_financials
+
+    # ----- 0. Skip-if-recent guard ----- #
+    if not force and resume_run_id is None:
+        with db_engine.connect() as conn:
+            last = FundamentalsRunRepository(conn).last_success(
+                phase="financials", exchange=exchange,
+            )
+        if last is not None and last.completed_at is not None:
+            age = (datetime.now(timezone.utc) - last.completed_at).days
+            if age < 80:
+                logger.info(
+                    "Skipping financials refresh for %s: last SUCCESS "
+                    "run %d completed %d days ago (use force=True to override)",
+                    exchange, last.run_id, age,
+                )
+                return last.run_id
+
+    # ----- 1. Determine ticker list ----- #
+    if resume_run_id is not None:
+        run_id, ticker_list, cursor_index = _resume_from_checkpoint(
+            db_engine, resume_run_id, expected_phase="financials",
+        )
+        logger.info(
+            "Resuming financials refresh run %d at index %d/%d",
+            run_id, cursor_index, len(ticker_list),
+        )
+    else:
+        ticker_list = _load_active_tickers_for_exchange(db_engine, exchange)
+        if not ticker_list:
+            logger.warning(
+                "No active tickers for exchange %s — skipping financials refresh",
+                exchange,
+            )
+            with transaction(db_engine) as conn:
+                run_id = FundamentalsRunRepository(conn).open(
+                    phase="financials", exchange=exchange,
+                    notes="No active tickers",
+                )
+                FundamentalsRunRepository(conn).close(
+                    run_id, status="SUCCESS",
+                    succeeded=0, failed=0, skipped=0,
+                )
+            return run_id
+        with transaction(db_engine) as conn:
+            run_id = FundamentalsRunRepository(conn).open(
+                phase="financials", exchange=exchange,
+                notes=f"Financials refresh of {len(ticker_list)} active tickers",
+            )
+            FundamentalsRunRepository(conn).update_progress(
+                run_id,
+                progress_json={
+                    "ticker_list": [
+                        {"id": t["id"], "symbol": t["symbol"],
+                         "instrument_type": t.get("instrument_type", "EQ")}
+                        for t in ticker_list
+                    ],
+                    "cursor_index": 0,
+                },
+            )
+        cursor_index = 0
+
+    # ----- 2. Main loop ----- #
+    succeeded = 0
+    failed = 0
+    skipped = 0
+
+    try:
+        for idx in range(cursor_index, len(ticker_list)):
+            t = ticker_list[idx]
+            tid, symbol = t["id"], t["symbol"]
+
+            try:
+                quarters = fetch_fn(symbol, exchange, max_quarters=max_quarters)
+                with transaction(db_engine) as conn:
+                    repo = QuarterlyFinancialsRepository(conn)
+                    for q in quarters:
+                        repo.insert_snapshot(
+                            tid,
+                            fiscal_quarter=q.fiscal_quarter,
+                            revenue=q.revenue,
+                            ebitda=q.ebitda,
+                            currency=q.currency,
+                            source="YFINANCE",
+                        )
+                succeeded += 1
+            except FinancialsFetchRateLimited as e:
+                logger.warning(
+                    "Rate limited on %s (%s): sleeping %.1fs",
+                    symbol, e, RATE_LIMIT_COOLOFF_S,
+                )
+                _checkpoint(db_engine, run_id, ticker_list, idx,
+                            succeeded, failed, skipped)
+                time.sleep(RATE_LIMIT_COOLOFF_S)
+                try:
+                    quarters = fetch_fn(symbol, exchange, max_quarters=max_quarters)
+                    with transaction(db_engine) as conn:
+                        repo = QuarterlyFinancialsRepository(conn)
+                        for q in quarters:
+                            repo.insert_snapshot(
+                                tid,
+                                fiscal_quarter=q.fiscal_quarter,
+                                revenue=q.revenue,
+                                ebitda=q.ebitda,
+                                currency=q.currency,
+                                source="YFINANCE",
+                            )
+                    succeeded += 1
+                except Exception as e2:
+                    logger.error(
+                        "Failed retry after rate-limit cool-off for %s: %s",
+                        symbol, e2,
+                    )
+                    failed += 1
+            except (FinancialsFetchTransient, FinancialsFetchPermanent) as e:
+                logger.warning("Failed to fetch financials for %s: %s", symbol, e)
+                failed += 1
+            except Exception as e:
+                logger.exception(
+                    "Unexpected error fetching financials for %s: %s",
+                    symbol, e,
+                )
+                failed += 1
+
+            if (idx + 1) % CHECKPOINT_EVERY == 0:
+                _checkpoint(db_engine, run_id, ticker_list, idx + 1,
+                            succeeded, failed, skipped)
+                logger.info(
+                    "Checkpoint: %d/%d processed (s=%d f=%d) on %s",
+                    idx + 1, len(ticker_list),
+                    succeeded, failed, exchange,
+                )
+
+            if request_delay_s > 0:
+                time.sleep(request_delay_s)
+
+    except KeyboardInterrupt:
+        logger.warning(
+            "KeyboardInterrupt — closing financials run %d as PARTIAL", run_id,
+        )
+        with transaction(db_engine) as conn:
+            FundamentalsRunRepository(conn).close(
+                run_id, status="PARTIAL",
+                succeeded=succeeded, failed=failed, skipped=skipped,
+                notes="Interrupted by KeyboardInterrupt",
+            )
+        raise
+
+    # ----- 3. Close out ----- #
+    status = _terminal_status(succeeded, failed)
+    with transaction(db_engine) as conn:
+        FundamentalsRunRepository(conn).close(
+            run_id, status=status,
+            succeeded=succeeded, failed=failed, skipped=skipped,
+        )
+    logger.info(
+        "Financials refresh run %d (%s) finished: status=%s s=%d f=%d",
+        run_id, exchange, status, succeeded, failed,
+    )
+    return run_id
