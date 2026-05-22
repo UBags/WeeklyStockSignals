@@ -1137,3 +1137,125 @@ Total: 295 fundamentals-domain + migration tests pass.
 - Per the §17 scheduler decision: mcap compute is operator-
   triggered for Phase 4A. Daily scheduling is a Phase 4C concern
   alongside bars-ingestion-daemon integration.
+
+---
+
+## 19. Phase 4A part 3 (fetcher + runner + CLI + HTTP, complete)
+
+Continuing from §18. The operator's probe of yfinance's
+historical mcap API (scripts/probe_yfinance_hist_mcap.py, run
+2026-05-22 against 5 NSE tickers across cap tiers) returned a
+clean result:
+
+- `Ticker.get_shares_full()` returns ~150-250 historical shares
+  snapshots per ticker covering ~16 months back, for ALL cap
+  tiers (large/mid/small).
+- `Ticker.history(period='1y')` returns daily OHLCV for the same
+  range.
+- The manual `close × current_shares` sanity check matched
+  yfinance's reported `marketCap` to within 0.0000001 ratio for
+  all 5 samples — confirming yfinance's mcap is just close ×
+  shares.
+
+This is much cleaner than expected. **All backfill rows now get
+source=COMPUTED**, computed from yfinance-historical-shares ×
+yfinance-historical-close. There's no need for the separate
+YFINANCE_HIST_MCAP source path or APPROX_TODAYS_SHARES fallback
+on backfill — both remain in the schema for forward compatibility
+but aren't written by the Phase 4A runner.
+
+### Shipped this session
+
+- **market_cap_fetch.py**: `fetch_historical_mcap_for_ticker(
+  symbol, exchange, from_date, to_date) → list[HistoricalMcapPoint]`.
+  Calls Ticker.history() and Ticker.get_shares_full(), joins them
+  per-date via an asof merge cursor (O(n+m), not O(n*m)), filters
+  to the requested range. Same typed-exception pattern as the
+  other Phase 2/3 fetchers. 16 fetcher tests.
+
+- **run_market_cap_backfill()** in runners.py: walks active EQ
+  tickers (ETFs excluded via instrument_type='EQ' filter), one
+  yfinance HTTP per ticker covering the full date range. Same
+  checkpoint-every-50, 80-day skip-if-recent, expected_phase=
+  'market_cap' for resume. Persists the date range in
+  progress_json so resume uses the same range as the original.
+  11 runner tests.
+
+- **CLI**: `compute-market-cap --exchange NSE` with two modes:
+    - Single-day: `--date YYYY-MM-DD` (default today) calls
+      compute_market_cap_for_date — uses local ohlcv_bars ×
+      instrument_shares JOIN, no yfinance HTTP.
+    - Backfill: `--backfill-from YYYY-MM-DD [--backfill-to ...]`
+      calls run_market_cap_backfill — yfinance per-ticker over
+      the range.
+  Single-day mode returns rc=1 if nothing was written (most
+  likely cause: bars not yet ingested for the date).
+  `fundamentals-status` now reports a "Daily market cap coverage"
+  section showing per-date breakdown of COMPUTED vs
+  YFINANCE_HIST_MCAP source counts. 5 new CLI tests.
+
+- **HTTP**: GET /v1/fundamentals/market-cap?trade_date=YYYY-MM-DD
+  (Phase 4B's top-N hot path read endpoint, optional exchange
+  filter, configurable limit), GET /v1/fundamentals/market-cap/
+  {ticker_id}/history, POST /v1/fundamentals/compute-market-cap
+  (fire-and-forget backfill — single-day not exposed via HTTP
+  since it's cheap and local-only). 12 new HTTP tests.
+
+### Test counts
+
+339 fundamentals-domain + migration tests pass. Up from 295 by:
++ 16 fetcher tests
++ 11 runner tests
++ 5 CLI tests
++ 12 HTTP tests
++ (Plus the existing 295 still pass.)
+
+### Operator's test of compute_market_cap_for_date today
+
+The operator ran `compute_market_cap_for_date(eng, 'NSE',
+date.today())` and got `skipped_no_close=2347` — every NSE EQ
+ticker was skipped because no bar was found.
+
+Most likely cause: bars for today haven't been ingested yet.
+Markets close 15:30 IST; if the bars ingestion daemon runs after
+EoD and the test was run before that, no bars exist. The simplest
+diagnostic is the SQL provided in this session's exchange:
+
+```sql
+SELECT trade_date, COUNT(*) FROM (
+    SELECT DATE(bar_timestamp) AS trade_date
+    FROM ohlcv_bars
+    WHERE timeframe = '1d'
+      AND bar_timestamp >= NOW() - INTERVAL '7 days'
+) sub
+GROUP BY trade_date
+ORDER BY trade_date DESC;
+```
+
+If today shows in the list, my SQL has a timezone bug and needs
+investigation. If today is missing, the compute is correct and
+the operator just needs to wait for bars ingestion (or run with
+--date=yesterday).
+
+### What's next
+
+Phase 4A is functionally complete. The natural next step:
+operator runs `compute-market-cap --backfill-from 2025-05-22`
+to populate the 1-year backfill. Should take ~60-90 min (similar
+shape to the other Phase 1-3 refreshes). After that, we have a
+year of daily market cap data per active EQ ticker, ready for
+Phase 4B (index construction).
+
+### Phase 4B entry point
+
+"start Phase 4B with the index construction layer" — covers:
+- Migration for industry_index, industry_index_constituent,
+  industry_index_value tables.
+- Repos for each.
+- select_top_n_constituents(industry, rebalance_date, n=10) —
+  the top-N selection logic with the threshold=10 minimum.
+- compute_index_value(index_id, date) — modified Laspeyres
+  formula with drop-and-renormalize on mid-cycle delisting.
+- CLI: build-industry-indices, compute-index-values.
+- HTTP endpoints.
+- Tests.

@@ -206,6 +206,27 @@ def cmd_fundamentals_status(args, config: Config) -> int:
                     f"{with_rev:>10} {with_ebt:>10}"
                 )
 
+        # Daily market cap coverage section (Phase 4A). Per-date
+        # breakdown of COMPUTED vs YFINANCE_HIST_MCAP rows. We
+        # show only the most recent ~10 dates to keep the output
+        # readable; the operator can query the table directly for
+        # full history.
+        from ..persistence.fundamentals_repo import DailyMarketCapRepository
+        with db_engine.connect() as conn:
+            mc_counts = DailyMarketCapRepository(conn).coverage_counts_by_date()
+        if mc_counts:
+            print()
+            print("Daily market cap coverage (most recent 10 dates):")
+            print(
+                f"  {'DATE':<12} {'TOTAL':>8} "
+                f"{'COMPUTED':>10} {'HIST_MCAP':>10}"
+            )
+            for td, total, computed, hist in mc_counts[:10]:
+                print(
+                    f"  {td!s:<12} {total:>8} "
+                    f"{computed:>10} {hist:>10}"
+                )
+
         # Recent runs section.
         with db_engine.connect() as conn:
             runs = FundamentalsRunRepository(conn).list_recent(
@@ -311,6 +332,74 @@ def cmd_refresh_financials(args, config: Config) -> int:
         if r.status == "PARTIAL":
             return 1
         return 2
+    finally:
+        db_engine.dispose()
+
+
+# ---------- compute-market-cap (Phase 4A) ---------- #
+
+
+def cmd_compute_market_cap(args, config: Config) -> int:
+    """Two modes:
+      - Single-day compute (no --backfill-from): uses local
+        ohlcv_bars × instrument_shares JOIN to compute COMPUTED /
+        APPROX_TODAYS_SHARES rows for one trade_date. Cheap,
+        no yfinance HTTP.
+      - Backfill (--backfill-from given): walks the date range
+        via run_market_cap_backfill, hitting yfinance once per
+        ticker. ~60-90 min for 2300 NSE tickers depending on
+        rate-limit behavior.
+    """
+    from datetime import date as _date
+    from .market_cap_compute import compute_market_cap_for_date
+    from .runners import run_market_cap_backfill
+
+    validate_exchange(args.exchange, config)
+    db_engine = create_engine_from_config(config)
+    try:
+        if args.backfill_from is not None:
+            # Backfill mode.
+            from_date = _date.fromisoformat(args.backfill_from)
+            to_date = _date.fromisoformat(args.backfill_to) if args.backfill_to else _date.today()
+            run_id = run_market_cap_backfill(
+                db_engine, args.exchange,
+                from_date=from_date,
+                to_date=to_date,
+                resume_run_id=args.resume,
+                force=args.force,
+            )
+            with db_engine.connect() as conn:
+                r = FundamentalsRunRepository(conn).get(run_id)
+            if r is None:
+                print(f"run_id={run_id} (no row found?)", file=sys.stderr)
+                return 1
+            print(
+                f"run_id={r.run_id} status={r.status} "
+                f"succeeded={r.succeeded} failed={r.failed}"
+            )
+            if r.status == "SUCCESS":
+                return 0
+            if r.status == "PARTIAL":
+                return 1
+            return 2
+
+        # Single-day mode.
+        trade_date = _date.fromisoformat(args.date) if args.date else _date.today()
+        result = compute_market_cap_for_date(
+            db_engine, args.exchange, trade_date,
+        )
+        print(
+            f"date={result.trade_date} exchange={result.exchange} "
+            f"computed={result.succeeded_computed} "
+            f"approx={result.succeeded_approx} "
+            f"skipped_no_close={result.skipped_no_close} "
+            f"skipped_no_shares={result.skipped_no_shares}"
+        )
+        # Exit code policy: 0 if at least one row was written;
+        # 1 if nothing was written (most likely cause: bars
+        # haven't been ingested for the date yet).
+        total_written = result.succeeded_computed + result.succeeded_approx
+        return 0 if total_written > 0 else 1
     finally:
         db_engine.dispose()
 
@@ -524,6 +613,36 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
         help="Resume a previously-interrupted financials run from its checkpoint",
     )
 
+    cmc = sub.add_parser(
+        "compute-market-cap",
+        help="Compute daily market cap for active EQ tickers. Single-"
+             "day mode joins local ohlcv_bars × instrument_shares. "
+             "Backfill mode (--backfill-from YYYY-MM-DD) walks a date "
+             "range via yfinance historical mcap fetch.",
+    )
+    _add_exchange_arg(cmc)
+    cmc.add_argument(
+        "--date", default=None, metavar="YYYY-MM-DD",
+        help="Single-day mode: trade_date to compute (default: today)",
+    )
+    cmc.add_argument(
+        "--backfill-from", default=None, metavar="YYYY-MM-DD",
+        help="Backfill mode start date. If given, walks dates via "
+             "yfinance instead of single-day local compute",
+    )
+    cmc.add_argument(
+        "--backfill-to", default=None, metavar="YYYY-MM-DD",
+        help="Backfill mode end date. Default: today",
+    )
+    cmc.add_argument(
+        "--force", action="store_true",
+        help="Re-run backfill even if a successful one exists from the last 80 days",
+    )
+    cmc.add_argument(
+        "--resume", type=int, default=None, metavar="RUN_ID",
+        help="Resume an interrupted backfill",
+    )
+
     return {
         "refresh-industry":             cmd_refresh_industry,
         "set-industry-override":        cmd_set_industry_override,
@@ -532,4 +651,5 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
         "backfill-etf-classification":  cmd_backfill_etf_classification,
         "refresh-shares":               cmd_refresh_shares,
         "refresh-financials":           cmd_refresh_financials,
+        "compute-market-cap":           cmd_compute_market_cap,
     }

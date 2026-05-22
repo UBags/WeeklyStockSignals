@@ -648,3 +648,183 @@ class TestRefreshFinancials:
 def test_financials_endpoints_require_auth(real_db_client):
     r = real_db_client.get("/v1/fundamentals/financials?exchange=NSE")
     assert r.status_code == 401
+
+
+# ============================================================
+# Phase 4A — market cap endpoints
+# ============================================================
+
+
+from trip_ema.persistence.fundamentals_repo import DailyMarketCapRepository
+
+
+class TestListMarketCap:
+
+    def test_returns_empty_for_date_with_no_rows(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/market-cap?trade_date=2026-05-22",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["rows"] == []
+
+    def test_returns_sorted_by_mcap_desc(
+        self, real_db_client, db_engine, reliance_ticker,
+    ):
+        td = date(2026, 5, 22)
+        with transaction(db_engine) as conn:
+            DailyMarketCapRepository(conn).upsert_snapshot(
+                reliance_ticker,
+                trade_date=td, close_price=1450.0,
+                shares_used=6_700_000_000,
+                market_cap=9_715_000_000_000.0,
+                source="COMPUTED",
+            )
+        r = real_db_client.get(
+            "/v1/fundamentals/market-cap?trade_date=2026-05-22",
+            headers=AUTH_HEADERS,
+        )
+        body = r.json()
+        assert r.status_code == 200
+        assert len(body["rows"]) == 1
+        row = body["rows"][0]
+        assert row["ticker_id"] == reliance_ticker
+        assert row["close_price"] == 1450.0
+        assert row["market_cap"] == 9_715_000_000_000.0
+        assert row["source"] == "COMPUTED"
+
+    def test_limit_param_truncates_results(
+        self, real_db_client, db_engine, reliance_ticker,
+    ):
+        td = date(2026, 5, 22)
+        with transaction(db_engine) as conn:
+            DailyMarketCapRepository(conn).upsert_snapshot(
+                reliance_ticker,
+                trade_date=td, close_price=1.0, shares_used=1,
+                market_cap=1.0, source="COMPUTED",
+            )
+        r = real_db_client.get(
+            "/v1/fundamentals/market-cap?trade_date=2026-05-22&limit=1",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+
+    def test_exchange_filter(
+        self, real_db_client, db_engine, reliance_ticker,
+    ):
+        td = date(2026, 5, 22)
+        with transaction(db_engine) as conn:
+            DailyMarketCapRepository(conn).upsert_snapshot(
+                reliance_ticker,
+                trade_date=td, close_price=1.0, shares_used=1,
+                market_cap=1.0, source="COMPUTED",
+            )
+        r = real_db_client.get(
+            "/v1/fundamentals/market-cap?trade_date=2026-05-22&exchange=NSE",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["exchange"] == "NSE"
+        assert len(body["rows"]) == 1
+
+    def test_rejects_invalid_exchange(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/market-cap?trade_date=2026-05-22&exchange=BOGUS",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+
+class TestGetMarketCapHistory:
+
+    def test_returns_history_newest_first(
+        self, real_db_client, db_engine, reliance_ticker,
+    ):
+        with transaction(db_engine) as conn:
+            r = DailyMarketCapRepository(conn)
+            for td_iso, mc in [
+                (date(2026, 3, 1),  9_000_000_000_000.0),
+                (date(2026, 4, 1),  9_500_000_000_000.0),
+                (date(2026, 5, 22), 9_715_000_000_000.0),
+            ]:
+                r.upsert_snapshot(
+                    reliance_ticker, trade_date=td_iso,
+                    close_price=1.0, shares_used=1,
+                    market_cap=mc, source="COMPUTED",
+                )
+        r = real_db_client.get(
+            f"/v1/fundamentals/market-cap/{reliance_ticker}/history",
+            headers=AUTH_HEADERS,
+        )
+        body = r.json()
+        assert r.status_code == 200
+        dates_returned = [row["trade_date"] for row in body["rows"]]
+        # Newest first.
+        assert dates_returned == ["2026-05-22", "2026-04-01", "2026-03-01"]
+
+    def test_returns_empty_history_for_unknown(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/market-cap/999999/history",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        assert r.json()["rows"] == []
+
+
+class TestComputeMarketCapEndpoint:
+
+    def test_returns_202_and_kicks_runner(
+        self, real_db_client, db_engine, reliance_ticker, monkeypatch,
+    ):
+        called = []
+        def fake_runner(engine, exchange, *, from_date, to_date,
+                        force=False, **kw):
+            called.append((exchange, from_date, to_date, force))
+            return 0
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_market_cap_backfill",
+            fake_runner,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-market-cap?exchange=NSE"
+            "&backfill_from=2025-05-22&backfill_to=2026-05-22&force=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        body = r.json()
+        assert body["action"] == "compute-market-cap"
+        assert called == [
+            ("NSE", date(2025, 5, 22), date(2026, 5, 22), True),
+        ]
+
+    def test_rejects_inverted_date_range(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-market-cap?exchange=NSE"
+            "&backfill_from=2026-05-22&backfill_to=2025-05-22",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+    def test_rejects_missing_backfill_from(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-market-cap?exchange=NSE",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+    def test_rejects_invalid_exchange(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-market-cap?exchange=BOGUS"
+            "&backfill_from=2025-05-22",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+
+def test_market_cap_endpoints_require_auth(real_db_client):
+    r = real_db_client.get(
+        "/v1/fundamentals/market-cap?trade_date=2026-05-22"
+    )
+    assert r.status_code == 401

@@ -632,3 +632,166 @@ def refresh_financials(
             f"check /v1/fundamentals/runs for progress."
         ),
     )
+
+
+# ============================================================
+# Phase 4A — daily market cap endpoints
+# ============================================================
+
+
+from ....persistence.fundamentals_repo import DailyMarketCapRepository
+
+
+class MarketCapRowPayload(BaseModel):
+    ticker_id: int
+    trade_date: date
+    close_price: float
+    shares_used: Optional[int] = None
+    market_cap: float
+    source: str
+    computed_at: datetime
+
+
+class MarketCapListPayload(BaseModel):
+    trade_date: date
+    exchange: Optional[str] = None
+    rows: list[MarketCapRowPayload]
+
+
+class MarketCapHistoryPayload(BaseModel):
+    ticker_id: int
+    rows: list[MarketCapRowPayload]
+
+
+def _mcap_row_payload(r) -> MarketCapRowPayload:
+    return MarketCapRowPayload(
+        ticker_id=r.ticker_id,
+        trade_date=r.trade_date,
+        close_price=r.close_price,
+        shares_used=r.shares_used,
+        market_cap=r.market_cap,
+        source=r.source,
+        computed_at=r.computed_at,
+    )
+
+
+def _run_mcap_backfill_safe(
+    db_engine: Engine, config: Config, exchange: str,
+    from_date: date, to_date: date, force: bool,
+) -> None:
+    """Executor wrapper — catches exceptions so the executor thread
+    doesn't die silently."""
+    from ....fundamentals.runners import run_market_cap_backfill
+    try:
+        run_market_cap_backfill(
+            db_engine, exchange,
+            from_date=from_date, to_date=to_date, force=force,
+        )
+    except Exception:
+        logger.exception(
+            "Market cap backfill failed for exchange=%s", exchange,
+        )
+
+
+@router.get("/market-cap", response_model=MarketCapListPayload)
+def list_market_cap(
+    trade_date: date = Query(...),
+    exchange: Optional[str] = Query(None, min_length=2, max_length=10),
+    limit: int = Query(100, ge=1, le=5000),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+) -> MarketCapListPayload:
+    """All market cap rows for `trade_date`, sorted by market_cap DESC.
+    Optionally scoped to one exchange. Returns up to `limit` rows.
+
+    This is the read endpoint Phase 4B uses for "top-N tickers by
+    market cap on rebalance date X".
+    """
+    if exchange is not None:
+        _validate_exchange_or_400(exchange, config)
+    with db_engine.connect() as conn:
+        rows = DailyMarketCapRepository(conn).list_for_date(
+            trade_date, exchange=exchange, limit=limit,
+        )
+    return MarketCapListPayload(
+        trade_date=trade_date,
+        exchange=exchange,
+        rows=[_mcap_row_payload(r) for r in rows],
+    )
+
+
+@router.get("/market-cap/{ticker_id}/history",
+            response_model=MarketCapHistoryPayload)
+def get_market_cap_history(
+    ticker_id: int,
+    limit: int = Query(365, ge=1, le=3650),
+    db_engine: Engine = Depends(get_db_engine),
+) -> MarketCapHistoryPayload:
+    """Daily market cap history for one ticker, newest first."""
+    with db_engine.connect() as conn:
+        history = DailyMarketCapRepository(conn).list_history(
+            ticker_id, limit=limit,
+        )
+    return MarketCapHistoryPayload(
+        ticker_id=ticker_id,
+        rows=[_mcap_row_payload(r) for r in history],
+    )
+
+
+@router.post("/compute-market-cap",
+             response_model=RefreshAcceptedPayload, status_code=202)
+def compute_market_cap_endpoint(
+    exchange: str = Query(..., min_length=2, max_length=10),
+    backfill_from: Optional[date] = Query(None),
+    backfill_to: Optional[date] = Query(None),
+    force: bool = Query(False),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+    executor = Depends(get_etl_executor),
+) -> RefreshAcceptedPayload:
+    """Fire-and-forget market cap backfill. Requires backfill_from
+    (and optionally backfill_to, defaulting to today). Returns 202
+    immediately; poll /runs for the result.
+
+    Single-day compute via this endpoint is not supported — for
+    that, use the CLI's `compute-market-cap --date YYYY-MM-DD`
+    locally. The HTTP path is for the heavy backfill that benefits
+    from the executor.
+    """
+    from datetime import date as _date
+    _require_executor(executor)
+    _validate_exchange_or_400(exchange, config)
+    if backfill_from is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="backfill_from is required",
+        )
+    if backfill_to is None:
+        backfill_to = _date.today()
+    if backfill_from > backfill_to:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"backfill_from {backfill_from} must be <= "
+                   f"backfill_to {backfill_to}",
+        )
+    logger.info(
+        "Admin: compute-market-cap requested",
+        extra={"exchange": exchange,
+               "backfill_from": str(backfill_from),
+               "backfill_to": str(backfill_to),
+               "force": force},
+    )
+    executor.submit(
+        _run_mcap_backfill_safe, db_engine, config, exchange,
+        backfill_from, backfill_to, force,
+    )
+    return RefreshAcceptedPayload(
+        action="compute-market-cap",
+        run_id=None,
+        accepted_at=datetime.now(timezone.utc),
+        notes=(
+            f"Market cap backfill ({exchange}, {backfill_from}→"
+            f"{backfill_to}, force={force}) submitted; check "
+            f"/v1/fundamentals/runs for progress."
+        ),
+    )

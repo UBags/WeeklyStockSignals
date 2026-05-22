@@ -703,3 +703,150 @@ class TestCmdFundamentalsStatusShowsFinancials:
         out = capsys.readouterr().out
         assert rc == 0
         assert "Quarterly financials coverage" not in out
+
+
+# ---------- cmd_compute_market_cap ---------- #
+
+
+class TestCmdComputeMarketCap:
+
+    def test_single_day_mode_writes_rows_and_returns_0(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, monkeypatch, capsys,
+    ):
+        """The single-day mode calls compute_market_cap_for_date and
+        returns 0 if any rows were written."""
+        from trip_ema.fundamentals.cli import cmd_compute_market_cap
+        from trip_ema.fundamentals.market_cap_compute import ComputeResult
+
+        def stub_compute(engine, exchange, trade_date,
+                         allow_approx_fallback=True):
+            return ComputeResult(
+                trade_date=trade_date, exchange=exchange,
+                succeeded_computed=1, succeeded_approx=0,
+                skipped_no_close=0, skipped_no_shares=0,
+            )
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.market_cap_compute.compute_market_cap_for_date",
+            stub_compute,
+        )
+
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.date = "2026-05-22"
+        args.backfill_from = None
+        args.backfill_to = None
+        args.force = False
+        args.resume = None
+        rc = cmd_compute_market_cap(args, fake_config)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "computed=1" in out
+
+    def test_single_day_mode_returns_1_when_nothing_written(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, monkeypatch, capsys,
+    ):
+        """If no rows were written (e.g. no bars for the date),
+        rc=1 — operator action needed."""
+        from trip_ema.fundamentals.cli import cmd_compute_market_cap
+        from trip_ema.fundamentals.market_cap_compute import ComputeResult
+
+        def stub_compute(engine, exchange, trade_date,
+                         allow_approx_fallback=True):
+            return ComputeResult(
+                trade_date=trade_date, exchange=exchange,
+                succeeded_computed=0, succeeded_approx=0,
+                skipped_no_close=10, skipped_no_shares=0,
+            )
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.market_cap_compute.compute_market_cap_for_date",
+            stub_compute,
+        )
+
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.date = "2026-05-22"
+        args.backfill_from = None
+        args.backfill_to = None
+        args.force = False
+        args.resume = None
+        rc = cmd_compute_market_cap(args, fake_config)
+        assert rc == 1
+
+    def test_backfill_mode_routes_to_runner(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, monkeypatch, capsys,
+    ):
+        """When --backfill-from is given, the CLI calls the runner
+        instead of the single-day compute."""
+        from trip_ema.fundamentals.cli import cmd_compute_market_cap
+        with transaction(db_engine) as conn:
+            rid = FundamentalsRunRepository(conn).open(
+                phase="market_cap", exchange="NSE",
+            )
+            FundamentalsRunRepository(conn).close(
+                rid, status="SUCCESS",
+                succeeded=1, failed=0, skipped=0,
+            )
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_market_cap_backfill",
+            lambda *a, **kw: rid,
+        )
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.date = None
+        args.backfill_from = "2025-05-01"
+        args.backfill_to = "2026-05-01"
+        args.force = False
+        args.resume = None
+        rc = cmd_compute_market_cap(args, fake_config)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "status=SUCCESS" in out
+
+
+class TestCmdFundamentalsStatusShowsMarketCap:
+
+    def test_shows_mcap_section_when_present(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, capsys,
+    ):
+        from trip_ema.persistence.fundamentals_repo import (
+            DailyMarketCapRepository,
+        )
+        with transaction(db_engine) as conn:
+            DailyMarketCapRepository(conn).upsert_snapshot(
+                reliance_ticker,
+                trade_date=date(2026, 5, 22),
+                close_price=1450.0,
+                shares_used=6_700_000_000,
+                market_cap=9_715_000_000_000.0,
+                source="COMPUTED",
+            )
+        args = type("A", (), {})()
+        args.exchange = None
+        args.phase = None
+        args.limit = 10
+        rc = cmd_fundamentals_status(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Daily market cap coverage" in out
+        assert "COMPUTED" in out
+
+    def test_omits_mcap_section_when_no_data(
+        self, db_engine, fake_config, patched_engine_factory,
+        reliance_ticker, capsys,
+    ):
+        with transaction(db_engine) as conn:
+            InstrumentIndustryRepository(conn).upsert(
+                reliance_ticker, sector="Energy", industry="Oil",
+            )
+        args = type("A", (), {})()
+        args.exchange = None
+        args.phase = None
+        args.limit = 10
+        rc = cmd_fundamentals_status(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Daily market cap coverage" not in out

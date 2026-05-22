@@ -930,3 +930,262 @@ def run_financials_refresh(
         run_id, exchange, status, succeeded, failed,
     )
     return run_id
+
+
+# ============================================================
+# Phase 4A — market cap backfill
+# ============================================================
+#
+# Walks the date range and writes daily_market_cap rows. Two
+# distinct paths:
+#
+#   - For trade_dates within our local data window (i.e. where
+#     ohlcv_bars × instrument_shares both have data), uses the
+#     market_cap_compute module's compute_market_cap_for_date.
+#     No yfinance HTTP needed for these.
+#
+#   - For trade_dates older than our local data, uses the
+#     market_cap_fetch module's fetch_historical_mcap_for_ticker
+#     to pull from yfinance. One HTTP per ticker covers the entire
+#     historical window for that ticker, so we iterate tickers
+#     not dates — much cheaper than per-date yfinance calls.
+#
+# Per-ticker outer loop on the historical path also means a
+# resumed run picks up at "RELIANCE done, TCS half-done" rather
+# than mid-date, which matches the resume semantics of the other
+# fundamentals runners.
+
+
+def run_market_cap_backfill(
+    db_engine: Engine,
+    exchange: str,
+    *,
+    from_date: "date",
+    to_date: "date",
+    resume_run_id: Optional[int] = None,
+    force: bool = False,
+    request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
+    hist_fetch_fn=None,
+) -> int:
+    """Backfill daily_market_cap for [from_date, to_date] on `exchange`.
+
+    Strategy:
+      1. Iterate active EQ tickers on `exchange`.
+      2. For each ticker, one yfinance HTTP returns all historical
+         (close, shares) points in range. Write them to
+         daily_market_cap with source=COMPUTED.
+      3. The resume cursor advances per-ticker.
+
+    The "local data" path (compute_market_cap_for_date) is NOT
+    used here — the backfill path always hits yfinance because
+    yfinance has historical shares anyway and the unified path is
+    simpler. The local path is reserved for the forward-only
+    daily compute (next-session work).
+
+    Returns run_id.
+    """
+    from .market_cap_fetch import (
+        HistoricalMcapFetchPermanent,
+        HistoricalMcapFetchRateLimited,
+        HistoricalMcapFetchTransient,
+        fetch_historical_mcap_for_ticker,
+    )
+    from ..persistence.fundamentals_repo import DailyMarketCapRepository
+
+    if hist_fetch_fn is None:
+        hist_fetch_fn = fetch_historical_mcap_for_ticker
+
+    if from_date > to_date:
+        raise ValueError(
+            f"from_date {from_date} must be <= to_date {to_date}"
+        )
+
+    # ----- 0. Skip-if-recent guard ----- #
+    if not force and resume_run_id is None:
+        with db_engine.connect() as conn:
+            last = FundamentalsRunRepository(conn).last_success(
+                phase="market_cap", exchange=exchange,
+            )
+        if last is not None and last.completed_at is not None:
+            age = (datetime.now(timezone.utc) - last.completed_at).days
+            if age < 80:
+                logger.info(
+                    "Skipping market cap backfill for %s: last SUCCESS "
+                    "run %d completed %d days ago (use force=True to override)",
+                    exchange, last.run_id, age,
+                )
+                return last.run_id
+
+    # ----- 1. Determine ticker list ----- #
+    if resume_run_id is not None:
+        run_id, ticker_list, cursor_index = _resume_from_checkpoint(
+            db_engine, resume_run_id, expected_phase="market_cap",
+        )
+        # Pull the persisted date range from progress_json so a
+        # resumed run uses the same range as the original.
+        with db_engine.connect() as conn:
+            run = FundamentalsRunRepository(conn).get(run_id)
+        if run.progress_json and "from_date" in run.progress_json:
+            from_date = _parse_iso_date(run.progress_json["from_date"])
+            to_date = _parse_iso_date(run.progress_json["to_date"])
+        logger.info(
+            "Resuming market cap backfill run %d at ticker index %d/%d "
+            "(range %s → %s)",
+            run_id, cursor_index, len(ticker_list), from_date, to_date,
+        )
+    else:
+        ticker_list = _load_active_tickers_for_exchange(db_engine, exchange)
+        # Filter to EQ only — ETFs excluded from market cap layer.
+        ticker_list = [
+            t for t in ticker_list
+            if t.get("instrument_type", "EQ") == "EQ"
+        ]
+        if not ticker_list:
+            logger.warning(
+                "No active EQ tickers for exchange %s — skipping market "
+                "cap backfill", exchange,
+            )
+            with transaction(db_engine) as conn:
+                run_id = FundamentalsRunRepository(conn).open(
+                    phase="market_cap", exchange=exchange,
+                    notes="No active EQ tickers",
+                )
+                FundamentalsRunRepository(conn).close(
+                    run_id, status="SUCCESS",
+                    succeeded=0, failed=0, skipped=0,
+                )
+            return run_id
+        with transaction(db_engine) as conn:
+            run_id = FundamentalsRunRepository(conn).open(
+                phase="market_cap", exchange=exchange,
+                notes=(
+                    f"Market cap backfill {from_date}→{to_date} "
+                    f"of {len(ticker_list)} active EQ tickers"
+                ),
+            )
+            FundamentalsRunRepository(conn).update_progress(
+                run_id,
+                progress_json={
+                    "ticker_list": [
+                        {"id": t["id"], "symbol": t["symbol"],
+                         "instrument_type": t.get("instrument_type", "EQ")}
+                        for t in ticker_list
+                    ],
+                    "cursor_index": 0,
+                    "from_date": from_date.isoformat(),
+                    "to_date": to_date.isoformat(),
+                },
+            )
+        cursor_index = 0
+
+    # ----- 2. Main per-ticker loop ----- #
+    succeeded = 0   # tickers where at least one point was written
+    failed = 0      # tickers where the fetch failed
+    skipped = 0     # always 0 for this phase
+
+    try:
+        for idx in range(cursor_index, len(ticker_list)):
+            t = ticker_list[idx]
+            tid, symbol = t["id"], t["symbol"]
+
+            try:
+                points = hist_fetch_fn(symbol, exchange, from_date, to_date)
+                if not points:
+                    # Treat empty as failed — the fetcher should have
+                    # raised Permanent in that case, but defensive.
+                    failed += 1
+                else:
+                    with transaction(db_engine) as conn:
+                        mcap_repo = DailyMarketCapRepository(conn)
+                        for p in points:
+                            mcap_repo.upsert_snapshot(
+                                tid,
+                                trade_date=p.trade_date,
+                                close_price=p.close_price,
+                                shares_used=p.shares_outstanding,
+                                market_cap=p.close_price * p.shares_outstanding,
+                                source="COMPUTED",
+                            )
+                    succeeded += 1
+            except HistoricalMcapFetchRateLimited as e:
+                logger.warning(
+                    "Rate limited on %s (%s): sleeping %.1fs",
+                    symbol, e, RATE_LIMIT_COOLOFF_S,
+                )
+                _checkpoint(db_engine, run_id, ticker_list, idx,
+                            succeeded, failed, skipped)
+                time.sleep(RATE_LIMIT_COOLOFF_S)
+                try:
+                    points = hist_fetch_fn(symbol, exchange, from_date, to_date)
+                    with transaction(db_engine) as conn:
+                        mcap_repo = DailyMarketCapRepository(conn)
+                        for p in points:
+                            mcap_repo.upsert_snapshot(
+                                tid,
+                                trade_date=p.trade_date,
+                                close_price=p.close_price,
+                                shares_used=p.shares_outstanding,
+                                market_cap=p.close_price * p.shares_outstanding,
+                                source="COMPUTED",
+                            )
+                    succeeded += 1
+                except Exception as e2:
+                    logger.error(
+                        "Retry-after-cool-off failed for %s: %s", symbol, e2,
+                    )
+                    failed += 1
+            except (HistoricalMcapFetchTransient,
+                    HistoricalMcapFetchPermanent) as e:
+                logger.warning("Failed to fetch hist mcap for %s: %s", symbol, e)
+                failed += 1
+            except Exception as e:
+                logger.exception(
+                    "Unexpected error fetching hist mcap for %s: %s",
+                    symbol, e,
+                )
+                failed += 1
+
+            if (idx + 1) % CHECKPOINT_EVERY == 0:
+                _checkpoint(db_engine, run_id, ticker_list, idx + 1,
+                            succeeded, failed, skipped)
+                logger.info(
+                    "Checkpoint: %d/%d tickers processed (s=%d f=%d) on %s",
+                    idx + 1, len(ticker_list),
+                    succeeded, failed, exchange,
+                )
+
+            if request_delay_s > 0:
+                time.sleep(request_delay_s)
+
+    except KeyboardInterrupt:
+        logger.warning(
+            "KeyboardInterrupt — closing market cap run %d as PARTIAL",
+            run_id,
+        )
+        with transaction(db_engine) as conn:
+            FundamentalsRunRepository(conn).close(
+                run_id, status="PARTIAL",
+                succeeded=succeeded, failed=failed, skipped=skipped,
+                notes="Interrupted by KeyboardInterrupt",
+            )
+        raise
+
+    # ----- 3. Close out ----- #
+    status = _terminal_status(succeeded, failed)
+    with transaction(db_engine) as conn:
+        FundamentalsRunRepository(conn).close(
+            run_id, status=status,
+            succeeded=succeeded, failed=failed, skipped=skipped,
+        )
+    logger.info(
+        "Market cap backfill run %d (%s, %s→%s) finished: status=%s s=%d f=%d",
+        run_id, exchange, from_date, to_date, status, succeeded, failed,
+    )
+    return run_id
+
+
+def _parse_iso_date(s: str) -> "date":
+    """Parse a 'YYYY-MM-DD' string to date. Used to restore from
+    progress_json on resume."""
+    from datetime import date as _date
+    return _date.fromisoformat(s)
