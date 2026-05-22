@@ -948,3 +948,115 @@ For the IT industry on a recent date, you should see something like:
 
 `fundamentals-status` now includes an "Indicator state coverage" section
 after the "Industry indices" section, showing per-industry row counts.
+
+### 12.8 Signal events (Phase 6-1)
+
+After indicator state is computed, you can derive signal events:
+four sparse event kinds keyed off `display_regime` transitions.
+
+| Event kind | When it fires |
+|---|---|
+| `BUY` | `display_regime` transitions from non-+1 to +1 |
+| `SELL` | `display_regime` transitions from non--1 to -1 |
+| `EXIT_BUY` | `display_regime` transitions from +1 to non-+1 |
+| `EXIT_SELL` | `display_regime` transitions from -1 to non--1 |
+
+These map 1:1 to your Pine Script's `longCondition`,
+`exitLongCondition`, `shortCondition`, `exitShortCondition`. Whether
+to act on shorts is a downstream concern; this layer records all
+four kinds unconditionally.
+
+```bash
+# After compute-indicator-state has populated indicator_state:
+trip-ema-etl --config config.yaml compute-signals --all-industries
+
+# Single industry
+trip-ema-etl --config config.yaml compute-signals --industry "Information Technology Services"
+
+# Force re-compute (bypass skip-if-recent 80-day guard)
+trip-ema-etl --config config.yaml compute-signals --all-industries --force
+```
+
+Behavior:
+  - Signals are derived purely from `indicator_state`; no network,
+    no yfinance, very fast (~5 seconds for all industries).
+  - **Delete-then-insert per industry**: when re-computing, all
+    prior `signal_event` rows for the industry are deleted before
+    the new ones are written. This guarantees the table reflects
+    the current compute exactly — no lingering stale rows from
+    an older `indicator_state`.
+
+Via HTTP:
+
+```bash
+TOKEN="$TRIP_EMA_ADMIN_TOKEN"
+
+# All BUY signals for IT in the last 90 days
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/signal-events/industries/Information%20Technology%20Services?kind=BUY&from_date=2026-02-22" | jq
+
+# Cross-industry scanner: all BUY signals in the last 7 days
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/signal-events/recent?kind=BUY&days=7" | jq
+
+# Trigger compute
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/compute-signals?all_industries=true"
+```
+
+SQL inspection:
+
+```bash
+# Latest signal per industry
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT industry_name, trade_date, event_kind,
+       regime_before, regime_after,
+       round(close_at_event::numeric, 2) AS close_at_event
+FROM signal_event s1
+WHERE industry_name IS NOT NULL
+  AND trade_date = (
+      SELECT MAX(trade_date) FROM signal_event
+      WHERE industry_name = s1.industry_name
+  )
+ORDER BY trade_date DESC, industry_name;
+"
+
+# All BUY signals in the last 30 days, with the industry value at that bar
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT industry_name, trade_date,
+       round(close_at_event::numeric, 2) AS close
+FROM signal_event
+WHERE event_kind = 'BUY'
+  AND industry_name IS NOT NULL
+  AND trade_date >= CURRENT_DATE - INTERVAL '30 days'
+ORDER BY trade_date DESC, industry_name;
+"
+
+# Per-kind counts per industry
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT industry_name, event_kind, COUNT(*) AS n
+FROM signal_event
+WHERE industry_name IS NOT NULL
+GROUP BY industry_name, event_kind
+ORDER BY industry_name, event_kind;
+"
+```
+
+`fundamentals-status` now includes a "Signal events coverage"
+section showing per-industry event count and latest event date.
+
+Pipeline recap:
+
+```
+1. trip-ema-etl refresh-industry --exchange NSE        # Phase 1
+2. trip-ema-etl refresh-shares --exchange NSE          # Phase 2
+3. trip-ema-etl refresh-financials --exchange NSE      # Phase 3
+4. trip-ema-etl compute-market-cap                     # Phase 4A
+5. trip-ema-etl build-industry-indices                 # Phase 4B
+6. trip-ema-etl compute-index-values --all-active      # Phase 4B
+7. trip-ema-etl compute-indicator-state --all-industries  # Phase 5
+8. trip-ema-etl compute-signals --all-industries       # Phase 6-1  ← new
+```
+
+Each step's output is the next step's input. A full EoD refresh
+re-runs all 8 in order.

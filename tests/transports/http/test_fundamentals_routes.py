@@ -1417,3 +1417,235 @@ class TestComputeIndicatorStateEndpoint:
             "/v1/fundamentals/compute-indicator-state?all_industries=true"
         )
         assert r.status_code == 401
+
+
+# ============================================================
+# Phase 6-1 — signal event endpoints
+# ============================================================
+
+
+from trip_ema.fundamentals import SignalEvent
+from trip_ema.persistence.fundamentals_repo import SignalEventRepository
+
+
+def _make_signal_row(
+    industry: str, td: date, kind: str = "BUY",
+    *, regime_before: int = 0, regime_after: int = 1,
+    close: float = 100.0,
+):
+    return SignalEvent(
+        ticker_id=None, timeframe=None, industry_name=industry,
+        trade_date=td, event_kind=kind,
+        regime_before=regime_before, regime_after=regime_after,
+        close_at_event=close,
+        computed_at=datetime.now(timezone.utc),
+    )
+
+
+# ---------- GET /signal-events/industries/{name} ---------- #
+
+
+class TestGetIndustrySignalEvents:
+
+    def _setup(self, db_engine):
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                "IT - Services", sector_name="Technology",
+                base_date=date(2025, 10, 1),
+            )
+            repo = SignalEventRepository(conn)
+            repo.upsert(_make_signal_row(
+                "IT - Services", date(2026, 1, 8), "BUY",
+            ))
+            repo.upsert(_make_signal_row(
+                "IT - Services", date(2026, 1, 22), "EXIT_BUY",
+                regime_before=1, regime_after=0,
+            ))
+            repo.upsert(_make_signal_row(
+                "IT - Services", date(2026, 2, 5), "SELL",
+                regime_before=0, regime_after=-1,
+            ))
+
+    def test_returns_all_events_newest_first(self, real_db_client, db_engine):
+        self._setup(db_engine)
+        r = real_db_client.get(
+            "/v1/fundamentals/signal-events/industries/IT - Services",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        rows = r.json()["rows"]
+        assert len(rows) == 3
+        dates = [r["trade_date"] for r in rows]
+        assert dates == ["2026-02-05", "2026-01-22", "2026-01-08"]
+
+    def test_kind_filter(self, real_db_client, db_engine):
+        self._setup(db_engine)
+        r = real_db_client.get(
+            "/v1/fundamentals/signal-events/industries/IT - Services?kind=BUY",
+            headers=AUTH_HEADERS,
+        )
+        rows = r.json()["rows"]
+        assert len(rows) == 1
+        assert rows[0]["event_kind"] == "BUY"
+
+    def test_date_range_filter(self, real_db_client, db_engine):
+        self._setup(db_engine)
+        r = real_db_client.get(
+            "/v1/fundamentals/signal-events/industries/IT - Services"
+            "?from_date=2026-01-01&to_date=2026-01-31",
+            headers=AUTH_HEADERS,
+        )
+        rows = r.json()["rows"]
+        # Two events in January.
+        assert len(rows) == 2
+
+    def test_invalid_kind_returns_400(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/signal-events/industries/IT - Services"
+            "?kind=INVALID",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+    def test_payload_includes_all_fields(self, real_db_client, db_engine):
+        self._setup(db_engine)
+        r = real_db_client.get(
+            "/v1/fundamentals/signal-events/industries/IT - Services?limit=1",
+            headers=AUTH_HEADERS,
+        )
+        row = r.json()["rows"][0]
+        for k in ["industry_name", "trade_date", "event_kind",
+                  "regime_before", "regime_after", "close_at_event",
+                  "computed_at"]:
+            assert k in row
+
+    def test_requires_auth(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/signal-events/industries/IT - Services"
+        )
+        assert r.status_code == 401
+
+
+# ---------- GET /signal-events/recent ---------- #
+
+
+class TestGetRecentSignalEvents:
+
+    def test_returns_recent_events(self, real_db_client, db_engine):
+        # An event today is "recent"; an old one isn't.
+        from datetime import timedelta
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                "IT - Services", sector_name="Technology",
+                base_date=date(2025, 10, 1),
+            )
+            repo = SignalEventRepository(conn)
+            repo.upsert(_make_signal_row(
+                "IT - Services", date.today(), "BUY",
+            ))
+            repo.upsert(_make_signal_row(
+                "IT - Services", date.today() - timedelta(days=100),
+                "EXIT_BUY", regime_before=1, regime_after=0,
+            ))
+        r = real_db_client.get(
+            "/v1/fundamentals/signal-events/recent?days=7",
+            headers=AUTH_HEADERS,
+        )
+        rows = r.json()["rows"]
+        # Only today's BUY is within 7 days.
+        assert len(rows) == 1
+        assert rows[0]["event_kind"] == "BUY"
+
+    def test_kind_filter_on_recent(self, real_db_client, db_engine):
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                "IT - Services", sector_name="Technology",
+                base_date=date(2025, 10, 1),
+            )
+            repo = SignalEventRepository(conn)
+            repo.upsert(_make_signal_row(
+                "IT - Services", date.today(), "BUY",
+            ))
+            repo.upsert(_make_signal_row(
+                "IT - Services", date.today(), "SELL",
+                regime_before=0, regime_after=-1,
+            ))
+        r = real_db_client.get(
+            "/v1/fundamentals/signal-events/recent?kind=BUY&days=7",
+            headers=AUTH_HEADERS,
+        )
+        rows = r.json()["rows"]
+        assert len(rows) == 1
+        assert rows[0]["event_kind"] == "BUY"
+
+    def test_invalid_kind_returns_400(self, real_db_client):
+        r = real_db_client.get(
+            "/v1/fundamentals/signal-events/recent?kind=INVALID",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+
+# ---------- POST /compute-signals ---------- #
+
+
+class TestComputeSignalsEndpoint:
+
+    def test_rejects_no_industry_and_no_all_industries(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-signals",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+        assert "industry" in r.json()["detail"]
+
+    def test_rejects_both(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-signals"
+            "?industry=IT - Services&all_industries=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+    def test_returns_202_for_industry(
+        self, real_db_client, db_engine, monkeypatch,
+    ):
+        called = []
+        def fake_runner(engine, name, *, force=False):
+            called.append((name, force))
+            return 1
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_signal_events_for_industry",
+            fake_runner,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-signals"
+            "?industry=IT - Services&force=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        assert called == [("IT - Services", True)]
+
+    def test_returns_202_for_all_industries(
+        self, real_db_client, db_engine, monkeypatch,
+    ):
+        called = []
+        def fake_runner(engine, *, force=False):
+            called.append(force)
+            return {"succeeded": [], "skipped": [], "failed": []}
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_signal_events_for_all_industries",
+            fake_runner,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-signals?all_industries=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        assert called == [False]
+
+    def test_requires_auth(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-signals?all_industries=true"
+        )
+        assert r.status_code == 401

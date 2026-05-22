@@ -1391,3 +1391,191 @@ def compute_indicator_state_endpoint(
             f"all_industries={all_industries}) submitted."
         ),
     )
+
+
+# ============================================================
+# Phase 6-1 — signal event endpoints
+# ============================================================
+
+
+from ....persistence.fundamentals_repo import SignalEventRepository
+
+
+# ---------- payload models ---------- #
+
+
+class SignalEventPayload(BaseModel):
+    """One signal_event row."""
+    ticker_id: Optional[int] = None
+    timeframe: Optional[str] = None
+    industry_name: Optional[str] = None
+    trade_date: date
+    event_kind: str
+    regime_before: int
+    regime_after: int
+    close_at_event: float
+    computed_at: datetime
+
+
+class SignalEventListPayload(BaseModel):
+    industry_name: Optional[str] = None
+    ticker_id: Optional[int] = None
+    from_date: Optional[date] = None
+    to_date: Optional[date] = None
+    kind: Optional[str] = None
+    rows: list[SignalEventPayload]
+
+
+def _signal_event_payload(e) -> SignalEventPayload:
+    return SignalEventPayload(
+        ticker_id=e.ticker_id,
+        timeframe=e.timeframe,
+        industry_name=e.industry_name,
+        trade_date=e.trade_date,
+        event_kind=e.event_kind,
+        regime_before=e.regime_before,
+        regime_after=e.regime_after,
+        close_at_event=e.close_at_event,
+        computed_at=e.computed_at,
+    )
+
+
+# ---------- executor wrapper ---------- #
+
+
+def _run_signals_safe(
+    db_engine: Engine, industry_name: Optional[str],
+    force: bool, all_industries: bool,
+) -> None:
+    from ....fundamentals.runners import (
+        run_signal_events_for_all_industries,
+        run_signal_events_for_industry,
+    )
+    try:
+        if all_industries:
+            run_signal_events_for_all_industries(db_engine, force=force)
+        else:
+            run_signal_events_for_industry(
+                db_engine, industry_name, force=force,
+            )
+    except Exception:
+        logger.exception(
+            "Signal events compute failed for industry=%s "
+            "all_industries=%s", industry_name, all_industries,
+        )
+
+
+# ---------- GET endpoints ---------- #
+
+
+@router.get("/signal-events/industries/{industry_name:path}",
+            response_model=SignalEventListPayload)
+def get_industry_signal_events(
+    industry_name: str,
+    kind: Optional[str] = Query(None),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    limit: Optional[int] = Query(None, ge=1, le=5000),
+    db_engine: Engine = Depends(get_db_engine),
+) -> SignalEventListPayload:
+    """Get signal events for one industry, newest-first.
+
+    Pass kind=BUY|SELL|EXIT_BUY|EXIT_SELL to filter by event kind.
+    Pass from_date/to_date to restrict the date range, and limit to
+    cap the row count.
+    """
+    from ....fundamentals import SIGNAL_EVENT_KINDS
+    if kind is not None and kind not in SIGNAL_EVENT_KINDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"kind must be one of {SIGNAL_EVENT_KINDS}, "
+                   f"got {kind!r}",
+        )
+    with db_engine.connect() as conn:
+        rows = SignalEventRepository(conn).get_for_industry(
+            industry_name,
+            kinds=[kind] if kind else None,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+        )
+    return SignalEventListPayload(
+        industry_name=industry_name,
+        from_date=from_date,
+        to_date=to_date,
+        kind=kind,
+        rows=[_signal_event_payload(e) for e in rows],
+    )
+
+
+@router.get("/signal-events/recent",
+            response_model=SignalEventListPayload)
+def list_recent_signal_events(
+    kind: Optional[str] = Query(None),
+    days: int = Query(7, ge=1, le=365),
+    limit: int = Query(100, ge=1, le=5000),
+    db_engine: Engine = Depends(get_db_engine),
+) -> SignalEventListPayload:
+    """Cross-industry scanner: events in the last N days, optionally
+    filtered by kind. Newest-first."""
+    from ....fundamentals import SIGNAL_EVENT_KINDS
+    if kind is not None and kind not in SIGNAL_EVENT_KINDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"kind must be one of {SIGNAL_EVENT_KINDS}, "
+                   f"got {kind!r}",
+        )
+    with db_engine.connect() as conn:
+        rows = SignalEventRepository(conn).list_recent(
+            kind=kind, days=days, limit=limit,
+        )
+    return SignalEventListPayload(
+        kind=kind,
+        rows=[_signal_event_payload(e) for e in rows],
+    )
+
+
+# ---------- POST (fire-and-forget) endpoint ---------- #
+
+
+@router.post("/compute-signals",
+             response_model=RefreshAcceptedPayload, status_code=202)
+def compute_signals_endpoint(
+    industry: Optional[str] = Query(None),
+    all_industries: bool = Query(False),
+    force: bool = Query(False),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+    executor = Depends(get_etl_executor),
+) -> RefreshAcceptedPayload:
+    """Fire-and-forget signal events compute. Pass either
+    industry=NAME or all_industries=true."""
+    _require_executor(executor)
+    if industry is None and not all_industries:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Must provide either industry=NAME or all_industries=true",
+        )
+    if industry is not None and all_industries:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="industry and all_industries are mutually exclusive",
+        )
+    logger.info(
+        "Admin: compute-signals requested",
+        extra={"industry": industry, "all_industries": all_industries,
+               "force": force},
+    )
+    executor.submit(
+        _run_signals_safe, db_engine,
+        industry, force, all_industries,
+    )
+    return RefreshAcceptedPayload(
+        action="compute-signals",
+        run_id=None,
+        accepted_at=datetime.now(timezone.utc),
+        notes=(
+            f"Signal events compute (industry={industry!r}, "
+            f"all_industries={all_industries}) submitted."
+        ),
+    )

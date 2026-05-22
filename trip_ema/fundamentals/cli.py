@@ -234,11 +234,15 @@ def cmd_fundamentals_status(args, config: Config) -> int:
             IndicatorStateRepository,
             IndustryIndexRepository,
             IndustryIndexValueRepository,
+            SignalEventRepository,
         )
         with db_engine.connect() as conn:
             indices = IndustryIndexRepository(conn).list_all()
             value_summary = IndustryIndexValueRepository(conn).coverage_summary()
             indicator_summary = IndicatorStateRepository(
+                conn,
+            ).coverage_summary_for_industries()
+            signal_summary = SignalEventRepository(
                 conn,
             ).coverage_summary_for_industries()
         if indices:
@@ -284,6 +288,28 @@ def cmd_fundamentals_status(args, config: Config) -> int:
                 latest_s = str(latest) if latest else "(none)"
                 print(
                     f"  {name[:48]:<48} {latest_s:<12} {rows:>5}"
+                )
+
+        # Signal events section (Phase 6-1). Per-industry event
+        # count and latest event date.
+        if signal_summary:
+            sig_by_name = {
+                name: (rows, earliest, latest)
+                for name, rows, earliest, latest in signal_summary
+            }
+            print()
+            print(
+                f"Signal events coverage ({len(signal_summary)} "
+                f"industries):"
+            )
+            print(
+                f"  {'INDUSTRY':<48} {'LATEST':<12} {'EVENTS':>6}"
+            )
+            for name in sorted(sig_by_name):
+                rows, _earliest, latest = sig_by_name[name]
+                latest_s = str(latest) if latest else "(none)"
+                print(
+                    f"  {name[:48]:<48} {latest_s:<12} {rows:>6}"
                 )
 
         # Recent runs section.
@@ -814,6 +840,101 @@ def cmd_compute_indicator_state(args, config: Config) -> int:
         db_engine.dispose()
 
 
+# ---------- compute-signals (Phase 6-1) ---------- #
+
+
+def cmd_compute_signals(args, config: Config) -> int:
+    """Compute signal events for one industry or all industries.
+
+    Derives BUY / SELL / EXIT_BUY / EXIT_SELL events from
+    display_regime transitions in indicator_state. Same shape as
+    compute-indicator-state: whole-history per industry, no date
+    range (signals are derived from a path-dependent compute, so
+    partial backfills aren't meaningful).
+    """
+    from .runners import (
+        run_signal_events_for_all_industries,
+        run_signal_events_for_industry,
+    )
+
+    if not args.industry and not args.all_industries:
+        print(
+            "error: must pass either --industry NAME or --all-industries",
+            file=sys.stderr,
+        )
+        return 2
+    if args.industry and args.all_industries:
+        print(
+            "error: --industry and --all-industries are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+
+    db_engine = create_engine_from_config(config)
+    try:
+        if args.industry:
+            try:
+                run_id = run_signal_events_for_industry(
+                    db_engine, args.industry, force=args.force,
+                )
+            except ValueError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 2
+            with db_engine.connect() as conn:
+                r = FundamentalsRunRepository(conn).get(run_id)
+            if r is None:
+                print(f"run_id={run_id} (no row found?)", file=sys.stderr)
+                return 1
+            print(
+                f"compute-signals {args.industry}: "
+                f"run_id={r.run_id} status={r.status} "
+                f"events_written={r.succeeded} skipped={r.skipped}"
+            )
+            if r.status == "SUCCESS":
+                return 0
+            if r.status == "PARTIAL":
+                return 1
+            return 2
+
+        # All-industries path.
+        report = run_signal_events_for_all_industries(
+            db_engine, force=args.force,
+        )
+        print(f"compute-signals --all-industries:")
+        print(
+            f"  succeeded: {len(report['succeeded'])}, "
+            f"skipped: {len(report['skipped'])}, "
+            f"failed: {len(report['failed'])}"
+        )
+
+        if report["succeeded"]:
+            print()
+            print("Succeeded:")
+            print(f"  {'INDUSTRY':<48} {'EVENTS':>8}")
+            for name, count in report["succeeded"]:
+                print(f"  {name[:48]:<48} {count:>8}")
+
+        if report["skipped"]:
+            print()
+            print("Skipped (run compute-indicator-state first):")
+            for name, reason in report["skipped"]:
+                print(f"  {name[:48]:<48} {reason}")
+
+        if report["failed"]:
+            print()
+            print("Failed:")
+            for name, err in report["failed"]:
+                print(f"  {name[:48]:<48} {err[:60]}")
+
+        if report["failed"]:
+            if report["succeeded"]:
+                return 1
+            return 2
+        return 0
+    finally:
+        db_engine.dispose()
+
+
 # ---------- backfill-etf-classification ---------- #
 
 
@@ -1172,6 +1293,30 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
              "(within 80 days).",
     )
 
+    # ---------- Phase 6-1 command ---------- #
+
+    csg = sub.add_parser(
+        "compute-signals",
+        help="Compute BUY/SELL/EXIT_BUY/EXIT_SELL signal events from "
+             "indicator_state.display_regime transitions, for one "
+             "industry or all industries. Reads indicator_state, "
+             "writes signal_event.",
+    )
+    csg.add_argument(
+        "--industry", default=None, metavar="NAME",
+        help="Industry name to compute. Mutually exclusive with "
+             "--all-industries.",
+    )
+    csg.add_argument(
+        "--all-industries", action="store_true", dest="all_industries",
+        help="Compute signals for every active industry that has "
+             "indicator_state rows.",
+    )
+    csg.add_argument(
+        "--force", action="store_true",
+        help="Re-compute even if recent events exist (within 80 days).",
+    )
+
     return {
         "refresh-industry":             cmd_refresh_industry,
         "set-industry-override":        cmd_set_industry_override,
@@ -1185,4 +1330,5 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
         "compute-index-values":         cmd_compute_index_values,
         "rebalance-industry-index":     cmd_rebalance_industry_index,
         "compute-indicator-state":      cmd_compute_indicator_state,
+        "compute-signals":              cmd_compute_signals,
     }

@@ -2188,3 +2188,200 @@ What works end-to-end:
   - **Phase 4C**: scheduler integration (deferred from Phase 4A).
     Wire the bars-ingestion daemon to call compute-market-cap then
     compute-index-values then compute-indicator-state on EoD.
+
+---
+
+## 27. Phase 6-1 (signal markers — no backtest yet)
+
+Phase 6 was originally scoped as "strategy and signal layer including
+backtest execution". Operator clarification narrowed the scope:
+*just signal markers, the four signal kinds from the Pine Script*.
+Backtest engine deferred to a future Phase 6-2.
+
+### Scope
+
+Four signal kinds, derived from `display_regime` transitions:
+
+  - **BUY**       — `display_regime` goes from non-+1 to +1
+  - **SELL**      — `display_regime` goes from non--1 to -1
+  - **EXIT_BUY**  — `display_regime` goes from +1 to non-+1
+  - **EXIT_SELL** — `display_regime` goes from -1 to non--1
+
+These map 1:1 to the Pine Script:
+
+```
+longCondition      = display == 1 and prev != 1    → BUY
+exitLongCondition  = prev == 1 and display != 1    → EXIT_BUY
+shortCondition     = display == -1 and prev != -1  → SELL
+exitShortCondition = prev == -1 and display != -1  → EXIT_SELL
+```
+
+All four are computed unconditionally. The Pine `allow_shorts`
+toggle is a consumer-side concern (the eventual backtest engine
+or a downstream filter); the signal layer stores everything that
+fires.
+
+### Schema design choice
+
+Two options were considered:
+
+  **Schema A** (chosen): separate `signal_event` table. Sparse —
+  only fire bars produce rows.
+
+  **Schema B**: add boolean columns to `indicator_state` (one per
+  kind). Dense — every bar has all-false rows for non-fire bars.
+
+Schema A wins because (a) signals are *sparse* (~20 events per
+industry per year vs. 250 trading days), so a separate table is
+storage-efficient and query-friendly, and (b) the layers are
+conceptually different — indicator_state is "what the EMAs and
+regimes look like on this bar", signal_event is "what fired".
+Changing strategy parameters affects signal_event without
+needing to recompute indicator_state.
+
+### Polymorphic identity
+
+Signal events inherit the same polymorphic identity as
+indicator_state: nullable `(ticker_id, timeframe)` OR nullable
+`industry_name`, with an XOR CHECK constraint. Phase 6-1 only
+writes industry rows; the schema supports ticker rows for a
+future per-ticker phase.
+
+### Single-bar double events
+
+A single bar can produce two events when display_regime flips
+directly from +1 to -1 (or vice versa) without passing through 0:
+
+```
+prev=+1, curr=-1:
+  → EXIT_BUY (prev=+1, after=-1) fires
+  → SELL    (prev=+1, after=-1) fires
+```
+
+Both events have `regime_before=+1, regime_after=-1`. They're
+distinct rows in `signal_event` because the natural key includes
+`event_kind`.
+
+### Pine `nz()` semantics on the first bar
+
+Pine treats the first bar's `display_regime[1]` (previous value)
+as 0 via `nz()`. So a series whose first bar has display_regime=+1
+fires a BUY on that bar (regime_before=0, regime_after=+1). The
+compute primitive's `prev_display` initialization to 0 mirrors this.
+
+### Runner: delete-then-insert (not pure upsert)
+
+Unlike `compute-indicator-state` which uses pure upsert, the
+signal events runner uses **delete-then-insert per industry**:
+
+```python
+with transaction(db_engine) as conn:
+    repo = SignalEventRepository(conn)
+    deleted = repo.delete_for_industry(industry_name)
+    repo.batch_upsert(new_events)
+```
+
+Why: if `indicator_state` is regenerated with different parameters
+or different bar values, the *set* of bars that emit events
+changes. A bar that previously emitted a BUY might no longer.
+Pure upsert would leave that stale BUY row in place forever.
+Delete-then-insert guarantees `signal_event` exactly reflects the
+current compute.
+
+The delete + insert happen in a single transaction (`transaction(db_engine)`
+context manager), so a failure mid-write rolls back the delete —
+no partial-state risk.
+
+### Compute primitive shape
+
+`compute_signal_events_from_states(states, close_lookup)` is a pure
+function. Takes:
+  - `states`: time-ordered iterable of IndicatorState rows (oldest-first).
+  - `close_lookup`: callable that maps trade_date → underlying close
+    (industry index value or ticker close, depending on series kind).
+
+Why `close_lookup` is injected: `IndicatorState` doesn't store the
+bar's underlying value, only derived indicators. For accurate
+`close_at_event`, the caller looks up the real value from
+`industry_index_value` (or `ohlcv_bars` for tickers) and provides a
+lookup function. Cleaner than having the compute primitive read from
+the DB or fall back to an EMA proxy.
+
+Returns a `list[SignalEvent]` in time order. No lookahead, no
+state held across calls — calling the function bar-by-bar on
+two-bar windows gives the same results as one bulk call.
+
+### What was shipped this session
+
+  - **Migration 0015** + legacy SQL 022: `signal_event` table with
+    polymorphic identity, four-kind CHECK constraint, regime CHECKs,
+    two partial unique indexes (one per series kind), date-axis and
+    event-kind indexes.
+  - **Domain**: `SIGNAL_EVENT_KINDS` tuple and `SignalEvent` dataclass
+    in `trip_ema/fundamentals/__init__.py`.
+  - **Repository**: `SignalEventRepository` with reads
+    (get_for_industry, get_for_ticker, list_for_date_range,
+    list_recent, count_by_kind, coverage_summary), writes (upsert,
+    batch_upsert), and deletes.
+  - **Compute primitive**: `compute_signal_events_from_states` in
+    `trip_ema/fundamentals/signal_compute.py`.
+  - **Runners**: `run_signal_events_for_industry`,
+    `run_signal_events_for_all_industries` in `runners.py`. Same
+    skip-if-recent 80-day pattern as Phase 5-4.
+  - **CLI**: `compute-signals` command with `--industry` /
+    `--all-industries` / `--force`.
+  - **HTTP**: GET `/signal-events/industries/{name}` (with kind +
+    date range filters), GET `/signal-events/recent` (cross-industry
+    scanner), POST `/compute-signals` (fire-and-forget).
+  - **`fundamentals-status` extension**: "Signal events coverage"
+    section after "Indicator state coverage".
+
+### Test counts
+
+75 new tests in this session:
+  - 5 SignalEvent domain tests
+  - 15 signal_compute tests (empty/all-zero, BUY/SELL/EXIT_BUY/
+    EXIT_SELL paths, direct +1↔-1 double-event bar, Pine `nz()`
+    default, complex 8-bar sequence with hand-traced expected
+    events, close_lookup behavior, series identity preservation
+    for both ticker and industry rows)
+  - 21 repo tests (writes, idempotency on natural key, two events
+    on same date different kinds, batch_upsert, 4 validation
+    tests, reads with all filter combinations, count_by_kind,
+    coverage_summary, list_recent days filter, delete, 2 DB-level
+    CHECK constraint tests)
+  - 12 runner tests (known sequence `[0,1,1,0,-1,-1,0]` produces
+    exact 4-event set, close_at_event reflects real value not
+    EMA, skip-if-recent uses recent dates so guard fires, force
+    re-runs, delete-then-insert clears stale rows on mutation,
+    validation errors, no-events when display always zero, bulk
+    mode succeed/skip/fail isolation)
+  - 9 CLI tests (mutual exclusion, validation, success paths,
+    force passthrough, status section)
+  - 14 HTTP tests (industry endpoint with all filters, recent
+    endpoint with kind filter, invalid kind returns 400, POST
+    validation, fire-and-forget for both modes, auth requirements)
+
+Total: 714 fundamentals + migration tests pass (601 from Phase 5-4
++ 75 new this session + 38 incidental). All prior tests remain
+green.
+
+### What's next
+
+**Phase 6-2** — backtest execution engine. Walk `signal_event`
+rows in time order, simulate entries/exits, track equity curve
+and PnL. Adds:
+  - Trade-level table (entry/exit pairs + reason + PnL).
+  - Strategy parameters (allow_shorts, position sizing, transaction
+    costs/slippage).
+  - Outer-band take-profit exits (the Pine `strategy.exit` with
+    `limit=upper_outer_atr_level`).
+  - Equity curve, drawdown, win-rate, max consecutive losses,
+    Sharpe (or other performance metrics).
+
+**Phase 5+ per-ticker**: would let signals be computed for
+individual stocks. Schema already supports it; just needs a
+runner reading from `ohlcv_bars`.
+
+**Phase 4C scheduler**: wire all 8 ETL phases as a single EoD
+pipeline.

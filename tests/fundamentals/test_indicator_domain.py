@@ -146,3 +146,60 @@ class TestIndicatorStateDataclass:
             s = self._make(core_regime=v, display_regime=v)
             assert s.core_regime == v
             assert s.display_regime == v
+
+
+# ============================================================
+# SignalEvent (Phase 6-1)
+# ============================================================
+
+
+from trip_ema.fundamentals import SIGNAL_EVENT_KINDS, SignalEvent
+
+
+class TestSignalEventConstants:
+
+    def test_signal_event_kinds(self):
+        assert SIGNAL_EVENT_KINDS == ("BUY", "SELL", "EXIT_BUY", "EXIT_SELL")
+        assert isinstance(SIGNAL_EVENT_KINDS, tuple)
+
+
+class TestSignalEventDataclass:
+
+    def _make(self, **overrides):
+        defaults = {
+            "ticker_id": None,
+            "timeframe": None,
+            "industry_name": "IT - Services",
+            "trade_date": date(2026, 5, 22),
+            "event_kind": "BUY",
+            "regime_before": 0,
+            "regime_after": 1,
+            "close_at_event": 844.27,
+            "computed_at": datetime(2026, 5, 22, 16, 0, tzinfo=timezone.utc),
+        }
+        defaults.update(overrides)
+        return SignalEvent(**defaults)
+
+    def test_can_construct_industry_keyed(self):
+        e = self._make()
+        assert e.industry_name == "IT - Services"
+        assert e.ticker_id is None
+        assert e.event_kind == "BUY"
+
+    def test_can_construct_ticker_keyed(self):
+        e = self._make(
+            ticker_id=1, timeframe="1w", industry_name=None,
+        )
+        assert e.ticker_id == 1
+        assert e.timeframe == "1w"
+        assert e.industry_name is None
+
+    def test_frozen(self):
+        e = self._make()
+        with pytest.raises(FrozenInstanceError):
+            e.event_kind = "SELL"  # type: ignore[misc]
+
+    def test_all_event_kinds_accepted(self):
+        for k in SIGNAL_EVENT_KINDS:
+            e = self._make(event_kind=k)
+            assert e.event_kind == k

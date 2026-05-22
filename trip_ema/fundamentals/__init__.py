@@ -437,3 +437,53 @@ class IndicatorState:
 
     # --- audit ---
     computed_at: datetime
+
+
+# Allowed values for signal_event.event_kind. Added in migration
+# 0015 (Phase 6-1). Mirrors the operator's Pine Script signal names
+# but in plain English to avoid Pine-specific terminology in the
+# domain layer.
+SIGNAL_EVENT_KINDS = ("BUY", "SELL", "EXIT_BUY", "EXIT_SELL")
+
+
+@dataclass(frozen=True, slots=True)
+class SignalEvent:
+    """One row from signal_event.
+
+    Sparse — only bars where a regime transition fired produce
+    rows. event_kind tells you which of the four signal types it is:
+      - BUY       : entered display_regime=+1 from non-+1
+      - SELL      : entered display_regime=-1 from non--1
+      - EXIT_BUY  : left display_regime=+1
+      - EXIT_SELL : left display_regime=-1
+
+    Polymorphic series identity (ticker_id+timeframe OR industry_name)
+    matches indicator_state. Exactly one is non-None; the DB CHECK
+    enforces.
+
+    regime_before and regime_after are the display_regime values
+    on the previous bar and this bar respectively. Constrained to
+    {-1, 0, +1} at the DB level.
+
+    close_at_event is the close (or index value) on the bar where
+    the event fired. Useful for downstream backtesting without
+    needing a JOIN back to ohlcv_bars or industry_index_value.
+    """
+    # --- polymorphic identity ---
+    ticker_id: Optional[int]
+    timeframe: Optional[str]
+    industry_name: Optional[str]
+    trade_date: date
+
+    # --- event ---
+    event_kind: str  # one of SIGNAL_EVENT_KINDS
+
+    # --- regime context ---
+    regime_before: int
+    regime_after: int
+
+    # --- price context ---
+    close_at_event: float
+
+    # --- audit ---
+    computed_at: datetime

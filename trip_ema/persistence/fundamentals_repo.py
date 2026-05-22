@@ -2308,3 +2308,351 @@ def _indicator_from_row(row):
         longest_turn_sell=bool(row[38]),
         computed_at=row[39],
     )
+
+
+# ---------- SignalEventRepository (Phase 6-1) ---------- #
+
+
+class SignalEventRepository:
+    """Sparse signal events derived from indicator_state regime
+    transitions.
+
+    Reads cover the common Phase 6+ access patterns:
+      - get_for_industry(name): full history for one industry.
+      - list_for_date_range(from, to, kind): all events of a kind
+        across all series in a window.
+      - list_recent(kind, days, limit): scanner-style "what fired
+        recently".
+      - count_by_kind(): summary for status displays.
+
+    Writes:
+      - upsert (one-row): idempotent on (series, trade_date, kind).
+      - batch_upsert: many events in one transaction, used by the
+        runner.
+      - delete_for_industry / delete_for_ticker: full wipe for
+        re-compute.
+    """
+
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    # ----- reads ----- #
+
+    def get_for_industry(
+        self, industry_name: str, *,
+        kinds: Optional[list[str]] = None,
+        from_date: Optional["date"] = None,
+        to_date: Optional["date"] = None,
+        limit: Optional[int] = None,
+    ) -> list:
+        """All events for one industry, newest-first. Optional
+        filters on event kinds (e.g. ["BUY", "EXIT_BUY"]) and date
+        range."""
+        conditions = ["industry_name = :n"]
+        params: dict = {"n": industry_name}
+        if kinds:
+            from ..fundamentals import SIGNAL_EVENT_KINDS
+            for k in kinds:
+                if k not in SIGNAL_EVENT_KINDS:
+                    raise ValueError(
+                        f"unknown event_kind {k!r}; "
+                        f"must be in {SIGNAL_EVENT_KINDS}"
+                    )
+            placeholders = ", ".join(f":k{i}" for i in range(len(kinds)))
+            conditions.append(f"event_kind IN ({placeholders})")
+            for i, k in enumerate(kinds):
+                params[f"k{i}"] = k
+        if from_date is not None:
+            conditions.append("trade_date >= :fd")
+            params["fd"] = from_date
+        if to_date is not None:
+            conditions.append("trade_date <= :td")
+            params["td"] = to_date
+        sql = f"""
+            SELECT * FROM signal_event
+            WHERE {' AND '.join(conditions)}
+            ORDER BY trade_date DESC, event_kind
+        """
+        if limit is not None:
+            sql += " LIMIT :lim"
+            params["lim"] = limit
+        rows = self._conn.execute(text(sql), params)
+        return [_signal_event_from_row(r) for r in rows]
+
+    def get_for_ticker(
+        self, ticker_id: int, timeframe: str, *,
+        kinds: Optional[list[str]] = None,
+        from_date: Optional["date"] = None,
+        to_date: Optional["date"] = None,
+        limit: Optional[int] = None,
+    ) -> list:
+        """All events for one ticker series. Same shape as
+        get_for_industry. Phase 6-1 schema supports this but no
+        runner writes to it yet."""
+        conditions = ["ticker_id = :tid", "timeframe = :tf"]
+        params: dict = {"tid": ticker_id, "tf": timeframe}
+        if kinds:
+            from ..fundamentals import SIGNAL_EVENT_KINDS
+            for k in kinds:
+                if k not in SIGNAL_EVENT_KINDS:
+                    raise ValueError(
+                        f"unknown event_kind {k!r}; "
+                        f"must be in {SIGNAL_EVENT_KINDS}"
+                    )
+            placeholders = ", ".join(f":k{i}" for i in range(len(kinds)))
+            conditions.append(f"event_kind IN ({placeholders})")
+            for i, k in enumerate(kinds):
+                params[f"k{i}"] = k
+        if from_date is not None:
+            conditions.append("trade_date >= :fd")
+            params["fd"] = from_date
+        if to_date is not None:
+            conditions.append("trade_date <= :td")
+            params["td"] = to_date
+        sql = f"""
+            SELECT * FROM signal_event
+            WHERE {' AND '.join(conditions)}
+            ORDER BY trade_date DESC, event_kind
+        """
+        if limit is not None:
+            sql += " LIMIT :lim"
+            params["lim"] = limit
+        rows = self._conn.execute(text(sql), params)
+        return [_signal_event_from_row(r) for r in rows]
+
+    def list_for_date_range(
+        self, from_date: "date", to_date: "date", *,
+        kind: Optional[str] = None,
+        series_kind: Optional[str] = None,  # 'TICKER' | 'INDUSTRY' | None
+        limit: Optional[int] = None,
+    ) -> list:
+        """Cross-series scanner. 'show me all BUY events between
+        date X and Y' across all industries (or tickers, or both).
+        """
+        from ..fundamentals import SIGNAL_EVENT_KINDS
+        conditions = ["trade_date BETWEEN :fd AND :td"]
+        params: dict = {"fd": from_date, "td": to_date}
+        if kind is not None:
+            if kind not in SIGNAL_EVENT_KINDS:
+                raise ValueError(
+                    f"unknown event_kind {kind!r}; "
+                    f"must be in {SIGNAL_EVENT_KINDS}"
+                )
+            conditions.append("event_kind = :k")
+            params["k"] = kind
+        if series_kind == "TICKER":
+            conditions.append("ticker_id IS NOT NULL")
+        elif series_kind == "INDUSTRY":
+            conditions.append("industry_name IS NOT NULL")
+        elif series_kind is not None:
+            raise ValueError(
+                f"series_kind must be 'TICKER', 'INDUSTRY', or None; "
+                f"got {series_kind!r}"
+            )
+        sql = f"""
+            SELECT * FROM signal_event
+            WHERE {' AND '.join(conditions)}
+            ORDER BY trade_date DESC, industry_name NULLS LAST,
+                     ticker_id NULLS LAST, event_kind
+        """
+        if limit is not None:
+            sql += " LIMIT :lim"
+            params["lim"] = limit
+        rows = self._conn.execute(text(sql), params)
+        return [_signal_event_from_row(r) for r in rows]
+
+    def list_recent(
+        self, *,
+        kind: Optional[str] = None,
+        days: int = 7,
+        limit: int = 100,
+    ) -> list:
+        """Scanner-style: events of a kind in the last N days,
+        newest-first. None for kind means all kinds."""
+        from ..fundamentals import SIGNAL_EVENT_KINDS
+        conditions = [f"trade_date >= CURRENT_DATE - INTERVAL '{int(days)} days'"]
+        params: dict = {"lim": limit}
+        if kind is not None:
+            if kind not in SIGNAL_EVENT_KINDS:
+                raise ValueError(
+                    f"unknown event_kind {kind!r}; "
+                    f"must be in {SIGNAL_EVENT_KINDS}"
+                )
+            conditions.append("event_kind = :k")
+            params["k"] = kind
+        sql = f"""
+            SELECT * FROM signal_event
+            WHERE {' AND '.join(conditions)}
+            ORDER BY trade_date DESC, industry_name NULLS LAST,
+                     ticker_id NULLS LAST, event_kind
+            LIMIT :lim
+        """
+        rows = self._conn.execute(text(sql), params)
+        return [_signal_event_from_row(r) for r in rows]
+
+    def count_by_kind_for_industry(
+        self, industry_name: str,
+    ) -> dict:
+        """Per-kind event count for one industry. Used by status
+        displays."""
+        rows = self._conn.execute(text("""
+            SELECT event_kind, COUNT(*)
+            FROM signal_event
+            WHERE industry_name = :n
+            GROUP BY event_kind
+        """), {"n": industry_name})
+        counts = {k: 0 for k in (
+            "BUY", "SELL", "EXIT_BUY", "EXIT_SELL",
+        )}
+        for kind, count in rows:
+            counts[kind] = int(count)
+        return counts
+
+    def coverage_summary_for_industries(
+        self,
+    ) -> list[tuple[str, int, "date", "date"]]:
+        """Per-industry (name, total_event_count, earliest, latest).
+        Used by fundamentals-status."""
+        rows = self._conn.execute(text("""
+            SELECT industry_name, COUNT(*),
+                   MIN(trade_date), MAX(trade_date)
+            FROM signal_event
+            WHERE industry_name IS NOT NULL
+            GROUP BY industry_name
+            ORDER BY industry_name
+        """))
+        return [(r[0], int(r[1]), r[2], r[3]) for r in rows]
+
+    # ----- writes ----- #
+
+    def upsert(self, event) -> None:
+        """Upsert one signal event. Validates the event_kind and
+        regime values before hitting the DB (in addition to the DB
+        CHECK constraints).
+
+        Idempotent on (series_identity, trade_date, event_kind).
+        """
+        from ..fundamentals import SIGNAL_EVENT_KINDS
+        # Application-level validation.
+        if event.event_kind not in SIGNAL_EVENT_KINDS:
+            raise ValueError(
+                f"event_kind must be in {SIGNAL_EVENT_KINDS}; "
+                f"got {event.event_kind!r}"
+            )
+        if event.regime_before not in (-1, 0, 1):
+            raise ValueError(
+                f"regime_before must be in {{-1, 0, 1}}; "
+                f"got {event.regime_before!r}"
+            )
+        if event.regime_after not in (-1, 0, 1):
+            raise ValueError(
+                f"regime_after must be in {{-1, 0, 1}}; "
+                f"got {event.regime_after!r}"
+            )
+        # Series-shape validation. Either ticker_id+timeframe or
+        # industry_name; not both, not neither.
+        ticker_set = event.ticker_id is not None and event.timeframe is not None
+        industry_set = event.industry_name is not None
+        if ticker_set and industry_set:
+            raise ValueError(
+                "exactly one of (ticker_id, timeframe) or "
+                "industry_name must be set; got both"
+            )
+        if not ticker_set and not industry_set:
+            raise ValueError(
+                "exactly one of (ticker_id, timeframe) or "
+                "industry_name must be set; got neither"
+            )
+
+        if industry_set:
+            self._conn.execute(text("""
+                INSERT INTO signal_event (
+                    ticker_id, timeframe, industry_name, trade_date,
+                    event_kind, regime_before, regime_after,
+                    close_at_event, computed_at
+                ) VALUES (
+                    NULL, NULL, :ind, :td,
+                    :kind, :rb, :ra, :close, NOW()
+                )
+                ON CONFLICT (industry_name, trade_date, event_kind)
+                WHERE industry_name IS NOT NULL
+                DO UPDATE SET
+                    regime_before = EXCLUDED.regime_before,
+                    regime_after = EXCLUDED.regime_after,
+                    close_at_event = EXCLUDED.close_at_event,
+                    computed_at = NOW()
+            """), {
+                "ind": event.industry_name, "td": event.trade_date,
+                "kind": event.event_kind,
+                "rb": event.regime_before, "ra": event.regime_after,
+                "close": float(event.close_at_event),
+            })
+        else:
+            self._conn.execute(text("""
+                INSERT INTO signal_event (
+                    ticker_id, timeframe, industry_name, trade_date,
+                    event_kind, regime_before, regime_after,
+                    close_at_event, computed_at
+                ) VALUES (
+                    :tid, :tf, NULL, :td,
+                    :kind, :rb, :ra, :close, NOW()
+                )
+                ON CONFLICT (ticker_id, timeframe, trade_date, event_kind)
+                WHERE ticker_id IS NOT NULL
+                DO UPDATE SET
+                    regime_before = EXCLUDED.regime_before,
+                    regime_after = EXCLUDED.regime_after,
+                    close_at_event = EXCLUDED.close_at_event,
+                    computed_at = NOW()
+            """), {
+                "tid": event.ticker_id, "tf": event.timeframe,
+                "td": event.trade_date,
+                "kind": event.event_kind,
+                "rb": event.regime_before, "ra": event.regime_after,
+                "close": float(event.close_at_event),
+            })
+
+    def batch_upsert(self, events: list) -> int:
+        """Upsert a list of events in the current transaction.
+        Returns the number processed."""
+        for e in events:
+            self.upsert(e)
+        return len(events)
+
+    # ----- deletes ----- #
+
+    def delete_for_industry(self, industry_name: str) -> int:
+        """Wipe all signal events for one industry. Used by the
+        runner's full-recompute path."""
+        result = self._conn.execute(text("""
+            DELETE FROM signal_event
+            WHERE industry_name = :n
+        """), {"n": industry_name})
+        return result.rowcount
+
+    def delete_for_ticker(self, ticker_id: int, timeframe: str) -> int:
+        result = self._conn.execute(text("""
+            DELETE FROM signal_event
+            WHERE ticker_id = :tid AND timeframe = :tf
+        """), {"tid": ticker_id, "tf": timeframe})
+        return result.rowcount
+
+
+def _signal_event_from_row(row):
+    """Unpack a row of signal_event SELECT * into SignalEvent.
+
+    Column order matters and must match the CREATE TABLE in
+    migration 0015 exactly.
+    """
+    from ..fundamentals import SignalEvent
+    return SignalEvent(
+        ticker_id=int(row[0]) if row[0] is not None else None,
+        timeframe=row[1],
+        industry_name=row[2],
+        trade_date=row[3],
+        event_kind=row[4],
+        regime_before=int(row[5]),
+        regime_after=int(row[6]),
+        close_at_event=float(row[7]),
+        computed_at=row[8],
+    )

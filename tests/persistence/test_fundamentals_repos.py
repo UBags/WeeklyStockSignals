@@ -2563,3 +2563,331 @@ class TestIndicatorStateDBConstraints:
                         1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 5, 0
                     )
                 """), {"tid": tid, "td": date(2026, 5, 22)})
+
+
+# ---------- SignalEventRepository (Phase 6-1) ---------- #
+
+
+from trip_ema.fundamentals import SignalEvent
+from trip_ema.persistence.fundamentals_repo import SignalEventRepository
+
+
+def _make_signal(
+    industry: str, td: date, kind: str = "BUY",
+    *, regime_before: int = 0, regime_after: int = 1,
+    close: float = 100.0,
+) -> SignalEvent:
+    return SignalEvent(
+        ticker_id=None, timeframe=None, industry_name=industry,
+        trade_date=td, event_kind=kind,
+        regime_before=regime_before, regime_after=regime_after,
+        close_at_event=close,
+        computed_at=datetime.now(timezone.utc),
+    )
+
+
+def _setup_industry_for_signals(db_engine, name: str = "IT - Services"):
+    from trip_ema.persistence.fundamentals_repo import IndustryIndexRepository
+    with transaction(db_engine) as conn:
+        IndustryIndexRepository(conn).upsert(
+            name, sector_name="Technology",
+            base_date=date(2025, 10, 1),
+        )
+
+
+class TestSignalEventWrites:
+
+    def test_upsert_and_retrieve(self, db_engine):
+        _setup_industry_for_signals(db_engine)
+        with transaction(db_engine) as conn:
+            SignalEventRepository(conn).upsert(
+                _make_signal("IT - Services", date(2026, 1, 8), "BUY"),
+            )
+        with db_engine.connect() as conn:
+            rows = SignalEventRepository(conn).get_for_industry(
+                "IT - Services",
+            )
+        assert len(rows) == 1
+        assert rows[0].event_kind == "BUY"
+        assert rows[0].industry_name == "IT - Services"
+        assert rows[0].ticker_id is None
+
+    def test_upsert_idempotent_on_natural_key(self, db_engine):
+        """Same (industry, date, kind) upserted twice produces one
+        row with the second value."""
+        _setup_industry_for_signals(db_engine)
+        with transaction(db_engine) as conn:
+            repo = SignalEventRepository(conn)
+            repo.upsert(_make_signal(
+                "IT - Services", date(2026, 1, 8), "BUY", close=100.0,
+            ))
+            repo.upsert(_make_signal(
+                "IT - Services", date(2026, 1, 8), "BUY", close=200.0,
+            ))
+        with db_engine.connect() as conn:
+            rows = SignalEventRepository(conn).get_for_industry(
+                "IT - Services",
+            )
+        assert len(rows) == 1
+        assert rows[0].close_at_event == 200.0
+
+    def test_different_kinds_same_date_coexist(self):
+        """A bar can produce multiple events (e.g. EXIT_BUY and SELL
+        on the same date). Both should land as separate rows."""
+        pass  # Implementation merged into next test as combo.
+
+    def test_two_events_on_same_date_different_kinds(self, db_engine):
+        _setup_industry_for_signals(db_engine)
+        with transaction(db_engine) as conn:
+            repo = SignalEventRepository(conn)
+            repo.upsert(_make_signal(
+                "IT - Services", date(2026, 1, 8), "EXIT_BUY",
+                regime_before=1, regime_after=-1,
+            ))
+            repo.upsert(_make_signal(
+                "IT - Services", date(2026, 1, 8), "SELL",
+                regime_before=1, regime_after=-1,
+            ))
+        with db_engine.connect() as conn:
+            rows = SignalEventRepository(conn).get_for_industry(
+                "IT - Services",
+            )
+        kinds = {r.event_kind for r in rows}
+        assert kinds == {"EXIT_BUY", "SELL"}
+
+    def test_batch_upsert(self, db_engine):
+        _setup_industry_for_signals(db_engine)
+        events = [
+            _make_signal("IT - Services", date(2026, 1, 8), "BUY"),
+            _make_signal("IT - Services", date(2026, 1, 15), "EXIT_BUY",
+                         regime_before=1, regime_after=0),
+            _make_signal("IT - Services", date(2026, 1, 22), "SELL",
+                         regime_before=0, regime_after=-1),
+        ]
+        with transaction(db_engine) as conn:
+            n = SignalEventRepository(conn).batch_upsert(events)
+        assert n == 3
+        with db_engine.connect() as conn:
+            rows = SignalEventRepository(conn).get_for_industry(
+                "IT - Services",
+            )
+        assert len(rows) == 3
+
+
+class TestSignalEventValidation:
+
+    def test_rejects_bad_event_kind(self, db_engine):
+        _setup_industry_for_signals(db_engine)
+        from dataclasses import replace
+        bad = replace(
+            _make_signal("IT - Services", date(2026, 1, 8)),
+            event_kind="MADEUP",
+        )
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="event_kind"):
+                SignalEventRepository(conn).upsert(bad)
+
+    def test_rejects_bad_regime_before(self, db_engine):
+        _setup_industry_for_signals(db_engine)
+        from dataclasses import replace
+        bad = replace(
+            _make_signal("IT - Services", date(2026, 1, 8)),
+            regime_before=5,
+        )
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="regime_before"):
+                SignalEventRepository(conn).upsert(bad)
+
+    def test_rejects_both_keys_set(self, db_engine):
+        from dataclasses import replace
+        bad = replace(
+            _make_signal("IT - Services", date(2026, 1, 8)),
+            ticker_id=1, timeframe="1w",
+        )
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="both"):
+                SignalEventRepository(conn).upsert(bad)
+
+    def test_rejects_neither_key_set(self, db_engine):
+        from dataclasses import replace
+        bad = replace(
+            _make_signal("IT - Services", date(2026, 1, 8)),
+            industry_name=None,
+        )
+        with transaction(db_engine) as conn:
+            with pytest.raises(ValueError, match="neither"):
+                SignalEventRepository(conn).upsert(bad)
+
+
+class TestSignalEventReads:
+
+    def _setup_with_events(self, db_engine):
+        _setup_industry_for_signals(db_engine, "Industry A")
+        _setup_industry_for_signals(db_engine, "Industry B")
+        with transaction(db_engine) as conn:
+            repo = SignalEventRepository(conn)
+            # Industry A: 2 BUY, 1 EXIT_BUY.
+            repo.upsert(_make_signal("Industry A", date(2026, 1, 8), "BUY"))
+            repo.upsert(_make_signal(
+                "Industry A", date(2026, 1, 22), "EXIT_BUY",
+                regime_before=1, regime_after=0,
+            ))
+            repo.upsert(_make_signal("Industry A", date(2026, 2, 5), "BUY"))
+            # Industry B: 1 SELL.
+            repo.upsert(_make_signal(
+                "Industry B", date(2026, 1, 15), "SELL",
+                regime_before=0, regime_after=-1,
+            ))
+
+    def test_get_for_industry_filters_by_kind(self, db_engine):
+        self._setup_with_events(db_engine)
+        with db_engine.connect() as conn:
+            rows = SignalEventRepository(conn).get_for_industry(
+                "Industry A", kinds=["BUY"],
+            )
+        assert len(rows) == 2
+        for r in rows:
+            assert r.event_kind == "BUY"
+
+    def test_get_for_industry_date_range(self, db_engine):
+        self._setup_with_events(db_engine)
+        with db_engine.connect() as conn:
+            rows = SignalEventRepository(conn).get_for_industry(
+                "Industry A",
+                from_date=date(2026, 1, 1),
+                to_date=date(2026, 1, 31),
+            )
+        # Only the first BUY (1/8) and the EXIT_BUY (1/22) — the
+        # 2/5 BUY is filtered out.
+        assert len(rows) == 2
+        dates = {r.trade_date for r in rows}
+        assert dates == {date(2026, 1, 8), date(2026, 1, 22)}
+
+    def test_list_for_date_range_across_industries(self, db_engine):
+        self._setup_with_events(db_engine)
+        with db_engine.connect() as conn:
+            rows = SignalEventRepository(conn).list_for_date_range(
+                date(2026, 1, 1), date(2026, 1, 31),
+            )
+        # All events in Jan 2026: Industry A's BUY+EXIT_BUY, Industry B's SELL.
+        assert len(rows) == 3
+
+    def test_list_for_date_range_kind_filter(self, db_engine):
+        self._setup_with_events(db_engine)
+        with db_engine.connect() as conn:
+            rows = SignalEventRepository(conn).list_for_date_range(
+                date(2026, 1, 1), date(2026, 12, 31),
+                kind="BUY",
+            )
+        assert len(rows) == 2
+        for r in rows:
+            assert r.event_kind == "BUY"
+
+    def test_count_by_kind(self, db_engine):
+        self._setup_with_events(db_engine)
+        with db_engine.connect() as conn:
+            counts = SignalEventRepository(conn).count_by_kind_for_industry(
+                "Industry A",
+            )
+        assert counts == {"BUY": 2, "EXIT_BUY": 1, "SELL": 0, "EXIT_SELL": 0}
+
+    def test_coverage_summary(self, db_engine):
+        self._setup_with_events(db_engine)
+        with db_engine.connect() as conn:
+            summary = SignalEventRepository(
+                conn,
+            ).coverage_summary_for_industries()
+        # Two industries.
+        names = {r[0] for r in summary}
+        assert names == {"Industry A", "Industry B"}
+        # Counts.
+        counts = {r[0]: r[1] for r in summary}
+        assert counts["Industry A"] == 3
+        assert counts["Industry B"] == 1
+
+    def test_list_recent_filters_by_days(self, db_engine):
+        """An old event (60 days ago) should not appear with days=7."""
+        from datetime import timedelta
+        _setup_industry_for_signals(db_engine)
+        old = date.today() - timedelta(days=60)
+        with transaction(db_engine) as conn:
+            SignalEventRepository(conn).upsert(
+                _make_signal("IT - Services", old, "BUY"),
+            )
+        with db_engine.connect() as conn:
+            recent = SignalEventRepository(conn).list_recent(
+                kind="BUY", days=7,
+            )
+        assert recent == []
+
+    def test_list_recent_includes_recent(self, db_engine):
+        _setup_industry_for_signals(db_engine)
+        with transaction(db_engine) as conn:
+            SignalEventRepository(conn).upsert(
+                _make_signal("IT - Services", date.today(), "BUY"),
+            )
+        with db_engine.connect() as conn:
+            recent = SignalEventRepository(conn).list_recent(
+                kind="BUY", days=7,
+            )
+        assert len(recent) == 1
+
+    def test_get_for_industry_rejects_bad_kind_in_filter(self, db_engine):
+        _setup_industry_for_signals(db_engine)
+        with db_engine.connect() as conn:
+            with pytest.raises(ValueError, match="event_kind"):
+                SignalEventRepository(conn).get_for_industry(
+                    "IT - Services", kinds=["MADEUP"],
+                )
+
+
+class TestSignalEventDelete:
+
+    def test_delete_for_industry(self, db_engine):
+        _setup_industry_for_signals(db_engine)
+        with transaction(db_engine) as conn:
+            repo = SignalEventRepository(conn)
+            repo.upsert(_make_signal("IT - Services", date(2026, 1, 8), "BUY"))
+            repo.upsert(_make_signal(
+                "IT - Services", date(2026, 1, 22), "EXIT_BUY",
+                regime_before=1, regime_after=0,
+            ))
+        with transaction(db_engine) as conn:
+            n = SignalEventRepository(conn).delete_for_industry("IT - Services")
+        assert n == 2
+
+
+class TestSignalEventDBConstraints:
+    """Tests that the DB CHECK constraints reject invalid rows even
+    if a bug in the repo layer let them through."""
+
+    def test_db_rejects_bad_event_kind(self, db_engine):
+        from sqlalchemy.exc import IntegrityError
+        _setup_industry_for_signals(db_engine)
+        with transaction(db_engine) as conn:
+            with pytest.raises(IntegrityError):
+                conn.execute(text("""
+                    INSERT INTO signal_event (
+                        ticker_id, timeframe, industry_name, trade_date,
+                        event_kind, regime_before, regime_after,
+                        close_at_event
+                    ) VALUES (
+                        NULL, NULL, 'IT - Services', :td,
+                        'INVALID', 0, 1, 100.0
+                    )
+                """), {"td": date(2026, 1, 8)})
+
+    def test_db_rejects_neither_key_set(self, db_engine):
+        from sqlalchemy.exc import IntegrityError
+        with transaction(db_engine) as conn:
+            with pytest.raises(IntegrityError):
+                conn.execute(text("""
+                    INSERT INTO signal_event (
+                        ticker_id, timeframe, industry_name, trade_date,
+                        event_kind, regime_before, regime_after,
+                        close_at_event
+                    ) VALUES (
+                        NULL, NULL, NULL, :td,
+                        'BUY', 0, 1, 100.0
+                    )
+                """), {"td": date(2026, 1, 8)})
