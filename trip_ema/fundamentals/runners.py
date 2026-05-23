@@ -117,7 +117,7 @@ def run_industry_refresh(
     # ----- 0. Skip-if-recent guard ----- #
     if not force and resume_run_id is None:
         with db_engine.connect() as conn:
-            last = FundamentalsRunRepository(conn).last_success(
+            last = FundamentalsRunRepository(conn).last_completed(
                 phase="industry", exchange=exchange,
             )
         if last is not None and last.completed_at is not None:
@@ -571,7 +571,7 @@ def run_shares_refresh(
     # ----- 0. Skip-if-recent guard ----- #
     if not force and resume_run_id is None:
         with db_engine.connect() as conn:
-            last = FundamentalsRunRepository(conn).last_success(
+            last = FundamentalsRunRepository(conn).last_completed(
                 phase="shares", exchange=exchange,
             )
         if last is not None and last.completed_at is not None:
@@ -776,7 +776,7 @@ def run_financials_refresh(
     # ----- 0. Skip-if-recent guard ----- #
     if not force and resume_run_id is None:
         with db_engine.connect() as conn:
-            last = FundamentalsRunRepository(conn).last_success(
+            last = FundamentalsRunRepository(conn).last_completed(
                 phase="financials", exchange=exchange,
             )
         if last is not None and last.completed_at is not None:
@@ -1004,7 +1004,7 @@ def run_market_cap_backfill(
     # ----- 0. Skip-if-recent guard ----- #
     if not force and resume_run_id is None:
         with db_engine.connect() as conn:
-            last = FundamentalsRunRepository(conn).last_success(
+            last = FundamentalsRunRepository(conn).last_completed(
                 phase="market_cap", exchange=exchange,
             )
         if last is not None and last.completed_at is not None:
@@ -2334,6 +2334,502 @@ def run_signal_events_for_all_industries(
         "run_signal_events_for_all_industries: succeeded=%d "
         "skipped=%d failed=%d",
         len(succeeded), len(skipped), len(failed),
+    )
+    return {
+        "succeeded": succeeded,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+# ============================================================
+# Phase 7: per-ticker indicator state + signal events
+# ============================================================
+#
+# The schema already supports per-ticker rows (indicator_state and
+# signal_event both have nullable (ticker_id, timeframe) slots with
+# the XOR CHECK). Phase 5-4 / 6-1 wrote per-industry rows; Phase 7
+# adds the per-ticker variants.
+#
+# Compute is identical mechanically: read OHLCV history, run the
+# indicator pipeline, walk the regime, write indicator_state rows
+# keyed on (ticker_id, timeframe). Then for signals: walk the
+# indicator_state rows and emit signal_event rows.
+#
+# Differences from per-industry:
+#   - source data is real OHLC with distinct open/high/low/close
+#     and real volume (not the index synthesis); so we pass
+#     synthetic_atr_for_index=False.
+#   - close_lookup for signals uses real close from ohlcv_bars,
+#     not industry_index_value.
+#   - bulk runner iterates over tickers (potentially thousands).
+#     Per-ticker error isolation, sequential — no need for parallel
+#     since the compute is in-process and fast.
+
+
+def run_indicator_state_for_ticker(
+    db_engine: Engine,
+    ticker_id: int,
+    timeframe: str,
+    *,
+    force: bool = False,
+    min_bars: int = 30,
+) -> int:
+    """Compute and upsert indicator state for one ticker+timeframe.
+
+    Reads the full OHLCV history for this ticker+timeframe, runs
+    the indicator pipeline (3 EMAs, ATR, bands, regime), and
+    upserts each indicator-ready bar into indicator_state.
+
+    Returns run_id. Raises ValueError if the ticker doesn't exist
+    or has insufficient bars (fewer than `min_bars` to seed the
+    EMAs meaningfully).
+
+    Skip-if-recent guard: 80-day threshold same as the per-industry
+    runner.
+    """
+    import pandas as pd
+    from ..persistence.bars_repo import BarsRepository
+    from ..persistence.fundamentals_repo import (
+        IndicatorStateRepository,
+    )
+    from ..persistence.tickers_repo import TickersRepository
+    from ..domain import Timeframe
+    from ..fundamentals import IndicatorState
+    from .indicator_primitives import (
+        compute_bar_states,
+        compute_indicator_series,
+        INDICATOR_DEFAULTS,
+    )
+    from datetime import datetime, timezone
+
+    # Coerce timeframe string to Timeframe enum.
+    try:
+        tf_enum = Timeframe(timeframe)
+    except ValueError:
+        raise ValueError(
+            f"run_indicator_state_for_ticker: unknown timeframe "
+            f"{timeframe!r}; must be one of "
+            f"{[t.value for t in Timeframe]}"
+        )
+
+    # Sanity: ticker must exist.
+    with db_engine.connect() as conn:
+        ticker = TickersRepository(conn).get_by_id(ticker_id)
+    if ticker is None:
+        raise ValueError(
+            f"run_indicator_state_for_ticker: ticker_id={ticker_id} "
+            f"does not exist"
+        )
+
+    phase = "index_indicators"
+    if not force:
+        with db_engine.connect() as conn:
+            latest = IndicatorStateRepository(conn).get_latest_for_ticker(
+                ticker_id, timeframe,
+            )
+        if latest is not None:
+            age = (date.today() - latest.trade_date).days
+            if age < 80:
+                logger.info(
+                    "Skipping indicator_state for ticker_id=%d tf=%s: "
+                    "latest=%s (age=%d days < 80).",
+                    ticker_id, timeframe, latest.trade_date, age,
+                )
+                with transaction(db_engine) as conn:
+                    run_id = FundamentalsRunRepository(conn).open(
+                        phase=phase, exchange="ALL",
+                    )
+                    FundamentalsRunRepository(conn).close(
+                        run_id, status="SUCCESS",
+                        succeeded=0, failed=0, skipped=1,
+                    )
+                return run_id
+
+    # Read the full OHLCV history (chronological order from fetch_history).
+    with db_engine.connect() as conn:
+        # Use a large limit — most tickers have <500 weekly bars even
+        # over multi-year history. 10000 is a safe upper bound.
+        bars = BarsRepository(conn).fetch_history(
+            ticker_id, tf_enum, limit=10000,
+        )
+    if len(bars) < min_bars:
+        raise ValueError(
+            f"run_indicator_state_for_ticker: ticker_id={ticker_id} "
+            f"tf={timeframe} has only {len(bars)} bars (need at least "
+            f"{min_bars} to seed EMAs)"
+        )
+
+    # Build pandas Series from the bars. ohlcv_bars stores
+    # bar_timestamp as TIMESTAMPTZ; we project to trade_date.
+    open_s = pd.Series([b.open for b in bars], dtype=float)
+    high_s = pd.Series([b.high for b in bars], dtype=float)
+    low_s = pd.Series([b.low for b in bars], dtype=float)
+    close_s = pd.Series([b.close for b in bars], dtype=float)
+    volume_s = pd.Series([b.volume for b in bars], dtype=float)
+    # bar_timestamp.date() — weekly bars typically have the same
+    # weekday across a series (e.g. all Mondays), so date() is
+    # unambiguous. For intraday timeframes this loses time-of-day,
+    # but indicator_state.trade_date is DATE anyway so any intraday
+    # multiplicity within a day collapses to the last bar of that
+    # day. For 1W/1D this is exact.
+    dates = pd.Series([b.timestamp.date() for b in bars])
+
+    series = compute_indicator_series(
+        close_s, volume_s, high_s, low_s,
+        params=INDICATOR_DEFAULTS,
+        synthetic_atr_for_index=False,
+    )
+    bar_states = compute_bar_states(
+        close_s, volume_s, high_s, low_s,
+        trade_dates=dates, series=series,
+        params=INDICATOR_DEFAULTS,
+        open_=open_s,
+    )
+
+    # Atomic write: one transaction, all bars or none.
+    succeeded = 0
+    skipped = 0
+    with transaction(db_engine) as conn:
+        run_id = FundamentalsRunRepository(conn).open(
+            phase=phase, exchange="ALL",
+        )
+        repo = IndicatorStateRepository(conn)
+        for bs in bar_states:
+            if (bs.get("med_ema") is None or pd.isna(bs.get("med_ema"))
+                or bs.get("long_ema") is None or pd.isna(bs.get("long_ema"))
+                or bs.get("longest_ema") is None
+                or pd.isna(bs.get("longest_ema"))
+                or bs.get("atr") is None or pd.isna(bs.get("atr"))):
+                skipped += 1
+                continue
+            state = IndicatorState(
+                ticker_id=ticker_id, timeframe=timeframe,
+                industry_name=None,
+                trade_date=bs["trade_date"],
+                med_ema=float(bs["med_ema"]),
+                long_ema=float(bs["long_ema"]),
+                longest_ema=float(bs["longest_ema"]),
+                atr=float(bs["atr"]),
+                upper_inner_band=float(bs["upper_inner_band"]),
+                lower_inner_band=float(bs["lower_inner_band"]),
+                upper_mid_band=float(bs["upper_mid_band"]),
+                lower_mid_band=float(bs["lower_mid_band"]),
+                upper_outer_band=float(bs["upper_outer_band"]),
+                lower_outer_band=float(bs["lower_outer_band"]),
+                core_regime=bs["core_regime"],
+                display_regime=bs["display_regime"],
+                pierces_upper_mid=bs["pierces_upper_mid"],
+                pierces_lower_mid=bs["pierces_lower_mid"],
+                dist_to_med_in_hl_units=bs["dist_to_med_in_hl_units"],
+                dist_to_long_in_hl_units=bs["dist_to_long_in_hl_units"],
+                dist_to_longest_in_hl_units=bs["dist_to_longest_in_hl_units"],
+                mean_dist_to_med_in_hl_units=bs["mean_dist_to_med_in_hl_units"],
+                mean_dist_to_long_in_hl_units=bs["mean_dist_to_long_in_hl_units"],
+                mean_dist_to_longest_in_hl_units=bs["mean_dist_to_longest_in_hl_units"],
+                bars_since_med_turn=bs["bars_since_med_turn"],
+                bars_since_long_turn=bs["bars_since_long_turn"],
+                bars_since_longest_turn=bs["bars_since_longest_turn"],
+                pct_change_since_med_turn=bs["pct_change_since_med_turn"],
+                pct_change_since_long_turn=bs["pct_change_since_long_turn"],
+                pct_change_since_longest_turn=bs["pct_change_since_longest_turn"],
+                med_pattern_label=bs["med_pattern_label"],
+                long_pattern_label=bs["long_pattern_label"],
+                longest_pattern_label=bs["longest_pattern_label"],
+                med_turn_buy=bs["med_turn_buy"],
+                med_turn_sell=bs["med_turn_sell"],
+                long_turn_buy=bs["long_turn_buy"],
+                long_turn_sell=bs["long_turn_sell"],
+                longest_turn_buy=bs["longest_turn_buy"],
+                longest_turn_sell=bs["longest_turn_sell"],
+                computed_at=datetime.now(timezone.utc),
+            )
+            repo.upsert_for_ticker(state)
+            succeeded += 1
+
+        FundamentalsRunRepository(conn).close(
+            run_id, status="SUCCESS",
+            succeeded=succeeded, failed=0, skipped=skipped,
+        )
+
+    logger.info(
+        "run_indicator_state_for_ticker ticker_id=%d tf=%s: "
+        "succeeded=%d skipped=%d",
+        ticker_id, timeframe, succeeded, skipped,
+    )
+    return run_id
+
+
+def run_indicator_state_for_all_tickers(
+    db_engine: Engine,
+    timeframe: str,
+    *,
+    exchange: Optional[str] = None,
+    force: bool = False,
+    min_bars: int = 30,
+) -> dict:
+    """Compute indicator state for every ticker that has at least
+    `min_bars` of OHLCV history for the given timeframe.
+
+    Args:
+      timeframe: which timeframe to compute (e.g. "1W", "1D").
+      exchange: optional filter — only process tickers on this
+        exchange. None means all exchanges.
+      force: bypass skip-if-recent guard.
+      min_bars: skip tickers with fewer than this many bars
+        (counted into the skipped bucket, not failed).
+
+    Returns:
+      {"succeeded": list[(ticker_id, symbol, written, skipped)],
+       "skipped":   list[(ticker_id, symbol, reason)],
+       "failed":    list[(ticker_id, symbol, error_message)]}
+    """
+    from ..persistence.bars_repo import BarsRepository
+    from ..persistence.tickers_repo import TickersRepository
+    from ..domain import Timeframe
+
+    # Validate timeframe up-front.
+    try:
+        tf_enum = Timeframe(timeframe)
+    except ValueError:
+        raise ValueError(
+            f"unknown timeframe {timeframe!r}; must be one of "
+            f"{[t.value for t in Timeframe]}"
+        )
+
+    # Enumerate tickers. Only ACTIVE tickers — retired/delisted
+    # ones shouldn't get fresh indicator state.
+    with db_engine.connect() as conn:
+        repo = TickersRepository(conn)
+        tickers = repo.find_active()
+    if exchange is not None:
+        tickers = [t for t in tickers if t.ref.exchange == exchange]
+
+    succeeded: list[tuple[int, str, int, int]] = []
+    skipped: list[tuple[int, str, str]] = []
+    failed: list[tuple[int, str, str]] = []
+
+    for ticker in tickers:
+        try:
+            run_id = run_indicator_state_for_ticker(
+                db_engine, ticker.ticker_id, timeframe,
+                force=force, min_bars=min_bars,
+            )
+            with db_engine.connect() as conn:
+                r = FundamentalsRunRepository(conn).get(run_id)
+            if r is not None:
+                succeeded.append(
+                    (ticker.ticker_id, ticker.ref.symbol,
+                     r.succeeded, r.skipped)
+                )
+            else:
+                succeeded.append(
+                    (ticker.ticker_id, ticker.ref.symbol, 0, 0)
+                )
+        except ValueError as e:
+            # Insufficient bars / unknown timeframe / ticker missing —
+            # these are skip conditions, not failures.
+            skipped.append((ticker.ticker_id, ticker.ref.symbol, str(e)))
+        except Exception as e:
+            logger.exception(
+                "run_indicator_state_for_all_tickers: failed for "
+                "ticker_id=%d symbol=%s",
+                ticker.ticker_id, ticker.ref.symbol,
+            )
+            failed.append((ticker.ticker_id, ticker.ref.symbol, str(e)))
+
+    logger.info(
+        "run_indicator_state_for_all_tickers tf=%s: succeeded=%d "
+        "skipped=%d failed=%d",
+        timeframe, len(succeeded), len(skipped), len(failed),
+    )
+    return {
+        "succeeded": succeeded,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+def run_signal_events_for_ticker(
+    db_engine: Engine,
+    ticker_id: int,
+    timeframe: str,
+    *,
+    force: bool = False,
+) -> int:
+    """Compute and persist signal events for one ticker+timeframe.
+
+    Same delete-then-insert semantics as the per-industry variant.
+    Reads indicator_state rows for this ticker, reads ohlcv_bars for
+    real close values, emits BUY/SELL/EXIT_BUY/EXIT_SELL events.
+
+    Returns run_id.
+    Raises ValueError if the ticker doesn't exist or has no
+    indicator_state rows.
+    """
+    from ..domain import Timeframe
+    from ..persistence.bars_repo import BarsRepository
+    from ..persistence.fundamentals_repo import (
+        IndicatorStateRepository,
+        SignalEventRepository,
+    )
+    from ..persistence.tickers_repo import TickersRepository
+    from .signal_compute import compute_signal_events_from_states
+
+    try:
+        tf_enum = Timeframe(timeframe)
+    except ValueError:
+        raise ValueError(
+            f"unknown timeframe {timeframe!r}; must be one of "
+            f"{[t.value for t in Timeframe]}"
+        )
+
+    with db_engine.connect() as conn:
+        ticker = TickersRepository(conn).get_by_id(ticker_id)
+    if ticker is None:
+        raise ValueError(
+            f"run_signal_events_for_ticker: ticker_id={ticker_id} "
+            f"does not exist"
+        )
+
+    phase = "index_indicators"
+    if not force:
+        with db_engine.connect() as conn:
+            recent = SignalEventRepository(conn).get_for_ticker(
+                ticker_id, timeframe, limit=1,
+            )
+        if recent:
+            age = (date.today() - recent[0].trade_date).days
+            if age < 80:
+                logger.info(
+                    "Skipping signal events for ticker_id=%d tf=%s: "
+                    "latest=%s (age=%d days < 80).",
+                    ticker_id, timeframe, recent[0].trade_date, age,
+                )
+                with transaction(db_engine) as conn:
+                    run_id = FundamentalsRunRepository(conn).open(
+                        phase=phase, exchange="ALL",
+                    )
+                    FundamentalsRunRepository(conn).close(
+                        run_id, status="SUCCESS",
+                        succeeded=0, failed=0, skipped=1,
+                    )
+                return run_id
+
+    # Read indicator_state (oldest-first for the walk) and OHLCV
+    # bars (for close lookup).
+    with db_engine.connect() as conn:
+        states = IndicatorStateRepository(conn).get_history_for_ticker(
+            ticker_id, timeframe,
+        )
+        bars = BarsRepository(conn).fetch_history(
+            ticker_id, tf_enum, limit=10000,
+        )
+
+    if not states:
+        raise ValueError(
+            f"run_signal_events_for_ticker: ticker_id={ticker_id} "
+            f"tf={timeframe} has no indicator_state rows. Run "
+            f"compute-indicator-state-ticker first."
+        )
+
+    states.reverse()  # oldest-first
+    # Build close lookup from bars (bar_timestamp.date() → close).
+    close_by_date = {b.timestamp.date(): float(b.close) for b in bars}
+
+    def close_lookup(td):
+        if td in close_by_date:
+            return close_by_date[td]
+        return 0.0  # Defensive — shouldn't happen if data integrity OK.
+
+    events = compute_signal_events_from_states(states, close_lookup)
+
+    with transaction(db_engine) as conn:
+        run_id = FundamentalsRunRepository(conn).open(
+            phase=phase, exchange="ALL",
+        )
+        repo = SignalEventRepository(conn)
+        deleted = repo.delete_for_ticker(ticker_id, timeframe)
+        repo.batch_upsert(events)
+        FundamentalsRunRepository(conn).close(
+            run_id, status="SUCCESS",
+            succeeded=len(events), failed=0, skipped=0,
+        )
+
+    logger.info(
+        "run_signal_events_for_ticker ticker_id=%d tf=%s: "
+        "emitted=%d (deleted prior=%d)",
+        ticker_id, timeframe, len(events), deleted,
+    )
+    return run_id
+
+
+def run_signal_events_for_all_tickers(
+    db_engine: Engine,
+    timeframe: str,
+    *,
+    exchange: Optional[str] = None,
+    force: bool = False,
+) -> dict:
+    """Bulk-compute signal events for all tickers (optionally
+    filtered by exchange) that have indicator_state rows for the
+    given timeframe."""
+    from ..persistence.fundamentals_repo import IndicatorStateRepository
+    from ..persistence.tickers_repo import TickersRepository
+
+    with db_engine.connect() as conn:
+        repo = TickersRepository(conn)
+        tickers = repo.find_active()
+        # Pre-filter to tickers with at least one indicator_state row
+        # for this timeframe.
+        ind_repo = IndicatorStateRepository(conn)
+        with_indicators = {
+            (tid, tf) for tid, tf, _count, _earliest, _latest
+            in ind_repo.coverage_summary_for_tickers()
+        }
+    if exchange is not None:
+        tickers = [t for t in tickers if t.ref.exchange == exchange]
+
+    succeeded: list[tuple[int, str, int]] = []
+    skipped: list[tuple[int, str, str]] = []
+    failed: list[tuple[int, str, str]] = []
+
+    for ticker in tickers:
+        key = (ticker.ticker_id, timeframe)
+        if key not in with_indicators:
+            skipped.append((
+                ticker.ticker_id, ticker.ref.symbol,
+                "no indicator_state rows for this timeframe",
+            ))
+            continue
+        try:
+            run_id = run_signal_events_for_ticker(
+                db_engine, ticker.ticker_id, timeframe, force=force,
+            )
+            with db_engine.connect() as conn:
+                r = FundamentalsRunRepository(conn).get(run_id)
+            if r is not None:
+                succeeded.append(
+                    (ticker.ticker_id, ticker.ref.symbol, r.succeeded)
+                )
+            else:
+                succeeded.append(
+                    (ticker.ticker_id, ticker.ref.symbol, 0)
+                )
+        except Exception as e:
+            logger.exception(
+                "run_signal_events_for_all_tickers: failed for "
+                "ticker_id=%d symbol=%s",
+                ticker.ticker_id, ticker.ref.symbol,
+            )
+            failed.append(
+                (ticker.ticker_id, ticker.ref.symbol, str(e))
+            )
+
+    logger.info(
+        "run_signal_events_for_all_tickers tf=%s: succeeded=%d "
+        "skipped=%d failed=%d",
+        timeframe, len(succeeded), len(skipped), len(failed),
     )
     return {
         "succeeded": succeeded,

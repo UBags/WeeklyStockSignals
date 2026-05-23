@@ -1060,3 +1060,206 @@ Pipeline recap:
 
 Each step's output is the next step's input. A full EoD refresh
 re-runs all 8 in order.
+
+### 12.9 Per-ticker indicators and signals (Phase 7)
+
+Phase 5 and Phase 6 ship per-industry indicator state and signal
+events. Phase 7 adds per-ticker variants for individual stocks.
+
+```bash
+# Compute indicator state for one ticker (weekly bars)
+trip-ema-etl --config config.yaml compute-indicator-state \
+    --ticker RELIANCE --exchange NSE --timeframe 1W
+
+# Bulk per-ticker compute for all active NSE tickers, weekly
+trip-ema-etl --config config.yaml compute-indicator-state \
+    --all-tickers --timeframe 1W --exchange NSE
+
+# Compute signals (depends on indicator_state being populated first)
+trip-ema-etl --config config.yaml compute-signals \
+    --ticker RELIANCE --exchange NSE --timeframe 1W
+
+trip-ema-etl --config config.yaml compute-signals \
+    --all-tickers --timeframe 1W --exchange NSE
+```
+
+Tickers with fewer than 30 bars on the requested timeframe are
+skipped (counted as "skipped" not "failed" — operationally these
+are usually newly-listed names without enough history to seed
+EMAs).
+
+Querying per-ticker results via SQL:
+
+```bash
+# Latest indicator state for RELIANCE on weekly bars
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT i.trade_date,
+       i.core_regime, i.display_regime,
+       round(i.med_ema::numeric, 2) AS med_ema,
+       round(i.long_ema::numeric, 2) AS long_ema
+FROM indicator_state i
+JOIN tickers t ON i.ticker_id = t.ticker_id
+WHERE t.symbol = 'RELIANCE' AND t.exchange = 'NSE'
+  AND i.timeframe = '1W'
+ORDER BY i.trade_date DESC
+LIMIT 5;
+"
+
+# All BUY signals in the last 30 days across NSE tickers (1W)
+psql -h localhost -U trip_ema_app -d trip_ema -c "
+SELECT t.symbol, s.trade_date,
+       round(s.close_at_event::numeric, 2) AS close
+FROM signal_event s
+JOIN tickers t ON s.ticker_id = t.ticker_id
+WHERE s.event_kind = 'BUY'
+  AND s.ticker_id IS NOT NULL
+  AND s.timeframe = '1W'
+  AND t.exchange = 'NSE'
+  AND s.trade_date >= CURRENT_DATE - INTERVAL '30 days'
+ORDER BY s.trade_date DESC;
+"
+```
+
+Via HTTP:
+
+```bash
+TOKEN="$TRIP_EMA_ADMIN_TOKEN"
+
+# Read indicator history for a ticker
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/indicator-state/tickers/42?timeframe=1W&limit=20" | jq
+
+# Trigger fire-and-forget per-ticker compute
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/compute-indicator-state?all_tickers=true&timeframe=1W&exchange=NSE"
+
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/compute-signals?all_tickers=true&timeframe=1W&exchange=NSE"
+```
+
+### 12.10 EoD pipeline (Phase 4C)
+
+Run all 8 fundamentals phases (10 with `--include-tickers`) as
+one command:
+
+```bash
+# Daily EoD — per-industry only (default; ~5-10 min when shares/
+# financials skip-if-recent, ~90 min if they actually fetch from
+# yfinance)
+trip-ema-etl --config config.yaml run-eod-pipeline --exchange NSE
+
+# Heavier run that also processes individual tickers
+trip-ema-etl --config config.yaml run-eod-pipeline \
+    --exchange NSE --include-tickers --timeframe 1W
+
+# Recovery: force re-compute of every phase (use sparingly —
+# bypasses all skip-if-recent guards and may take hours)
+trip-ema-etl --config config.yaml run-eod-pipeline \
+    --exchange NSE --force
+```
+
+Output is a per-step progress table:
+
+```
+Running EoD pipeline on NSE (include_tickers=False, timeframe=1W, force=False)
+
+  [SUCCESS ] refresh-industry                                3.2s  s=0 f=0 sk=1
+             Skipping (recent: age=12 days < 80)
+  [SUCCESS ] refresh-shares                                  4.1s  s=0 f=0 sk=1
+  [SUCCESS ] refresh-financials                              5.0s  s=0 f=0 sk=1
+  [SUCCESS ] compute-market-cap                             18.3s  s=2150 f=0 sk=87
+             compute-market-cap on NSE for today: 2150 COMPUTED, 0 APPROX,...
+  [SUCCESS ] build-industry-indices                         42.1s  s=60 f=0 sk=0
+  [SUCCESS ] compute-index-values                           65.7s  s=57 f=0 sk=0
+             compute-index-values: 57 SUCCESS, 0 PARTIAL, 0 FAILED (of 60 indices)
+  [SUCCESS ] compute-indicator-state (industries)           23.4s  s=57 f=0 sk=0
+  [SUCCESS ] compute-signals (industries)                    8.9s  s=57 f=0 sk=0
+
+Pipeline SUCCESS in 170.7s (8 steps)
+```
+
+Exit codes:
+  - **0** — overall SUCCESS.
+  - **1** — overall PARTIAL (some steps PARTIAL, or some bulk
+    units within a step failed but the step itself completed).
+  - **2** — overall FAILED (a fatal step error aborted the
+    pipeline; remaining steps marked NOT_RUN).
+
+Via HTTP (fire-and-forget):
+
+```bash
+TOKEN="$TRIP_EMA_ADMIN_TOKEN"
+
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/run-eod-pipeline?exchange=NSE"
+
+# With per-ticker compute:
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8000/v1/fundamentals/run-eod-pipeline?exchange=NSE&include_tickers=true&timeframe=1W"
+```
+
+The HTTP variant returns 202 immediately and the pipeline runs in
+the executor thread; check progress via `fundamentals-status` or
+direct DB queries on `fundamentals_run`.
+
+### 12.11 Pipeline ordering (updated)
+
+```
+EoD pipeline (default):
+  1. refresh-industry          (yfinance, ~60 min if not cached)
+  2. refresh-shares            (yfinance, ~60 min)
+  3. refresh-financials        (yfinance, ~60 min)
+  4. compute-market-cap        (local, ~20s)
+  5. build-industry-indices    (local, ~40s)
+  6. compute-index-values      (local, ~60s)
+  7. compute-indicator-state   (local, ~25s for 60 industries)
+  8. compute-signals           (local, ~10s for 60 industries)
+
+EoD pipeline (--include-tickers):
+  9. compute-indicator-state (tickers)  (local, ~5-10 min for ~3500)
+ 10. compute-signals (tickers)          (local, ~2-3 min)
+```
+
+Steps 1-3 are skip-if-recent for 80 days, so daily re-runs only
+hit yfinance once per ~3 months. Steps 4-10 do real work whenever
+their inputs (bars / market cap / index values / indicator state)
+have advanced.
+
+### 12.12 Running the pipeline on non-trading days
+
+The pipeline is safe to run any day — on weekends and holidays
+each step decides for itself whether there's work:
+
+  - **refresh-industry/shares/financials**: skip-if-recent (80
+    days) guard. After your first full run, subsequent daily runs
+    skip these in seconds because the last completed run is recent.
+    Both SUCCESS and PARTIAL status count as "recent" — ETF
+    failures in shares/financials don't cause re-runs.
+  - **compute-market-cap**: detects "no bars for today" and emits
+    SKIPPED status. Doesn't abort.
+  - **build-industry-indices**: in steady state (all qualifying
+    industries already indexed), only sub-threshold industries
+    appear in `failed`. The step reports PARTIAL but does not
+    abort downstream phases — the existing index fleet is intact.
+  - **compute-index-values/indicator-state/signals**: each has its
+    own skip-if-recent guard (80 days), so re-runs on the same
+    data are cheap.
+
+Real-world Saturday run (2026-05-23, market closed):
+
+```
+  [SUCCESS ] refresh-industry                               0.0s  s=320 f=0 sk=0
+  [SUCCESS ] refresh-shares                                 0.1s  s=0 f=0 sk=1     <- skip-if-recent
+  [SUCCESS ] refresh-financials                             0.1s  s=0 f=0 sk=1     <- skip-if-recent
+  [SKIPPED ] compute-market-cap                             0.6s  s=0 f=0 sk=2347  <- no-trading-day
+             compute-market-cap on NSE: no bars for today...market was closed
+  [PARTIAL ] build-industry-indices                         0.2s  s=0 f=3 sk=0     <- 3 sub-threshold industries
+             ...steady state — existing indices unchanged...
+  [SUCCESS ] compute-index-values                          12.4s  s=57 f=0 sk=0    <- nothing new from today
+  [SUCCESS ] compute-indicator-state (industries)           ...
+  [SUCCESS ] compute-signals (industries)                   ...
+
+Pipeline PARTIAL in 15.3s
+```
+
+A Saturday run takes 15 seconds, not 3 hours.

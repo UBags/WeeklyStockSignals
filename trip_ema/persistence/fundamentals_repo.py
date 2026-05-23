@@ -461,6 +461,46 @@ class FundamentalsRunRepository:
         row = self._conn.execute(text(sql), params).fetchone()
         return _run_from_row(row) if row else None
 
+    def last_completed(
+        self, *, phase: str, exchange: Optional[str],
+    ) -> Optional[FundamentalsRun]:
+        """The most recent row for (phase, exchange) that finished
+        with a non-failure status — SUCCESS or PARTIAL.
+
+        Used by skip-if-recent guards in Phase 1-3 runners. The
+        original `last_success` only matches SUCCESS, but phases
+        that work over a heterogeneous universe (e.g. shares
+        refresh over a mix of EQ tickers and ETFs) routinely end
+        in PARTIAL because ETFs lack the data — that's expected,
+        not a failure to retry. Treating PARTIAL as "completed"
+        for the purposes of skip-if-recent prevents endless
+        re-runs of expected-partial phases.
+        """
+        if exchange is None:
+            sql = """
+                SELECT run_id, phase, exchange, started_at, completed_at,
+                       status, succeeded, failed, skipped, progress_json, notes
+                FROM fundamentals_run
+                WHERE phase = :phase AND exchange IS NULL
+                  AND status IN ('SUCCESS', 'PARTIAL')
+                ORDER BY completed_at DESC NULLS LAST
+                LIMIT 1
+            """
+            params = {"phase": phase}
+        else:
+            sql = """
+                SELECT run_id, phase, exchange, started_at, completed_at,
+                       status, succeeded, failed, skipped, progress_json, notes
+                FROM fundamentals_run
+                WHERE phase = :phase AND exchange = :ex
+                  AND status IN ('SUCCESS', 'PARTIAL')
+                ORDER BY completed_at DESC NULLS LAST
+                LIMIT 1
+            """
+            params = {"phase": phase, "ex": exchange}
+        row = self._conn.execute(text(sql), params).fetchone()
+        return _run_from_row(row) if row else None
+
     # ----- writes ----- #
 
     def open(

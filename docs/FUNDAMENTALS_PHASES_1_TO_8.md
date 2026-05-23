@@ -2385,3 +2385,377 @@ runner reading from `ohlcv_bars`.
 
 **Phase 4C scheduler**: wire all 8 ETL phases as a single EoD
 pipeline.
+
+---
+
+## 28. Phase 7 (per-ticker indicators + signals)
+
+The schema established in Phase 5-1 (indicator_state) and Phase 6-1
+(signal_event) was already polymorphic on series identity: nullable
+`(ticker_id, timeframe)` OR nullable `industry_name` with an XOR
+CHECK. Phases 5-4 and 6-1 wrote per-industry rows; Phase 7 adds
+the per-ticker variants.
+
+### Why per-ticker compute is opt-in
+
+Per-industry: ~60 industries × ~150 weekly bars = ~9,000 indicator
+rows. Computes in seconds.
+
+Per-ticker (single timeframe): ~3,500 tickers × ~150 weekly bars =
+~500,000 indicator rows. Still computes in minutes (pure Python +
+local DB reads, no network), but the storage and the bulk of
+signal events significantly increase. So per-ticker compute is
+opt-in via `--include-tickers` in the pipeline and via the
+explicit per-ticker CLI/HTTP modes.
+
+### What was shipped
+
+  - **Runners** in `trip_ema/fundamentals/runners.py`:
+    - `run_indicator_state_for_ticker(ticker_id, timeframe, force, min_bars)`
+    - `run_indicator_state_for_all_tickers(timeframe, exchange, force, min_bars)`
+    - `run_signal_events_for_ticker(ticker_id, timeframe, force)`
+    - `run_signal_events_for_all_tickers(timeframe, exchange, force)`
+  - **CLI**: existing `compute-indicator-state` and `compute-signals`
+    commands extended to accept `--ticker SYMBOL --exchange X
+    --timeframe TF` for single ticker or `--all-tickers --timeframe
+    TF [--exchange X]` for bulk.
+  - **HTTP**: existing POST endpoints extended with `ticker`,
+    `all_tickers`, `exchange`, `timeframe` query params.
+  - **Existing GET endpoints already worked** —
+    `/indicator-state/tickers/{id}?timeframe=X` and
+    `/signal-events/tickers/{id}?timeframe=X` were schema-ready in
+    Phase 5-1 / 6-1; Phase 7 just makes them return non-empty.
+
+### Compute mechanics
+
+Indicator pipeline reads from `ohlcv_bars` instead of
+`industry_index_value`. Important difference: passes
+`synthetic_atr_for_index=False` to the ATR computation, because
+tickers have real OHLC (with distinct H, L, C and meaningful
+volume) rather than the single-point synthesis used for indices.
+
+Signal compute is identical to per-industry — same
+`compute_signal_events_from_states` primitive. Just feeds it
+ticker-keyed IndicatorState rows and uses `ohlcv_bars.close` for
+the close-lookup callable.
+
+### Bulk runner: error isolation + min_bars filter
+
+`run_indicator_state_for_all_tickers` iterates over active tickers.
+Three outcomes per ticker:
+  - **succeeded**: indicator state written.
+  - **skipped**: ticker has fewer than `min_bars` (default 30)
+    of OHLCV history for the timeframe. Counted into "skipped"
+    rather than "failed" — operationally a "not enough data
+    yet" rather than an error.
+  - **failed**: an unexpected exception (e.g. DB integrity error).
+
+Bulk signal runner additionally pre-filters to tickers that already
+have indicator_state rows for the requested timeframe.
+
+### Test counts
+
+37 new tests:
+  - 23 runner tests (single + bulk for both indicator-state and
+    signals; ticker identity preservation; idempotency via
+    skip-if-recent; force flag; insufficient-bars skip; exchange
+    filter; missing ticker)
+  - 8 CLI tests (per-ticker mode validation, exchange/timeframe
+    requirements, success paths)
+  - 6 HTTP tests (POST validation for ticker modes, all-tickers
+    fire-and-forget)
+
+Total: 751 fundamentals + migration tests pass after Phase 7.
+
+---
+
+## 29. Phase 4C (EoD pipeline orchestrator)
+
+Phase 4C wires the now-existing 8 phases (10 with `--include-tickers`)
+as a single orchestrated EoD pipeline. The pipeline is operator-
+runnable today via `trip-ema-etl run-eod-pipeline`; a future
+scheduler hook will call it directly.
+
+### Why an orchestrator at all
+
+After Phase 7, the operator has 10+ commands to run in order for
+a full EoD refresh. Composing them by hand is error-prone — wrong
+order, missed phase, partial outcome interpretation. The
+orchestrator embeds the canonical sequence and unifies the
+per-step result reporting.
+
+### Failure semantics
+
+The pipeline distinguishes between two kinds of failure:
+
+  - **Step-level partial failure** (e.g. yfinance rate-limit on
+    refresh-industry — most tickers succeeded, a few failed). The
+    step's runner reports PARTIAL via its FundamentalsRun row.
+    Pipeline continues to the next step. Overall status becomes
+    PARTIAL.
+  - **Step-level fatal failure** (DB connection lost, unhandled
+    exception, or all units failed). Pipeline aborts. Remaining
+    steps are marked NOT_RUN. Overall status becomes FAILED.
+
+A bulk step (compute-indicator-state with many industries) is
+PARTIAL if some industries succeeded and some failed, FAILED if
+all failed.
+
+### Daily safety via skip-if-recent
+
+Every step's runner has an 80-day skip-if-recent guard. Re-running
+the pipeline daily is cheap: Phases 1-3 (yfinance, expensive) only
+do real work every 80 days; Phases 4-8 only re-do work if their
+inputs actually changed.
+
+The `--force` flag bypasses all guards — useful for one-off
+recovery scenarios.
+
+### Pipeline result struct
+
+`PipelineResult` records per-step outcomes:
+
+```python
+@dataclass
+class StepResult:
+    name: str
+    status: StepStatus  # PENDING / RUNNING / SUCCESS / PARTIAL /
+                        # FAILED / SKIPPED / NOT_RUN
+    started_at: datetime | None
+    finished_at: datetime | None
+    succeeded: int
+    failed: int
+    skipped: int
+    notes: str
+    error: str | None
+```
+
+Plus a `progress_callback` parameter that's invoked after each step
+completes — used by the CLI to print a live progress table, and
+by the eventual scheduler hook to surface progress via logs or a
+status endpoint.
+
+### What was shipped
+
+  - **Orchestrator**: `trip_ema/fundamentals/eod_pipeline.py` with
+    `run_eod_pipeline()` and result dataclasses.
+  - **CLI**: `trip-ema-etl run-eod-pipeline --exchange NSE [--include-tickers]
+    [--timeframe TF] [--force]`. Prints a per-step result table.
+  - **HTTP**: `POST /v1/fundamentals/run-eod-pipeline?exchange=NSE`
+    (fire-and-forget via the executor).
+
+### Test counts
+
+33 new tests:
+  - 25 orchestrator tests (step ordering, force/include_tickers
+    propagation, failure propagation including the abort-on-fatal
+    behavior, per-unit-failures-become-partial, progress callback,
+    PipelineResult struct logic, helper functions)
+  - 4 CLI tests (return codes for SUCCESS/PARTIAL/FATAL, include
+    -tickers flag passthrough)
+  - 4 HTTP tests (returns 202, include_tickers query param, auth,
+    exchange required validation)
+
+Total: 784 fundamentals + migration tests pass.
+
+### Operational picture after Phase 4C
+
+```bash
+# Daily EoD (default — no per-ticker compute):
+trip-ema-etl --config config.yaml run-eod-pipeline --exchange NSE
+
+# Weekly heavier run (includes per-ticker):
+trip-ema-etl --config config.yaml run-eod-pipeline \
+    --exchange NSE --include-tickers --timeframe 1W
+
+# Recovery (after a multi-day outage — force everything):
+trip-ema-etl --config config.yaml run-eod-pipeline \
+    --exchange NSE --force
+```
+
+### Future: scheduler integration
+
+The pipeline is callable directly from Python without subprocess.
+The bars-ingestion daemon (which already exists separately and
+runs at EoD) needs a thin hook that, after bars ingestion
+completes for a given exchange, calls
+`run_eod_pipeline(engine, exchange=...)`. That's a future change
+to `trip_ema/etl/scheduler.py` — small enough to land alongside
+the bars-daemon EoD trigger work whenever that's prioritized.
+
+---
+
+## 30. What's next: backtest engine
+
+After Phases 1 through 7 + 4C, the platform is feature-complete
+through the **signals** layer. Every active industry index and
+every active ticker (when opted in) has indicator_state and
+signal_event rows updated EoD via a single orchestrated pipeline.
+
+**The next layer is backtest execution.**
+
+A backtest engine walks signal_event rows in time order, simulates
+entries and exits against the actual price series, tracks an
+equity curve, and reports trade-level outcomes. This was originally
+in scope for Phase 6 but was deferred when the operator scoped
+Phase 6-1 to just signal markers.
+
+The backtest engine adds:
+
+  - A **trade-level table** (entry/exit pairs + reason + PnL).
+  - **Strategy parameters**: `allow_shorts`, position sizing,
+    transaction costs / slippage assumptions.
+  - **Outer-band take-profit exits** — the Pine
+    `strategy.exit(limit=upper_outer_atr_level)` semantics, which
+    on daily data become "did `high >= upper_outer_band` on this
+    bar".
+  - **Performance metrics**: equity curve, drawdown, win rate, max
+    consecutive losses, Sharpe, and similar.
+
+Design questions deferred to that phase:
+
+  - How to handle intra-bar take-profit on daily data when both
+    a regime exit and a limit touch could plausibly fire on the
+    same bar (Pine's `process_orders_on_close` vs. its limit
+    order semantics).
+  - Transaction cost model (fixed bps per trade vs. tiered).
+  - Slippage model (instant fills at close, or with a model
+    based on volume / spread).
+  - Whether to store the equity curve per (industry, parameters)
+    or recompute on demand.
+
+The signal_event table is **ready as the input to that work** —
+no further schema changes needed at the signal layer to support
+backtesting.
+
+---
+
+## 31. Phase 4C bug fixes + skip-if-recent semantics
+
+After Phase 4C shipped, a real-world EoD pipeline run on a Saturday
+(market closed, weekend) exposed three issues. All three are now
+fixed and documented here so future debugging has the reasoning
+trail.
+
+### Bug 1: build-industry-indices reported FAILED in steady state
+
+`run_industry_index_build` returns a dict with keys
+`{qualified, unqualified, indexed, failed}`. Industries that
+*already have* indices and constituents are silently skipped —
+they don't appear in any list. The function only reports work
+that was attempted in THIS call.
+
+On a steady-state daily run, the universe of 60 indexed industries
+is unchanged. The only candidates the function tries to add are
+sub-threshold industries (fewer than `min_constituents`=10 EQ
+tickers) that have never qualified. These reliably end up in
+`failed` with a "picked 8 < 10" message.
+
+The original Phase 4C orchestrator interpreted "succeeded=0,
+failed=3" as a fatal step failure and aborted the pipeline.
+This was wrong: the existing fleet of 60 indices is intact;
+only the marginal 3 sub-threshold industries weren't added (and
+never will be). Downstream phases consume the existing fleet,
+not the marginal ones.
+
+**Fix**: the index-build step now reports PARTIAL when some
+industries failed but none were newly indexed (steady-state case),
+not FAILED. PARTIAL doesn't abort the pipeline. The notes string
+explicitly explains "steady state — existing indices unchanged".
+
+The orchestrator also previously read the wrong dict keys
+(`created` / `updated`) which don't exist in the return value.
+That's been fixed to read `indexed` and `failed` correctly.
+
+### Bug 2: compute-market-cap on a non-trading day
+
+On weekends and holidays, `ohlcv_bars` has no rows for today.
+`compute_market_cap_for_date` then reports every ticker as
+"skipped_no_close" — every single one.
+
+The original Phase 4C interpreted this as PARTIAL ("0 succeeded,
+nothing failed, lots skipped") which is technically true but
+operationally uninformative. The pipeline kept running, but the
+operator's status line said "PARTIAL" for what was really "no
+market today, nothing to compute".
+
+**Fix**: the market-cap step now detects the no-trading-day
+signature (`succeeded == 0 AND skipped_no_close > 0 AND
+skipped_no_shares == 0`) and emits StepStatus.SKIPPED with a
+clear note ("market was closed — weekend or holiday"). Pipeline
+continues to subsequent steps which themselves see no new mcap
+data and skip naturally.
+
+This adds a new StepStatus value to the orchestrator's normal
+outcomes. SKIPPED ≠ NOT_RUN: the latter means "an earlier step
+failed fatally so we never ran this one"; SKIPPED means "ran
+and decided there was no work to do".
+
+### Issue 3: Phases 2 and 3 never hit skip-if-recent
+
+The Phase 1-3 runners (`run_industry_refresh`, `run_shares_refresh`,
+`run_financials_refresh`) and `run_market_cap_backfill` all have
+an 80-day skip-if-recent guard that queries
+`FundamentalsRunRepository.last_success()`. That method only
+matches rows where `status='SUCCESS'`.
+
+But: refresh-shares and refresh-financials work over a heterogeneous
+universe of EQ tickers + ETFs. ETFs have no `sharesOutstanding`
+field in yfinance, and no quarterly financials — yfinance returns
+"not populated" or "no quarterly data" for every ETF. ~400 of
+the ~2700 NSE tickers are ETFs. So these runners *always* finish
+with PARTIAL status (some succeeded, ETFs failed).
+
+The 80-day skip-if-recent guard, which only matches SUCCESS, then
+found no recent SUCCESS run and decided to re-do the full 100-
+minute yfinance hit on every pipeline run. The fundamentally
+expected-partial steady state was incorrectly retried daily.
+
+**Fix**: added `FundamentalsRunRepository.last_completed()` which
+matches both SUCCESS and PARTIAL. The 4 skip-if-recent guards
+(industry, shares, financials, market_cap) and the
+`fundamentals/scheduler.py` `_skip_due_to_recent_run` check now
+use `last_completed`. PARTIAL counts as "recently completed"
+for skip purposes.
+
+`last_success` remains in the repo as a stricter helper — useful
+for callers that specifically need a clean-success row (e.g.
+quarterly bookkeeping). Phase 1-3 guards now use the more lenient
+`last_completed`.
+
+### Better long-term fix (deferred): treat ETF "no data" as skip not fail
+
+The cleanest fix to Issue 3's root cause would be: inside the
+Phase 2/3 runners, when yfinance returns "no sharesOutstanding" or
+"no quarterly financials" for an ETF, count that as `skipped`
+rather than `failed`. The phase would then complete with status
+SUCCESS (all real failures absent), and the original `last_success`
+guard would work correctly.
+
+This requires the runner to check `tickers.instrument_type` or
+the ETF-classified status at the per-ticker level before
+classifying the yfinance error. It's the right design, but it's
+invasive — both runners have well-tested error-classification
+paths. The `last_completed` fix above is a smaller change that
+gets the correct skip-if-recent behavior without restructuring
+the runners. The longer-term refactor remains good follow-up
+work.
+
+### Tests added
+
+10 new tests:
+  - 4 in `test_fundamentals_repos.py`:
+    - `test_last_completed_accepts_partial`: PARTIAL row matches
+      while same FAILED row doesn't; original `last_success`
+      still excludes the PARTIAL.
+    - `test_last_completed_picks_most_recent`: tie-break by
+      `completed_at`.
+    - `test_last_completed_returns_none_if_only_failed`.
+  - 7 in `test_eod_pipeline.py`:
+    - 4 for Bug 1: steady-state SUCCESS, sub-threshold
+      failures-yield-PARTIAL, overall pipeline PARTIAL
+      propagation, mixed new+failed.
+    - 3 for Bug 2: weekend yields SKIPPED, partial-data still
+      SUCCESS, missing-shares yields PARTIAL.
+
+Total: 794 fundamentals + migration tests pass after fixes.

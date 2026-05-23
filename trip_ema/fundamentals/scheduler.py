@@ -176,12 +176,12 @@ class QuarterlyFundamentalsScheduler:
     def _skip_due_to_recent_run(self, phase: str, exchange: str) -> bool:
         try:
             with self._db_engine.connect() as conn:
-                last = FundamentalsRunRepository(conn).last_success(
+                last = FundamentalsRunRepository(conn).last_completed(
                     phase=phase, exchange=exchange,
                 )
         except Exception:
             logger.exception(
-                "Scheduler: failed to read last_success for %s/%s",
+                "Scheduler: failed to read last_completed for %s/%s",
                 phase, exchange,
             )
             # On error, err on the side of NOT firing — we don't want

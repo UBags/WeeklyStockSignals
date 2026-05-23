@@ -295,6 +295,55 @@ class TestFundamentalsRun:
             # BSE only has a FAILED run — last_success returns None.
             assert r.last_success(phase="industry", exchange="BSE") is None
 
+    def test_last_completed_accepts_partial(self, db_engine):
+        """last_completed should match both SUCCESS and PARTIAL —
+        critical for phases that work over heterogeneous universes
+        (e.g. shares-refresh over EQ+ETF) where PARTIAL is the
+        expected steady-state outcome."""
+        with transaction(db_engine) as conn:
+            r = FundamentalsRunRepository(conn)
+            # NSE shares: PARTIAL (some ETFs failed — normal).
+            nse_rid = r.open(phase="shares", exchange="NSE")
+            r.close(nse_rid, status="PARTIAL", succeeded=2200, failed=400, skipped=0)
+            # BSE shares: FAILED (something actually broke).
+            bse_rid = r.open(phase="shares", exchange="BSE")
+            r.close(bse_rid, status="FAILED", succeeded=0, failed=100, skipped=0)
+        with db_engine.connect() as conn:
+            r = FundamentalsRunRepository(conn)
+            # PARTIAL counts as "completed" — guard would fire skip.
+            assert r.last_completed(phase="shares", exchange="NSE").run_id == nse_rid
+            # FAILED does not — guard would let runner retry.
+            assert r.last_completed(phase="shares", exchange="BSE") is None
+            # last_success is stricter: PARTIAL doesn't match.
+            assert r.last_success(phase="shares", exchange="NSE") is None
+
+    def test_last_completed_picks_most_recent(self, db_engine):
+        """Multiple completed runs — return the newest by completed_at."""
+        import time
+        with transaction(db_engine) as conn:
+            r = FundamentalsRunRepository(conn)
+            old_rid = r.open(phase="shares", exchange="NSE")
+            r.close(old_rid, status="SUCCESS", succeeded=10, failed=0, skipped=0)
+        time.sleep(0.01)
+        with transaction(db_engine) as conn:
+            r = FundamentalsRunRepository(conn)
+            new_rid = r.open(phase="shares", exchange="NSE")
+            r.close(new_rid, status="PARTIAL", succeeded=8, failed=2, skipped=0)
+        with db_engine.connect() as conn:
+            r = FundamentalsRunRepository(conn)
+            assert r.last_completed(
+                phase="shares", exchange="NSE",
+            ).run_id == new_rid
+
+    def test_last_completed_returns_none_if_only_failed(self, db_engine):
+        with transaction(db_engine) as conn:
+            r = FundamentalsRunRepository(conn)
+            rid = r.open(phase="shares", exchange="NSE")
+            r.close(rid, status="FAILED", succeeded=0, failed=10, skipped=0)
+        with db_engine.connect() as conn:
+            r = FundamentalsRunRepository(conn)
+            assert r.last_completed(phase="shares", exchange="NSE") is None
+
 
 # ---------- ETF classification (migration 0007) ---------- #
 
