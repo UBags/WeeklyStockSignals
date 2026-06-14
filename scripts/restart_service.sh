@@ -3,16 +3,16 @@
 # Restart the trip-ema service cleanly.
 #
 # Workflow:
-#   1. Kill any running trip-ema instance (by port, not by name —
-#      `pkill -f trip_ema.app` misses some invocations).
-#   2. Sleep 3 seconds to let the OS reclaim the socket.
-#   3. Verify port is free.
-#   4. Start the service in the background via nohup so it survives
+#   1. Find any running trip-ema instance bound to SERVICE_PORT.
+#      Send SIGTERM. Poll for graceful shutdown up to
+#      SHUTDOWN_WAIT_SECONDS, escalating to SIGKILL if it overruns.
+#   2. Verify the port is free.
+#   3. Start the service in the background via nohup so it survives
 #      this script's exit.
-#   5. Poll /healthz for up to PRIME_WAIT_SECONDS to confirm priming.
-#   6. Print the /healthz response so you see cache_size before the
+#   4. Poll /healthz for up to PRIME_WAIT_SECONDS to confirm priming.
+#   5. Print the /healthz response so you see cache_size before the
 #      script returns.
-#   7. Exit, leaving the service running.
+#   6. Exit, leaving the service running.
 #
 # Usage:
 #   With the env var set in your shell:
@@ -43,6 +43,12 @@ SERVICE_PORT=8000
 CONFIG="${1:-config.yaml}"
 LOG_FILE=/tmp/trip-ema.log
 PRIME_WAIT_SECONDS=120
+SHUTDOWN_WAIT_SECONDS=30   # trip-ema's graceful shutdown stops
+                           # SubscriberDistributor + OrchestratorPool
+                           # (one thread per market) + ComputeScheduler
+                           # + uvicorn + disposes the DB engine. Under
+                           # load this routinely takes 5-15s; 30s gives
+                           # comfortable headroom before SIGKILL.
 # =========================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -65,13 +71,18 @@ if [[ ! -f "$CONFIG" ]]; then
     exit 1
 fi
 
-# Step 1 — find and kill whatever's bound to the port.
+# Step 1 — find and stop whatever's bound to the port.
 echo "=== Step 1: stopping existing trip-ema ==="
+
+# `|| true` absorbs grep's exit-1-on-no-match (the common case when
+# no service is running). Without it, set -euo pipefail kills this
+# script silently here, BEFORE the [[ -z ]] branch below can handle
+# the "nothing to kill" case.
 existing_pids=$(ss -tlnp 2>/dev/null \
     | grep -E ":${SERVICE_PORT}\s" \
     | grep -oE 'pid=[0-9]+' \
     | cut -d= -f2 \
-    | sort -u)
+    | sort -u || true)
 
 if [[ -z "$existing_pids" ]]; then
     echo "  no process found on port ${SERVICE_PORT}"
@@ -82,34 +93,69 @@ else
         # that aren't ours. Match by command line to be safe.
         cmd=$(ps -p "$pid" -o comm= 2>/dev/null || echo "")
         if [[ "$cmd" == "trip-ema" ]] || [[ "$cmd" == "python"* ]]; then
-            echo "  killing PID $pid (cmd: $cmd)"
-            kill "$pid"
+            echo "  sending SIGTERM to PID $pid (cmd: $cmd)"
+            kill "$pid" 2>/dev/null || true
         else
             echo "  PID $pid is '$cmd', not trip-ema — refusing to kill"
             echo "  resolve manually before re-running"
             exit 1
         fi
     done
+
+    # Poll for graceful shutdown. The old script used a fixed
+    # `sleep 3` here, which raced trip-ema's actual shutdown
+    # (typically 5-15s) and caused Step 2's port check to fail —
+    # leaving the operator with a killed-but-not-restarted service.
+    echo "  waiting up to ${SHUTDOWN_WAIT_SECONDS}s for graceful shutdown..."
+    shutdown_ok=0
+    for i in $(seq 1 "$SHUTDOWN_WAIT_SECONDS"); do
+        all_dead=1
+        for pid in $existing_pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                all_dead=0
+                break
+            fi
+        done
+
+        port_free=1
+        if ss -tlnp 2>/dev/null | grep -q ":${SERVICE_PORT}\s"; then
+            port_free=0
+        fi
+
+        if [[ $all_dead -eq 1 && $port_free -eq 1 ]]; then
+            echo "  shutdown complete after ${i}s"
+            shutdown_ok=1
+            break
+        fi
+        sleep 1
+    done
+
+    # Escalate if graceful shutdown overran.
+    if [[ $shutdown_ok -eq 0 ]]; then
+        echo "  graceful shutdown exceeded ${SHUTDOWN_WAIT_SECONDS}s — escalating to SIGKILL"
+        for pid in $existing_pids; do
+            kill -9 "$pid" 2>/dev/null || true
+        done
+        sleep 2
+    fi
 fi
 
-# Step 2 — wait for the OS to release the socket.
+# Step 2 — final port check (safety net; usually passes after Step 1).
+# Even after SIGKILL, a socket can sit in TIME_WAIT briefly. Don't
+# escalate from here — just report and bail so the operator can
+# investigate.
 echo ""
-echo "=== Step 2: waiting 3s for socket release ==="
-sleep 3
-
-# Step 3 — verify port is free.
-echo ""
-echo "=== Step 3: verifying port ${SERVICE_PORT} is free ==="
+echo "=== Step 2: verifying port ${SERVICE_PORT} is free ==="
 if ss -tlnp 2>/dev/null | grep -q ":${SERVICE_PORT}\s"; then
-    echo "FAIL: port ${SERVICE_PORT} is still bound after kill+sleep."
+    echo "FAIL: port ${SERVICE_PORT} is still bound after Step 1."
     echo "Check manually with: ss -tlnp | grep :${SERVICE_PORT}"
     exit 1
 fi
 echo "  port is free"
 
-# Step 4 — start the service in the background.
+# Step 3 — start the service in the background.
 echo ""
-echo "=== Step 4: starting trip-ema (config=${CONFIG}) ==="
+echo "=== Step 3: starting trip-ema (config=${CONFIG}) ==="
 # nohup detaches from the controlling terminal so closing the shell
 # doesn't kill the service. `setsid` would do the same; nohup is
 # more portable.
@@ -118,9 +164,9 @@ SERVICE_PID=$!
 echo "  started, PID $SERVICE_PID"
 echo "  logs at $LOG_FILE"
 
-# Step 5 — wait for priming to complete.
+# Step 4 — wait for priming to complete.
 echo ""
-echo "=== Step 5: waiting up to ${PRIME_WAIT_SECONDS}s for priming ==="
+echo "=== Step 4: waiting up to ${PRIME_WAIT_SECONDS}s for priming ==="
 # Poll healthz periodically rather than blindly sleeping. If the
 # service dies during startup, fail fast with the log tail.
 for i in $(seq 1 "$PRIME_WAIT_SECONDS"); do
@@ -141,13 +187,13 @@ for i in $(seq 1 "$PRIME_WAIT_SECONDS"); do
     fi
 done
 
-# Step 6 — publish the cache state.
+# Step 5 — publish the cache state.
 echo ""
-echo "=== Step 6: cache state ==="
+echo "=== Step 5: cache state ==="
 response=$(curl -fsS "$HEALTH_URL")
 echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
 
-# Step 7 — exit cleanly, leaving the service running.
+# Step 6 — exit cleanly, leaving the service running.
 echo ""
 echo "=== Service restarted successfully ==="
 echo "PID:     $SERVICE_PID"
