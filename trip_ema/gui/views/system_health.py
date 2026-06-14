@@ -202,9 +202,11 @@ class SystemHealthView(QWidget):
 
     def _on_refresh_tick(self) -> None:
         http = self._http
-        worker = submit(lambda: http.get_health_snapshot())
-        worker.signals.finished.connect(self._on_snapshot_received)
-        worker.signals.failed.connect(self._on_snapshot_failed)
+        submit(
+            lambda: http.get_health_snapshot(),
+            on_finished=self._on_snapshot_received,
+            on_failed=self._on_snapshot_failed,
+        )
 
     def _on_snapshot_received(self, payload: dict) -> None:
         overall = payload.get("overall_status", "unknown")

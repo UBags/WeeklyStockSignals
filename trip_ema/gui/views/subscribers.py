@@ -382,9 +382,11 @@ class SubscribersView(QWidget):
 
     def _on_refresh_tick(self) -> None:
         http = self._http
-        worker = submit(lambda: http.list_subscribers())
-        worker.signals.finished.connect(self._on_subscribers_received)
-        worker.signals.failed.connect(self._on_subscribers_failed)
+        submit(
+            lambda: http.list_subscribers(),
+            on_finished=self._on_subscribers_received,
+            on_failed=self._on_subscribers_failed,
+        )
 
     def _on_subscribers_received(self, payload: dict) -> None:
         subs = payload.get("subscribers", [])
@@ -539,9 +541,11 @@ class SubscribersView(QWidget):
                 filters=filters,
             )
 
-        worker = submit(do_create)
-        worker.signals.finished.connect(self._on_create_succeeded)
-        worker.signals.failed.connect(self._on_save_failed)
+        submit(
+            do_create,
+            on_finished=self._on_create_succeeded,
+            on_failed=self._on_save_failed,
+        )
 
     def _on_create_succeeded(self, new_row: dict) -> None:
         self._set_save_in_progress(False)
@@ -572,9 +576,11 @@ class SubscribersView(QWidget):
             )
             return http.replace_filters(subscriber_id, filters)
 
-        worker = submit(do_update)
-        worker.signals.finished.connect(self._on_update_succeeded)
-        worker.signals.failed.connect(self._on_save_failed)
+        submit(
+            do_update,
+            on_finished=self._on_update_succeeded,
+            on_failed=self._on_save_failed,
+        )
 
     def _on_update_succeeded(self, _payload: dict) -> None:
         self._set_save_in_progress(False)
@@ -603,7 +609,6 @@ class SubscribersView(QWidget):
         sid = self._editing_subscriber_id
         http = self._http
         self._test_button.setEnabled(False)
-        worker = submit(lambda: http.test_notification(sid))
 
         def on_done(payload: dict):
             self._test_button.setEnabled(self._http.token_configured)
@@ -623,8 +628,11 @@ class SubscribersView(QWidget):
                 self, "Test notification request failed",
                 message,
             )
-        worker.signals.finished.connect(on_done)
-        worker.signals.failed.connect(on_fail)
+        submit(
+            lambda: http.test_notification(sid),
+            on_finished=on_done,
+            on_failed=on_fail,
+        )
 
     def _on_delete_clicked(self) -> None:
         if self._editing_subscriber_id is None:
@@ -643,7 +651,6 @@ class SubscribersView(QWidget):
 
         http = self._http
         self._delete_button.setEnabled(False)
-        worker = submit(lambda: http.delete_subscriber(sid))
         def on_done(_payload):
             self._editing_subscriber_id = None
             self._clear_form()
@@ -652,8 +659,11 @@ class SubscribersView(QWidget):
         def on_fail(message: str):
             self._delete_button.setEnabled(True)
             QMessageBox.warning(self, "Delete failed", message)
-        worker.signals.finished.connect(on_done)
-        worker.signals.failed.connect(on_fail)
+        submit(
+            lambda: http.delete_subscriber(sid),
+            on_finished=on_done,
+            on_failed=on_fail,
+        )
 
     # ---------- filters editor ---------- #
 
@@ -735,9 +745,11 @@ class SubscribersView(QWidget):
                      "exchange": r.exchange, "symbol": r.symbol}
                     for r in rows
                 ]
-        worker = submit(fetch)
-        worker.signals.finished.connect(self._on_ticker_lookup_ready)
-        worker.signals.failed.connect(self._on_ticker_lookup_failed)
+        submit(
+            fetch,
+            on_finished=self._on_ticker_lookup_ready,
+            on_failed=self._on_ticker_lookup_failed,
+        )
 
     def _on_ticker_lookup_ready(self, rows: list) -> None:
         self._ticker_lookup = rows

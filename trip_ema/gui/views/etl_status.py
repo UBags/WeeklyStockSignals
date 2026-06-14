@@ -356,29 +356,35 @@ class EtlStatusView(QWidget):
 
         # Status — recent runs (global) + parked count (global) + tier
         # counts (scoped to picker, or server default if picker not loaded).
-        w1 = submit(lambda: http.get_etl_status(limit=20, exchange=exchange))
-        w1.signals.finished.connect(self._on_status_received)
-        w1.signals.failed.connect(self._on_status_failed)
+        submit(
+            lambda: http.get_etl_status(limit=20, exchange=exchange),
+            on_finished=self._on_status_received,
+            on_failed=self._on_status_failed,
+        )
 
         # Parked detail list (global).
-        w2 = submit(lambda: http.get_etl_parked())
-        w2.signals.finished.connect(self._on_parked_received)
-        w2.signals.failed.connect(self._on_parked_failed)
+        submit(
+            lambda: http.get_etl_parked(),
+            on_finished=self._on_parked_received,
+            on_failed=self._on_parked_failed,
+        )
 
         # Per-exchange state for the panel. Only fetched when the
         # picker has a real value; pre-load we just leave the panel
         # in its empty state.
         if exchange is not None:
-            w3 = submit(lambda: http.get_exchange_state(exchange))
-            w3.signals.finished.connect(self._on_exchange_state_received)
             # We need the exchange code at failure time too, so wrap
             # the callback. The closure pins `exchange` to the value
             # that was active when the fetch was kicked off — the
             # operator may have switched by the time the response
             # lands, but the panel should still show coherent data
             # for whichever exchange the WORKER was fetching.
-            w3.signals.failed.connect(
-                lambda msg, ex=exchange: self._on_exchange_state_failed(ex, msg)
+            submit(
+                lambda: http.get_exchange_state(exchange),
+                on_finished=self._on_exchange_state_received,
+                on_failed=(
+                    lambda msg, ex=exchange: self._on_exchange_state_failed(ex, msg)
+                ),
             )
 
     def _on_status_received(self, payload: dict) -> None:
@@ -608,7 +614,6 @@ class EtlStatusView(QWidget):
         """
         for btn in self._action_buttons:
             btn.setEnabled(False)
-        worker = submit(fn)
         def on_done(payload: dict):
             self._refresh_action_buttons_enabled()
             notes = payload.get("notes", "Submitted.")
@@ -622,8 +627,7 @@ class EtlStatusView(QWidget):
                 self, f"{label} failed",
                 f"The action could not be submitted:\n\n{message}",
             )
-        worker.signals.finished.connect(on_done)
-        worker.signals.failed.connect(on_fail)
+        submit(fn, on_finished=on_done, on_failed=on_fail)
 
     # ---------- lifecycle ---------- #
 

@@ -254,17 +254,19 @@ class NotificationLogView(QWidget):
                 limit=500, since_hours=hours,
                 subscriber_id=sub_id,
             )
-        worker = submit(fetch)
-        worker.signals.finished.connect(self._on_log_received)
-        worker.signals.failed.connect(self._on_log_failed)
+        submit(
+            fetch,
+            on_finished=self._on_log_received,
+            on_failed=self._on_log_failed,
+        )
 
     def _kick_subscribers_fetch(self) -> None:
         """Populate the subscriber filter dropdown."""
         http = self._http
-        worker = submit(lambda: http.list_subscribers())
-        worker.signals.finished.connect(self._on_subscribers_for_filter)
-        worker.signals.failed.connect(
-            lambda msg: logger.warning("Subscribers dropdown fetch failed: %s", msg)
+        submit(
+            lambda: http.list_subscribers(),
+            on_finished=self._on_subscribers_for_filter,
+            on_failed=lambda msg: logger.warning("Subscribers dropdown fetch failed: %s", msg),
         )
 
     def _on_subscribers_for_filter(self, payload: dict) -> None:

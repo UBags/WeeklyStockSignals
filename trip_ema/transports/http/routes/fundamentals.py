@@ -1265,16 +1265,38 @@ def _indicator_state_payload(s) -> IndicatorStatePayload:
 def _run_indicator_state_safe(
     db_engine: Engine, industry_name: Optional[str],
     force: bool, all_industries: bool,
+    ticker: Optional[str] = None,
+    all_tickers: bool = False,
+    exchange: Optional[str] = None,
+    timeframe: Optional[str] = None,
 ) -> None:
-    """Runs either one industry or all industries indicator-state
-    backfill. Catches exceptions so the executor doesn't die."""
+    """Runs the indicator-state compute corresponding to the mode
+    requested. Catches exceptions so the executor doesn't die."""
     from ....fundamentals.runners import (
         run_indicator_state_for_all_industries,
+        run_indicator_state_for_all_tickers,
         run_indicator_state_for_industry,
+        run_indicator_state_for_ticker,
     )
+    from ....persistence.tickers_repo import TickersRepository
+    from ....domain import TickerRef
     try:
         if all_industries:
             run_indicator_state_for_all_industries(db_engine, force=force)
+        elif all_tickers:
+            run_indicator_state_for_all_tickers(
+                db_engine, timeframe, exchange=exchange, force=force,
+            )
+        elif ticker:
+            ref = TickerRef(exchange, ticker, "EQ")
+            with db_engine.connect() as conn:
+                t = TickersRepository(conn).get_by_ref(ref)
+            if t is None:
+                logger.error("Ticker not found: %s:%s:EQ", exchange, ticker)
+                return
+            run_indicator_state_for_ticker(
+                db_engine, t.ticker_id, timeframe, force=force,
+            )
         else:
             run_indicator_state_for_industry(
                 db_engine, industry_name, force=force,
@@ -1282,7 +1304,8 @@ def _run_indicator_state_safe(
     except Exception:
         logger.exception(
             "Indicator state compute failed for industry=%s "
-            "all_industries=%s", industry_name, all_industries,
+            "all_industries=%s ticker=%s all_tickers=%s",
+            industry_name, all_industries, ticker, all_tickers,
         )
 
 
@@ -1355,32 +1378,56 @@ def get_ticker_indicator_state(
 def compute_indicator_state_endpoint(
     industry: Optional[str] = Query(None),
     all_industries: bool = Query(False),
+    ticker: Optional[str] = Query(None),
+    all_tickers: bool = Query(False),
+    exchange: Optional[str] = Query(None),
+    timeframe: Optional[str] = Query(None),
     force: bool = Query(False),
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
     executor = Depends(get_etl_executor),
 ) -> RefreshAcceptedPayload:
-    """Fire-and-forget indicator state compute. Pass either
-    industry=NAME or all_industries=true. Returns 202 immediately."""
+    """Fire-and-forget indicator state compute. Modes (mutually
+    exclusive): industry, all_industries, ticker, all_tickers."""
     _require_executor(executor)
-    if industry is None and not all_industries:
+    modes_set = sum([
+        bool(industry), bool(all_industries),
+        bool(ticker), bool(all_tickers),
+    ])
+    if modes_set == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Must provide either industry=NAME or all_industries=true",
+            detail=(
+                "Must provide one of: industry=NAME, "
+                "all_industries=true, ticker=SYMBOL, or all_tickers=true"
+            ),
         )
-    if industry is not None and all_industries:
+    if modes_set > 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="industry and all_industries are mutually exclusive",
+            detail="industry/all_industries/ticker/all_tickers are mutually exclusive",
+        )
+    if ticker and (not exchange or not timeframe):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ticker requires both exchange and timeframe",
+        )
+    if all_tickers and not timeframe:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="all_tickers requires timeframe",
         )
     logger.info(
         "Admin: compute-indicator-state requested",
         extra={"industry": industry, "all_industries": all_industries,
+               "ticker": ticker, "all_tickers": all_tickers,
+               "exchange": exchange, "timeframe": timeframe,
                "force": force},
     )
     executor.submit(
         _run_indicator_state_safe, db_engine,
         industry, force, all_industries,
+        ticker, all_tickers, exchange, timeframe,
     )
     return RefreshAcceptedPayload(
         action="compute-indicator-state",
@@ -1388,7 +1435,9 @@ def compute_indicator_state_endpoint(
         accepted_at=datetime.now(timezone.utc),
         notes=(
             f"Indicator state compute (industry={industry!r}, "
-            f"all_industries={all_industries}) submitted."
+            f"all_industries={all_industries}, ticker={ticker!r}, "
+            f"all_tickers={all_tickers}, timeframe={timeframe!r}) "
+            f"submitted."
         ),
     )
 
@@ -1446,14 +1495,36 @@ def _signal_event_payload(e) -> SignalEventPayload:
 def _run_signals_safe(
     db_engine: Engine, industry_name: Optional[str],
     force: bool, all_industries: bool,
+    ticker: Optional[str] = None,
+    all_tickers: bool = False,
+    exchange: Optional[str] = None,
+    timeframe: Optional[str] = None,
 ) -> None:
     from ....fundamentals.runners import (
         run_signal_events_for_all_industries,
+        run_signal_events_for_all_tickers,
         run_signal_events_for_industry,
+        run_signal_events_for_ticker,
     )
+    from ....persistence.tickers_repo import TickersRepository
+    from ....domain import TickerRef
     try:
         if all_industries:
             run_signal_events_for_all_industries(db_engine, force=force)
+        elif all_tickers:
+            run_signal_events_for_all_tickers(
+                db_engine, timeframe, exchange=exchange, force=force,
+            )
+        elif ticker:
+            ref = TickerRef(exchange, ticker, "EQ")
+            with db_engine.connect() as conn:
+                t = TickersRepository(conn).get_by_ref(ref)
+            if t is None:
+                logger.error("Ticker not found: %s:%s:EQ", exchange, ticker)
+                return
+            run_signal_events_for_ticker(
+                db_engine, t.ticker_id, timeframe, force=force,
+            )
         else:
             run_signal_events_for_industry(
                 db_engine, industry_name, force=force,
@@ -1461,7 +1532,8 @@ def _run_signals_safe(
     except Exception:
         logger.exception(
             "Signal events compute failed for industry=%s "
-            "all_industries=%s", industry_name, all_industries,
+            "all_industries=%s ticker=%s all_tickers=%s",
+            industry_name, all_industries, ticker, all_tickers,
         )
 
 
@@ -1543,32 +1615,56 @@ def list_recent_signal_events(
 def compute_signals_endpoint(
     industry: Optional[str] = Query(None),
     all_industries: bool = Query(False),
+    ticker: Optional[str] = Query(None),
+    all_tickers: bool = Query(False),
+    exchange: Optional[str] = Query(None),
+    timeframe: Optional[str] = Query(None),
     force: bool = Query(False),
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
     executor = Depends(get_etl_executor),
 ) -> RefreshAcceptedPayload:
-    """Fire-and-forget signal events compute. Pass either
-    industry=NAME or all_industries=true."""
+    """Fire-and-forget signal events compute. Modes (mutually
+    exclusive): industry, all_industries, ticker, all_tickers."""
     _require_executor(executor)
-    if industry is None and not all_industries:
+    modes_set = sum([
+        bool(industry), bool(all_industries),
+        bool(ticker), bool(all_tickers),
+    ])
+    if modes_set == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Must provide either industry=NAME or all_industries=true",
+            detail=(
+                "Must provide one of: industry=NAME, "
+                "all_industries=true, ticker=SYMBOL, or all_tickers=true"
+            ),
         )
-    if industry is not None and all_industries:
+    if modes_set > 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="industry and all_industries are mutually exclusive",
+            detail="industry/all_industries/ticker/all_tickers are mutually exclusive",
+        )
+    if ticker and (not exchange or not timeframe):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ticker requires both exchange and timeframe",
+        )
+    if all_tickers and not timeframe:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="all_tickers requires timeframe",
         )
     logger.info(
         "Admin: compute-signals requested",
         extra={"industry": industry, "all_industries": all_industries,
+               "ticker": ticker, "all_tickers": all_tickers,
+               "exchange": exchange, "timeframe": timeframe,
                "force": force},
     )
     executor.submit(
         _run_signals_safe, db_engine,
         industry, force, all_industries,
+        ticker, all_tickers, exchange, timeframe,
     )
     return RefreshAcceptedPayload(
         action="compute-signals",
@@ -1576,6 +1672,74 @@ def compute_signals_endpoint(
         accepted_at=datetime.now(timezone.utc),
         notes=(
             f"Signal events compute (industry={industry!r}, "
-            f"all_industries={all_industries}) submitted."
+            f"all_industries={all_industries}, ticker={ticker!r}, "
+            f"all_tickers={all_tickers}, timeframe={timeframe!r}) "
+            f"submitted."
+        ),
+    )
+
+
+# ============================================================
+# Phase 4C — EoD pipeline endpoint
+# ============================================================
+
+
+def _run_eod_pipeline_safe(
+    db_engine: Engine, exchange: str,
+    include_tickers: bool, timeframe: str, force: bool,
+) -> None:
+    """Executor wrapper: catches exceptions so the pipeline failing
+    doesn't kill the executor thread."""
+    from ....fundamentals.eod_pipeline import run_eod_pipeline
+    try:
+        result = run_eod_pipeline(
+            db_engine, exchange,
+            include_tickers=include_tickers,
+            timeframe=timeframe, force=force,
+        )
+        logger.info(
+            "EoD pipeline finished via HTTP: exchange=%s status=%s "
+            "duration=%.1fs",
+            exchange, result.overall_status,
+            result.duration_seconds or 0.0,
+        )
+    except Exception:
+        logger.exception(
+            "EoD pipeline raised via HTTP for exchange=%s", exchange,
+        )
+
+
+@router.post("/run-eod-pipeline",
+             response_model=RefreshAcceptedPayload, status_code=202)
+def run_eod_pipeline_endpoint(
+    exchange: str = Query(..., min_length=1, max_length=8),
+    include_tickers: bool = Query(False),
+    timeframe: str = Query("1W", min_length=1, max_length=8),
+    force: bool = Query(False),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+    executor = Depends(get_etl_executor),
+) -> RefreshAcceptedPayload:
+    """Fire-and-forget EoD pipeline. Runs 8 phases for one exchange
+    (10 with include_tickers=True)."""
+    _require_executor(executor)
+    logger.info(
+        "Admin: run-eod-pipeline requested",
+        extra={"exchange": exchange,
+               "include_tickers": include_tickers,
+               "timeframe": timeframe, "force": force},
+    )
+    executor.submit(
+        _run_eod_pipeline_safe, db_engine,
+        exchange, include_tickers, timeframe, force,
+    )
+    return RefreshAcceptedPayload(
+        action="run-eod-pipeline",
+        run_id=None,
+        accepted_at=datetime.now(timezone.utc),
+        notes=(
+            f"EoD pipeline (exchange={exchange}, "
+            f"include_tickers={include_tickers}, "
+            f"timeframe={timeframe}, force={force}) submitted."
         ),
     )

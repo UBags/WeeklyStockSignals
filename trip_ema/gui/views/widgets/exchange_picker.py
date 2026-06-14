@@ -178,9 +178,11 @@ class ExchangePicker(QWidget):
     def _fetch_exchanges_list(self) -> None:
         """One-shot async fetch of /v1/admin/exchanges."""
         http = self._http
-        worker = submit(lambda: http.list_exchanges())
-        worker.signals.finished.connect(self._on_exchanges_received)
-        worker.signals.failed.connect(self._on_exchanges_failed)
+        submit(
+            lambda: http.list_exchanges(),
+            on_finished=self._on_exchanges_received,
+            on_failed=self._on_exchanges_failed,
+        )
 
     def _on_exchanges_received(self, payload: dict) -> None:
         exchanges = list(payload.get("exchanges", []))

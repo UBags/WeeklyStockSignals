@@ -1649,3 +1649,168 @@ class TestComputeSignalsEndpoint:
             "/v1/fundamentals/compute-signals?all_industries=true"
         )
         assert r.status_code == 401
+
+
+# ============================================================
+# Phase 7 — HTTP per-ticker mode tests
+# ============================================================
+
+
+class TestComputeIndicatorStateTickerMode:
+
+    def test_ticker_requires_exchange_and_timeframe(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-indicator-state?ticker=RELIANCE",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+        assert "exchange" in r.json()["detail"] or "timeframe" in r.json()["detail"]
+
+    def test_all_tickers_requires_timeframe(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-indicator-state?all_tickers=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+        assert "timeframe" in r.json()["detail"]
+
+    def test_multiple_modes_rejected(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-indicator-state"
+            "?industry=IT&all_tickers=true&timeframe=1W",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+        assert "mutually exclusive" in r.json()["detail"]
+
+    def test_all_tickers_returns_202(
+        self, real_db_client, db_engine, monkeypatch,
+    ):
+        called = []
+        def fake_runner(engine, timeframe, *, exchange=None, force=False, min_bars=30):
+            called.append((timeframe, exchange, force))
+            return {"succeeded": [], "skipped": [], "failed": []}
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_indicator_state_for_all_tickers",
+            fake_runner,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-indicator-state"
+            "?all_tickers=true&timeframe=1W&exchange=NSE",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        assert called == [("1W", "NSE", False)]
+
+
+class TestComputeSignalsTickerMode:
+
+    def test_ticker_requires_exchange_and_timeframe(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-signals?ticker=RELIANCE",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 400
+
+    def test_all_tickers_returns_202(
+        self, real_db_client, db_engine, monkeypatch,
+    ):
+        called = []
+        def fake_runner(engine, timeframe, *, exchange=None, force=False):
+            called.append((timeframe, exchange))
+            return {"succeeded": [], "skipped": [], "failed": []}
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_signal_events_for_all_tickers",
+            fake_runner,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/compute-signals"
+            "?all_tickers=true&timeframe=1W",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        assert called == [("1W", None)]
+
+
+# ============================================================
+# Phase 4C — run-eod-pipeline endpoint
+# ============================================================
+
+
+class TestRunEodPipelineEndpoint:
+
+    def test_returns_202(
+        self, real_db_client, db_engine, monkeypatch,
+    ):
+        from trip_ema.fundamentals.eod_pipeline import (
+            PipelineResult,
+        )
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+
+        called = []
+        def fake_pipeline(engine, exchange, **kw):
+            called.append((exchange, kw))
+            return PipelineResult(
+                exchange=exchange, started_at=now, finished_at=now,
+                steps=[],
+            )
+
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.eod_pipeline.run_eod_pipeline",
+            fake_pipeline,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/run-eod-pipeline?exchange=NSE",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        # Need to give the executor a moment to actually run.
+        import time
+        time.sleep(0.2)
+        # The pipeline was called.
+        assert len(called) == 1
+        assert called[0][0] == "NSE"
+
+    def test_include_tickers_flag(
+        self, real_db_client, db_engine, monkeypatch,
+    ):
+        from trip_ema.fundamentals.eod_pipeline import PipelineResult
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        called = []
+        def fake_pipeline(engine, exchange, **kw):
+            called.append(kw)
+            return PipelineResult(
+                exchange=exchange, started_at=now, finished_at=now,
+                steps=[],
+            )
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.eod_pipeline.run_eod_pipeline",
+            fake_pipeline,
+        )
+        r = real_db_client.post(
+            "/v1/fundamentals/run-eod-pipeline"
+            "?exchange=NSE&include_tickers=true&timeframe=1D&force=true",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 202
+        import time
+        time.sleep(0.2)
+        assert len(called) == 1
+        assert called[0]["include_tickers"] is True
+        assert called[0]["timeframe"] == "1D"
+        assert called[0]["force"] is True
+
+    def test_requires_auth(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/run-eod-pipeline?exchange=NSE"
+        )
+        assert r.status_code == 401
+
+    def test_exchange_is_required(self, real_db_client):
+        r = real_db_client.post(
+            "/v1/fundamentals/run-eod-pipeline",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422  # FastAPI validation

@@ -335,9 +335,11 @@ class TickersView(QWidget):
                 summary = ticker_universe_summary(conn)
             return rows, summary
 
-        worker = submit(fetch_rows)
-        worker.signals.finished.connect(self._on_rows_received)
-        worker.signals.failed.connect(self._on_rows_failed)
+        submit(
+            fetch_rows,
+            on_finished=self._on_rows_received,
+            on_failed=self._on_rows_failed,
+        )
 
     def _on_rows_received(self, payload) -> None:
         rows, summary = payload
@@ -408,9 +410,11 @@ class TickersView(QWidget):
         def fetch():
             with db.connect() as conn:
                 return recent_signal_events(conn, ticker_id, limit=10)
-        worker = submit(fetch)
-        worker.signals.finished.connect(self._on_events_received)
-        worker.signals.failed.connect(self._on_events_failed)
+        submit(
+            fetch,
+            on_finished=self._on_events_received,
+            on_failed=self._on_events_failed,
+        )
 
     def _on_events_received(self, events: list[SignalEventRow]) -> None:
         if not events:
@@ -432,9 +436,11 @@ class TickersView(QWidget):
         def fetch():
             with db.connect() as conn:
                 return ticker_symbol_history(conn, ticker_id)
-        worker = submit(fetch)
-        worker.signals.finished.connect(self._on_history_received)
-        worker.signals.failed.connect(self._on_history_failed)
+        submit(
+            fetch,
+            on_finished=self._on_history_received,
+            on_failed=self._on_history_failed,
+        )
 
     def _on_history_received(self, history: list[SymbolHistoryRow]) -> None:
         if not history:
@@ -526,7 +532,6 @@ class TickersView(QWidget):
             return
 
         self._reprime_button.setEnabled(False)
-        worker = submit(lambda: self._http.reprime_ticker(row.exchange, row.symbol))
         def on_done(payload: dict):
             self._reprime_button.setEnabled(self._http.token_configured)
             msg = f"Reprime: succeeded={payload.get('succeeded')}, " \
@@ -539,8 +544,11 @@ class TickersView(QWidget):
             QMessageBox.warning(
                 self, f"Reprime {row.symbol} failed", message,
             )
-        worker.signals.finished.connect(on_done)
-        worker.signals.failed.connect(on_fail)
+        submit(
+            lambda: self._http.reprime_ticker(row.exchange, row.symbol),
+            on_finished=on_done,
+            on_failed=on_fail,
+        )
 
     # ---------- lifecycle ---------- #
 

@@ -1772,3 +1772,328 @@ class TestCmdFundamentalsStatusShowsSignalCoverage:
         out = capsys.readouterr().out
         assert rc == 0
         assert "Signal events coverage" not in out
+
+
+# ============================================================
+# Phase 7 CLI tests — per-ticker modes
+# ============================================================
+
+
+class TestCmdComputeIndicatorStateTickerModes:
+
+    def test_rejects_more_than_one_mode(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = "IT - Services"
+        args.all_industries = False
+        args.ticker = "RELIANCE"
+        args.all_tickers = False
+        args.exchange = "NSE"
+        args.timeframe = "1W"
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "mutually exclusive" in err
+
+    def test_ticker_requires_timeframe(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_industries = False
+        args.ticker = "RELIANCE"
+        args.all_tickers = False
+        args.exchange = "NSE"
+        args.timeframe = None
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "timeframe" in err
+
+    def test_ticker_requires_exchange(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_industries = False
+        args.ticker = "RELIANCE"
+        args.all_tickers = False
+        args.exchange = None
+        args.timeframe = "1W"
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "exchange" in err.lower()
+
+    def test_unknown_ticker_returns_2(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_industries = False
+        args.ticker = "NOSUCH"
+        args.all_tickers = False
+        args.exchange = "NSE"
+        args.timeframe = "1W"
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "not found" in err
+
+    def test_all_tickers_requires_timeframe(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_industries = False
+        args.ticker = None
+        args.all_tickers = True
+        args.exchange = None
+        args.timeframe = None
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "timeframe" in err
+
+    def test_all_tickers_success_path(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        def fake_runner(engine, timeframe, *, exchange=None, force=False, min_bars=30):
+            return {
+                "succeeded": [
+                    (1, "RELIANCE", 80, 6),
+                    (2, "TCS", 80, 6),
+                ],
+                "skipped": [],
+                "failed": [],
+            }
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_indicator_state_for_all_tickers",
+            fake_runner,
+        )
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_industries = False
+        args.ticker = None
+        args.all_tickers = True
+        args.exchange = None
+        args.timeframe = "1W"
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_indicator_state
+        rc = cmd_compute_indicator_state(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "RELIANCE" in out
+        assert "TCS" in out
+
+
+class TestCmdComputeSignalsTickerModes:
+
+    def test_ticker_requires_exchange_and_timeframe(
+        self, db_engine, fake_config, patched_engine_factory, capsys,
+    ):
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_industries = False
+        args.ticker = "RELIANCE"
+        args.all_tickers = False
+        args.exchange = None
+        args.timeframe = None
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_signals
+        rc = cmd_compute_signals(args, fake_config)
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "exchange" in err.lower() or "timeframe" in err.lower()
+
+    def test_all_tickers_success_path(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        def fake_runner(engine, timeframe, *, exchange=None, force=False):
+            return {
+                "succeeded": [(1, "RELIANCE", 12), (2, "TCS", 8)],
+                "skipped": [],
+                "failed": [],
+            }
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.runners.run_signal_events_for_all_tickers",
+            fake_runner,
+        )
+        args = type("A", (), {})()
+        args.industry = None
+        args.all_industries = False
+        args.ticker = None
+        args.all_tickers = True
+        args.exchange = None
+        args.timeframe = "1W"
+        args.force = False
+        from trip_ema.fundamentals.cli import cmd_compute_signals
+        rc = cmd_compute_signals(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "RELIANCE" in out
+        assert "TCS" in out
+
+
+# ============================================================
+# Phase 4C CLI tests — run-eod-pipeline
+# ============================================================
+
+
+class TestCmdRunEodPipeline:
+
+    def _make_args(self, exchange="NSE", include_tickers=False,
+                   timeframe=None, force=False):
+        args = type("A", (), {})()
+        args.exchange = exchange
+        args.include_tickers = include_tickers
+        args.timeframe = timeframe
+        args.force = force
+        return args
+
+    def test_returns_0_on_full_success(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        from trip_ema.fundamentals.eod_pipeline import (
+            PipelineResult, StepResult, StepStatus,
+        )
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        fake_result = PipelineResult(
+            exchange="NSE", started_at=now, finished_at=now,
+            steps=[
+                StepResult(
+                    name="refresh-industry",
+                    status=StepStatus.SUCCESS,
+                    succeeded=100, started_at=now, finished_at=now,
+                ),
+            ],
+        )
+
+        def fake_run_pipeline(engine, exchange, *,
+                              include_tickers=False, timeframe="1W",
+                              force=False, progress_callback=None):
+            if progress_callback:
+                progress_callback(fake_result.steps[0])
+            return fake_result
+
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.eod_pipeline.run_eod_pipeline",
+            fake_run_pipeline,
+        )
+        args = self._make_args()
+        from trip_ema.fundamentals.cli import cmd_run_eod_pipeline
+        rc = cmd_run_eod_pipeline(args, fake_config)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "SUCCESS" in out
+        assert "refresh-industry" in out
+
+    def test_returns_1_on_partial(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        from trip_ema.fundamentals.eod_pipeline import (
+            PipelineResult, StepResult, StepStatus,
+        )
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        fake_result = PipelineResult(
+            exchange="NSE", started_at=now, finished_at=now,
+            steps=[
+                StepResult(
+                    name="refresh-shares",
+                    status=StepStatus.PARTIAL,
+                    succeeded=80, failed=20,
+                    started_at=now, finished_at=now,
+                ),
+            ],
+        )
+
+        def fake_pipeline(engine, exchange, **kw):
+            return fake_result
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.eod_pipeline.run_eod_pipeline",
+            fake_pipeline,
+        )
+        args = self._make_args()
+        from trip_ema.fundamentals.cli import cmd_run_eod_pipeline
+        rc = cmd_run_eod_pipeline(args, fake_config)
+        assert rc == 1
+
+    def test_returns_2_on_fatal(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        from trip_ema.fundamentals.eod_pipeline import (
+            PipelineResult, StepResult, StepStatus,
+        )
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        fake_result = PipelineResult(
+            exchange="NSE", started_at=now, finished_at=now,
+            steps=[
+                StepResult(
+                    name="refresh-industry",
+                    status=StepStatus.FAILED,
+                    error="DB down",
+                    started_at=now, finished_at=now,
+                ),
+            ],
+        )
+
+        def fake_pipeline(engine, exchange, **kw):
+            return fake_result
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.eod_pipeline.run_eod_pipeline",
+            fake_pipeline,
+        )
+        args = self._make_args()
+        from trip_ema.fundamentals.cli import cmd_run_eod_pipeline
+        rc = cmd_run_eod_pipeline(args, fake_config)
+        assert rc == 2
+
+    def test_include_tickers_flag_passed(
+        self, db_engine, fake_config, patched_engine_factory,
+        monkeypatch, capsys,
+    ):
+        from trip_ema.fundamentals.eod_pipeline import (
+            PipelineResult, StepResult, StepStatus,
+        )
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        captured_kwargs = {}
+
+        def fake_pipeline(engine, exchange, **kw):
+            captured_kwargs.update(kw)
+            return PipelineResult(
+                exchange=exchange, started_at=now, finished_at=now,
+                steps=[],
+            )
+
+        monkeypatch.setattr(
+            "trip_ema.fundamentals.eod_pipeline.run_eod_pipeline",
+            fake_pipeline,
+        )
+        args = self._make_args(
+            include_tickers=True, timeframe="1D", force=True,
+        )
+        from trip_ema.fundamentals.cli import cmd_run_eod_pipeline
+        cmd_run_eod_pipeline(args, fake_config)
+        assert captured_kwargs.get("include_tickers") is True
+        assert captured_kwargs.get("timeframe") == "1D"
+        assert captured_kwargs.get("force") is True

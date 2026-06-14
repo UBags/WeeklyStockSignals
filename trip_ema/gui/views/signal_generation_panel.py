@@ -337,12 +337,10 @@ class SignalGenerationPanel(QGroupBox):
                 force_full=force_full,
             )
 
-        worker = submit(do_post)
-        worker.signals.finished.connect(
-            lambda payload: self._on_post_succeeded(payload, exchange)
-        )
-        worker.signals.failed.connect(
-            lambda msg: self._on_post_failed(msg, exchange)
+        submit(
+            do_post,
+            on_finished=lambda payload: self._on_post_succeeded(payload, exchange),
+            on_failed=lambda msg: self._on_post_failed(msg, exchange),
         )
 
     def _on_post_succeeded(self, payload: dict, exchange: str) -> None:
@@ -414,12 +412,10 @@ class SignalGenerationPanel(QGroupBox):
         def do_get():
             return http.get_signal_generation_metadata(exchange)
 
-        worker = submit(do_get)
-        worker.signals.finished.connect(
-            lambda payload: self._on_metadata_received(exchange, payload)
-        )
-        worker.signals.failed.connect(
-            lambda msg: self._on_metadata_failed(exchange, msg)
+        submit(
+            do_get,
+            on_finished=lambda payload: self._on_metadata_received(exchange, payload),
+            on_failed=lambda msg: self._on_metadata_failed(exchange, msg),
         )
 
     def _on_metadata_received(self, exchange: str, payload: dict) -> None:

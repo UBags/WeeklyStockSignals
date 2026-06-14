@@ -350,9 +350,11 @@ class SignalsView(QWidget):
                     for r in rows
                 ]
 
-        worker = submit(fetch)
-        worker.signals.finished.connect(self._on_combo_rows_received)
-        worker.signals.failed.connect(self._on_combo_rows_failed)
+        submit(
+            fetch,
+            on_finished=self._on_combo_rows_received,
+            on_failed=self._on_combo_rows_failed,
+        )
 
     def _on_combo_rows_received(self, rows: list) -> None:
         self._ticker_combo.clear()
@@ -421,13 +423,13 @@ class SignalsView(QWidget):
         inst = self._current_instrument or "EQ"
         years = self._current_years
         self._chart_status_label.setText(f"Loading {sym}...")
-        worker = submit(
+        submit(
             lambda: self._http.get_signal_history(
                 ex, sym, instrument=inst, years=years,
-            )
+            ),
+            on_finished=self._on_history_received,
+            on_failed=self._on_history_failed,
         )
-        worker.signals.finished.connect(self._on_history_received)
-        worker.signals.failed.connect(self._on_history_failed)
 
     def _on_history_received(self, payload: dict) -> None:
         self._last_payload = payload

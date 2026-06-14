@@ -32,16 +32,14 @@ class _WorkerSignals(QObject):
 
 
 class BackgroundWorker(QRunnable):
-    """One-shot background task. Construct, call .signals.finished.connect(...),
-    then submit to a QThreadPool via .pool.start(worker).
+    """One-shot background task. Prefer the `submit()` helper below
+    over constructing this directly — it handles the lifetime and
+    callback-ordering correctness properties that raw construction
+    leaves to the caller (and that 22 call sites previously got wrong).
 
-    Example:
-        def fetch():
-            return http_client.get_etl_status()
-        worker = BackgroundWorker(fetch)
-        worker.signals.finished.connect(on_status_received)
-        worker.signals.failed.connect(on_status_error)
-        QThreadPool.globalInstance().start(worker)
+    If you do construct one directly: connect your callbacks BEFORE
+    calling `pool.start(worker)`, and hold a strong reference to the
+    worker until both signals have had a chance to deliver.
     """
 
     def __init__(self, fn: Callable[[], Any], *args, **kwargs):
@@ -50,6 +48,14 @@ class BackgroundWorker(QRunnable):
         self._args = args
         self._kwargs = kwargs
         self.signals = _WorkerSignals()
+        # CRITICAL: QRunnable.autoDelete() defaults to True, which makes
+        # QThreadPool delete the C++ side of the runnable as soon as
+        # run() returns. Our `signals` QObject is owned by this wrapper,
+        # so once Qt tears the C++ runnable down, queued-signal delivery
+        # on the main thread can dispatch into freed memory → silent
+        # process death with no Python traceback. The lifetime of this
+        # worker is managed by `submit()` instead (see _INFLIGHT below).
+        self.setAutoDelete(False)
 
     def run(self) -> None:
         try:
@@ -61,18 +67,64 @@ class BackgroundWorker(QRunnable):
         self.signals.finished.emit(result)
 
 
-def submit(fn: Callable[[], Any]) -> BackgroundWorker:
-    """Convenience: build a worker, submit to the default thread pool,
-    and return it so the caller can wire up the signals.
+def submit(
+    fn: Callable[[], Any],
+    *,
+    on_finished: Optional[Callable[[Any], None]] = None,
+    on_failed: Optional[Callable[[str], None]] = None,
+) -> BackgroundWorker:
+    """Build a worker, wire its callbacks, submit to the default pool.
+
+    Two correctness properties this function guarantees that callers
+    used to have to get right themselves (and didn't):
+
+      1. **Callbacks connect BEFORE start().** Otherwise, for any task
+         that finishes faster than the caller's next line of Python
+         (cached HTTP responses, small DB reads), the signal is emitted
+         into nothing and the callback never fires. Symptom: panels
+         that "sometimes don't refresh".
+
+      2. **The worker is kept alive until both signals have had a
+         chance to deliver.** Local `worker = submit(...)` variables go
+         out of scope at the end of the calling method; combined with
+         QRunnable's default autoDelete=True (now disabled in
+         BackgroundWorker.__init__), this previously caused silent
+         process death from use-after-free on the C++ QObject backing
+         `worker.signals`. The module-level _INFLIGHT set holds a
+         strong Python reference until the worker reports done.
 
     Usage:
-        w = submit(lambda: http_client.get_etl_status())
-        w.signals.finished.connect(self._on_status)
-        w.signals.failed.connect(self._on_status_error)
+        submit(
+            lambda: http_client.get_etl_status(),
+            on_finished=self._on_status,
+            on_failed=self._on_status_error,
+        )
+
+    The old `w = submit(fn); w.signals.finished.connect(...)` pattern
+    is still tolerated for backward compat, but it carries the
+    fast-emit race described above — prefer the kwargs form.
     """
     worker = BackgroundWorker(fn)
+    if on_finished is not None:
+        worker.signals.finished.connect(on_finished)
+    if on_failed is not None:
+        worker.signals.failed.connect(on_failed)
+    _INFLIGHT.add(worker)
+    # Drop our strong ref once the worker has reported either way.
+    # Using a default arg pins `worker` into the lambda's scope without
+    # closing over the surrounding name (which is fine here, but kept
+    # for clarity).
+    worker.signals.finished.connect(lambda _r, w=worker: _INFLIGHT.discard(w))
+    worker.signals.failed.connect(lambda _m, w=worker: _INFLIGHT.discard(w))
     QThreadPool.globalInstance().start(worker)
     return worker
+
+
+# Strong references for in-flight workers. Without this, locals go out
+# of scope at the end of the caller's method and the worker becomes
+# eligible for GC the moment Python finishes the call frame — long
+# before the background task finishes. See submit() for the full story.
+_INFLIGHT: set[BackgroundWorker] = set()
 
 
 class RefreshScheduler(QObject):

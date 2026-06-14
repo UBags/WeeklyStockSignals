@@ -110,9 +110,17 @@ def recent_signal_events(
     *,
     limit: int = 10,
 ) -> list[SignalEventRow]:
-    """The detail panel's signal-history list."""
+    """The detail panel's signal-history list.
+
+    The DB column is `signal_type` (see signal_events DDL in
+    0001_initial_schema.sql); we alias it to `signal` here so the
+    dataclass field and the view's e.signal access stay consistent
+    with the HTTP-side payload shape, which also aliases this way
+    (see transports/http/routes/signals.py).
+    """
     rows = conn.execute(text("""
-        SELECT event_id, bar_timestamp, timeframe, signal, price_at_signal
+        SELECT event_id, bar_timestamp, timeframe,
+               signal_type AS signal, price_at_signal
         FROM signal_events
         WHERE ticker_id = :tid
         ORDER BY bar_timestamp DESC
