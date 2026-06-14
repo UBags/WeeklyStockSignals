@@ -530,6 +530,29 @@ def _run_fetch_pass(
         )
 
     with correlation_id(cid):
+        # Step 0: close any orphaned etl_runs rows for this exchange
+        # left behind by an earlier mid-run process death. Idempotent;
+        # cheap (single UPDATE). Runs at the start of every fetch
+        # pass so EoD (~daily) naturally serves as a janitor for
+        # this exchange, and the Phase 15b backtest concurrent-run
+        # guard never sees a dead row as "still in flight". See
+        # EtlStatusRepository.cleanup_stale_runs for the threshold
+        # rationale.
+        with db_engine.begin() as conn:
+            n_orphans = EtlStatusRepository(conn).cleanup_stale_runs(
+                exchange=exchange,
+            )
+        if n_orphans > 0:
+            logger.warning(
+                "ETL: auto-closed %d orphaned etl_runs row(s) for exchange=%s "
+                "(left dangling by an earlier mid-run process death)",
+                n_orphans, exchange,
+                extra={
+                    "exchange": exchange, "kind": kind.value,
+                    "n_orphans": n_orphans,
+                },
+            )
+
         # Open the run row first
         with db_engine.begin() as conn:
             run_id = EtlStatusRepository(conn).open_run(

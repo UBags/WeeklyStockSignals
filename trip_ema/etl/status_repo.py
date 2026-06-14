@@ -172,6 +172,63 @@ class EtlStatusRepository:
             {"out": outcome.value, "extra_notes": notes, "rid": run_id},
         )
 
+    def cleanup_stale_runs(
+        self,
+        *,
+        exchange: str,
+        stale_after_hours: int = 6,
+    ) -> int:
+        """Close any etl_runs rows for `exchange` that look orphaned —
+        no `outcome` and no `finished_at`, with `started_at` older
+        than `stale_after_hours`.
+
+        Why this exists. The etl_runs lifecycle is "open in one
+        transaction, close in another". If the process dies mid-run
+        (kill -9, OS reboot, crash), the row is left dangling with
+        outcome=NULL and finished_at=NULL forever. Operators see
+        these in the GUI / `trip-ema-etl status` and have to clear
+        them manually. Worse, Phase 15b's signal_backtest
+        concurrent-run guard reads `outcome IS NULL` as "still in
+        flight" — a stale row would block all subsequent backtest
+        submissions for that exchange until someone notices.
+
+        Threshold. Default 6 hours. EoD typically finishes in ~15
+        minutes; intraday in ~5; backfills can take an hour or two.
+        6h is comfortably above the slowest legitimate case and well
+        below the timescale at which a real orphan is operationally
+        confusing. Operators can pass a longer value if they expect
+        a multi-hour backfill to be running concurrently.
+
+        Scope. Only rows for `exchange` are touched. Rows with
+        `exchange IS NULL` (pre-Phase-15a, no longer produced by new
+        code) are left alone — they're months old and don't interact
+        with the per-exchange guards.
+
+        Idempotency. Called many times safely. Each call writes the
+        same UPDATE for the same matching rows; concurrent callers
+        race harmlessly on the final write.
+
+        Returns the number of rows closed. Caller is expected to
+        log this if > 0.
+        """
+        result = self._conn.execute(
+            text("""
+                UPDATE etl_runs SET
+                    finished_at = NOW(),
+                    outcome     = 'failed',
+                    notes       = COALESCE(notes || E'\n', '')
+                                  || 'cleanup: orphaned by mid-run '
+                                  || 'process death; auto-closed after '
+                                  || :hrs || 'h'
+                WHERE exchange = :ex
+                  AND outcome IS NULL
+                  AND finished_at IS NULL
+                  AND started_at < NOW() - (:hrs || ' hours')::interval
+            """),
+            {"ex": exchange, "hrs": stale_after_hours},
+        )
+        return result.rowcount or 0
+
     def list_recent_runs(self, limit: int = 50) -> list[RunRecord]:
         """For the GUI's ETL-history tab."""
         result = self._conn.execute(
