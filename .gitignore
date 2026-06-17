@@ -21,4 +21,10 @@ tests/TestMail.py
 scripts/test_smtp.py
 
 # Brevo / Gmail / OAuth secrets — never commit
-secrets/
+# Ignore all files in secrets/ but keep the directory + the .example
+# template under version control. Real secrets files live alongside
+# but are filtered out by the wildcard.
+secrets/*
+!secrets/.gitkeep
+!secrets/*.example
+!secrets/README.md
