@@ -11,18 +11,37 @@ consumer abstraction, and a small batcher that renders the message body.
 |---|---|
 | `__init__.py` | Marker |
 | `base.py` | Abstract `NotificationTransport` + `NullTransport` (used by tests) |
-| `email_transport.py` | SMTP delivery |
+| `email_transport.py` | Brevo HTTP API delivery (POST to `/v3/smtp/email`). Replaced the SMTP implementation after Microsoft disabled `SmtpClientAuthentication` for new Outlook.com personal mailboxes and Gmail moved to OAuth-only |
 | `webhook_transport.py` | HTTP POST delivery (Slack-compatible JSON body) |
 | `circuit_breaker.py` | Per-transport failure-window breaker — opens after `failure_threshold` consecutive failures within a window; closes after `reset_timeout_seconds` of quiet; half-open lets `half_open_max_successes` succeed before fully closing |
 | `batcher.py` | Renders one event line (text or JSON) for the message body. Single-event today; reserved for multi-event batching |
 | `redis_queue.py` | `RedisQueue` producer (used by `SubscriberDistributor`) + consumer (used by `NotifierWorker`). Also owns the DLQ data structure and the Redis HASH attempt counter |
 
+## Email transport (Brevo HTTP API)
+
+`email_transport.py` posts to Brevo's transactional `/v3/smtp/email`
+endpoint with an `api-key` header. The key itself is read at startup
+from a YAML file outside the main config (see
+`../config/brevo_secrets.py` and `transports.brevo.secrets_file` in
+`config.yaml`); the loader validates file perms and key prefix, then
+crashes the process on any defect — there is **no env-var fallback**
+that could silently substitute `NullTransport` for misconfigured
+email. The old SMTP implementation's `TRIP_EMA_SMTP_HOST`-unset path
+lost weeks of notifications by silently substituting `NullTransport`
+at send time; the new contract makes that bug class structurally
+impossible.
+
+Sender verification is enforced by Brevo itself: the `From:` address
+listed in `transports.brevo.sender_email` must be confirmed in
+Brevo's Senders settings, or every send returns
+`400 invalid_parameter`. Setup is a one-time email-click flow.
+
 ## Notifier worker
 
 The consumer side lives in `../notifier_worker.py` (top-level module,
 not in this directory). Architecture decision: the worker is a
-separate Python process from the engine — a wedged SMTP server can't
-slow down compute.
+separate Python process from the engine — a wedged transport (Brevo
+API, webhook target) can't slow down compute.
 
 ## Circuit breaker pattern
 
