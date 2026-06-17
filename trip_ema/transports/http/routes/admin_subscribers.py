@@ -394,7 +394,11 @@ def _build_transport(transport_name: str, config: Config):
     Reuses the same transport-builder helpers app.py uses so the
     test sends through the same code paths production does."""
     if transport_name == "email":
-        from ...app import _build_email_transport_or_null
+        # 4 dots: trip_ema.transports.http.routes -> trip_ema.app
+        # (this used to be 3 dots, resolving to the non-existent
+        # trip_ema.transports.app; silently broken until the test-
+        # notification endpoint was first exercised.)
+        from ....app import _build_email_transport_or_null
         return _build_email_transport_or_null(config)
     if transport_name == "webhook":
         from ....notifications.webhook_transport import WebhookTransport
