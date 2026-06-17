@@ -410,24 +410,43 @@ def _wrap_transports_with_breakers(
 
 
 def _build_email_transport_or_null(config):
-    """Email transport is only useful with SMTP credentials. In dev/test,
-    fall back to NullTransport so the system still functions for non-email
-    subscribers."""
-    import os
-    smtp_host = os.environ.get("TRIP_EMA_SMTP_HOST")
-    if not smtp_host:
+    """Build the email transport from `config.transports.brevo`.
+
+    Returns NullTransport when `transports.brevo` is None (the
+    explicit "email disabled" choice for dev/test). When it IS set,
+    returns a fully-configured Brevo HTTP API EmailTransport.
+
+    Note: there is NO env-var fallback path. The previous SMTP
+    implementation silently substituted NullTransport when
+    TRIP_EMA_SMTP_HOST was unset — a bug class that lost weeks of
+    notifications. The new contract is: config controls delivery,
+    secrets file controls the credential, both validated at startup
+    by load_config().
+    """
+    brevo_cfg = config.transports.brevo
+    if brevo_cfg is None:
         logger.info(
-            "TRIP_EMA_SMTP_HOST not set — using NullTransport for email"
+            "transports.brevo not configured — using NullTransport for email"
         )
         return NullTransport()
+
+    # load_config() already validated this file at startup. Re-loading
+    # here is the simplest path to a fresh string (we never store the
+    # secret on the Config object) and is cheap (one small file read).
+    from .config.brevo_secrets import load_brevo_api_key
+    api_key = load_brevo_api_key(brevo_cfg.secrets_file)
+
+    logger.info(
+        "Email transport: Brevo HTTP API (sender=%s, endpoint=%s)",
+        brevo_cfg.sender_email, brevo_cfg.api_url,
+    )
     return EmailTransport(
-        from_address=os.environ.get(
-            "TRIP_EMA_EMAIL_FROM", "alerts@trip-ema.local",
-        ),
-        smtp_host=smtp_host,
-        smtp_port=int(os.environ.get("TRIP_EMA_SMTP_PORT", "587")),
-        smtp_user=os.environ.get("TRIP_EMA_SMTP_USER"),
-        smtp_password=os.environ.get("TRIP_EMA_SMTP_PASSWORD"),
+        api_key=api_key,
+        from_address=brevo_cfg.sender_email,
+        from_name=brevo_cfg.sender_name,
+        subject=brevo_cfg.subject,
+        api_url=brevo_cfg.api_url,
+        timeout_seconds=brevo_cfg.timeout_seconds,
     )
 
 

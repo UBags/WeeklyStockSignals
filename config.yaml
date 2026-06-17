@@ -147,13 +147,26 @@ http:
 #     exporter: console             # console | otlp
 #     otlp_endpoint: null           # required when exporter=otlp
 
-# --- Phase 10: transport circuit breakers ---------------------------
-# transports:
-#   circuit_breaker:
-#     enabled: true                 # default; trips on 5 consecutive failures
-#     failure_threshold: 5
-#     reset_timeout_seconds: 30
-#     half_open_max_successes: 1
+# --- Phase 10: transport circuit breakers + Brevo email --------------
+transports:
+  # Circuit breaker stays at defaults; uncomment to tune.
+  # circuit_breaker:
+  #   enabled: true
+  #   failure_threshold: 5
+  #   reset_timeout_seconds: 30
+  #   half_open_max_successes: 1
+
+  # Brevo (formerly Sendinblue) HTTP API email transport.
+  # Comment this whole block out to fall back to NullTransport (silent
+  # success for email subscribers — useful for dev/test). The api_key
+  # itself lives in secrets/brevo.yaml (chmod 600, .gitignored).
+  brevo:
+    secrets_file: secrets/brevo.yaml
+    sender_email: weeklystocksignals@outlook.com   # MUST be verified in Brevo Senders
+    sender_name: WeeklyStockSignals
+    subject: "Trip EMA signal updates"
+    # api_url: https://api.brevo.com/v3/smtp/email   # default; override only for proxy
+    # timeout_seconds: 30                            # default
 
 # --- Phase 11: ETL (used by `trip-ema-etl` CLI, NOT by the main app) -
 # The ETL section is read by the trip-ema-etl CLI when it runs as a

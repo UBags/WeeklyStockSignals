@@ -61,6 +61,20 @@ def load_config(path: str | Path) -> Config:
                 f"Redis password env var '{redis_pwd_env}' is not set"
             )
 
+    # Brevo secrets file: when `transports.brevo` is configured, the
+    # secrets file must exist, be securely permissioned, and contain
+    # a well-formed api_key. Same fail-fast contract as the DB and
+    # Redis password checks above. This prevents the silent-
+    # NullTransport bug class: an operator who configures Brevo in
+    # config.yaml but forgets to deploy the secrets file should see
+    # a hard startup failure, not silent loss of email delivery.
+    if config.transports.brevo is not None:
+        from .brevo_secrets import BrevoSecretsError, load_brevo_api_key
+        try:
+            load_brevo_api_key(config.transports.brevo.secrets_file)
+        except BrevoSecretsError as e:
+            raise ConfigError(str(e)) from e
+
     return config
 
 

@@ -377,28 +377,41 @@ class NotifierWorker:
 # ---------- Process entry point ---------- #
 
 
-def _build_transports_from_env() -> dict[str, NotificationTransport]:
-    """Build the transport map from env vars, same conventions as app.py.
-    The worker process needs its own copy since it doesn't share Python
-    state with the main app process."""
-    import os
+def _build_transports_from_config(config: Config) -> dict[str, NotificationTransport]:
+    """Build the transport map from `config.transports`. The worker
+    process needs its own copy of the build logic since it doesn't
+    share Python state with the main app process — but the SOURCE
+    OF TRUTH (config.yaml + secrets file) is shared, so both
+    processes deterministically produce the same transports.
 
+    Note: there is NO env-var fallback path here — see the same
+    note in app.py::_build_email_transport_or_null. A misconfigured
+    transport.brevo would already have failed startup at load_config().
+    """
     transports: dict[str, NotificationTransport] = {
         "webhook": WebhookTransport(),
     }
-    smtp_host = os.environ.get("TRIP_EMA_SMTP_HOST")
-    if smtp_host:
-        transports["email"] = EmailTransport(
-            from_address=os.environ.get(
-                "TRIP_EMA_EMAIL_FROM", "alerts@trip-ema.local",
-            ),
-            smtp_host=smtp_host,
-            smtp_port=int(os.environ.get("TRIP_EMA_SMTP_PORT", "587")),
-            smtp_user=os.environ.get("TRIP_EMA_SMTP_USER"),
-            smtp_password=os.environ.get("TRIP_EMA_SMTP_PASSWORD"),
+    brevo_cfg = config.transports.brevo
+    if brevo_cfg is None:
+        logger.info(
+            "transports.brevo not configured — using NullTransport for email"
         )
-    else:
         transports["email"] = NullTransport()
+    else:
+        from .config.brevo_secrets import load_brevo_api_key
+        api_key = load_brevo_api_key(brevo_cfg.secrets_file)
+        logger.info(
+            "Email transport: Brevo HTTP API (sender=%s, endpoint=%s)",
+            brevo_cfg.sender_email, brevo_cfg.api_url,
+        )
+        transports["email"] = EmailTransport(
+            api_key=api_key,
+            from_address=brevo_cfg.sender_email,
+            from_name=brevo_cfg.sender_name,
+            subject=brevo_cfg.subject,
+            api_url=brevo_cfg.api_url,
+            timeout_seconds=brevo_cfg.timeout_seconds,
+        )
     return transports
 
 
@@ -479,7 +492,7 @@ def main(argv: list[str] | None = None) -> int:
         dedup_hash_name=config.redis.dedup_hash_name,
     )
     db_engine = create_engine_from_config(config)
-    transports = _build_transports_from_env()
+    transports = _build_transports_from_config(config)
     transports = _wrap_transports_with_breakers(transports, config)
 
     worker = NotifierWorker(

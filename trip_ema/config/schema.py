@@ -479,11 +479,68 @@ class CircuitBreakerConfig(BaseModel):
     """Successful probes needed to return to CLOSED. 1 is standard CB."""
 
 
+class BrevoConfig(BaseModel):
+    """Brevo (formerly Sendinblue) HTTP API email transport settings.
+
+    The actual API key is NOT stored here. It lives in a separate
+    YAML file at `secrets_file`, which is loaded at startup by
+    `config.brevo_secrets.load_brevo_api_key`. The secrets file is
+    .gitignored; only its path lives in committable config.
+
+    Construction-time validation:
+      - `secrets_file` is required (the loader will then validate
+        existence, permissions, and key format)
+      - `sender_email` is required (Brevo rejects sends from
+        unverified addresses — confirm via Brevo dashboard before
+        first use)
+    """
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    secrets_file: Path = Field(
+        description="Path (relative to cwd) to a YAML file containing "
+                    "the Brevo api_key. File must be chmod 600.",
+    )
+    sender_email: str = Field(
+        description="From address. MUST be verified in Brevo's Senders "
+                    "settings before sends will succeed.",
+    )
+    sender_name: str = Field(
+        default="WeeklyStockSignals",
+        description="Display name shown alongside sender_email in mail "
+                    "clients.",
+    )
+    subject: str = Field(
+        default="Trip EMA signal updates",
+        description="Email subject line. Kept transactional in tone to "
+                    "discourage Gmail Promotions-tab classification.",
+    )
+    api_url: str = Field(
+        default="https://api.brevo.com/v3/smtp/email",
+        description="Brevo transactional email endpoint. Override only "
+                    "if you proxy Brevo through an internal gateway.",
+    )
+    timeout_seconds: float = Field(
+        default=30.0, gt=0.0,
+        description="Per-request HTTP timeout. Brevo's p99 is ~2s; 30s "
+                    "is comfortably above that plus jitter.",
+    )
+
+
 class TransportsConfig(BaseModel):
     """Settings for the notification transports."""
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     circuit_breaker: CircuitBreakerConfig = CircuitBreakerConfig()
+    brevo: BrevoConfig | None = Field(
+        default=None,
+        description="When set, the email transport uses Brevo's HTTP API. "
+                    "When None, email subscribers receive NullTransport "
+                    "(silent success) — this is the dev/test default. "
+                    "The 'None means disabled' rule is explicit: there "
+                    "is no env-var fallback that can silently substitute "
+                    "NullTransport when a configured transport's secrets "
+                    "file goes missing — that case fails at startup.",
+    )
 
 
 # ---------- ETL ---------- #
