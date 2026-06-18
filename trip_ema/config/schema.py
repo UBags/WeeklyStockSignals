@@ -454,13 +454,30 @@ class MarketHoursConfig(BaseModel):
         by `scheduler.tick_planner`. Lazy-imported to avoid the cycle
         flagged at module top.
 
-        Phase 16a note: this still returns the LEGACY MarketTickConfig
-        shape. The Phase 16b tick_planner rewrite will consume the
-        new tick_schedule via `to_tick_schedule_runtime()` below
-        when that field is populated. Existing callers keep working
-        unchanged.
+        Phase 16b note: when `tick_schedule` is set on this
+        MarketHoursConfig, we forward it as a `ResolvedTickEntry`
+        tuple on the runtime dataclass; the planner's dispatcher
+        then selects the new four-instant code path. When
+        `tick_schedule` is None, the runtime dataclass carries no
+        schedule and the planner's legacy hourly cadence runs
+        unchanged. Existing callers (no tick_schedule in YAML) keep
+        working without modification.
         """
-        from ..scheduler.tick_planner import MarketTickConfig  # noqa: PLC0415
+        from ..scheduler.tick_planner import (  # noqa: PLC0415
+            MarketTickConfig,
+            ResolvedTickEntry,
+        )
+
+        resolved_schedule: tuple[ResolvedTickEntry, ...] | None = None
+        if self.tick_schedule is not None:
+            resolved_schedule = tuple(
+                ResolvedTickEntry(
+                    name=e.name,
+                    anchor=e.anchor,
+                    offset_minutes=e.offset_minutes,
+                )
+                for e in self.tick_schedule
+            )
 
         return MarketTickConfig(
             exchange=self.exchange,
@@ -470,6 +487,7 @@ class MarketHoursConfig(BaseModel):
             post_open_offset=timedelta(minutes=self.post_open_offset_minutes),
             pre_close_offset=timedelta(minutes=self.pre_close_offset_minutes),
             intraday_cadence=timedelta(minutes=self.intraday_cadence_minutes),
+            tick_schedule=resolved_schedule,
         )
 
     def to_calendar_config(self) -> "TradingCalendarConfig":
