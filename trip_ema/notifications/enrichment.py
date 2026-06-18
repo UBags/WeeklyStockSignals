@@ -184,12 +184,23 @@ def _fetch_ticker_basics(conn, refs: list[TickerRef]) -> list[dict]:
     rather than a join — keeps the result one-row-per-ticker without
     DISTINCT ON.
     """
+    # NOTE: Parens around each bind param are REQUIRED. SQLAlchemy's text()
+    # parser uses a `(?!:)` lookahead when extracting bind-param names; with
+    # `:exchanges::text[]` it backs off greedily and binds `:exchange`
+    # (singular) instead of `:exchanges`, then the params-dict lookup fails
+    # at execute time with "A value is required for bind parameter
+    # 'exchange'". That exception is swallowed by enrich_batch's broad
+    # try/except and the renderer ends up with EMPTY_ENRICHMENT, producing
+    # an email where every row shows `—` / NEUTRAL for mcap, sector,
+    # zone, direction, and last-5. The `(:foo)::text[]` form forces the
+    # parser to see the closing paren as a non-colon lookahead and binds
+    # the correct (plural) name. Equivalent SQL on the Postgres side.
     sql = text("""
         WITH wanted AS (
             SELECT * FROM unnest(
-                :exchanges::text[],
-                :symbols::text[],
-                :instruments::text[]
+                (:exchanges)::text[],
+                (:symbols)::text[],
+                (:instruments)::text[]
             ) AS u(exchange, symbol, instrument)
         )
         SELECT
