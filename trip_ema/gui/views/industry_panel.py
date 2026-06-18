@@ -16,10 +16,10 @@ Flow when SignalsView selects a new ticker:
          b. Fire top-12-by-mcap query → for each ticker returned,
             fire a 5Y history fetch → render that mini.
     3. If no industry found:
-         Show "(no industry classification)" message in the top
-         chart slot and clear all 12 minis. NIFTY 50 fallback
-         will be added in a follow-up once the DB state is
-         confirmed.
+         Render a NIFTY 50 tracking ETF (see _NIFTY50_FALLBACK)
+         in the top chart slot as a broad-market reference.
+         Mini grid stays empty per spec (no peer industry to
+         draw the top-12 from).
 
 All fetches go through the worker pool — no blocking on the GUI
 thread. Each mini receives its result via its own callback, so
@@ -55,6 +55,16 @@ _N_MINIS = _GRID_ROWS * _GRID_COLS   # 12
 # range selector. Minis are fixed at 5Y per spec.
 _MINI_YEARS = 5
 
+# When a ticker has no instrument_industry classification, fall back
+# to a NIFTY 50 tracking ETF in the industry chart slot as a broad-
+# market reference. NIFTY 50 itself isn't stored as a ticker and
+# isn't in industry_index — the major tracking ETFs (NIFTYBEES,
+# HDFCNIFTY, AXISNIFTY) all track the same underlying, so the chart
+# shape is identical regardless of which one we pick. NIFTYBEES
+# chosen for history depth: ~4300 bars from 2009 vs HDFCNIFTY's
+# ~725 from 2023 (verified 2026-06-18). Change this tuple to switch.
+_NIFTY50_FALLBACK: tuple[str, str, str] = ("NSE", "NIFTYBEES", "ETF")
+
 
 class IndustryPanel(QWidget):
 
@@ -76,6 +86,12 @@ class IndustryPanel(QWidget):
         # Track the range that should be applied to the industry chart
         # (the minis are always 5Y).
         self._industry_years = 3
+
+        # True when the industry chart slot is showing the NIFTY 50
+        # fallback (selected ticker had no industry classification).
+        # Used so range changes know to re-fetch the fallback rather
+        # than the (None) industry name.
+        self._in_fallback_mode = False
 
         self._build_ui()
 
@@ -132,10 +148,15 @@ class IndustryPanel(QWidget):
         Re-fetches the industry chart at the new range; minis are
         unaffected (their range is fixed at 5Y per spec)."""
         self._industry_years = years
-        if hasattr(self, "_current_industry_name") and self._current_industry_name:
+        if getattr(self, "_current_industry_name", None):
             self._fetch_industry_chart(
                 self._current_industry_name, self._current_request_id,
             )
+        elif self._in_fallback_mode:
+            # Selected ticker has no industry; the slot is showing the
+            # NIFTY 50 fallback. Refresh it at the new range so the
+            # fallback view matches the rest of the panel.
+            self._fetch_nifty50_fallback(self._current_request_id)
 
     def load_for_ticker(
         self,
@@ -186,19 +207,21 @@ class IndustryPanel(QWidget):
         if request_id != self._current_request_id:
             return  # stale — a newer ticker has been selected
         if not industry_name:
-            # No classification → spec says NIFTY 50 fallback. Not
-            # wired yet; show a placeholder until the fallback lands.
+            # No classification → fall back to a NIFTY 50 tracking ETF
+            # in the industry chart slot. Mini grid stays empty (no
+            # peer industry for the top-12 query); load_for_ticker
+            # already cleared the minis at the start of the flow.
             self._current_industry_name = None
-            self._industry_chart.render(None)
+            self._in_fallback_mode = True
+            ex, sym, _inst = _NIFTY50_FALLBACK
             self._industry_chart.set_title(
-                "(no industry classification — NIFTY 50 fallback pending)"
+                f"NIFTY 50 (broad market, via {ex}:{sym})"
             )
-            for mini in self._mini_charts:
-                mini.render(None)
-                mini.set_title("—")
+            self._fetch_nifty50_fallback(request_id)
             return
 
         self._current_industry_name = industry_name
+        self._in_fallback_mode = False
         self._industry_chart.set_title(industry_name)
         self._fetch_industry_chart(industry_name, request_id)
         self._fetch_top_minis(industry_name, request_id)
@@ -212,6 +235,32 @@ class IndustryPanel(QWidget):
         )
 
     # ---------- Industry chart fetch ---------- #
+
+    def _fetch_nifty50_fallback(self, request_id: int) -> None:
+        """Fetch the NIFTY 50 tracking ETF history and render it in
+        the industry chart slot. Used when the selected ticker has
+        no instrument_industry classification.
+
+        The ETF is treated as a regular ticker — the history endpoint
+        replays the engine over its bars to materialize EMAs / bands
+        / regime, so the resulting chart looks the same as any other
+        Triple-EMA chart. Mini grid stays empty (load_for_ticker
+        already cleared it).
+        """
+        ex, sym, inst = _NIFTY50_FALLBACK
+        def fetch():
+            return self._http.get_signal_history(
+                ex, sym, instrument=inst, years=self._industry_years,
+            )
+        submit(
+            fetch,
+            on_finished=lambda payload: self._on_industry_chart_received(
+                payload, request_id,
+            ),
+            on_failed=lambda msg: self._on_industry_chart_failed(
+                msg, request_id,
+            ),
+        )
 
     def _fetch_industry_chart(
         self, industry_name: str, request_id: int,
