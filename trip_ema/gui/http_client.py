@@ -293,6 +293,32 @@ class TripEmaHttpClient:
     def get_health_snapshot(self) -> dict:
         return self._get("/v1/admin/health-snapshot")
 
+    def get_industry_history(
+        self,
+        industry_name: str,
+        *,
+        years: int = 3,
+    ) -> dict:
+        """GET /v1/signals/industry/{name}/history.
+
+        Returns a SignalHistoryPayload-shaped dict for an industry
+        index. Synthetic OHLC (open/high/low/close) is generated
+        server-side from `industry_index_value` as a ±0.25% box
+        around each weekly close, colored by week-over-week
+        direction. EMAs / bands / regime come from `indicator_state`,
+        sampled at the last trading day of each week.
+
+        Used by the GUI's IndustryPanel for the top-of-left chart.
+        """
+        # FastAPI route accepts the industry name verbatim; the
+        # client encodes any forward slashes via requests' built-in
+        # quoting on the URL path.
+        from urllib.parse import quote
+        return self._get(
+            f"/v1/signals/industry/{quote(industry_name, safe='')}/history",
+            params={"years": years},
+        )
+
     # ---------- Ticker actions (POST) ---------- #
 
     def reprime_ticker(self, exchange: str, symbol: str) -> dict:

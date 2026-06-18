@@ -1,51 +1,41 @@
-"""Signal viewer / chart view (Tab C — Slice 3).
+"""Signal viewer / chart view (Phase C layout).
 
-Layout:
-  ┌─────────────────────────────────────────────────────────────┐
-  │ Ticker: [ RELIANCE        ▾]   [1Y] [3Y] [5Y] [10Y] [All]   │
-  │ Layers: ☑EMAs  ☑ATR bands  ☑Regime fill  ☑Signals  [Refresh]│
-  ├─────────────────────────────────────────────────────────────┤
-  │                                          ┌─OHLC readout──┐  │
-  │  ┌─candles + overlays──────────────┐    │ Date  W of...  │  │
-  │  │                                 │    │ O ...          │  │
-  │  │     [chart, 75% height]         │    │ H ...          │  │
-  │  │                                 │    │ L ...          │  │
-  │  │                                 │    │ C ...          │  │
-  │  │                                 │    │ Vol ...        │  │
-  │  ├─volume───────────────────────────┤    │ Regime ...     │  │
-  │  │   [volume bars, 25% height]     │    └────────────────┘  │
-  │  └─────────────────────────────────┘                        │
-  └─────────────────────────────────────────────────────────────┘
+Top bar:
+  Ticker | Layers | Range buttons | Exchange | Refresh
 
-Built on pyqtgraph with a custom CandlestickItem (pyqtgraph has no
-built-in OHLC). Everything else (EMA lines, ATR bands, volume bars)
-uses pyqtgraph's stock primitives.
+Body — horizontal QSplitter:
+  LEFT  (55% default): IndustryPanel
+    - Industry chart on top
+    - 4x3 grid of top-12-by-mcap mini charts below
+  RIGHT (45% default): vertical:
+    - Main ChartWidget (in MAIN mode — layer toggles apply here only)
+    - Alt timeframe row (1W enabled; 1D disabled with tooltip)
+    - Backtest row (range + run, was in Phase B — moves here)
+    - Last 5 signals list
+    - Bar detail readout (defaults to latest bar; live-updates on
+      crosshair; reverts to latest bar when cursor leaves chart)
 
-The chart re-fetches `/v1/signals/{exchange}/{symbol}/history` when:
-  - the ticker combo changes
-  - any time-range button is clicked
-  - the [Refresh] button is clicked
-  - load_ticker() is called externally (cross-tab nav from Tickers)
+Cross-tab nav: load_ticker(ex, sym, inst) is unchanged externally
+  — Tickers tab's "View chart" still works.
 
-The chart does NOT poll automatically — historical data doesn't
-change minute-to-minute.
+Splitter position persisted via QSettings under
+"trip_ema/signals/splitter_state".
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
-import pyqtgraph as pg
-from PySide6.QtCore import Qt, QPointF, Signal
+from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import (
-    QBrush, QColor, QPainter, QPen, QPicture, QStandardItem,
-    QStandardItemModel,
+    QBrush, QColor, QStandardItem, QStandardItemModel,
 )
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QGroupBox, QHBoxLayout,
-    QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QLabel, QListWidget, QMessageBox, QPushButton, QSizePolicy,
+    QSplitter, QVBoxLayout, QWidget,
 )
 from sqlalchemy import text  # noqa: F401 — retained for future inline SQL
 
@@ -53,6 +43,7 @@ from ..backtest_engine import (
     filter_bars_to_range,
     run_long_only_backtest,
 )
+from ..chart_widget import ChartMode, ChartWidget
 from ..db import GuiDbSession
 from ..http_client import ApiError, TripEmaHttpClient
 from ..queries import ticker_universe_with_recent_signals
@@ -63,112 +54,20 @@ from ..signals_helpers import (
 )
 from ..workers import submit
 from .backtest_dialog import BacktestDialog
+from .industry_panel import IndustryPanel
 from .signal_generation_panel import SignalGenerationPanel
 
 logger = logging.getLogger(__name__)
 
 
-# Dark-theme palette. Matches the sidebar styling so the chart reads
-# as part of the same UI.
-COLOR_BG = "#1e1e1e"
-COLOR_AXIS = "#666"
-COLOR_GRID = "#333"
-
-COLOR_CANDLE_UP = "#1f9c5e"     # green
-COLOR_CANDLE_DOWN = "#c84a4a"   # red
-
-COLOR_EMA_MED = "#5cb6e8"       # light blue
-COLOR_EMA_LONG = "#ed8a3a"      # orange
-COLOR_EMA_LONGEST = "#a26adb"   # purple
-
-COLOR_BAND_INNER = "#777"
-COLOR_BAND_MID = "#c8aa28"
-COLOR_BAND_OUTER = "#c64242"
-
-COLOR_REGIME_BULL = "#1f9c5e"
-COLOR_REGIME_BEAR = "#c84a4a"
-COLOR_REGIME_NEUTRAL = "#555"
-
-COLOR_SIGNAL_BUY = "#1f9c5e"
-COLOR_SIGNAL_SELL = "#c84a4a"
-
-# Phase A:
-# Grey background for the 'no recent signal' section of the ticker
-# combo dropdown. Light enough to be readable as a quiet differentiator
-# without overpowering the row text.
 _DROPDOWN_GREY_BG = "#f0f0f0"
-# TradingView-style pinned axis label tab. Same blue as the med EMA
-# so the chart palette stays cohesive.
-COLOR_AXIS_LABEL_BG = "#5cb6e8"
-COLOR_AXIS_LABEL_FG = "#1e1e1e"   # dark text on the blue tab
 
-
-# Configure pyqtgraph globally — we want dark background and antialiasing.
-pg.setConfigOption("background", COLOR_BG)
-pg.setConfigOption("foreground", "#cccccc")
-pg.setConfigOption("antialias", True)
-
-
-class CandlestickItem(pg.GraphicsObject):
-    """Custom OHLC candle plot.
-
-    pyqtgraph doesn't ship one (its examples have a half-finished
-    sample). We do the minimum: rectangle body from open to close,
-    line from high to low, color by direction.
-
-    Bars are indexed numerically along the X axis (0, 1, 2, ...) so
-    weekend/holiday gaps don't widen the chart. The DateAxisItem
-    above the X axis translates indices back to dates via a lookup.
-    """
-
-    def __init__(self, ohlc_points: list[tuple[int, float, float, float, float]]):
-        """ohlc_points: list of (x_index, open, high, low, close)."""
-        super().__init__()
-        self._points = ohlc_points
-        self._picture = QPicture()
-        self._generate_picture()
-
-    def _generate_picture(self) -> None:
-        p = QPainter(self._picture)
-        try:
-            width = 0.6  # candle body half-width, in x-units (one bar = 1)
-            for x, o, h, l, c in self._points:
-                color = COLOR_CANDLE_UP if c >= o else COLOR_CANDLE_DOWN
-                pen = QPen(QColor(color))
-                pen.setWidthF(0.0)  # cosmetic
-                p.setPen(pen)
-                p.setBrush(QBrush(QColor(color)))
-                # The wick (high-low)
-                p.drawLine(QPointF(x, l), QPointF(x, h))
-                # The body (open-close)
-                top = max(o, c)
-                bot = min(o, c)
-                if abs(top - bot) < 1e-9:
-                    # Doji: no body, draw a thin horizontal line
-                    p.drawLine(QPointF(x - width, o), QPointF(x + width, o))
-                else:
-                    rect_h = top - bot
-                    p.drawRect(pg.QtCore.QRectF(x - width, bot, 2 * width, rect_h))
-        finally:
-            p.end()
-
-    def paint(self, painter, option, widget=None) -> None:
-        painter.drawPicture(0, 0, self._picture)
-
-    def boundingRect(self):
-        if not self._points:
-            return pg.QtCore.QRectF()
-        xs = [p[0] for p in self._points]
-        lows = [p[3] for p in self._points]
-        highs = [p[2] for p in self._points]
-        return pg.QtCore.QRectF(
-            min(xs) - 1, min(lows),
-            max(xs) - min(xs) + 2, max(highs) - min(lows),
-        )
+_QSETTINGS_ORG = "trip_ema"
+_QSETTINGS_APP = "gui"
+_QSETTINGS_SPLITTER_KEY = "signals/splitter_state"
 
 
 class SignalsView(QWidget):
-    """Slice 3's chart tab. See module docstring for layout."""
 
     def __init__(
         self,
@@ -181,64 +80,116 @@ class SignalsView(QWidget):
         super().__init__(parent)
         self._db = db
         self._http = http
-        # Captured for _build_ui — the signal-generation panel uses
-        # this same flag to decide whether to start its metadata
-        # polling timer.
         self._populate_combo_on_init = populate_combo_on_init
 
-        # State carried across refetches
+        # Selected-ticker state
         self._current_exchange: Optional[str] = None
         self._current_symbol: Optional[str] = None
         self._current_instrument: Optional[str] = None
         self._current_years: int = 3
         self._last_payload: Optional[dict] = None
 
+        # Backtest dialog cache (Phase B)
+        self._open_backtest_dialogs: list[BacktestDialog] = []
+
+        self._settings = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+
         self._build_ui()
+        self._restore_splitter()
+
         if populate_combo_on_init:
             self._populate_ticker_combo()
 
-    # ---------- UI ---------- #
+    # ====================  UI construction  ==================== #
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(8)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
 
-        outer.addLayout(self._build_selector_row())
-        outer.addLayout(self._build_layer_row())
-        outer.addLayout(self._build_backtest_row())
-        outer.addLayout(self._build_chart_row(), 1)
+        outer.addLayout(self._build_top_bar())
 
-        # Phase 15c: the signal-generation panel sits below the chart
-        # area. Embedded as a child widget so the same SignalsView
-        # tab now hosts both "look at the chart" and "regenerate the
-        # backtest file" responsibilities. Constructed lazily on
-        # populate_combo_on_init so tests that build the view in
-        # headless minimal mode don't end up polling the network.
+        # Horizontal splitter: left panel (industry) | right panel (main)
+        self._main_splitter = QSplitter(Qt.Horizontal)
+
+        self._industry_panel = IndustryPanel(self._db, self._http, parent=self)
+        self._main_splitter.addWidget(self._industry_panel)
+
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+
+        # Main chart
+        self._main_chart = ChartWidget(ChartMode.MAIN, parent=self)
+        self._main_chart.bar_under_cursor_changed.connect(self._on_bar_under_cursor)
+        self._main_chart.cursor_left.connect(self._on_cursor_left_chart)
+        right_layout.addWidget(self._main_chart, 1)
+
+        # Alt timeframe row (Phase C: 1D disabled)
+        right_layout.addLayout(self._build_alt_tf_row())
+
+        # Backtest controls (moved here from Phase B's position)
+        right_layout.addLayout(self._build_backtest_row())
+
+        # Last 5 signals
+        right_layout.addWidget(self._build_last5_box())
+
+        # Bar detail readout
+        right_layout.addWidget(self._build_bar_detail_box())
+
+        self._main_splitter.addWidget(right_widget)
+
+        # 55/45 split default
+        self._main_splitter.setStretchFactor(0, 55)
+        self._main_splitter.setStretchFactor(1, 45)
+        self._main_splitter.setSizes([550, 450])
+        # Persist on every drag
+        self._main_splitter.splitterMoved.connect(self._save_splitter)
+
+        outer.addWidget(self._main_splitter, 1)
+
+        # Existing signal-generation panel still belongs below the
+        # main body (it controls the persisted backfill, separate
+        # from the Phase B transient backtest).
         self._signal_generation_panel = SignalGenerationPanel(
             self._http, parent=self,
             start_polling_on_init=self._populate_combo_on_init,
         )
         outer.addWidget(self._signal_generation_panel)
 
-    def _build_selector_row(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Ticker:"))
+    # ----- top bar ----- #
 
+    def _build_top_bar(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        # Ticker dropdown
+        row.addWidget(QLabel("Ticker:"))
         self._ticker_combo = QComboBox()
         self._ticker_combo.setEditable(True)
         self._ticker_combo.setInsertPolicy(QComboBox.NoInsert)
-        self._ticker_combo.setMinimumWidth(220)
+        self._ticker_combo.setMinimumWidth(240)
         self._ticker_combo.setMaxVisibleItems(20)
-        # currentIndexChanged fires when the user picks from the list;
-        # we don't react to free-text edits (search-as-you-type filtering
-        # is via the combo's built-in completer).
         self._ticker_combo.activated.connect(self._on_ticker_combo_activated)
         row.addWidget(self._ticker_combo)
 
-        row.addSpacing(20)
+        row.addSpacing(12)
 
-        # Time-range button group
+        # Layer toggles (apply to right-panel main chart only)
+        row.addWidget(QLabel("Layers:"))
+        self._chk_emas = self._make_layer_checkbox("EMAs", "emas", True)
+        self._chk_atr_bands = self._make_layer_checkbox("ATR", "atr", True)
+        self._chk_regime = self._make_layer_checkbox("Regime", "regime", True)
+        self._chk_signals = self._make_layer_checkbox("Signals", "signals", True)
+        for chk in (self._chk_emas, self._chk_atr_bands,
+                    self._chk_regime, self._chk_signals):
+            row.addWidget(chk)
+
+        row.addSpacing(12)
+
+        # Range buttons
         self._range_buttons = QButtonGroup(self)
         self._range_buttons.setExclusive(True)
         for years, label in [(1, "1Y"), (3, "3Y"), (5, "5Y"), (10, "10Y"), (20, "All")]:
@@ -246,158 +197,143 @@ class SignalsView(QWidget):
             btn.setCheckable(True)
             btn.setProperty("years", years)
             if years == 3:
-                btn.setChecked(True)  # default
+                btn.setChecked(True)
             self._range_buttons.addButton(btn)
             row.addWidget(btn)
         self._range_buttons.buttonClicked.connect(self._on_range_button_clicked)
+
+        row.addSpacing(12)
+
+        # Exchange — read-only label for now (single-exchange deployments)
+        row.addWidget(QLabel("Exchange:"))
+        self._exchange_label = QLabel("NSE")
+        self._exchange_label.setStyleSheet("color: #cccccc; font-weight: bold;")
+        row.addWidget(self._exchange_label)
 
         row.addStretch(1)
 
         self._refresh_button = QPushButton("Refresh")
         self._refresh_button.clicked.connect(self._on_refresh_clicked)
         row.addWidget(self._refresh_button)
-        return row
 
-    def _build_layer_row(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(QLabel("Layers:"))
-        self._chk_emas = self._make_layer_checkbox("EMAs", True)
-        self._chk_atr_bands = self._make_layer_checkbox("ATR bands", True)
-        self._chk_regime = self._make_layer_checkbox("Regime fill", True)
-        self._chk_signals = self._make_layer_checkbox("Signal markers", True)
-        row.addWidget(self._chk_emas)
-        row.addWidget(self._chk_atr_bands)
-        row.addWidget(self._chk_regime)
-        row.addWidget(self._chk_signals)
-        row.addStretch(1)
-        # Status label on the right for "loaded N bars / warmed up M"
+        # Status label for chart load state (was in old layer row)
         self._chart_status_label = QLabel("")
         self._chart_status_label.setStyleSheet("color: #888;")
         row.addWidget(self._chart_status_label)
         return row
 
-    def _make_layer_checkbox(self, label: str, default_checked: bool) -> QCheckBox:
-        cb = QCheckBox(label)
+    def _make_layer_checkbox(
+        self, text_label: str, key: str, default_checked: bool,
+    ) -> QCheckBox:
+        cb = QCheckBox(text_label)
         cb.setChecked(default_checked)
+        cb.setProperty("layer_key", key)
         cb.stateChanged.connect(self._on_layer_toggled)
         return cb
 
-    def _build_chart_row(self) -> QHBoxLayout:
+    # ----- right panel rows ----- #
+
+    def _build_alt_tf_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
+        row.addWidget(QLabel("Alt timeframe:"))
+        self._chk_1w = QCheckBox("1W")
+        self._chk_1w.setChecked(True)
+        self._chk_1w.setEnabled(False)  # Always on; placeholder for future
+        self._chk_1w.setToolTip("Weekly bars — currently the only supported timeframe.")
+        row.addWidget(self._chk_1w)
 
-        # Left: chart area (price + volume in a vertical layout)
-        chart_widget = self._build_chart_widget()
-        row.addWidget(chart_widget, 5)
-
-        # Right: OHLC readout panel (crosshair-driven)
-        readout_box = QGroupBox("Bar detail")
-        readout_box.setMaximumWidth(220)
-        readout_layout = QVBoxLayout(readout_box)
-        self._readout_label = QLabel("Hover over a bar to inspect.")
-        self._readout_label.setStyleSheet(
-            "font-family: monospace; font-size: 12px; padding: 6px;"
+        self._chk_1d = QCheckBox("1D")
+        self._chk_1d.setEnabled(False)
+        self._chk_1d.setToolTip(
+            "Daily timeframe — coming in a later phase. "
+            "Weekly indicators don't map cleanly to daily bars yet."
         )
-        self._readout_label.setWordWrap(True)
-        self._readout_label.setAlignment(Qt.AlignTop)
-        readout_layout.addWidget(self._readout_label)
-        readout_layout.addStretch(1)
-        row.addWidget(readout_box, 0)
+        row.addWidget(self._chk_1d)
 
+        row.addStretch(1)
         return row
 
-    def _build_chart_widget(self) -> QWidget:
-        """Build the GraphicsLayoutWidget with a price plot above and
-        a volume plot below, sharing the X axis."""
-        gl = pg.GraphicsLayoutWidget()
-        gl.setBackground(COLOR_BG)
+    def _build_backtest_row(self) -> QHBoxLayout:
+        """Phase B's transient backtest controls, moved into the
+        right panel per the Phase C layout."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QLabel("Backtest:"))
 
-        # Price plot — takes the top ~75% via stretch factor
-        self._price_plot = gl.addPlot(row=0, col=0)
-        self._price_plot.showGrid(x=True, y=True, alpha=0.15)
-        self._price_plot.getAxis("left").setTextPen(COLOR_AXIS)
-        self._price_plot.getAxis("bottom").setTextPen(COLOR_AXIS)
-        # Crosshair lines (added to price plot only — volume sub-plot
-        # gets a vertical line connected to the same x)
-        self._vline_price = pg.InfiniteLine(angle=90, movable=False,
-                                            pen=pg.mkPen("#888", width=1, style=Qt.DashLine))
-        self._hline_price = pg.InfiniteLine(angle=0, movable=False,
-                                            pen=pg.mkPen("#888", width=1, style=Qt.DashLine))
-        self._price_plot.addItem(self._vline_price, ignoreBounds=True)
-        self._price_plot.addItem(self._hline_price, ignoreBounds=True)
-        self._vline_price.hide()
-        self._hline_price.hide()
+        self._backtest_range_combo = QComboBox()
+        for years, label in [
+            (3, "3 years"), (5, "5 years"),
+            (10, "10 years"), (None, "All time"),
+        ]:
+            self._backtest_range_combo.addItem(label, years)
+        self._backtest_range_combo.setCurrentIndex(1)
+        row.addWidget(self._backtest_range_combo)
 
-        # Volume plot — bottom ~25%
-        self._volume_plot = gl.addPlot(row=1, col=0)
-        self._volume_plot.showGrid(x=True, y=True, alpha=0.1)
-        self._volume_plot.getAxis("left").setTextPen(COLOR_AXIS)
-        self._volume_plot.getAxis("bottom").setTextPen(COLOR_AXIS)
-        self._volume_plot.setMaximumHeight(150)
-        self._volume_plot.setXLink(self._price_plot)  # share X axis
+        self._run_backtest_button = QPushButton("Run")
+        self._run_backtest_button.clicked.connect(self._on_run_backtest_clicked)
+        row.addWidget(self._run_backtest_button)
 
-        self._vline_vol = pg.InfiniteLine(angle=90, movable=False,
-                                          pen=pg.mkPen("#888", width=1, style=Qt.DashLine))
-        self._volume_plot.addItem(self._vline_vol, ignoreBounds=True)
-        self._vline_vol.hide()
+        self._backtest_hint_label = QLabel("")
+        self._backtest_hint_label.setStyleSheet("color: #888;")
+        row.addWidget(self._backtest_hint_label)
 
-        # Phase A: TradingView-style pinned axis label tabs.
-        # The price tab hugs the right edge of the price plot at the
-        # cursor's y; the date tab hugs the bottom edge of the volume
-        # plot at the cursor's x. Both are hidden until the cursor
-        # enters the chart area (handled in _on_mouse_moved).
-        self._price_axis_label = pg.TextItem(
-            text="", anchor=(1.0, 0.5),  # right-middle of tab at position
-            color=COLOR_AXIS_LABEL_FG,
-            fill=pg.mkBrush(COLOR_AXIS_LABEL_BG),
-            border=pg.mkPen(COLOR_AXIS_LABEL_BG),
+        row.addStretch(1)
+        return row
+
+    def _build_last5_box(self) -> QGroupBox:
+        box = QGroupBox("Last 5 signals")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(6, 4, 6, 4)
+        self._last5_list = QListWidget()
+        self._last5_list.setMaximumHeight(110)
+        self._last5_list.setStyleSheet(
+            "QListWidget { font-family: monospace; font-size: 11px; }"
         )
-        self._price_plot.addItem(self._price_axis_label, ignoreBounds=True)
-        self._price_axis_label.hide()
+        layout.addWidget(self._last5_list)
+        return box
 
-        self._date_axis_label = pg.TextItem(
-            text="", anchor=(0.5, 1.0),  # middle-bottom of tab at position
-            color=COLOR_AXIS_LABEL_FG,
-            fill=pg.mkBrush(COLOR_AXIS_LABEL_BG),
-            border=pg.mkPen(COLOR_AXIS_LABEL_BG),
+    def _build_bar_detail_box(self) -> QGroupBox:
+        box = QGroupBox("Bar detail")
+        box.setMaximumHeight(180)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 4, 8, 4)
+        self._readout_label = QLabel("(load a ticker)")
+        self._readout_label.setStyleSheet(
+            "font-family: monospace; font-size: 11px;"
         )
-        self._volume_plot.addItem(self._date_axis_label, ignoreBounds=True)
-        self._date_axis_label.hide()
+        self._readout_label.setAlignment(Qt.AlignTop)
+        self._readout_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding,
+        )
+        self._readout_label.setTextFormat(Qt.RichText)
+        layout.addWidget(self._readout_label)
+        return box
 
-        # Hide the bottom X axis label on the price plot (visible on
-        # the volume plot since it's the lower one)
-        self._price_plot.hideAxis("bottom")
+    # ====================  Splitter persistence  ==================== #
 
-        # Mouse-move handler for crosshair
-        self._price_plot.scene().sigMouseMoved.connect(self._on_mouse_moved)
+    def _restore_splitter(self) -> None:
+        state = self._settings.value(_QSETTINGS_SPLITTER_KEY)
+        if state is not None:
+            try:
+                self._main_splitter.restoreState(state)
+            except Exception:
+                pass  # corrupt state — fall back to default sizes
 
-        # Stretch row heights: price gets most space
-        gl.ci.layout.setRowStretchFactor(0, 4)
-        gl.ci.layout.setRowStretchFactor(1, 1)
+    def _save_splitter(self, *_args) -> None:
+        self._settings.setValue(
+            _QSETTINGS_SPLITTER_KEY,
+            self._main_splitter.saveState(),
+        )
 
-        return gl
-
-    # ---------- ticker combo population ---------- #
+    # ====================  Ticker combo  ==================== #
 
     def _populate_ticker_combo(self) -> None:
-        """Populate the search-as-you-type ticker combo with the
-        active universe, partitioned into two sections: tickers
-        with a signal event in the rolling 'this week + last week'
-        window (top, normal background), and the rest (below, grey
-        background, separator between).
-
-        ~2300 entries — Qt's QCompleter handles the flat model fine
-        without virtualization. The sectioning is applied in
-        _on_combo_rows_received once the rows arrive; this fetcher
-        just gets them ordered by (has_recent_signal DESC, symbol ASC)
-        from the SQL layer.
-        """
+        """Same flow as Phase A: fetch via the recent-signal-aware
+        query and build a sectioned QStandardItemModel."""
         def fetch():
             with self._db.connect() as conn:
                 return ticker_universe_with_recent_signals(conn)
-
         submit(
             fetch,
             on_finished=self._on_combo_rows_received,
@@ -405,22 +341,7 @@ class SignalsView(QWidget):
         )
 
     def _on_combo_rows_received(self, rows: list) -> None:
-        """Build the combo's underlying model with two sections:
-        recent-signal tickers on top with normal background, then a
-        non-selectable separator, then the rest with a grey row
-        background. Search-as-you-type filtering preserves the
-        section ordering because rows arrive (recent DESC, alpha
-        ASC) and the completer iterates the model in order.
-
-        Edge cases:
-          - All tickers have a recent signal: no separator, no grey
-            rows. Combo is one alphabetical list.
-          - No tickers have a recent signal (quiet week, or initial
-            deploy): no separator, every row grey. Visually subtle
-            but the operator still sees the universe.
-        """
         recent, other = partition_ticker_rows(rows)
-
         model = QStandardItemModel(self)
         grey_brush = QBrush(QColor(_DROPDOWN_GREY_BG))
 
@@ -430,9 +351,6 @@ class SignalsView(QWidget):
                 display = f"{row.symbol}  —  {row.full_name[:60]}"
             item = QStandardItem(display)
             item.setEditable(False)
-            # itemData(idx) reads Qt.UserRole by default, so the
-            # existing _on_ticker_combo_activated handler keeps
-            # working unchanged.
             item.setData(
                 (row.exchange, row.symbol, row.instrument_type),
                 Qt.UserRole,
@@ -445,21 +363,15 @@ class SignalsView(QWidget):
             model.appendRow(_make_item(r, grey=False))
         for r in other:
             model.appendRow(_make_item(r, grey=True))
-
         self._ticker_combo.setModel(model)
-        # Insert separator between the two sections. Only meaningful
-        # when both sections are non-empty.
         if recent and other:
             self._ticker_combo.insertSeparator(len(recent))
-        # No initial selection — wait for the user to pick or for
-        # cross-tab nav (load_ticker) to set one explicitly.
         self._ticker_combo.setCurrentIndex(-1)
 
     def _on_combo_rows_failed(self, message: str) -> None:
         self._chart_status_label.setText(f"Ticker list fetch failed: {message}")
-        logger.warning("Combo population failed: %s", message)
 
-    # ---------- event handlers ---------- #
+    # ====================  Event handlers  ==================== #
 
     def _on_ticker_combo_activated(self, idx: int) -> None:
         if idx < 0:
@@ -473,166 +385,61 @@ class SignalsView(QWidget):
     def _on_range_button_clicked(self, btn) -> None:
         years = btn.property("years")
         self._current_years = years
+        # The industry chart follows the same range; minis are fixed at 5Y.
+        self._industry_panel.set_industry_chart_years(years)
         if self._current_exchange and self._current_symbol:
             self._fetch_history()
 
     def _on_refresh_clicked(self) -> None:
         if self._current_exchange and self._current_symbol:
             self._fetch_history()
+            # Also re-trigger the left panel so a fresh industry
+            # snapshot lands too.
+            self._industry_panel.load_for_ticker(
+                self._current_exchange,
+                self._current_symbol,
+                self._current_instrument or "EQ",
+            )
 
     def _on_layer_toggled(self, _state) -> None:
-        # Re-render from cached payload; no refetch needed.
-        if self._last_payload is not None:
-            self._render_chart(self._last_payload)
-
-    # ---------- Phase B: in-GUI backtest ---------- #
-
-    def _build_backtest_row(self) -> QHBoxLayout:
-        """Transient backtest controls.
-
-        Distinct from the embedded SignalGenerationPanel (which
-        regenerates the persisted backfill that writes to
-        signal_backtest_runs) — this row runs a pure in-process
-        simulation against the currently-loaded chart payload,
-        sliced to the chosen range, and pops a non-modal dialog.
-        No DB writes; closing the dialog discards the result.
-        """
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(QLabel("Backtest:"))
-
-        self._backtest_range_combo = QComboBox()
-        for years, label in [
-            (3, "3 years"),
-            (5, "5 years"),
-            (10, "10 years"),
-            (None, "All time"),
-        ]:
-            self._backtest_range_combo.addItem(label, years)
-        self._backtest_range_combo.setCurrentIndex(1)   # 5 years default
-        row.addWidget(self._backtest_range_combo)
-
-        self._run_backtest_button = QPushButton("Run backtest")
-        self._run_backtest_button.clicked.connect(self._on_run_backtest_clicked)
-        row.addWidget(self._run_backtest_button)
-
-        # Hint label fills with status during/after a run (e.g. trade
-        # count, win rate, or 'load a ticker first' warning).
-        self._backtest_hint_label = QLabel("")
-        self._backtest_hint_label.setStyleSheet("color: #888;")
-        row.addWidget(self._backtest_hint_label)
-
-        row.addStretch(1)
-        return row
-
-    def _on_run_backtest_clicked(self) -> None:
-        """Run the long-only backtest against the cached payload's
-        bars (sliced to the chosen range) and pop the result dialog.
-
-        Range vs. chart-range interaction: the engine runs on
-        whatever's in the current payload. If the chart range is
-        shorter than the backtest range, the hint label warns the
-        user — but we still run on what we have rather than
-        silently re-fetching. The user can bump the chart range
-        button and re-run if they want full history.
-        """
-        if not self._last_payload:
-            self._backtest_hint_label.setText(
-                "Load a ticker first."
-            )
+        sender = self.sender()
+        if sender is None:
             return
-        bars = self._last_payload.get("bars", [])
-        if not bars:
-            self._backtest_hint_label.setText(
-                "No bars in current payload — nothing to backtest."
-            )
+        key = sender.property("layer_key")
+        if not key:
             return
+        self._main_chart.set_layer_visible(key, sender.isChecked())
 
-        years = self._backtest_range_combo.currentData()
-        sliced = filter_bars_to_range(bars, years=years)
-        if not sliced:
-            self._backtest_hint_label.setText(
-                "Selected range has no bars."
-            )
-            return
+    def _on_bar_under_cursor(self, bar: dict) -> None:
+        self._update_bar_detail(bar)
 
-        # Warn if the chart range covers less than the backtest range.
-        # Weekly bars ≈ 52/yr; check against (years * 50) as a coarse
-        # 'is the user looking at enough history' threshold.
-        if years is not None and len(sliced) < years * 50:
-            self._backtest_hint_label.setText(
-                f"Note: chart has only {len(sliced)} bars in the "
-                f"last {years}y; bump the chart range for more."
-            )
-        else:
-            self._backtest_hint_label.setText("")
+    def _on_cursor_left_chart(self) -> None:
+        # Spec: revert to the latest available bar when cursor leaves.
+        latest = self._main_chart.latest_bar()
+        if latest is not None:
+            self._update_bar_detail(latest)
 
-        result = run_long_only_backtest(sliced)
+    # ====================  Cross-tab nav target  ==================== #
 
-        ticker_label = (
-            f"{self._current_exchange}:{self._current_symbol}"
-            if self._current_exchange and self._current_symbol
-            else "?"
-        )
-        range_label = (
-            "All time" if years is None else f"{years} years"
-        )
-
-        dlg = BacktestDialog(
-            result,
-            ticker_label=ticker_label,
-            range_label=range_label,
-            parent=self,
-        )
-        dlg.show()
-        # Hold a reference so the wrapper isn't GC'd before the user
-        # closes the window. Qt.WA_DeleteOnClose on the dialog itself
-        # releases the C++ object on close; the list grows then
-        # shrinks naturally via on_close handling below.
-        if not hasattr(self, "_open_backtest_dialogs"):
-            self._open_backtest_dialogs = []
-        # Prune any that have already been closed (deleted C++ side)
-        # before appending the new one.
-        self._open_backtest_dialogs = [
-            d for d in self._open_backtest_dialogs
-            if _is_dialog_alive(d)
-        ]
-        self._open_backtest_dialogs.append(dlg)
-
-        # Update hint with a concise summary so the row reflects the
-        # outcome even when the dialog is behind another window.
-        s = result.summary
-        if s.n_trades == 0:
-            self._backtest_hint_label.setText(
-                "Backtest complete: no trades fired in this range."
-            )
-        else:
-            self._backtest_hint_label.setText(
-                f"Backtest complete: {s.n_trades} trades, "
-                f"{s.win_rate_pct:.1f}% win rate, "
-                f"total return {s.total_return_pct:+.1f}%."
-            )
-
-    # ---------- public API (cross-tab nav target) ---------- #
-
-    def load_ticker(self, exchange: str, symbol: str, instrument: str = "EQ") -> None:
-        """Called by MainWindow when the user clicks 'View chart' on
-        the Tickers tab. Sets the combo + fetches history."""
+    def load_ticker(
+        self, exchange: str, symbol: str, instrument: str = "EQ",
+    ) -> None:
         self._current_exchange = exchange
         self._current_symbol = symbol
         self._current_instrument = instrument
-        # Try to find and select the matching combo entry
+        # Select in combo if present
         for i in range(self._ticker_combo.count()):
             data = self._ticker_combo.itemData(i)
             if data and data[0] == exchange and data[1] == symbol:
-                # blockSignals so we don't trigger activated and re-fetch
                 self._ticker_combo.blockSignals(True)
                 self._ticker_combo.setCurrentIndex(i)
                 self._ticker_combo.blockSignals(False)
                 break
         self._fetch_history()
+        # Left panel: refresh industry chart + minis for the new ticker.
+        self._industry_panel.load_for_ticker(exchange, symbol, instrument)
 
-    # ---------- history fetch + render ---------- #
+    # ====================  History fetch / render  ==================== #
 
     def _fetch_history(self) -> None:
         if not (self._current_exchange and self._current_symbol):
@@ -651,324 +458,135 @@ class SignalsView(QWidget):
 
     def _on_history_received(self, payload: dict) -> None:
         self._last_payload = payload
-        self._render_chart(payload)
+        self._main_chart.render(payload)
         n = len(payload.get("bars", []))
         warmup = payload.get("warmup_bars_count", 0)
         self._chart_status_label.setText(
-            f"{payload['symbol']}: {n} weekly bars, {warmup} in warmup."
+            f"{payload['symbol']}: {n} bars, {warmup} in warmup."
         )
+        # Default the bar detail to the latest bar (spec).
+        latest = self._main_chart.latest_bar()
+        if latest is not None:
+            self._update_bar_detail(latest)
+        # Populate the last-5 signals list.
+        self._update_last5_signals(payload)
 
     def _on_history_failed(self, message: str) -> None:
         self._chart_status_label.setText(f"Chart fetch failed: {message}")
-        self._clear_chart()
+        self._main_chart.render(None)
         QMessageBox.warning(
             self, "Chart fetch failed",
             f"Could not load chart data:\n\n{message}",
         )
 
-    # ---------- chart rendering ---------- #
+    # ====================  Bar detail + last 5 ==================== #
 
-    def _clear_chart(self) -> None:
-        self._price_plot.clear()
-        self._volume_plot.clear()
-        # Re-add crosshair lines (clear removes them)
-        self._price_plot.addItem(self._vline_price, ignoreBounds=True)
-        self._price_plot.addItem(self._hline_price, ignoreBounds=True)
-        self._volume_plot.addItem(self._vline_vol, ignoreBounds=True)
-        self._vline_price.hide()
-        self._hline_price.hide()
-        self._vline_vol.hide()
-
-    def _render_chart(self, payload: dict) -> None:
-        """Render everything from the latest payload according to
-        layer checkbox state."""
-        self._clear_chart()
-        bars = payload.get("bars", [])
-        if not bars:
-            return
-
-        # Store bar-index → datetime for the date-axis labels and the
-        # crosshair readout.
-        self._bar_index_to_dt: list[datetime] = []
-        for b in bars:
-            self._bar_index_to_dt.append(
-                datetime.fromisoformat(b["bar_timestamp"])
-            )
-        # Also keep bars indexed for the readout
-        self._bars_by_index: dict[int, dict] = {i: b for i, b in enumerate(bars)}
-
-        # Configure the bottom axis to show dates instead of indices
-        date_axis = _DateAxisItem(self._bar_index_to_dt, orientation="bottom")
-        self._volume_plot.setAxisItems({"bottom": date_axis})
-
-        # 1. Regime fill (drawn first so candles sit on top)
-        if self._chk_regime.isChecked():
-            self._render_regime_fill(bars)
-
-        # 2. Candles
-        candles_data = [
-            (i, b["open"], b["high"], b["low"], b["close"])
-            for i, b in enumerate(bars)
-        ]
-        self._price_plot.addItem(CandlestickItem(candles_data))
-
-        # 3. EMAs
-        if self._chk_emas.isChecked():
-            self._render_emas(bars)
-
-        # 4. ATR bands
-        if self._chk_atr_bands.isChecked():
-            self._render_atr_bands(bars)
-
-        # 5. Signal markers
-        if self._chk_signals.isChecked():
-            self._render_signal_markers(payload, bars)
-
-        # 6. Volume bars
-        self._render_volume(bars)
-
-        # Make sure the crosshair lines are still on the plots after clear()
-        # (we re-added them in _clear_chart, but they got removed when we
-        # called `clear()` on the plot; addItem above for candles/etc reset
-        # is fine — only need to ensure they're present)
-        if self._vline_price not in self._price_plot.items:
-            self._price_plot.addItem(self._vline_price, ignoreBounds=True)
-            self._price_plot.addItem(self._hline_price, ignoreBounds=True)
-        if self._vline_vol not in self._volume_plot.items:
-            self._volume_plot.addItem(self._vline_vol, ignoreBounds=True)
-
-        # Auto-range
-        self._price_plot.enableAutoRange()
-        self._volume_plot.enableAutoRange()
-
-    def _render_emas(self, bars: list[dict]) -> None:
-        xs = list(range(len(bars)))
-        # Separate (x, y) lists per EMA, skipping None values
-        def line_data(field: str):
-            out_x, out_y = [], []
-            for i, b in enumerate(bars):
-                v = b.get(field)
-                if v is not None:
-                    out_x.append(i)
-                    out_y.append(v)
-            return out_x, out_y
-
-        for field, color, name in [
-            ("med_ema", COLOR_EMA_MED, "med"),
-            ("long_ema", COLOR_EMA_LONG, "long"),
-            ("longest_ema", COLOR_EMA_LONGEST, "longest"),
-        ]:
-            x, y = line_data(field)
-            if x:
-                pen = pg.mkPen(color, width=1.5)
-                self._price_plot.plot(x, y, pen=pen, name=name)
-
-    def _render_atr_bands(self, bars: list[dict]) -> None:
-        def line_data(field: str):
-            out_x, out_y = [], []
-            for i, b in enumerate(bars):
-                v = b.get(field)
-                if v is not None:
-                    out_x.append(i)
-                    out_y.append(v)
-            return out_x, out_y
-
-        # Thin, low-alpha lines for the bands so they don't dominate
-        for field, color in [
-            ("upper_inner", COLOR_BAND_INNER),
-            ("lower_inner", COLOR_BAND_INNER),
-            ("upper_mid", COLOR_BAND_MID),
-            ("lower_mid", COLOR_BAND_MID),
-            ("upper_outer", COLOR_BAND_OUTER),
-            ("lower_outer", COLOR_BAND_OUTER),
-        ]:
-            x, y = line_data(field)
-            if x:
-                pen = pg.mkPen(QColor(color), width=1.0,
-                               style=Qt.DashLine if "outer" in field else Qt.SolidLine)
-                self._price_plot.plot(x, y, pen=pen)
-
-    def _render_regime_fill(self, bars: list[dict]) -> None:
-        """Light-alpha vertical bands at bar positions, colored by
-        display_bg regime."""
-        # Build runs of consecutive same-regime bars for efficiency.
-        if not bars:
-            return
-        run_start = 0
-        current = bars[0].get("display_bg") or "NEUTRAL"
-
-        def regime_color(r: str) -> str:
-            return {
-                "BULLISH": COLOR_REGIME_BULL,
-                "BEARISH": COLOR_REGIME_BEAR,
-                "NEUTRAL": COLOR_REGIME_NEUTRAL,
-            }.get(r, COLOR_REGIME_NEUTRAL)
-
-        runs = []
-        for i in range(1, len(bars)):
-            r = bars[i].get("display_bg") or "NEUTRAL"
-            if r != current:
-                runs.append((run_start, i, current))
-                run_start = i
-                current = r
-        runs.append((run_start, len(bars), current))
-
-        for x0, x1, regime in runs:
-            color = QColor(regime_color(regime))
-            color.setAlpha(28)  # ~10%
-            region = pg.LinearRegionItem(
-                values=[x0 - 0.5, x1 - 0.5],
-                brush=pg.mkBrush(color),
-                movable=False, pen=pg.mkPen(None),
-            )
-            region.setZValue(-10)  # behind everything else
-            self._price_plot.addItem(region)
-
-    def _render_signal_markers(self, payload: dict, bars: list[dict]) -> None:
-        """BUY = green ▲ below bar; SELL = red ▼ above bar. Positioned
-        slightly outside the bar's range so they don't overlap candles."""
-        events = payload.get("signal_events", [])
-        if not events:
-            return
-
-        # Build index lookup by timestamp for efficient placement
-        ts_to_idx: dict[str, int] = {
-            b["bar_timestamp"]: i for i, b in enumerate(bars)
-        }
-
-        for e in events:
-            ts = e["bar_timestamp"]
-            i = ts_to_idx.get(ts)
-            if i is None:
-                # The event may have been logged on a sub-day bar that
-                # got aggregated into a different weekly bucket; skip.
-                continue
-            bar = bars[i]
-            signal = e["signal"].upper()
-            if signal == "BUY":
-                # Place arrow below the low
-                offset = (bar["high"] - bar["low"]) * 0.5
-                y = bar["low"] - offset
-                arrow = pg.ArrowItem(
-                    pos=(i, y), angle=90,  # pointing UP
-                    headLen=12, tipAngle=40,
-                    brush=COLOR_SIGNAL_BUY, pen=pg.mkPen(COLOR_SIGNAL_BUY),
-                )
-                self._price_plot.addItem(arrow)
-            elif signal == "SELL":
-                offset = (bar["high"] - bar["low"]) * 0.5
-                y = bar["high"] + offset
-                arrow = pg.ArrowItem(
-                    pos=(i, y), angle=-90,  # pointing DOWN
-                    headLen=12, tipAngle=40,
-                    brush=COLOR_SIGNAL_SELL, pen=pg.mkPen(COLOR_SIGNAL_SELL),
-                )
-                self._price_plot.addItem(arrow)
-
-    def _render_volume(self, bars: list[dict]) -> None:
-        """Vertical volume bars, colored by candle direction."""
-        x = []
-        y = []
-        brushes = []
-        for i, b in enumerate(bars):
-            x.append(i)
-            y.append(b.get("volume", 0))
-            up = b["close"] >= b["open"]
-            color = QColor(COLOR_CANDLE_UP if up else COLOR_CANDLE_DOWN)
-            color.setAlpha(180)
-            brushes.append(color)
-        bar_item = pg.BarGraphItem(
-            x=x, height=y, width=0.7,
-            brushes=brushes, pen=pg.mkPen(None),
-        )
-        self._volume_plot.addItem(bar_item)
-
-    # ---------- crosshair ---------- #
-
-    def _on_mouse_moved(self, pos) -> None:
-        """Update the readout panel + crosshair lines + axis label
-        tabs from the cursor position. Hides everything when the
-        cursor leaves the chart area or falls outside the bar
-        range. Cheap on every move — no fetches or heavy work."""
-        if not self._last_payload:
-            return
-        if not self._price_plot.sceneBoundingRect().contains(pos):
-            self._hide_crosshair_items()
-            return
-        mouse_point = self._price_plot.vb.mapSceneToView(pos)
-        x_idx = int(round(mouse_point.x()))
-        if x_idx < 0 or x_idx >= len(self._bars_by_index):
-            self._hide_crosshair_items()
-            return
-
-        bar = self._bars_by_index[x_idx]
-        dt = self._bar_index_to_dt[x_idx]
-
-        # Position the dashed crosshair lines
-        self._vline_price.setPos(x_idx)
-        self._hline_price.setPos(mouse_point.y())
-        self._vline_vol.setPos(x_idx)
-        self._vline_price.show()
-        self._hline_price.show()
-        self._vline_vol.show()
-
-        # Phase A: position the TradingView-style axis label tabs.
-        # The price tab sits inside the right edge of the price plot
-        # at the cursor's y; the date tab sits just above the bottom
-        # edge of the volume plot at the bar's x-index. The view
-        # ranges can shift on pan/zoom, so we re-read them every
-        # mouse move.
-        price_view_x_range = self._price_plot.vb.viewRange()[0]
-        vol_view_y_range = self._volume_plot.vb.viewRange()[1]
-        self._price_axis_label.setPos(
-            price_view_x_range[1], mouse_point.y(),
-        )
-        self._price_axis_label.setText(
-            format_price_label(mouse_point.y()),
-        )
-        self._price_axis_label.show()
-        self._date_axis_label.setPos(x_idx, vol_view_y_range[0])
-        self._date_axis_label.setText(format_date_label(dt))
-        self._date_axis_label.show()
-
-        # Populate the side-panel OHLC readout
+    def _update_bar_detail(self, bar: dict) -> None:
+        dt_raw = bar.get("bar_timestamp")
+        if isinstance(dt_raw, str):
+            dt = datetime.fromisoformat(dt_raw)
+        else:
+            dt = dt_raw
         warmed = "yes" if bar.get("is_warmed_up") else "warming up"
         med = _fmt(bar.get("med_ema"))
         long_ = _fmt(bar.get("long_ema"))
         longest = _fmt(bar.get("longest_ema"))
         atr = _fmt(bar.get("atr"))
         self._readout_label.setText(
-            f"<b>{dt.strftime('%Y-%m-%d')}</b><br>"
-            f"O: {bar['open']:.2f}<br>"
-            f"H: {bar['high']:.2f}<br>"
-            f"L: {bar['low']:.2f}<br>"
-            f"C: {bar['close']:.2f}<br>"
+            f"<b>{dt.strftime('%d-%b-%y') if dt else '—'}</b><br>"
+            f"O: {bar.get('open', 0):.2f}  "
+            f"H: {bar.get('high', 0):.2f}<br>"
+            f"L: {bar.get('low', 0):.2f}  "
+            f"C: {bar.get('close', 0):.2f}<br>"
             f"Vol: {int(bar.get('volume', 0)):,}<br>"
-            f"<br>"
-            f"Med EMA: {med}<br>"
-            f"Long EMA: {long_}<br>"
-            f"Longest: {longest}<br>"
-            f"ATR: {atr}<br>"
-            f"<br>"
-            f"Regime: {bar.get('display_bg', '—')}<br>"
-            f"Warmup: {warmed}"
+            f"Med EMA: {med}  Long EMA: {long_}<br>"
+            f"Longest: {longest}  ATR: {atr}<br>"
+            f"Regime: {bar.get('display_bg', '—')} ({warmed})"
         )
 
-    def _hide_crosshair_items(self) -> None:
-        """Hide all crosshair-driven overlays. Used when the cursor
-        leaves the chart area or falls outside the bar range."""
-        self._vline_price.hide()
-        self._hline_price.hide()
-        self._vline_vol.hide()
-        self._price_axis_label.hide()
-        self._date_axis_label.hide()
+    def _update_last5_signals(self, payload: dict) -> None:
+        self._last5_list.clear()
+        events = payload.get("signal_events", []) or []
+        # signal_events come oldest→newest from the endpoint; take
+        # the last 5 and reverse so newest is at the top.
+        recent = list(events[-5:])
+        recent.reverse()
+        for e in recent:
+            ts = e.get("bar_timestamp")
+            if isinstance(ts, str):
+                dt = datetime.fromisoformat(ts)
+            else:
+                dt = ts
+            self._last5_list.addItem(
+                f"{dt.strftime('%d-%b-%y')}  {e.get('signal', '—'):>14}"
+                f"   ₹{e.get('price_at_signal', 0):,.2f}"
+            )
 
-    # ---------- lifecycle ---------- #
+    # ====================  Phase B: backtest  ==================== #
+
+    def _on_run_backtest_clicked(self) -> None:
+        if not self._last_payload:
+            self._backtest_hint_label.setText("Load a ticker first.")
+            return
+        bars = self._last_payload.get("bars", [])
+        if not bars:
+            self._backtest_hint_label.setText("No bars to backtest.")
+            return
+
+        years = self._backtest_range_combo.currentData()
+        sliced = filter_bars_to_range(bars, years=years)
+        if not sliced:
+            self._backtest_hint_label.setText("Selected range has no bars.")
+            return
+        if years is not None and len(sliced) < years * 50:
+            self._backtest_hint_label.setText(
+                f"Note: chart has only {len(sliced)} bars in the "
+                f"last {years}y; bump the chart range for more."
+            )
+        else:
+            self._backtest_hint_label.setText("")
+
+        result = run_long_only_backtest(sliced)
+        ticker_label = (
+            f"{self._current_exchange}:{self._current_symbol}"
+            if self._current_exchange and self._current_symbol else "?"
+        )
+        range_label = "All time" if years is None else f"{years} years"
+        dlg = BacktestDialog(
+            result,
+            ticker_label=ticker_label,
+            range_label=range_label,
+            parent=self,
+        )
+        dlg.show()
+        # Prune dead dialogs from prior runs (Qt.WA_DeleteOnClose
+        # leaves the wrapper pointing at a freed C++ object).
+        self._open_backtest_dialogs = [
+            d for d in self._open_backtest_dialogs if _is_dialog_alive(d)
+        ]
+        self._open_backtest_dialogs.append(dlg)
+
+        s = result.summary
+        if s.n_trades == 0:
+            self._backtest_hint_label.setText(
+                "Backtest complete: no trades fired."
+            )
+        else:
+            self._backtest_hint_label.setText(
+                f"Backtest complete: {s.n_trades} trades, "
+                f"{s.win_rate_pct:.1f}% win rate, "
+                f"total return {s.total_return_pct:+.1f}%."
+            )
+
+    # ====================  Lifecycle  ==================== #
 
     def on_close(self) -> None:
-        """Called by MainWindow.closeEvent. Stop the embedded
-        SignalGenerationPanel's polling timers so they don't keep
-        firing after the view (and the QApplication) tears down."""
+        """Called by MainWindow.closeEvent. Stop embedded panels
+        and persist final splitter state."""
+        try:
+            self._save_splitter()
+        except Exception:
+            pass
         try:
             if hasattr(self, "_signal_generation_panel"):
                 self._signal_generation_panel.on_close()
@@ -977,14 +595,7 @@ class SignalsView(QWidget):
 
 
 def _is_dialog_alive(dlg) -> bool:
-    """Return True if the Qt wrapper still maps to a live C++ object.
-
-    BacktestDialog uses Qt.WA_DeleteOnClose, so the C++ object is
-    released when the user closes the window. Touching the Python
-    wrapper afterwards raises RuntimeError ("wrapped C/C++ object
-    of type ... has been deleted"); we catch that to prune the
-    SignalsView's list of open dialogs lazily.
-    """
+    """Return True if the Qt wrapper still maps to a live C++ object."""
     try:
         dlg.isVisible()
     except RuntimeError:
@@ -996,24 +607,3 @@ def _fmt(v) -> str:
     if v is None:
         return "—"
     return f"{v:.2f}"
-
-
-class _DateAxisItem(pg.AxisItem):
-    """Translates the integer bar-index X axis into date strings for
-    display. The chart uses 0,1,2,... so weekend/holiday gaps don't
-    widen the chart; this axis maps those indices back to readable
-    dates for tick labels."""
-
-    def __init__(self, index_to_dt: list[datetime], **kwargs):
-        super().__init__(**kwargs)
-        self._index_to_dt = index_to_dt
-
-    def tickStrings(self, values, scale, spacing):
-        out = []
-        for v in values:
-            i = int(round(v))
-            if 0 <= i < len(self._index_to_dt):
-                out.append(self._index_to_dt[i].strftime("%Y-%m"))
-            else:
-                out.append("")
-        return out

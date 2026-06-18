@@ -338,3 +338,64 @@ def ticker_universe_with_recent_signals(
         )
         for r in rows
     ]
+
+
+
+def top_n_tickers_in_industry_by_mcap(
+    conn: Connection,
+    industry_name: str,
+    *,
+    n: int = 12,
+    exchange: str = "NSE",
+) -> list[TickerRow]:
+    """Top N tickers in `industry_name` by latest available market cap.
+
+    Used by the Signals tab's IndustryPanel to populate the 4x3 mini
+    grid of related stocks. Returns fewer than N rows if the industry
+    has fewer active tickers — caller (the panel) leaves trailing
+    grid slots blank rather than reshaping.
+
+    Latest market cap: each ticker's most recent `daily_market_cap`
+    row. The DISTINCT ON (ticker_id) pattern picks the latest per
+    ticker in one scan; the outer query ranks those rows by mcap
+    DESC and trims to N.
+
+    Active filter: same as the dropdown — is_active=TRUE and
+    delisted_at IS NULL. ETFs and indices are excluded by joining
+    on instrument_industry (which is populated only for equity-style
+    instruments).
+    """
+    rows = conn.execute(text("""
+        WITH latest_mcap AS (
+            SELECT DISTINCT ON (ticker_id)
+                ticker_id, market_cap
+            FROM daily_market_cap
+            ORDER BY ticker_id, trade_date DESC
+        )
+        SELECT t.ticker_id, t.exchange, t.symbol, t.instrument_type,
+               t.full_name, t.isin, t.tier, t.is_active, t.delisted_at,
+               NULL::date AS last_successful_bar_date,
+               0 AS consecutive_failures,
+               FALSE AS parked
+        FROM tickers t
+        JOIN instrument_industry ii ON ii.ticker_id = t.ticker_id
+        JOIN latest_mcap m ON m.ticker_id = t.ticker_id
+        WHERE ii.industry = :ind
+          AND t.exchange = :ex
+          AND t.is_active = TRUE
+          AND t.delisted_at IS NULL
+        ORDER BY m.market_cap DESC NULLS LAST, t.symbol ASC
+        LIMIT :lim
+    """), {"ind": industry_name, "ex": exchange, "lim": n})
+    return [
+        TickerRow(
+            ticker_id=r.ticker_id, exchange=r.exchange, symbol=r.symbol,
+            instrument_type=r.instrument_type, full_name=r.full_name,
+            isin=r.isin, tier=r.tier, is_active=r.is_active,
+            delisted_at=r.delisted_at,
+            last_successful_bar_date=r.last_successful_bar_date,
+            consecutive_failures=r.consecutive_failures,
+            parked=r.parked,
+        )
+        for r in rows
+    ]
