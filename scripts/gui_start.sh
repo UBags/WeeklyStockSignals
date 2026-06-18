@@ -15,7 +15,7 @@ cd "$REPO_ROOT"
 CONFIG="${1:-config.yaml}"
 
 echo "=== Ensuring GUI is up ==="
-if pgrep -f "trip-ema-console" > /dev/null; then
+if pgrep -f "trip.ema.console" > /dev/null; then
     echo "  GUI already running, leaving it alone"
     exit 0
 fi
@@ -28,6 +28,6 @@ if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
     exit 1
 fi
 
-nohup trip-ema-console --config "$CONFIG" > /tmp/trip-ema-console.log 2>&1 &
+nohup "$REPO_ROOT/.venv/bin/trip-ema-console" --config "$CONFIG" > /tmp/trip-ema-console.log 2>&1 &
 echo "  GUI started, PID $!"
 echo "  Logs: tail -f /tmp/trip-ema-console.log"

@@ -159,7 +159,7 @@ echo "=== Step 3: starting trip-ema (config=${CONFIG}) ==="
 # nohup detaches from the controlling terminal so closing the shell
 # doesn't kill the service. `setsid` would do the same; nohup is
 # more portable.
-nohup trip-ema --config "$CONFIG" > "$LOG_FILE" 2>&1 &
+nohup "$REPO_ROOT/.venv/bin/trip-ema" --config "$CONFIG" > "$LOG_FILE" 2>&1 &
 SERVICE_PID=$!
 echo "  started, PID $SERVICE_PID"
 echo "  logs at $LOG_FILE"

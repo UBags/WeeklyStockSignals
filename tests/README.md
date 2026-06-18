@@ -18,7 +18,7 @@ strategies (`_pure` suffix, `parity/`).
 | `gui/` | `trip_ema/gui/` views, widgets | no | yes |
 | `gui_pure/` | GUI-adjacent code that doesn't need a QApplication | no | no |
 | `indicators/` | `trip_ema/indicators/` math | no | no |
-| `notifications/` | `trip_ema/notifications/` transports + breakers + queue | no | no |
+| `notifications/` | `trip_ema/notifications/` transports + breakers + queue + enrichment | no | no |
 | `notifier/` | `trip_ema/notifier_worker.py` (full integration) | yes | no |
 | `notifier_pure/` | `notifier_worker` logic without DB | no | no |
 | `observability/` | `trip_ema/observability/` | no | no |

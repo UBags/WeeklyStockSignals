@@ -14,7 +14,8 @@ consumer abstraction, and a small batcher that renders the message body.
 | `email_transport.py` | Brevo HTTP API delivery (POST to `/v3/smtp/email`). Replaced the SMTP implementation after Microsoft disabled `SmtpClientAuthentication` for new Outlook.com personal mailboxes and Gmail moved to OAuth-only |
 | `webhook_transport.py` | HTTP POST delivery (Slack-compatible JSON body) |
 | `circuit_breaker.py` | Per-transport failure-window breaker — opens after `failure_threshold` consecutive failures within a window; closes after `reset_timeout_seconds` of quiet; half-open lets `half_open_max_successes` succeed before fully closing |
-| `batcher.py` | Renders one event line (text or JSON) for the message body. Single-event today; reserved for multi-event batching |
+| `enrichment.py` | Per-batch enrichment lookups for HTML email rendering — resolves each ticker's market cap, sector/industry, sector zone (display_regime), sector direction (day-over-day industry-index delta), and last 5 signal events. `enrich_batch(engine, batch)` runs four SQL queries and returns a `BatchEnrichment` container. Degrades gracefully: missing data → None/0 → renderer prints `—`. Errors (DB down) are caught and return `EMPTY_ENRICHMENT` so email delivery never blocks on enrichment |
+| `batcher.py` | Renders `NotificationBatch` into three formats: **text** (one event per line), **HTML** (grouped by signal type, color-coded tables with per-ticker enrichment columns: Mkt Cap, Sector, Sector Zone, Sector Direction, Last 5 signals), and **JSON** (structured array for webhooks). HTML sections emitted in fixed order (BUY → SELL → Exit Buy → Exit Sell); within a section rows sorted alphabetically by symbol. All styles inline (Gmail strips `<style>` blocks). Indian-numbering helper formats market cap as `₹19,84,302 Cr` |
 | `redis_queue.py` | `RedisQueue` producer (used by `SubscriberDistributor`) + consumer (used by `NotifierWorker`). Also owns the DLQ data structure and the Redis HASH attempt counter |
 
 ## Email transport (Brevo HTTP API)
@@ -83,9 +84,48 @@ Admin endpoints (in `transports/http/routes/admin_notifications.py`):
 - `POST /v1/admin/notifications/dlq/{job_id}/replay` — requeue
 - `DELETE /v1/admin/notifications/dlq/{job_id}` — permanent delete
 
+## Enrichment → HTML rendering pipeline
+
+When the `SubscriberDistributor` fires in legacy (in-process) mode,
+`app.py` wires an `enrichment_provider` closure into the
+`EmailTransport`. On each `send()`, the transport calls:
+
+```
+enrichment_provider(batch)
+  → enrich_batch(db_engine, batch)
+      → _fetch_ticker_basics(conn, refs)    # ticker_id + sector + industry + latest mcap
+      → _fetch_sector_zones(conn, industries)  # latest display_regime per industry
+      → _fetch_sector_directions(conn, industries)  # sign of day-over-day index-value change
+      → _fetch_recent_signals(conn, ticker_ids)  # last 5 signal_events per ticker
+  → BatchEnrichment (keyed by (exchange, symbol, instrument))
+
+render_html(batch, enrichment)
+  → grouped HTML tables per signal type
+```
+
+If enrichment fails (DB down, schema mismatch), `EmailTransport`
+falls back to text-only for that send — enrichment is decoration,
+not a delivery requirement.
+
+### Known bug (fixed): SQLAlchemy bind-name parsing
+
+`_fetch_ticker_basics` uses Postgres `unnest(:exchanges::text[],
+:symbols::text[], :instruments::text[])`. SQLAlchemy's `text()`
+parser detects bind names with a `:(\w+)(?!:)` lookahead —
+`:exchanges::text[]` caused it to bind `:exchange` (singular)
+instead of `:exchanges` (plural). The params dict supplied plural
+keys, so `execute()` raised, the broad `except` in `enrich_batch`
+swallowed it, and `EMPTY_ENRICHMENT` was returned — every email
+row showed `—` / NEUTRAL. Fix: wrap each cast as
+`(:exchanges)::text[]`. Regression test:
+`tests/notifications/test_enrichment.py`.
+
 ## Tests
 
 - `tests/notifications/test_batcher.py`
+- `tests/notifications/test_html_render.py`
+- `tests/notifications/test_enrichment.py` — regression test for
+  the SQLAlchemy bind-name parsing bug in `_fetch_ticker_basics`
 - `tests/notifications/test_circuit_breaker.py`
 - `tests/notifications/test_redis_queue.py`, `test_redis_queue_dlq.py`
 - `tests/notifications/test_transports.py`

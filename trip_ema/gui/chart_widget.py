@@ -441,7 +441,7 @@ class ChartWidget(QWidget):
 
         for x0, x1, regime in runs:
             color = QColor(regime_color(regime))
-            color.setAlpha(55)
+            color.setAlpha(80)
             region = pg.LinearRegionItem(
                 values=[x0 - 0.5, x1 - 0.5],
                 brush=pg.mkBrush(color),
