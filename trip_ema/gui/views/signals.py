@@ -156,6 +156,7 @@ class SignalsView(QWidget):
             self._http, parent=self,
             start_polling_on_init=self._populate_combo_on_init,
         )
+        self._signal_generation_panel.setMaximumHeight(130)
         outer.addWidget(self._signal_generation_panel)
 
     # ----- top bar ----- #

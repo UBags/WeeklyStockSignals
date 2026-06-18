@@ -83,9 +83,9 @@ class IndustryPanel(QWidget):
         # current view.
         self._current_request_id = 0
 
-        # Track the range that should be applied to the industry chart
-        # (the minis are always 5Y).
-        self._industry_years = 3
+        # Track the range for the industry chart — fixed at 10 years
+        # per spec (as opposed to 5Y for the minis below).
+        self._industry_years = 10
 
         # True when the industry chart slot is showing the NIFTY 50
         # fallback (selected ticker had no industry classification).
@@ -145,18 +145,9 @@ class IndustryPanel(QWidget):
 
     def set_industry_chart_years(self, years: int) -> None:
         """Called by SignalsView when its top-bar Range button changes.
-        Re-fetches the industry chart at the new range; minis are
-        unaffected (their range is fixed at 5Y per spec)."""
-        self._industry_years = years
-        if getattr(self, "_current_industry_name", None):
-            self._fetch_industry_chart(
-                self._current_industry_name, self._current_request_id,
-            )
-        elif self._in_fallback_mode:
-            # Selected ticker has no industry; the slot is showing the
-            # NIFTY 50 fallback. Refresh it at the new range so the
-            # fallback view matches the rest of the panel.
-            self._fetch_nifty50_fallback(self._current_request_id)
+        No-op: the industry chart is fixed at 10 years per spec.
+        Minis are also unaffected (fixed at 5Y)."""
+        pass
 
     def load_for_ticker(
         self,

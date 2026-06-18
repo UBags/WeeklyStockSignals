@@ -140,9 +140,18 @@ class _Candlestick(pg.GraphicsObject):
 class _DateAxis(pg.AxisItem):
     """Maps numeric bar indices to YYYY-MM tick strings."""
 
-    def __init__(self, index_to_dt: list[datetime], **kwargs):
+    def __init__(self, index_to_dt: list[datetime], *, single_mid: bool = False, **kwargs):
         super().__init__(**kwargs)
         self._index_to_dt = index_to_dt
+        self._single_mid = single_mid
+
+    def tickValues(self, minVal, maxVal, size):
+        if self._single_mid and self._index_to_dt:
+            # (d) For mini charts, show exactly 1 tick at the midpoint.
+            mid = int((minVal + maxVal) / 2)
+            mid = max(0, min(mid, len(self._index_to_dt) - 1))
+            return [(1, [mid])]
+        return super().tickValues(minVal, maxVal, size)
 
     def tickStrings(self, values, scale, spacing):
         out = []
@@ -254,29 +263,29 @@ class ChartWidget(QWidget):
             self._volume_plot = None
             self._vline_vol = None
 
-        # --- TradingView-style pinned axis labels (MAIN only) --- #
-        if self._mode == ChartMode.MAIN:
-            self._price_axis_label = pg.TextItem(
-                text="", anchor=(1.0, 0.5),
-                color=COLOR_AXIS_LABEL_FG,
-                fill=pg.mkBrush(COLOR_AXIS_LABEL_BG),
-                border=pg.mkPen(COLOR_AXIS_LABEL_BG),
-            )
-            self._price_plot.addItem(self._price_axis_label, ignoreBounds=True)
-            self._price_axis_label.hide()
+        # --- TradingView-style pinned axis labels (all modes) --- #
+        self._price_axis_label = pg.TextItem(
+            text="", anchor=(1.0, 0.5),
+            color=COLOR_AXIS_LABEL_FG,
+            fill=pg.mkBrush(COLOR_AXIS_LABEL_BG),
+            border=pg.mkPen(COLOR_AXIS_LABEL_BG),
+        )
+        self._price_plot.addItem(self._price_axis_label, ignoreBounds=True)
+        self._price_axis_label.hide()
 
-            self._date_axis_label = pg.TextItem(
-                text="", anchor=(0.5, 1.0),
-                color=COLOR_AXIS_LABEL_FG,
-                fill=pg.mkBrush(COLOR_AXIS_LABEL_BG),
-                border=pg.mkPen(COLOR_AXIS_LABEL_BG),
-            )
-            # Bottom axis lives on the volume plot in MAIN mode
+        self._date_axis_label = pg.TextItem(
+            text="", anchor=(0.5, 1.0),
+            color=COLOR_AXIS_LABEL_FG,
+            fill=pg.mkBrush(COLOR_AXIS_LABEL_BG),
+            border=pg.mkPen(COLOR_AXIS_LABEL_BG),
+        )
+        # Bottom axis lives on the volume plot in MAIN mode,
+        # on the price plot otherwise.
+        if self._volume_plot is not None:
             self._volume_plot.addItem(self._date_axis_label, ignoreBounds=True)
-            self._date_axis_label.hide()
         else:
-            self._price_axis_label = None
-            self._date_axis_label = None
+            self._price_plot.addItem(self._date_axis_label, ignoreBounds=True)
+        self._date_axis_label.hide()
 
         # Stretch — give price more vertical space than volume
         if self._volume_plot is not None:
@@ -319,7 +328,11 @@ class ChartWidget(QWidget):
 
         # Bottom date axis — install on the volume plot for MAIN,
         # on the price plot otherwise.
-        date_axis = _DateAxis(self._bar_index_to_dt, orientation="bottom")
+        use_single_mid = (self._mode == ChartMode.MINI)
+        date_axis = _DateAxis(
+            self._bar_index_to_dt, orientation="bottom",
+            single_mid=use_single_mid,
+        )
         if self._volume_plot is not None:
             self._volume_plot.setAxisItems({"bottom": date_axis})
         else:
@@ -328,11 +341,15 @@ class ChartWidget(QWidget):
         # Layers, in z-order back to front
         if self._layer_visible["regime"]:
             self._render_regime_fill(bars)
-        candles = [
-            (i, b["open"], b["high"], b["low"], b["close"])
-            for i, b in enumerate(bars)
-        ]
-        self._price_plot.addItem(_Candlestick(candles))
+        if self._mode == ChartMode.INDUSTRY:
+            # Industry index: colored dots instead of candles
+            self._render_industry_dots(bars)
+        else:
+            candles = [
+                (i, b["open"], b["high"], b["low"], b["close"])
+                for i, b in enumerate(bars)
+            ]
+            self._price_plot.addItem(_Candlestick(candles))
         if self._layer_visible["emas"]:
             self._render_emas(bars)
         if self._layer_visible["atr"]:
@@ -348,10 +365,11 @@ class ChartWidget(QWidget):
         self._price_plot.addItem(self._hline_price, ignoreBounds=True)
         if self._vline_vol is not None:
             self._volume_plot.addItem(self._vline_vol, ignoreBounds=True)
-        if self._price_axis_label is not None:
-            self._price_plot.addItem(self._price_axis_label, ignoreBounds=True)
-        if self._date_axis_label is not None and self._volume_plot is not None:
+        self._price_plot.addItem(self._price_axis_label, ignoreBounds=True)
+        if self._volume_plot is not None:
             self._volume_plot.addItem(self._date_axis_label, ignoreBounds=True)
+        else:
+            self._price_plot.addItem(self._date_axis_label, ignoreBounds=True)
 
         self._price_plot.enableAutoRange()
         if self._volume_plot is not None:
@@ -396,10 +414,8 @@ class ChartWidget(QWidget):
             self._hline_price.hide()
         if self._vline_vol is not None:
             self._vline_vol.hide()
-        if self._price_axis_label is not None:
-            self._price_axis_label.hide()
-        if self._date_axis_label is not None:
-            self._date_axis_label.hide()
+        self._price_axis_label.hide()
+        self._date_axis_label.hide()
 
     def _render_regime_fill(self, bars: list[dict]) -> None:
         if not bars:
@@ -425,7 +441,7 @@ class ChartWidget(QWidget):
 
         for x0, x1, regime in runs:
             color = QColor(regime_color(regime))
-            color.setAlpha(28)
+            color.setAlpha(55)
             region = pg.LinearRegionItem(
                 values=[x0 - 0.5, x1 - 0.5],
                 brush=pg.mkBrush(color),
@@ -488,7 +504,8 @@ class ChartWidget(QWidget):
             bar = bars[i]
             signal = e["signal"].upper()
             offset = (bar["high"] - bar["low"]) * 0.5
-            if signal == "BUY":
+            # BUY / EXIT_FROM_SELL: green ▲ below candle
+            if signal in ("BUY", "EXIT_FROM_SELL"):
                 y = bar["low"] - offset
                 arrow = pg.ArrowItem(
                     pos=(i, y), angle=90,
@@ -497,7 +514,8 @@ class ChartWidget(QWidget):
                     pen=pg.mkPen(COLOR_SIGNAL_BUY),
                 )
                 self._price_plot.addItem(arrow)
-            elif signal == "SELL":
+            # SELL / EXIT_FROM_BUY: red ▼ above candle
+            elif signal in ("SELL", "EXIT_FROM_BUY"):
                 y = bar["high"] + offset
                 arrow = pg.ArrowItem(
                     pos=(i, y), angle=-90,
@@ -521,6 +539,32 @@ class ChartWidget(QWidget):
                 x=x, height=y, width=0.7,
                 brushes=brushes, pen=pg.mkPen(None),
             ))
+
+    def _render_industry_dots(self, bars: list[dict]) -> None:
+        """Render the industry index as colored scatter dots.
+
+        Each point is the weekly close value, colored green if
+        close > previous close, red otherwise. Size = 3px.
+        Industry indices are synthetic single-value series, so
+        candles are misleading — dots show the actual data shape.
+        """
+        if not bars:
+            return
+        xs, ys, brushes = [], [], []
+        prev_close = None
+        for i, b in enumerate(bars):
+            c = b["close"]
+            xs.append(i)
+            ys.append(c)
+            if prev_close is not None and c >= prev_close:
+                brushes.append(pg.mkBrush(COLOR_CANDLE_UP))
+            else:
+                brushes.append(pg.mkBrush(COLOR_CANDLE_DOWN))
+            prev_close = c
+        scatter = pg.ScatterPlotItem(
+            x=xs, y=ys, size=3, pen=pg.mkPen(None), brush=brushes,
+        )
+        self._price_plot.addItem(scatter)
 
     # ---------- Crosshair / mouse ---------- #
 
@@ -566,13 +610,26 @@ class ChartWidget(QWidget):
             self._date_axis_label.setText(format_date_label(dt))
             self._date_axis_label.show()
             self.bar_under_cursor_changed.emit(bar)
+        else:
+            # MINI / INDUSTRY: same floating labels, positioned on
+            # the price plot (no volume sub-plot in these modes).
+            price_x_range = self._price_plot.vb.viewRange()[0]
+            price_y_range = self._price_plot.vb.viewRange()[1]
+            self._price_axis_label.setPos(
+                price_x_range[1], mouse_point.y(),
+            )
+            self._price_axis_label.setText(
+                format_price_label(mouse_point.y())
+            )
+            self._price_axis_label.show()
+            self._date_axis_label.setPos(x_idx, price_y_range[0])
+            self._date_axis_label.setText(format_date_label(dt))
+            self._date_axis_label.show()
 
     def _hide_crosshair(self) -> None:
         self._vline_price.hide()
         self._hline_price.hide()
         if self._vline_vol is not None:
             self._vline_vol.hide()
-        if self._price_axis_label is not None:
-            self._price_axis_label.hide()
-        if self._date_axis_label is not None:
-            self._date_axis_label.hide()
+        self._price_axis_label.hide()
+        self._date_axis_label.hide()

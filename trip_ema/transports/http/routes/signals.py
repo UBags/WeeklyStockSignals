@@ -327,18 +327,12 @@ def get_industry_history(
     window.
     """
     with db_engine.connect() as conn:
-        exists = conn.execute(text("""
-            SELECT 1 FROM industry_index WHERE industry_name = :n
-        """), {"n": industry_name}).first()
-        if exists is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Industry index '{industry_name}' not found",
-            )
-
-        # Pull daily values + the SAME-day indicator_state for the
-        # window. Joining left-side so weeks without indicator_state
-        # (warmup) still show candles.
+        # No hard-gate on industry_index existence — the table may
+        # not have a row for this industry if build-industry-indices
+        # hasn't been run yet, but industry_index_value may still
+        # have data (or we may want to return an empty-bars payload
+        # so the GUI degrades gracefully instead of showing "fetch
+        # failed").
         since = datetime.now(timezone.utc) - timedelta(days=365 * years)
         rows = conn.execute(text("""
             SELECT
@@ -430,7 +424,7 @@ def get_industry_history(
         bars.append(HistoricalBarPayload(
             bar_timestamp=bar_ts,
             open=open_, high=high, low=low, close=close,
-            volume=0.0,
+            volume=1.0,
             med_ema=_finite_or_none(last.med_ema),
             long_ema=_finite_or_none(last.long_ema),
             longest_ema=_finite_or_none(last.longest_ema),
