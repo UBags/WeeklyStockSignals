@@ -24,7 +24,12 @@ Behavior:
     draft). Editing form fields does NOT mutate the server; [Save]
     PATCHes the changed scalars then PUTs the canonical filter set.
   - [Add subscriber] clears the form to defaults and disables the
-    table; Save creates a new row.
+    table; Save creates a new row. A catch-all filter is pre-seeded
+    on the new draft so saving without further filter edits still
+    produces a working subscriber (without this, the distributor's
+    find_pending_for_subscriber short-circuits to [] on zero filter
+    rows and no notifications ever go out — see CATCH_ALL_FILTER
+    below).
   - [Test notify] fires the server-side endpoint; result via dialog.
   - [Delete] confirms then DELETEs.
   - Token-less mode: all writes disabled; reads work.
@@ -79,6 +84,25 @@ SMS_DISABLED_TOOLTIP = (
 
 # Cadence dropdown values — server CHECK constraint is 15-1440 step 15.
 CADENCE_CHOICES = [15, 30, 60, 120, 240, 480, 1440]
+
+
+def _catch_all_filter() -> dict:
+    """A single 'all tickers, all signals' filter row, in the same shape
+    the form's filter list and the HTTP create payload expect.
+
+    Pre-seeded on new-subscriber drafts (see _on_add_clicked) and used
+    as the auto-add option when a Save is attempted with zero filters
+    (see _on_save_clicked). Keep this in sync with the server-side
+    SubscriptionFilterPayload shape — both fields NULL means 'match
+    every event'.
+    """
+    return {
+        "subscription_id": None,
+        "ticker_id": None,
+        "ticker_symbol": None,
+        "ticker_exchange": None,
+        "signal_filter": None,
+    }
 
 
 # ---------- table model ---------- #
@@ -462,7 +486,20 @@ class SubscribersView(QWidget):
 
     def _on_add_clicked(self) -> None:
         """Begin a new-subscriber draft. Table selection cleared so we
-        don't accidentally save against an existing row."""
+        don't accidentally save against an existing row.
+
+        CATCH_ALL_FILTER: A single 'all tickers / all signals' filter
+        row is pre-seeded into the draft so that a subscriber created
+        without further filter edits is still functional. Without
+        this seed, `SignalsRepository.find_pending_for_subscriber`
+        short-circuits to [] on any subscriber with zero `subscriptions`
+        rows, and the SubscriberDistributor silently drops the
+        subscriber on every cycle — `notification_log` stays empty,
+        `subscribers.last_notified_at` never advances, and the operator
+        gets no signal that anything is wrong. The user can still
+        remove this filter and add specific ones; the empty-filters
+        guard in `_on_save_clicked` is the second line of defense.
+        """
         if self._form_dirty:
             confirm = QMessageBox.question(
                 self, "Discard unsaved changes?",
@@ -474,7 +511,7 @@ class SubscribersView(QWidget):
         self._table.clearSelection()
         self._editing_subscriber_id = None
         self._with_dirty_suppressed(self._reset_form_to_defaults)
-        self._form_filters = []
+        self._form_filters = [_catch_all_filter()]
         self._refresh_filters_list()
         self._form_dirty = True
         self._update_button_states()
@@ -510,6 +547,26 @@ class SubscribersView(QWidget):
             return
         cadence = self._form_cadence.currentData()
         active = self._form_active.isChecked()
+
+        # Empty-filters guard: a subscriber with zero subscription rows
+        # is never matched by the distributor. The Add-subscriber flow
+        # pre-seeds a catch-all, but the user can edit-then-remove all
+        # filters; this Yes/No catches that path. Confirming auto-adds
+        # the catch-all back so the Save proceeds with a working state.
+        if not self._form_filters:
+            confirm = QMessageBox.question(
+                self, "No filters set",
+                "This subscriber has no filters, so the distributor "
+                "will never match any events to them and no "
+                "notifications will be sent.\n\n"
+                "Add an 'all tickers / all signals' catch-all and "
+                "continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+            self._form_filters = [_catch_all_filter()]
+            self._refresh_filters_list()
 
         if self._editing_subscriber_id is None:
             # Create
