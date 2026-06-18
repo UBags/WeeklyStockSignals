@@ -258,16 +258,17 @@ class TickerComboRow:
     """One row in the Signals tab's ticker dropdown.
 
     The dropdown groups tickers into two sections: those with a
-    signal event in the last 2 weeks (top, normal background) and
-    those without (below, grey background). `has_recent_signal`
-    drives the partition; everything else is what the combo needs to
-    display the row and route a selection back to a chart fetch.
+    signal event in the last 2 weeks (top, colored by signal type)
+    and those without (below, grey background).
+    `has_recent_signal` drives the partition; `latest_signal`
+    drives the color (BUY=green, SELL=red, EXIT_*=blue).
     """
     exchange: str
     symbol: str
     instrument_type: str
     full_name: Optional[str]
     has_recent_signal: bool
+    latest_signal: Optional[str] = None
 
 
 def ticker_universe_with_recent_signals(
@@ -307,18 +308,21 @@ def ticker_universe_with_recent_signals(
     `partition_ticker_rows`.
     """
     sql = """
-        WITH recent_tids AS (
-            SELECT DISTINCT ticker_id
+        WITH recent_sigs AS (
+            SELECT DISTINCT ON (ticker_id)
+                ticker_id, signal_type
             FROM signal_events
             WHERE bar_timestamp >= (
                 (date_trunc('week', (NOW() AT TIME ZONE 'Asia/Kolkata'))::timestamp
                  - INTERVAL '7 days') AT TIME ZONE 'Asia/Kolkata'
             )
+            ORDER BY ticker_id, computed_at DESC
         )
         SELECT t.exchange, t.symbol, t.instrument_type, t.full_name,
-               (r.ticker_id IS NOT NULL) AS has_recent_signal
+               (r.ticker_id IS NOT NULL) AS has_recent_signal,
+               r.signal_type AS latest_signal
         FROM tickers t
-        LEFT JOIN recent_tids r ON r.ticker_id = t.ticker_id
+        LEFT JOIN recent_sigs r ON r.ticker_id = t.ticker_id
         WHERE t.is_active = TRUE AND t.delisted_at IS NULL
     """
     params: dict = {}
@@ -335,6 +339,7 @@ def ticker_universe_with_recent_signals(
             instrument_type=r.instrument_type,
             full_name=r.full_name,
             has_recent_signal=bool(r.has_recent_signal),
+            latest_signal=r.latest_signal,
         )
         for r in rows
     ]

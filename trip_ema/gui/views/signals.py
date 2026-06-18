@@ -61,6 +61,9 @@ logger = logging.getLogger(__name__)
 
 
 _DROPDOWN_GREY_BG = "#f0f0f0"
+_DROPDOWN_BUY_BG = "#c8e6c9"       # light green
+_DROPDOWN_SELL_BG = "#ffcdd2"      # light red
+_DROPDOWN_EXIT_BG = "#bbdefb"      # light blue
 
 _QSETTINGS_ORG = "trip_ema"
 _QSETTINGS_APP = "gui"
@@ -345,6 +348,18 @@ class SignalsView(QWidget):
         recent, other = partition_ticker_rows(rows)
         model = QStandardItemModel(self)
         grey_brush = QBrush(QColor(_DROPDOWN_GREY_BG))
+        buy_brush = QBrush(QColor(_DROPDOWN_BUY_BG))
+        sell_brush = QBrush(QColor(_DROPDOWN_SELL_BG))
+        exit_brush = QBrush(QColor(_DROPDOWN_EXIT_BG))
+
+        def _signal_brush(sig: str | None) -> QBrush | None:
+            if sig == "BUY":
+                return buy_brush
+            if sig == "SELL":
+                return sell_brush
+            if sig in ("EXIT_FROM_BUY", "EXIT_FROM_SELL"):
+                return exit_brush
+            return None
 
         def _make_item(row, *, grey: bool) -> QStandardItem:
             display = row.symbol
@@ -358,6 +373,10 @@ class SignalsView(QWidget):
             )
             if grey:
                 item.setData(grey_brush, Qt.BackgroundRole)
+            else:
+                sig_brush = _signal_brush(getattr(row, 'latest_signal', None))
+                if sig_brush is not None:
+                    item.setData(sig_brush, Qt.BackgroundRole)
             return item
 
         for r in recent:

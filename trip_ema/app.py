@@ -342,11 +342,37 @@ def _build_orchestrator_components(
             assert exchange_str == exchange, (
                 f"fetch_fn for {exchange} invoked with {exchange_str}"
             )
-            return run_eod(
+            result = run_eod(
                 db_engine=db_engine,
                 config=config,
                 exchange=exchange,
             )
+            # After bars are fetched, run the fundamentals daily
+            # pipeline so the industry index chart has fresh data.
+            # Steps 1-3 (refresh-industry/shares/financials) have
+            # 80-day skip guards and won't make yfinance API calls
+            # on daily runs. Steps 4-8 (compute-market-cap,
+            # build-industry-indices, compute-index-values,
+            # compute-indicator-state, compute-signals) are all
+            # local compute and run in ~30-60s.
+            try:
+                from .fundamentals.eod_pipeline import run_eod_pipeline  # noqa: PLC0415
+                pipeline_result = run_eod_pipeline(
+                    db_engine, exchange,
+                    include_tickers=False,  # industry-level only
+                )
+                logger.info(
+                    "Post-fetch fundamentals pipeline for %s: %s (%.1fs)",
+                    exchange, pipeline_result.overall_status,
+                    pipeline_result.duration_seconds or 0.0,
+                )
+            except Exception:
+                logger.warning(
+                    "Post-fetch fundamentals pipeline failed for %s; "
+                    "industry charts may be stale",
+                    exchange, exc_info=True,
+                )
+            return result
         return _fetch
 
     pool = build_pool_from_configs(
