@@ -335,7 +335,7 @@ def _recent_signals_cell(
         return f'<span style="color: {_COLOR_MUTED};">—</span>'
     lines: list[str] = []
     for sig in recent:
-        when = sig.bar_timestamp.astimezone(tz) if tz else sig.bar_timestamp
+        when = sig.computed_at.astimezone(tz) if tz else sig.computed_at
         when_str = when.strftime("%d-%b-%y %H:%M")
         verb_html = _signal_word_html(sig.signal_type)
         price_str = f"{sig.price_at_signal:,.2f}"

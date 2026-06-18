@@ -52,7 +52,7 @@ class HistoricalSignal:
     """One past signal event used in the 'Last 5 trading days signals'
     column. Stored in ascending order (oldest → newest) by the
     enrichment loader."""
-    bar_timestamp: datetime
+    computed_at: datetime
     signal_type: str          # 'BUY' | 'SELL' | 'EXIT_FROM_BUY' | 'EXIT_FROM_SELL'
     price_at_signal: float
 
@@ -312,26 +312,26 @@ def _fetch_recent_signals(
         WITH numbered AS (
             SELECT
                 ticker_id,
-                bar_timestamp,
+                computed_at,
                 signal_type,
                 price_at_signal,
                 ROW_NUMBER() OVER (
                     PARTITION BY ticker_id
-                    ORDER BY bar_timestamp DESC
+                    ORDER BY computed_at DESC
                 ) AS rn
             FROM signal_events
             WHERE ticker_id = ANY(:tids)
         )
-        SELECT ticker_id, bar_timestamp, signal_type, price_at_signal
+        SELECT ticker_id, computed_at, signal_type, price_at_signal
         FROM numbered
         WHERE rn <= 5
-        ORDER BY ticker_id, bar_timestamp ASC
+        ORDER BY ticker_id, computed_at ASC
     """)
     rows = conn.execute(sql, {"tids": ticker_ids}).all()
     out: dict[int, list[HistoricalSignal]] = {}
     for r in rows:
         out.setdefault(r.ticker_id, []).append(HistoricalSignal(
-            bar_timestamp=r.bar_timestamp,
+            computed_at=r.computed_at,
             signal_type=r.signal_type,
             price_at_signal=float(r.price_at_signal),
         ))

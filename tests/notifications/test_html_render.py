@@ -187,12 +187,12 @@ class TestRenderHTML:
     def test_enrichment_fields_appear_in_row(self):
         recent = (
             HistoricalSignal(
-                bar_timestamp=_NOW - timedelta(days=2),
+                computed_at=_NOW - timedelta(days=2),
                 signal_type="BUY",
                 price_at_signal=2941.20,
             ),
             HistoricalSignal(
-                bar_timestamp=_NOW,
+                computed_at=_NOW,
                 signal_type="BUY",
                 price_at_signal=2955.10,
             ),
