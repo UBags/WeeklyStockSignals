@@ -54,42 +54,82 @@ atr:
   outer_mult: 4.0
 
 
+# ---------------------------------------------------------------------------
+# market_hours
+#
+# Phase 16a — per-exchange explicit tick schedule via `tick_schedule:`.
+# Each entry names one of the four daily ticks and anchors it relative
+# to the market's open/close (or the midpoint of the flanking ticks):
+#
+#     tick_schedule:
+#       - { name: post_open,   anchor: open,     offset_minutes:  15 }
+#       - { name: mid_session, anchor: midpoint                       }
+#       - { name: pre_close,   anchor: close,    offset_minutes: -30 }
+#       - { name: post_close,  anchor: close,    offset_minutes:  60 }
+#
+# `anchor: midpoint` carries no offset — its instant is the arithmetic
+# midpoint of the latest open-anchored entry and the earliest close-
+# anchored entry. This makes the schedule auto-shrink correctly on
+# short sessions (e.g. NYSE 1pm ET early-close days).
+#
+# When `tick_schedule:` is present the legacy three-field cadence
+# (`post_open_offset_minutes`, `pre_close_offset_minutes`,
+# `intraday_cadence_minutes`) is ignored. Leaving the block out keeps
+# the legacy hourly behavior unchanged for backward compatibility.
+# ---------------------------------------------------------------------------
+
 market_hours:
   - exchange: NSE
     open: "09:15"
     close: "15:30"
     tz: Asia/Kolkata
     weekdays: [1, 2, 3, 4, 5]
-    # ---- All fields below are NEW and OPTIONAL ----
-    post_open_offset_minutes: 5        # first tick fires at 09:20 IST
-    pre_close_offset_minutes: 15       # last tick fires at 15:15 IST
-    intraday_cadence_minutes: 60       # hourly ticks between 09:20 and 15:15
     holidays_country: IN               # python-holidays code for IN federal holidays
     holidays_override_file: configs/nse_holidays_2026.yaml  # operator overrides
+    # Four-tick schedule per Phase 16a spec.
+    # Resolved instants (IST):
+    #   post_open   = 09:15 + 15min  = 09:30
+    #   mid_session = midpoint(09:30, 15:00) = 12:15
+    #   pre_close   = 15:30 - 30min  = 15:00
+    #   post_close  = 15:30 + 60min  = 16:30
+    tick_schedule:
+      - { name: post_open,   anchor: open,     offset_minutes:  15 }
+      - { name: mid_session, anchor: midpoint                       }
+      - { name: pre_close,   anchor: close,    offset_minutes: -30 }
+      - { name: post_close,  anchor: close,    offset_minutes:  60 }
 
-  # Future-proofing: example NYSE entry for when paid feed is added.
-  # MarketOrchestrator handles this transparently — each market gets
-  # its own thread, calendar, and tick schedule.
   - exchange: NYSE
     open: "09:30"
     close: "16:00"
     tz: America/New_York
     weekdays: [1, 2, 3, 4, 5]
-    post_open_offset_minutes: 5
-    pre_close_offset_minutes: 15
-    intraday_cadence_minutes: 60
     holidays_country: US
+    # Same four-tick shape; offsets are relative to NYSE's open/close
+    # so half-day sessions (1pm ET early close) auto-shrink without
+    # special-casing in the scheduler.
+    # Resolved instants on a standard session (ET):
+    #   post_open   = 09:30 + 15min  = 09:45
+    #   mid_session = midpoint(09:45, 15:30) = 12:37:30  (rounded by tick_planner)
+    #   pre_close   = 16:00 - 30min  = 15:30
+    #   post_close  = 16:00 + 60min  = 17:00
+    tick_schedule:
+      - { name: post_open,   anchor: open,     offset_minutes:  15 }
+      - { name: mid_session, anchor: midpoint                       }
+      - { name: pre_close,   anchor: close,    offset_minutes: -30 }
+      - { name: post_close,  anchor: close,    offset_minutes:  60 }
 
   - exchange: BSE
     open: "09:15"
     close: "15:30"
     tz: Asia/Kolkata
     weekdays: [1, 2, 3, 4, 5]
-    post_open_offset_minutes: 5        # first tick fires at 09:20 IST
-    pre_close_offset_minutes: 15       # last tick fires at 15:15 IST
-    intraday_cadence_minutes: 60       # hourly ticks between 09:20 and 15:15
-    holidays_country: IN               # python-holidays code for IN federal holidays
-    holidays_override_file: configs/nse_holidays_2026.yaml  # operator overrides
+    holidays_country: IN
+    holidays_override_file: configs/nse_holidays_2026.yaml  # BSE shares the IST exchange-holiday list
+    tick_schedule:
+      - { name: post_open,   anchor: open,     offset_minutes:  15 }
+      - { name: mid_session, anchor: midpoint                       }
+      - { name: pre_close,   anchor: close,    offset_minutes: -30 }
+      - { name: post_close,  anchor: close,    offset_minutes:  60 }
 
 # ---------------------------------------------------------------------------
 # Example override file: configs/nse_holidays_2026.yaml

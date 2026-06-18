@@ -201,6 +201,83 @@ class ExchangeIndicatorOverride(BaseModel):
 # ---------- Market hours ---------- #
 
 
+# ---- Tick schedule (Phase 16a) ---- #
+#
+# New, explicit tick-instant schema. Each entry names one of the four
+# daily ticks: post_open, mid_session, pre_close, post_close. Each
+# is anchored to either market open, market close, or the midpoint
+# between the post-open and pre-close ticks. Offsets are signed
+# minutes (negative = before the anchor).
+#
+# Example:
+#   tick_schedule:
+#     - { name: post_open,   anchor: open,     offset_minutes:  15 }
+#     - { name: mid_session, anchor: midpoint                        }
+#     - { name: pre_close,   anchor: close,    offset_minutes: -30 }
+#     - { name: post_close,  anchor: close,    offset_minutes:  60 }
+#
+# Per design: relative offsets (not absolute wall-clock) so that NYSE
+# early-close days (13:00 ET) automatically slide every instant with
+# the shortened close. No half-day branching in code paths.
+
+# Use a plain str-Literal type rather than enum.Enum so Pydantic can
+# parse YAML strings directly without an Enum subclass cluttering
+# imports across the codebase. Validation is identical.
+TickAnchor = Literal["open", "close", "midpoint"]
+
+
+class TickScheduleEntry(BaseModel):
+    """One scheduled tick instant within a trading day.
+
+    `name` is operator-chosen and surfaces in logs / metrics labels.
+    `anchor` selects which time of day to offset from.
+    `offset_minutes` is signed: negative means before the anchor.
+
+    A `midpoint`-anchored entry has no offset (offset_minutes must be
+    0). Its instant is computed as the arithmetic midpoint of the
+    latest `open`-anchored entry and the earliest `close`-anchored
+    entry in the same schedule. See `MarketHoursConfig._validate_
+    tick_schedule` for cross-entry validation.
+    """
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(
+        min_length=1, max_length=32,
+        description="Operator-chosen label, surfaces in logs / metrics. "
+                    "Must be unique within the schedule.",
+    )
+    anchor: TickAnchor = Field(
+        description="One of: 'open', 'close', 'midpoint'.",
+    )
+    offset_minutes: int = Field(
+        default=0, ge=-720, le=720,
+        description="Signed minutes from the anchor. Negative = before. "
+                    "Must be 0 when anchor='midpoint'.",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        # Identifier-like: alnum + underscore. Used in log labels and
+        # potentially in Prometheus metric labels, so be conservative.
+        stripped = v.replace("_", "")
+        if not stripped or not stripped.isalnum() or not stripped.isascii():
+            raise ValueError(
+                f"name must be ASCII alphanumeric + underscores, got {v!r}"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _validate_midpoint_no_offset(self) -> "TickScheduleEntry":
+        if self.anchor == "midpoint" and self.offset_minutes != 0:
+            raise ValueError(
+                f"tick {self.name!r}: anchor='midpoint' does not support "
+                f"offset_minutes (got {self.offset_minutes}); midpoint is "
+                f"computed from flanking open/close-anchored ticks."
+            )
+        return self
+
+
 class MarketHoursConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -212,26 +289,35 @@ class MarketHoursConfig(BaseModel):
         description="ISO weekdays open: 1=Monday..7=Sunday",
     )
 
-    # ---- New tick-scheduling fields (all optional with sane defaults) ---- #
+    # ---- Legacy tick-scheduling fields (all optional with sane defaults) ---- #
     # When the MarketOrchestrator owns a tick loop for this exchange, these
-    # control its firing pattern. Backward-compat: existing config.yaml files
-    # without these fields keep parsing unchanged.
+    # control its firing pattern in the LEGACY mode (hourly cadence between
+    # post-open and pre-close). Used only when `tick_schedule` is None.
+    #
+    # Backward-compat contract: existing config.yaml files without the
+    # tick_schedule block keep parsing exactly as before, and produce the
+    # same set of tick instants they always did.
 
     post_open_offset_minutes: int = Field(
         default=5, ge=0, le=240,
         description="Minutes after open at which the first tick fires "
-                    "(default 5 = NSE-style 09:20 IST for a 09:15 open).",
+                    "(default 5 = NSE-style 09:20 IST for a 09:15 open). "
+                    "Used only in legacy mode (when `tick_schedule` is "
+                    "absent).",
     )
     pre_close_offset_minutes: int = Field(
         default=15, ge=0, le=240,
         description="Minutes before close at which the last tick fires "
-                    "(default 15 = NSE-style 15:15 IST for a 15:30 close).",
+                    "(default 15 = NSE-style 15:15 IST for a 15:30 close). "
+                    "Used only in legacy mode (when `tick_schedule` is "
+                    "absent).",
     )
     intraday_cadence_minutes: int = Field(
         default=60, ge=1, le=720,
         description="Wall-clock cadence (in market-local time) for "
                     "intraday hourly ticks between post-open and "
-                    "pre-close.",
+                    "pre-close. Used only in legacy mode (when "
+                    "`tick_schedule` is absent).",
     )
     holidays_country: str | None = Field(
         default=None,
@@ -245,6 +331,29 @@ class MarketHoursConfig(BaseModel):
         description="Path (relative to cwd) to a YAML file with "
                     "`extra_holidays` and `special_trading_days` lists. "
                     "Operator overrides; exact wins over algorithm.",
+    )
+
+    # ---- New tick-schedule block (Phase 16a) ---- #
+    #
+    # When present, REPLACES the legacy three-field cadence (post_open_*,
+    # pre_close_*, intraday_cadence_*). All instants are expressed as
+    # signed offsets from open / close, with the midpoint computed from
+    # the flanking open/close-anchored ticks. NYSE early-close days
+    # auto-shrink because every instant is relative to that day's close.
+    #
+    # Backward-compat: when omitted, the legacy fields drive scheduling
+    # exactly as before. Mixing the two is allowed at schema level —
+    # the legacy fields are simply ignored when tick_schedule is set —
+    # but the validator emits a warning during loading so operators
+    # know to clean them up. (Warning lives in loader.py, not here, to
+    # keep schema.py side-effect-free.)
+    tick_schedule: list[TickScheduleEntry] | None = Field(
+        default=None,
+        description="Phase 16a explicit tick schedule. When set, drives "
+                    "the orchestrator's per-day firing instants and the "
+                    "legacy post_open_offset_minutes / "
+                    "pre_close_offset_minutes / intraday_cadence_minutes "
+                    "fields are ignored.",
     )
 
     @field_validator("weekdays")
@@ -280,10 +389,77 @@ class MarketHoursConfig(BaseModel):
             raise ValueError(f"unknown IANA tz {v!r}: {e}")
         return v
 
+    @model_validator(mode="after")
+    def _validate_tick_schedule(self) -> "MarketHoursConfig":
+        """Cross-entry validation of `tick_schedule`.
+
+        Rules (applied only when tick_schedule is set):
+          1. At least one entry. (Empty list is rejected — if you
+             want no ticks, omit the block; if you want the legacy
+             cadence, that's already the default behavior.)
+          2. Names are unique within the schedule. A typo'd
+             duplicate would silently mask one tick at scheduling
+             time, so we reject at load time.
+          3. Any `midpoint`-anchored entry requires at least one
+             `open`-anchored entry and at least one `close`-anchored
+             entry to compute the midpoint from. Without flanking
+             ticks the midpoint is undefined.
+
+        Validation runs at config-load time so misconfigurations
+        surface in /tmp/trip-ema.log on restart rather than at
+        first tick.
+        """
+        sched = self.tick_schedule
+        if sched is None:
+            return self
+
+        if len(sched) == 0:
+            raise ValueError(
+                f"market {self.exchange}: tick_schedule is empty; omit "
+                f"the block to use the legacy cadence, or add at least "
+                f"one entry."
+            )
+
+        seen_names: set[str] = set()
+        for entry in sched:
+            if entry.name in seen_names:
+                raise ValueError(
+                    f"market {self.exchange}: duplicate tick name "
+                    f"{entry.name!r} in tick_schedule; names must be "
+                    f"unique within a market."
+                )
+            seen_names.add(entry.name)
+
+        has_open = any(e.anchor == "open" for e in sched)
+        has_close = any(e.anchor == "close" for e in sched)
+        has_midpoint = any(e.anchor == "midpoint" for e in sched)
+        if has_midpoint and not (has_open and has_close):
+            missing = []
+            if not has_open:
+                missing.append("'open'")
+            if not has_close:
+                missing.append("'close'")
+            raise ValueError(
+                f"market {self.exchange}: tick_schedule contains a "
+                f"midpoint-anchored entry but is missing "
+                f"{' and '.join(missing)}-anchored entries to compute "
+                f"it from. Add the flanking entries or remove the "
+                f"midpoint entry."
+            )
+
+        return self
+
     def to_tick_config(self) -> "MarketTickConfig":
         """Adapt the YAML-shaped config into the runtime dataclass used
         by `scheduler.tick_planner`. Lazy-imported to avoid the cycle
-        flagged at module top."""
+        flagged at module top.
+
+        Phase 16a note: this still returns the LEGACY MarketTickConfig
+        shape. The Phase 16b tick_planner rewrite will consume the
+        new tick_schedule via `to_tick_schedule_runtime()` below
+        when that field is populated. Existing callers keep working
+        unchanged.
+        """
         from ..scheduler.tick_planner import MarketTickConfig  # noqa: PLC0415
 
         return MarketTickConfig(
