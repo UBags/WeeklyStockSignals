@@ -49,6 +49,10 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy import text  # noqa: F401 — retained for future inline SQL
 
+from ..backtest_engine import (
+    filter_bars_to_range,
+    run_long_only_backtest,
+)
 from ..db import GuiDbSession
 from ..http_client import ApiError, TripEmaHttpClient
 from ..queries import ticker_universe_with_recent_signals
@@ -58,6 +62,7 @@ from ..signals_helpers import (
     partition_ticker_rows,
 )
 from ..workers import submit
+from .backtest_dialog import BacktestDialog
 from .signal_generation_panel import SignalGenerationPanel
 
 logger = logging.getLogger(__name__)
@@ -201,6 +206,7 @@ class SignalsView(QWidget):
 
         outer.addLayout(self._build_selector_row())
         outer.addLayout(self._build_layer_row())
+        outer.addLayout(self._build_backtest_row())
         outer.addLayout(self._build_chart_row(), 1)
 
         # Phase 15c: the signal-generation panel sits below the chart
@@ -478,6 +484,134 @@ class SignalsView(QWidget):
         # Re-render from cached payload; no refetch needed.
         if self._last_payload is not None:
             self._render_chart(self._last_payload)
+
+    # ---------- Phase B: in-GUI backtest ---------- #
+
+    def _build_backtest_row(self) -> QHBoxLayout:
+        """Transient backtest controls.
+
+        Distinct from the embedded SignalGenerationPanel (which
+        regenerates the persisted backfill that writes to
+        signal_backtest_runs) — this row runs a pure in-process
+        simulation against the currently-loaded chart payload,
+        sliced to the chosen range, and pops a non-modal dialog.
+        No DB writes; closing the dialog discards the result.
+        """
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QLabel("Backtest:"))
+
+        self._backtest_range_combo = QComboBox()
+        for years, label in [
+            (3, "3 years"),
+            (5, "5 years"),
+            (10, "10 years"),
+            (None, "All time"),
+        ]:
+            self._backtest_range_combo.addItem(label, years)
+        self._backtest_range_combo.setCurrentIndex(1)   # 5 years default
+        row.addWidget(self._backtest_range_combo)
+
+        self._run_backtest_button = QPushButton("Run backtest")
+        self._run_backtest_button.clicked.connect(self._on_run_backtest_clicked)
+        row.addWidget(self._run_backtest_button)
+
+        # Hint label fills with status during/after a run (e.g. trade
+        # count, win rate, or 'load a ticker first' warning).
+        self._backtest_hint_label = QLabel("")
+        self._backtest_hint_label.setStyleSheet("color: #888;")
+        row.addWidget(self._backtest_hint_label)
+
+        row.addStretch(1)
+        return row
+
+    def _on_run_backtest_clicked(self) -> None:
+        """Run the long-only backtest against the cached payload's
+        bars (sliced to the chosen range) and pop the result dialog.
+
+        Range vs. chart-range interaction: the engine runs on
+        whatever's in the current payload. If the chart range is
+        shorter than the backtest range, the hint label warns the
+        user — but we still run on what we have rather than
+        silently re-fetching. The user can bump the chart range
+        button and re-run if they want full history.
+        """
+        if not self._last_payload:
+            self._backtest_hint_label.setText(
+                "Load a ticker first."
+            )
+            return
+        bars = self._last_payload.get("bars", [])
+        if not bars:
+            self._backtest_hint_label.setText(
+                "No bars in current payload — nothing to backtest."
+            )
+            return
+
+        years = self._backtest_range_combo.currentData()
+        sliced = filter_bars_to_range(bars, years=years)
+        if not sliced:
+            self._backtest_hint_label.setText(
+                "Selected range has no bars."
+            )
+            return
+
+        # Warn if the chart range covers less than the backtest range.
+        # Weekly bars ≈ 52/yr; check against (years * 50) as a coarse
+        # 'is the user looking at enough history' threshold.
+        if years is not None and len(sliced) < years * 50:
+            self._backtest_hint_label.setText(
+                f"Note: chart has only {len(sliced)} bars in the "
+                f"last {years}y; bump the chart range for more."
+            )
+        else:
+            self._backtest_hint_label.setText("")
+
+        result = run_long_only_backtest(sliced)
+
+        ticker_label = (
+            f"{self._current_exchange}:{self._current_symbol}"
+            if self._current_exchange and self._current_symbol
+            else "?"
+        )
+        range_label = (
+            "All time" if years is None else f"{years} years"
+        )
+
+        dlg = BacktestDialog(
+            result,
+            ticker_label=ticker_label,
+            range_label=range_label,
+            parent=self,
+        )
+        dlg.show()
+        # Hold a reference so the wrapper isn't GC'd before the user
+        # closes the window. Qt.WA_DeleteOnClose on the dialog itself
+        # releases the C++ object on close; the list grows then
+        # shrinks naturally via on_close handling below.
+        if not hasattr(self, "_open_backtest_dialogs"):
+            self._open_backtest_dialogs = []
+        # Prune any that have already been closed (deleted C++ side)
+        # before appending the new one.
+        self._open_backtest_dialogs = [
+            d for d in self._open_backtest_dialogs
+            if _is_dialog_alive(d)
+        ]
+        self._open_backtest_dialogs.append(dlg)
+
+        # Update hint with a concise summary so the row reflects the
+        # outcome even when the dialog is behind another window.
+        s = result.summary
+        if s.n_trades == 0:
+            self._backtest_hint_label.setText(
+                "Backtest complete: no trades fired in this range."
+            )
+        else:
+            self._backtest_hint_label.setText(
+                f"Backtest complete: {s.n_trades} trades, "
+                f"{s.win_rate_pct:.1f}% win rate, "
+                f"total return {s.total_return_pct:+.1f}%."
+            )
 
     # ---------- public API (cross-tab nav target) ---------- #
 
@@ -840,6 +974,22 @@ class SignalsView(QWidget):
                 self._signal_generation_panel.on_close()
         except Exception:
             pass
+
+
+def _is_dialog_alive(dlg) -> bool:
+    """Return True if the Qt wrapper still maps to a live C++ object.
+
+    BacktestDialog uses Qt.WA_DeleteOnClose, so the C++ object is
+    released when the user closes the window. Touching the Python
+    wrapper afterwards raises RuntimeError ("wrapped C/C++ object
+    of type ... has been deleted"); we catch that to prune the
+    SignalsView's list of open dialogs lazily.
+    """
+    try:
+        dlg.isVisible()
+    except RuntimeError:
+        return False
+    return True
 
 
 def _fmt(v) -> str:
