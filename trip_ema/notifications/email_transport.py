@@ -7,9 +7,24 @@ new-account `5.7.139 SmtpClientAuthentication is disabled`, Gmail
 OAuth-only since Sept 2024), so HTTP API is the only delivery path
 that works reliably for our scale.
 
-Public surface unchanged: `send(address, batch) -> bool`. Returns True
-on success, False on retryable failure. Raises only on unrecoverable
-construction errors.
+Public surface unchanged for callers: `send(address, batch) -> bool`.
+Returns True on success, False on retryable failure. Raises only on
+unrecoverable construction errors.
+
+HTML rendering:
+  - If `enrichment_provider` is supplied at construction, `send()`
+    calls it on every batch to fetch per-ticker enrichment (mcap,
+    sector, sector zone/direction, last 5 signals), passes that to
+    `batcher.render_html`, and includes the result as `htmlContent`
+    alongside the plain `textContent`. Most mail clients render the
+    HTML part by default and fall back to the text part when HTML
+    rendering is disabled — so both parts always go on the wire.
+  - When `enrichment_provider` is None, the transport sends text-only.
+    This is the legacy behavior, preserved for tests and for any
+    deployment where DB enrichment isn't wired.
+  - If enrichment lookup raises (DB down, malformed schema), the
+    transport falls back to text-only for that send and logs the
+    failure. Email delivery never blocks on enrichment.
 
 Tests inject a `poster` callable that bypasses the network — same
 dependency-injection pattern as the previous SMTP implementation's
@@ -20,12 +35,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import requests
 
 from ..domain import NotificationBatch
-from .batcher import render_text
+from .batcher import render_html, render_text
+from .enrichment import BatchEnrichment
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +50,13 @@ logger = logging.getLogger(__name__)
 # normally on success or raises on failure. The default uses
 # `requests.post`; tests inject a fake.
 EmailPoster = Callable[[str, dict, dict], None]
+
+
+# A "enrichment provider" takes a NotificationBatch and returns the
+# enrichment data the renderer needs. The app.py wiring layer captures
+# the db_engine in a closure and passes the closure in; tests pass a
+# fake that returns a fixed BatchEnrichment.
+EnrichmentProvider = Callable[[NotificationBatch], BatchEnrichment]
 
 
 _DEFAULT_BREVO_ENDPOINT = "https://api.brevo.com/v3/smtp/email"
@@ -51,6 +74,10 @@ class EmailTransport:
     agnostic (testable, deterministic) and avoids the silent-
     NullTransport bug-class we hit with the SMTP version's
     env-var fallback.
+
+    `enrichment_provider` is optional. When set, each send() call
+    invokes it to fetch per-ticker enrichment for HTML rendering;
+    when None, sends are text-only.
     """
 
     api_key: str
@@ -59,8 +86,12 @@ class EmailTransport:
     subject: str = "Trip EMA signal updates"
     api_url: str = _DEFAULT_BREVO_ENDPOINT
     timeout_seconds: float = 30.0
-    # Injection point for tests.
-    poster: EmailPoster | None = field(default=None, repr=False)
+    # Injection point for the enrichment lookup. None = text-only sends.
+    enrichment_provider: Optional[EnrichmentProvider] = field(
+        default=None, repr=False,
+    )
+    # Injection point for tests bypassing the network.
+    poster: Optional[EmailPoster] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.api_key or not isinstance(self.api_key, str):
@@ -73,11 +104,14 @@ class EmailTransport:
             raise ValueError("EmailTransport.from_address is required")
 
     def send(self, address: str, batch: NotificationBatch) -> bool:
-        body = render_text(batch)
-        if not body:
+        text_body = render_text(batch)
+        if not text_body:
             return True   # nothing to send is trivially successful
 
-        payload = self._build_payload(address=address, body=body)
+        html_body = self._render_html_or_none(batch)
+        payload = self._build_payload(
+            address=address, text_body=text_body, html_body=html_body,
+        )
         headers = {
             "api-key": self.api_key,
             "accept": "application/json",
@@ -94,21 +128,51 @@ class EmailTransport:
             logger.exception("Email delivery failed for %s", address)
             return False
 
-    def _build_payload(self, *, address: str, body: str) -> dict[str, Any]:
+    def _render_html_or_none(self, batch: NotificationBatch) -> Optional[str]:
+        """Run the enrichment provider + HTML renderer. Returns the HTML
+        body, or None if enrichment isn't wired or the enrichment lookup
+        raises (in which case we degrade to text-only for this send).
+
+        Why try/except here rather than letting it bubble up: enrichment
+        is a *decoration*, not a *delivery requirement*. A flaky DB or a
+        schema mismatch should not stop the operator from receiving the
+        signal events. Log and continue with text-only.
+        """
+        if self.enrichment_provider is None:
+            return None
+        try:
+            enrichment = self.enrichment_provider(batch)
+            return render_html(batch, enrichment)
+        except Exception:
+            logger.exception(
+                "Enrichment / HTML render failed; falling back to text-only "
+                "for this send"
+            )
+            return None
+
+    def _build_payload(
+        self,
+        *,
+        address: str,
+        text_body: str,
+        html_body: Optional[str],
+    ) -> dict[str, Any]:
         """Shape the Brevo `/v3/smtp/email` request body.
 
-        We send plain text only (no HTML alt). The Pine-style batcher
-        output is already designed for human-readable scanning; HTML
-        wrapping adds Promotions-tab signal to Gmail without helping
-        the operator. If we later want HTML, attach an `htmlContent`
-        key here built from the same `body` via a tiny wrapper.
+        Always include `textContent`. Include `htmlContent` when we have
+        rendered HTML; mail clients pick HTML by default and fall back
+        to text when HTML rendering is disabled by the user. Sending
+        both is the standard multipart pattern.
         """
-        return {
+        payload: dict[str, Any] = {
             "sender":      {"email": self.from_address, "name": self.from_name},
             "to":          [{"email": address}],
             "subject":     self.subject,
-            "textContent": body,
+            "textContent": text_body,
         }
+        if html_body:
+            payload["htmlContent"] = html_body
+        return payload
 
     def _post(self, headers: dict, payload: dict) -> None:
         """Production POST path. Raises on any non-2xx response so the

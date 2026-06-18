@@ -188,8 +188,17 @@ def _build_app_state(config_path: Path) -> AppState:
     else:
         # Legacy in-process mode: transports dispatched from the
         # distributor thread itself. Suitable for dev and small deployments.
+        # Build an enrichment provider closure for the email transport so
+        # outgoing mails carry the HTML table (grouped by signal type,
+        # per-ticker mcap / sector / last-5 signals). DB-down conditions
+        # fall back to text-only inside EmailTransport.send().
+        from .notifications.enrichment import enrich_batch
+        def _email_enrichment_provider(batch):
+            return enrich_batch(db_engine, batch)
         transports = {
-            "email": _build_email_transport_or_null(config),
+            "email": _build_email_transport_or_null(
+                config, enrichment_provider=_email_enrichment_provider,
+            ),
             "webhook": WebhookTransport(),
         }
         transports = _wrap_transports_with_breakers(transports, config)
@@ -409,7 +418,7 @@ def _wrap_transports_with_breakers(
     }
 
 
-def _build_email_transport_or_null(config):
+def _build_email_transport_or_null(config, *, enrichment_provider=None):
     """Build the email transport from `config.transports.brevo`.
 
     Returns NullTransport when `transports.brevo` is None (the
@@ -422,6 +431,11 @@ def _build_email_transport_or_null(config):
     notifications. The new contract is: config controls delivery,
     secrets file controls the credential, both validated at startup
     by load_config().
+
+    `enrichment_provider` is optional. When passed, the EmailTransport
+    invokes it on each send() to fetch per-ticker enrichment for HTML
+    rendering (mcap, sector, sector zone/direction, last 5 signals).
+    When None, sends are text-only (the legacy behavior).
     """
     brevo_cfg = config.transports.brevo
     if brevo_cfg is None:
@@ -447,6 +461,7 @@ def _build_email_transport_or_null(config):
         subject=brevo_cfg.subject,
         api_url=brevo_cfg.api_url,
         timeout_seconds=brevo_cfg.timeout_seconds,
+        enrichment_provider=enrichment_provider,
     )
 
 
