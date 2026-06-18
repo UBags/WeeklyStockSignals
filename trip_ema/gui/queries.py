@@ -250,3 +250,91 @@ def ticker_universe_summary(
         "tier_3": result.tier_3,
         "parked": result.parked,
     }
+
+
+
+@dataclass(frozen=True, slots=True)
+class TickerComboRow:
+    """One row in the Signals tab's ticker dropdown.
+
+    The dropdown groups tickers into two sections: those with a
+    signal event in the last 2 weeks (top, normal background) and
+    those without (below, grey background). `has_recent_signal`
+    drives the partition; everything else is what the combo needs to
+    display the row and route a selection back to a chart fetch.
+    """
+    exchange: str
+    symbol: str
+    instrument_type: str
+    full_name: Optional[str]
+    has_recent_signal: bool
+
+
+def ticker_universe_with_recent_signals(
+    conn: Connection,
+    *,
+    exchange: Optional[str] = None,
+) -> list[TickerComboRow]:
+    """Active ticker universe, flagged for recent signal activity.
+
+    "Recent" means: any row in `signal_events` whose `bar_timestamp`
+    lies within the rolling 'this week + last week' window, where
+    weeks are Monday-anchored IST (the same anchor the Pine-style
+    weekly bucketing uses).
+
+    The cutoff is computed in SQL as:
+        date_trunc('week', NOW() AT TIME ZONE 'Asia/Kolkata')
+            - INTERVAL '7 days'
+        interpreted as IST and converted back to timestamptz UTC
+        for comparison with bar_timestamp.
+
+    Example: at any moment on Thu 2026-06-18 IST,
+        date_trunc('week', NOW() AT TIME ZONE 'Asia/Kolkata')
+            = 2026-06-15 00:00 (Mon of this week IST)
+        - 7 days
+            = 2026-06-08 00:00 (Mon of last week IST)
+        AT TIME ZONE 'Asia/Kolkata'
+            = 2026-06-07 18:30 UTC (timestamptz form for comparison)
+
+    Implementation: one CTE producing distinct ticker_ids with any
+    matching event, then a LEFT JOIN to the tickers table. Single
+    scan of signal_events, no N+1. The LEFT JOIN means tickers with
+    zero historical events still appear (with has_recent_signal =
+    False), which is what the dropdown wants.
+
+    Ordering: (has_recent_signal DESC, symbol ASC) so the consumer
+    can split the list at the True->False boundary in one pass via
+    `partition_ticker_rows`.
+    """
+    sql = """
+        WITH recent_tids AS (
+            SELECT DISTINCT ticker_id
+            FROM signal_events
+            WHERE bar_timestamp >= (
+                (date_trunc('week', (NOW() AT TIME ZONE 'Asia/Kolkata'))::timestamp
+                 - INTERVAL '7 days') AT TIME ZONE 'Asia/Kolkata'
+            )
+        )
+        SELECT t.exchange, t.symbol, t.instrument_type, t.full_name,
+               (r.ticker_id IS NOT NULL) AS has_recent_signal
+        FROM tickers t
+        LEFT JOIN recent_tids r ON r.ticker_id = t.ticker_id
+        WHERE t.is_active = TRUE AND t.delisted_at IS NULL
+    """
+    params: dict = {}
+    if exchange is not None:
+        sql += " AND t.exchange = :ex"
+        params["ex"] = exchange
+    sql += " ORDER BY has_recent_signal DESC, t.symbol ASC"
+
+    rows = conn.execute(text(sql), params)
+    return [
+        TickerComboRow(
+            exchange=r.exchange,
+            symbol=r.symbol,
+            instrument_type=r.instrument_type,
+            full_name=r.full_name,
+            has_recent_signal=bool(r.has_recent_signal),
+        )
+        for r in rows
+    ]

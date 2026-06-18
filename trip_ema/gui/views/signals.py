@@ -39,15 +39,24 @@ from typing import Optional
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QPointF, Signal
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPicture
+from PySide6.QtGui import (
+    QBrush, QColor, QPainter, QPen, QPicture, QStandardItem,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QGroupBox, QHBoxLayout,
     QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
-from sqlalchemy import text
+from sqlalchemy import text  # noqa: F401 — retained for future inline SQL
 
 from ..db import GuiDbSession
 from ..http_client import ApiError, TripEmaHttpClient
+from ..queries import ticker_universe_with_recent_signals
+from ..signals_helpers import (
+    format_date_label,
+    format_price_label,
+    partition_ticker_rows,
+)
 from ..workers import submit
 from .signal_generation_panel import SignalGenerationPanel
 
@@ -77,6 +86,16 @@ COLOR_REGIME_NEUTRAL = "#555"
 
 COLOR_SIGNAL_BUY = "#1f9c5e"
 COLOR_SIGNAL_SELL = "#c84a4a"
+
+# Phase A:
+# Grey background for the 'no recent signal' section of the ticker
+# combo dropdown. Light enough to be readable as a quiet differentiator
+# without overpowering the row text.
+_DROPDOWN_GREY_BG = "#f0f0f0"
+# TradingView-style pinned axis label tab. Same blue as the med EMA
+# so the chart palette stays cohesive.
+COLOR_AXIS_LABEL_BG = "#5cb6e8"
+COLOR_AXIS_LABEL_FG = "#1e1e1e"   # dark text on the blue tab
 
 
 # Configure pyqtgraph globally — we want dark background and antialiasing.
@@ -318,6 +337,29 @@ class SignalsView(QWidget):
         self._volume_plot.addItem(self._vline_vol, ignoreBounds=True)
         self._vline_vol.hide()
 
+        # Phase A: TradingView-style pinned axis label tabs.
+        # The price tab hugs the right edge of the price plot at the
+        # cursor's y; the date tab hugs the bottom edge of the volume
+        # plot at the cursor's x. Both are hidden until the cursor
+        # enters the chart area (handled in _on_mouse_moved).
+        self._price_axis_label = pg.TextItem(
+            text="", anchor=(1.0, 0.5),  # right-middle of tab at position
+            color=COLOR_AXIS_LABEL_FG,
+            fill=pg.mkBrush(COLOR_AXIS_LABEL_BG),
+            border=pg.mkPen(COLOR_AXIS_LABEL_BG),
+        )
+        self._price_plot.addItem(self._price_axis_label, ignoreBounds=True)
+        self._price_axis_label.hide()
+
+        self._date_axis_label = pg.TextItem(
+            text="", anchor=(0.5, 1.0),  # middle-bottom of tab at position
+            color=COLOR_AXIS_LABEL_FG,
+            fill=pg.mkBrush(COLOR_AXIS_LABEL_BG),
+            border=pg.mkPen(COLOR_AXIS_LABEL_BG),
+        )
+        self._volume_plot.addItem(self._date_axis_label, ignoreBounds=True)
+        self._date_axis_label.hide()
+
         # Hide the bottom X axis label on the price plot (visible on
         # the volume plot since it's the lower one)
         self._price_plot.hideAxis("bottom")
@@ -335,20 +377,20 @@ class SignalsView(QWidget):
 
     def _populate_ticker_combo(self) -> None:
         """Populate the search-as-you-type ticker combo with the
-        active universe. ~2300 entries — Qt's QCompleter handles it
-        fine without virtualization."""
+        active universe, partitioned into two sections: tickers
+        with a signal event in the rolling 'this week + last week'
+        window (top, normal background), and the rest (below, grey
+        background, separator between).
+
+        ~2300 entries — Qt's QCompleter handles the flat model fine
+        without virtualization. The sectioning is applied in
+        _on_combo_rows_received once the rows arrive; this fetcher
+        just gets them ordered by (has_recent_signal DESC, symbol ASC)
+        from the SQL layer.
+        """
         def fetch():
             with self._db.connect() as conn:
-                rows = conn.execute(text("""
-                    SELECT exchange, symbol, instrument_type, full_name
-                    FROM tickers
-                    WHERE is_active = TRUE AND delisted_at IS NULL
-                    ORDER BY symbol ASC
-                """)).fetchall()
-                return [
-                    (r.exchange, r.symbol, r.instrument_type, r.full_name)
-                    for r in rows
-                ]
+                return ticker_universe_with_recent_signals(conn)
 
         submit(
             fetch,
@@ -357,13 +399,55 @@ class SignalsView(QWidget):
         )
 
     def _on_combo_rows_received(self, rows: list) -> None:
-        self._ticker_combo.clear()
-        for exchange, symbol, instrument_type, full_name in rows:
-            display = symbol
-            if full_name:
-                display = f"{symbol}  —  {full_name[:60]}"
-            # userData carries the tuple needed to fetch chart data
-            self._ticker_combo.addItem(display, (exchange, symbol, instrument_type))
+        """Build the combo's underlying model with two sections:
+        recent-signal tickers on top with normal background, then a
+        non-selectable separator, then the rest with a grey row
+        background. Search-as-you-type filtering preserves the
+        section ordering because rows arrive (recent DESC, alpha
+        ASC) and the completer iterates the model in order.
+
+        Edge cases:
+          - All tickers have a recent signal: no separator, no grey
+            rows. Combo is one alphabetical list.
+          - No tickers have a recent signal (quiet week, or initial
+            deploy): no separator, every row grey. Visually subtle
+            but the operator still sees the universe.
+        """
+        recent, other = partition_ticker_rows(rows)
+
+        model = QStandardItemModel(self)
+        grey_brush = QBrush(QColor(_DROPDOWN_GREY_BG))
+
+        def _make_item(row, *, grey: bool) -> QStandardItem:
+            display = row.symbol
+            if row.full_name:
+                display = f"{row.symbol}  —  {row.full_name[:60]}"
+            item = QStandardItem(display)
+            item.setEditable(False)
+            # itemData(idx) reads Qt.UserRole by default, so the
+            # existing _on_ticker_combo_activated handler keeps
+            # working unchanged.
+            item.setData(
+                (row.exchange, row.symbol, row.instrument_type),
+                Qt.UserRole,
+            )
+            if grey:
+                item.setData(grey_brush, Qt.BackgroundRole)
+            return item
+
+        for r in recent:
+            model.appendRow(_make_item(r, grey=False))
+        for r in other:
+            model.appendRow(_make_item(r, grey=True))
+
+        self._ticker_combo.setModel(model)
+        # Insert separator between the two sections. Only meaningful
+        # when both sections are non-empty.
+        if recent and other:
+            self._ticker_combo.insertSeparator(len(recent))
+        # No initial selection — wait for the user to pick or for
+        # cross-tab nav (load_ticker) to set one explicitly.
+        self._ticker_combo.setCurrentIndex(-1)
 
     def _on_combo_rows_failed(self, message: str) -> None:
         self._chart_status_label.setText(f"Ticker list fetch failed: {message}")
@@ -668,26 +752,25 @@ class SignalsView(QWidget):
     # ---------- crosshair ---------- #
 
     def _on_mouse_moved(self, pos) -> None:
-        """Update the readout panel with the bar under the cursor."""
+        """Update the readout panel + crosshair lines + axis label
+        tabs from the cursor position. Hides everything when the
+        cursor leaves the chart area or falls outside the bar
+        range. Cheap on every move — no fetches or heavy work."""
         if not self._last_payload:
             return
         if not self._price_plot.sceneBoundingRect().contains(pos):
-            self._vline_price.hide()
-            self._hline_price.hide()
-            self._vline_vol.hide()
+            self._hide_crosshair_items()
             return
         mouse_point = self._price_plot.vb.mapSceneToView(pos)
         x_idx = int(round(mouse_point.x()))
         if x_idx < 0 or x_idx >= len(self._bars_by_index):
-            self._vline_price.hide()
-            self._hline_price.hide()
-            self._vline_vol.hide()
+            self._hide_crosshair_items()
             return
 
         bar = self._bars_by_index[x_idx]
         dt = self._bar_index_to_dt[x_idx]
 
-        # Position crosshair
+        # Position the dashed crosshair lines
         self._vline_price.setPos(x_idx)
         self._hline_price.setPos(mouse_point.y())
         self._vline_vol.setPos(x_idx)
@@ -695,7 +778,26 @@ class SignalsView(QWidget):
         self._hline_price.show()
         self._vline_vol.show()
 
-        # Populate readout
+        # Phase A: position the TradingView-style axis label tabs.
+        # The price tab sits inside the right edge of the price plot
+        # at the cursor's y; the date tab sits just above the bottom
+        # edge of the volume plot at the bar's x-index. The view
+        # ranges can shift on pan/zoom, so we re-read them every
+        # mouse move.
+        price_view_x_range = self._price_plot.vb.viewRange()[0]
+        vol_view_y_range = self._volume_plot.vb.viewRange()[1]
+        self._price_axis_label.setPos(
+            price_view_x_range[1], mouse_point.y(),
+        )
+        self._price_axis_label.setText(
+            format_price_label(mouse_point.y()),
+        )
+        self._price_axis_label.show()
+        self._date_axis_label.setPos(x_idx, vol_view_y_range[0])
+        self._date_axis_label.setText(format_date_label(dt))
+        self._date_axis_label.show()
+
+        # Populate the side-panel OHLC readout
         warmed = "yes" if bar.get("is_warmed_up") else "warming up"
         med = _fmt(bar.get("med_ema"))
         long_ = _fmt(bar.get("long_ema"))
@@ -717,6 +819,15 @@ class SignalsView(QWidget):
             f"Regime: {bar.get('display_bg', '—')}<br>"
             f"Warmup: {warmed}"
         )
+
+    def _hide_crosshair_items(self) -> None:
+        """Hide all crosshair-driven overlays. Used when the cursor
+        leaves the chart area or falls outside the bar range."""
+        self._vline_price.hide()
+        self._hline_price.hide()
+        self._vline_vol.hide()
+        self._price_axis_label.hide()
+        self._date_axis_label.hide()
 
     # ---------- lifecycle ---------- #
 
