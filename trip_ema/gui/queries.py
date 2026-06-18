@@ -37,9 +37,22 @@ class TickerRow:
 
 @dataclass(frozen=True, slots=True)
 class SignalEventRow:
-    """For the per-ticker detail panel."""
+    """For the per-ticker detail panel.
+
+    `bar_timestamp` is the start instant of the OHLCV bar the signal
+    is attached to (for weekly: IST-Monday-anchored, so e.g. a Monday
+    at 00:00 UTC).
+
+    `computed_at` is when the compute pass actually fired the signal —
+    almost always strictly later than `bar_timestamp`, since the
+    orchestrator's scheduled ticks fall inside the trading session.
+    The two can differ by hours or days; for weekly signals on the
+    in-progress bar, multiple `computed_at` values share the same
+    `bar_timestamp` (one per tick that observed a regime change).
+    """
     event_id: int
     bar_timestamp: datetime
+    computed_at: datetime
     timeframe: str
     signal: str
     price_at_signal: float
@@ -112,6 +125,14 @@ def recent_signal_events(
 ) -> list[SignalEventRow]:
     """The detail panel's signal-history list.
 
+    Ordered by `computed_at DESC` (when the signal fired) rather than
+    `bar_timestamp DESC` (when the bar started), so the most recently
+    *generated* signal sits at the top — matching how the operator
+    thinks about the panel ("what fired most recently?"). For weekly
+    signals on the in-progress bar, multiple events share the same
+    `bar_timestamp`; sorting by `computed_at` is what separates them
+    visually.
+
     The DB column is `signal_type` (see signal_events DDL in
     0001_initial_schema.sql); we alias it to `signal` here so the
     dataclass field and the view's e.signal access stay consistent
@@ -119,16 +140,17 @@ def recent_signal_events(
     (see transports/http/routes/signals.py).
     """
     rows = conn.execute(text("""
-        SELECT event_id, bar_timestamp, timeframe,
+        SELECT event_id, bar_timestamp, computed_at, timeframe,
                signal_type AS signal, price_at_signal
         FROM signal_events
         WHERE ticker_id = :tid
-        ORDER BY bar_timestamp DESC
+        ORDER BY computed_at DESC
         LIMIT :lim
     """), {"tid": ticker_id, "lim": limit})
     return [
         SignalEventRow(
             event_id=r.event_id, bar_timestamp=r.bar_timestamp,
+            computed_at=r.computed_at,
             timeframe=r.timeframe, signal=r.signal,
             price_at_signal=float(r.price_at_signal),
         )
@@ -154,6 +176,50 @@ def ticker_symbol_history(
         )
         for r in rows
     ]
+
+
+def last_run_signals(
+    conn: Connection, *, exchange: str = "NSE",
+) -> dict[int, str]:
+    """Return {ticker_id: signal_type} for tickers that fired in the
+    most recent compute pass on `exchange`.
+
+    "Most recent compute pass" is defined as: all signal_events whose
+    `computed_at` falls within a 60-second window of the global
+    `MAX(computed_at)`. The orchestrator's signal-emission per tick
+    completes in well under a second, so 60s comfortably groups one
+    tick's events while staying narrower than the smallest inter-tick
+    gap (NSE post-open to mid-session is 2h 45min in Phase 16a).
+
+    Why "most recent" rather than "today's" or "last hour":
+      - "Today's" misses the first tick of the day before it fires.
+      - "Last hour" can miss a tick if the GUI is opened > 1h after
+        the last tick of the day.
+      - "Most recent" always returns something useful provided any
+        signal has ever fired, and naturally goes empty when nothing
+        has fired (initial deploys, ticker universe with no movers).
+
+    If a ticker has multiple events in the same window (unusual:
+    would require an orchestrator catching up across several missed
+    weekly bars), the latest by `bar_timestamp` wins via
+    `DISTINCT ON (s.ticker_id) ... ORDER BY s.bar_timestamp DESC`.
+
+    Empty dict is a normal return — no events ever, or all events
+    older than 60s before the global max (shouldn't happen but
+    surfaces cleanly as no coloring).
+    """
+    rows = conn.execute(text("""
+        SELECT DISTINCT ON (s.ticker_id) s.ticker_id, s.signal_type
+        FROM signal_events s
+        JOIN tickers t USING (ticker_id)
+        WHERE t.exchange = :ex
+          AND s.computed_at >= (
+              (SELECT MAX(computed_at) FROM signal_events)
+              - INTERVAL '60 seconds'
+          )
+        ORDER BY s.ticker_id, s.bar_timestamp DESC
+    """), {"ex": exchange})
+    return {r.ticker_id: r.signal_type for r in rows}
 
 
 def ticker_universe_summary(

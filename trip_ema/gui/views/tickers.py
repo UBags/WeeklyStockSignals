@@ -17,6 +17,42 @@ only renders visible rows, so 2300 rows scroll smoothly without
 per-row widget construction.
 
 Refresh cadence: 30s (the tickers table changes infrequently).
+
+# Default sort order (Phase 16e)
+
+The table uses a custom `TickerSortFilterProxy` that orders rows in
+two layers:
+
+1. **Signalled stocks first**, grouped by the signal fired in the
+   most recent compute tick:
+     - 🟢 BUY first, alphabetical within
+     - 🔴 SELL next, alphabetical within
+     - 🔵 EXIT_FROM_BUY and EXIT_FROM_SELL last, alphabetical within
+       (they share the same blue background and the same group rank)
+   These rows also carry their light-color background from Phase 16d,
+   so the visual matches the sort.
+
+2. **Non-signalled stocks below**, ordered by whatever column the
+   user has clicked. The default at view-construction is **tier ASC,
+   then symbol ASC**, which produces the "high-mkt-cap-looking" head
+   you see on first load.
+
+Why the second layer looks like "by market cap":
+
+  - `tickers.tier` is computed weekly by `trip-ema-etl recompute-tiers`.
+  - Tier 1 = top **200** tickers ranked by 30-trading-day **Average
+    Daily Value** (close × volume). That's not market cap directly,
+    but ADV correlates strongly with index inclusion at NSE, so the
+    top of the list reads as "NIFTY 100/200-ish".
+  - Tier 2 = next **500** by ADV.
+  - Tier 3 = everything else (incl. zero-ADV new listings, which can
+    never jump to Tier 1).
+  - Both `tier_1_size` and `tier_2_size` are knobs in `config.yaml`
+    under the `etl:` block; the defaults match the README.
+
+When the user clicks a column header, the secondary sort changes to
+that column but the signalled-first grouping stays intact — Phase 16e
+intent is "never scroll to find a fresh signal".
 """
 
 from __future__ import annotations
@@ -24,6 +60,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, Signal,
@@ -39,7 +76,7 @@ from ..db import GuiDbSession
 from ..http_client import ApiError, TripEmaHttpClient
 from ..queries import (
     SignalEventRow, SymbolHistoryRow, TickerRow,
-    list_tickers, recent_signal_events,
+    last_run_signals, list_tickers, recent_signal_events,
     ticker_symbol_history, ticker_universe_summary,
 )
 from ..workers import RefreshScheduler, submit
@@ -63,6 +100,19 @@ HEADERS = [
 ]
 
 
+# Background colors for rows whose ticker fired a signal in the most
+# recent compute tick. Applied to every cell in the row via
+# Qt.BackgroundRole — sits below the row's Qt.ForegroundRole (which is
+# used for parked/delisted text color), so a parked ticker with a
+# fresh BUY will show light-green background with red text.
+SIGNAL_BACKGROUND_COLORS = {
+    "BUY":            "#c8e6c9",   # light green
+    "SELL":           "#ffcdd2",   # light red
+    "EXIT_FROM_BUY":  "#bbdefb",   # light blue (change to neutral from BUY)
+    "EXIT_FROM_SELL": "#bbdefb",   # light blue (change to neutral from SELL)
+}
+
+
 class TickerTableModel(QAbstractTableModel):
     """Model wrapping a list of TickerRow. Implements only what
     QTableView needs (rowCount, columnCount, data, headerData)."""
@@ -70,20 +120,46 @@ class TickerTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._rows: list[TickerRow] = []
+        # Phase 16d — most-recent-tick signals, keyed by ticker_id.
+        # Drives the row's Qt.BackgroundRole. Empty dict = no recent
+        # signals, no coloring. Updated atomically via set_rows().
+        self._last_signals: dict[int, str] = {}
 
     # ---------- mutators ---------- #
 
-    def set_rows(self, rows: list[TickerRow]) -> None:
+    def set_rows(
+        self,
+        rows: list[TickerRow],
+        last_signals: Optional[dict[int, str]] = None,
+    ) -> None:
         """Replace the entire row set. Bulk update is cheaper than
-        per-row delete-and-insert for our refresh cadence."""
+        per-row delete-and-insert for our refresh cadence.
+
+        `last_signals` (Phase 16d): optional dict {ticker_id: signal_type}
+        for tickers that fired in the most recent compute pass. When
+        provided, rows whose ticker_id is in this dict are rendered with
+        a light background color matching the signal type. When omitted
+        (or None), the previous coloring is cleared — passing the
+        previous dict through is the caller's responsibility. Existing
+        single-argument callers (tests, legacy paths) keep working
+        unchanged; they implicitly clear coloring.
+        """
         self.beginResetModel()
         self._rows = rows
+        self._last_signals = last_signals if last_signals is not None else {}
         self.endResetModel()
 
     def row_at(self, source_row: int) -> Optional[TickerRow]:
         if 0 <= source_row < len(self._rows):
             return self._rows[source_row]
         return None
+
+    @property
+    def last_signals(self) -> dict[int, str]:
+        """Read-only view of the most-recent-tick signals dict, keyed
+        by ticker_id. The custom sort proxy reads this to put signalled
+        rows at the top of the table."""
+        return self._last_signals
 
     # ---------- QAbstractTableModel API ---------- #
 
@@ -112,6 +188,18 @@ class TickerTableModel(QAbstractTableModel):
                 return QBrush(QColor("#a02020"))
             if row.delisted_at is not None:
                 return QBrush(QColor("#888888"))
+        if role == Qt.BackgroundRole:
+            # Phase 16d — color the row based on the most recent tick's
+            # signal for this ticker, if any. We return a brush for
+            # every column so the entire row paints uniformly. Returning
+            # None for tickers without a recent signal lets Qt use the
+            # alternating-row color (set on the view), so non-signalled
+            # rows look the same as before.
+            sig = self._last_signals.get(row.ticker_id)
+            if sig is not None:
+                hex_color = SIGNAL_BACKGROUND_COLORS.get(sig)
+                if hex_color is not None:
+                    return QBrush(QColor(hex_color))
         if role == Qt.UserRole:
             return row
         return None
@@ -145,6 +233,93 @@ class TickerTableModel(QAbstractTableModel):
         return ""
 
 
+class TickerSortFilterProxy(QSortFilterProxyModel):
+    """Phase 16e — signal-grouped sort.
+
+    The Tickers tab's `QTableView` uses this proxy instead of the bare
+    `QSortFilterProxyModel`. The override is in `lessThan`: rows with
+    a fresh signal in the most recent compute tick float to the top,
+    grouped by color, alphabetical within group. Rows without a fresh
+    signal stay below and continue to obey whatever column the user
+    has clicked.
+
+    The primary sort key per row is:
+      - 0 if the row's ticker is in BUY (green)
+      - 1 if SELL (red)
+      - 2 if EXIT_FROM_BUY or EXIT_FROM_SELL (blue, share rank)
+      - 99 otherwise (the "below the signalled group" bucket)
+
+    Within ranks 0/1/2, sort is symbol ASC (case-insensitive). Within
+    rank 99, the proxy delegates to the parent class's `lessThan`, so
+    the user's clicked column (default: tier ASC) keeps working
+    exactly as before for the non-signalled portion.
+
+    Why a custom proxy instead of a custom sort role on the model:
+      - QSortFilterProxyModel calls `data(index, sortRole)` for both
+        sides of each `lessThan` comparison; encoding a (group, symbol)
+        tuple as a single string sort key works but loses the natural
+        "ascending" intuition and breaks when the user clicks a
+        different column. A proxy override is the cleaner separation
+        of concerns: the model stays one column = one value, the
+        proxy owns ordering policy.
+
+    Thread safety: only called from the Qt main thread (sort is a
+    GUI-thread operation). No locking required.
+    """
+
+    SIGNAL_GROUP_ORDER = {
+        "BUY":            0,
+        "SELL":           1,
+        "EXIT_FROM_BUY":  2,
+        "EXIT_FROM_SELL": 2,
+    }
+    UNSIGNALLED_GROUP = 99
+
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
+        # The proxy always works against the source model; access it
+        # via sourceModel() so this proxy is reusable even if a future
+        # refactor swaps the model class.
+        src = self.sourceModel()
+        if not isinstance(src, TickerTableModel):
+            # Defensive — the view never wires a non-TickerTableModel,
+            # but if someone does in a test, fall through to default.
+            return super().lessThan(left, right)
+
+        left_row = src.row_at(left.row())
+        right_row = src.row_at(right.row())
+        if left_row is None or right_row is None:
+            return super().lessThan(left, right)
+
+        signals = src.last_signals
+        left_sig = signals.get(left_row.ticker_id)
+        right_sig = signals.get(right_row.ticker_id)
+        left_group = self._group_rank(left_sig)
+        right_group = self._group_rank(right_sig)
+
+        # Layer 1: cross-group comparison wins immediately. Signalled
+        # groups (0/1/2) sort before unsignalled (99), and within
+        # signalled, BUY < SELL < EXIT.
+        if left_group != right_group:
+            return left_group < right_group
+
+        # Layer 2a: same signalled group → alphabetical by symbol.
+        # case-insensitive so "abc" sorts with "ABC".
+        if left_group != self.UNSIGNALLED_GROUP:
+            return left_row.symbol.lower() < right_row.symbol.lower()
+
+        # Layer 2b: both unsignalled → defer to whatever column the
+        # user has clicked. The view's initial sortByColumn() call
+        # makes this Tier ASC by default; subsequent column-header
+        # clicks change it.
+        return super().lessThan(left, right)
+
+    def _group_rank(self, signal_type: Optional[str]) -> int:
+        if signal_type is None:
+            return self.UNSIGNALLED_GROUP
+        return self.SIGNAL_GROUP_ORDER.get(signal_type, self.UNSIGNALLED_GROUP)
+
+
+
 class TickersView(QWidget):
     """The Tickers tab. Table on the left, detail panel on the right."""
 
@@ -168,7 +343,7 @@ class TickersView(QWidget):
         self._http = http
 
         self._model = TickerTableModel()
-        self._proxy = QSortFilterProxyModel()
+        self._proxy = TickerSortFilterProxy()
         self._proxy.setSourceModel(self._model)
         self._proxy.setSortRole(Qt.DisplayRole)
 
@@ -277,6 +452,11 @@ class TickersView(QWidget):
         layout.addWidget(QLabel("Recent signal events:"))
         self._events_box = QTextEdit()
         self._events_box.setReadOnly(True)
+        # Phase 16d — keep each event on its own line. Without this,
+        # QTextEdit's default soft-wrap would split one event line
+        # across two visible lines when the panel is narrow, making
+        # the descending-time grouping hard to read.
+        self._events_box.setLineWrapMode(QTextEdit.NoWrap)
         self._events_box.setStyleSheet("font-family: monospace; font-size: 12px;")
         layout.addWidget(self._events_box, 1)
 
@@ -333,7 +513,12 @@ class TickersView(QWidget):
                     include_delisted=include_delisted,
                 )
                 summary = ticker_universe_summary(conn)
-            return rows, summary
+                # Phase 16d — pull the most recent tick's signals so
+                # the model can color those rows. Empty dict on
+                # initial deploys / a still-priming service; that's
+                # fine, the model treats it as "no coloring".
+                signals = last_run_signals(conn)
+            return rows, summary, signals
 
         submit(
             fetch_rows,
@@ -342,8 +527,8 @@ class TickersView(QWidget):
         )
 
     def _on_rows_received(self, payload) -> None:
-        rows, summary = payload
-        self._model.set_rows(rows)
+        rows, summary, signals = payload
+        self._model.set_rows(rows, last_signals=signals)
         self._summary_label.setText(
             f"Active: {summary['active']}  Delisted: {summary['delisted']}  "
             f"T1: {summary['tier_1']}  T2: {summary['tier_2']}  "
@@ -409,7 +594,8 @@ class TickersView(QWidget):
         db = self._db
         def fetch():
             with db.connect() as conn:
-                return recent_signal_events(conn, ticker_id, limit=10)
+                # Phase 16d — show the last 5 events per spec (was 10).
+                return recent_signal_events(conn, ticker_id, limit=5)
         submit(
             fetch,
             on_finished=self._on_events_received,
@@ -420,11 +606,17 @@ class TickersView(QWidget):
         if not events:
             self._events_box.setPlainText("(no signal events for this ticker)")
             return
+        # Phase 16e — render computed_at (when the engine fired the
+        # signal) in IST, not bar_timestamp (the bar's start). Two
+        # signal_events on the same weekly bar will share their
+        # bar_timestamp but have distinct computed_at values; the
+        # IST rendering separates them visually.
+        ist = ZoneInfo("Asia/Kolkata")
         lines = []
         for e in events:
-            ts = e.bar_timestamp.strftime("%Y-%m-%d %H:%M")
+            ts = e.computed_at.astimezone(ist).strftime("%Y-%m-%d %H:%M")
             lines.append(
-                f"{ts}  {e.timeframe:>3}  {e.signal:6}  @ {e.price_at_signal:.2f}"
+                f"{ts} : {e.timeframe} {e.signal} @ {e.price_at_signal:.2f}"
             )
         self._events_box.setPlainText("\n".join(lines))
 
