@@ -187,6 +187,10 @@ class EtlStatusView(QWidget):
         bar.addWidget(make_action_button(
             "Backfill…", self._on_backfill_clicked,
         ))
+        bar.addWidget(make_action_button(
+            "Backfill historical shares...",
+            self._on_backfill_shares_clicked,
+        ))
 
         # Action buttons start disabled until BOTH conditions hold:
         #   1. token is configured
@@ -598,6 +602,35 @@ class EtlStatusView(QWidget):
             label,
             lambda: self._http.backfill(
                 exchange=exchange, start_date=start_date, tier=tier,
+            ),
+        )
+
+    def _on_backfill_shares_clicked(self) -> None:
+        """Open the BackfillSharesDialog to collect start_date + force,
+        then POST to /v1/admin/etl/backfill-shares via _fire_action.
+
+        Same pattern as _on_backfill_clicked — the dialog is the
+        gating step; no double-confirm modal here.
+        """
+        exchange = self._require_exchange()
+        if exchange is None:
+            return
+        # Lazy import — same pattern as the existing backfill button.
+        from .widgets.backfill_shares_dialog import BackfillSharesDialog
+        dialog = BackfillSharesDialog(exchange=exchange, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        start_date, force = dialog.values()
+        label = (
+            f"Backfill historical shares ({exchange}, from "
+            f"{start_date.isoformat()}{', force' if force else ''})"
+        )
+        self._fire_action(
+            label,
+            lambda: self._http.backfill_historical_shares(
+                exchange=exchange,
+                start_date=start_date,
+                force=force,
             ),
         )
 

@@ -267,6 +267,67 @@ def admin_etl_backfill(
     )
 
 
+"""
+The admin_etl.py imports already cover what we need (Query, status,
+date, datetime, timezone, EtlActionAcceptedPayload, executor,
+require_admin_token via the router-level dependency).
+"""
+
+@router.post("/backfill-shares", response_model=EtlActionAcceptedPayload)
+def admin_etl_backfill_shares(
+    exchange: str = Query(..., min_length=2, max_length=10),
+    start_date: date = Query(
+        ...,
+        description=(
+            "ISO date, e.g. 2016-06-01. Earliest date to fetch "
+            "historical shares for."
+        ),
+    ),
+    force: bool = Query(
+        False,
+        description="Bypass the 80-day skip-if-recent guard.",
+    ),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+    executor=Depends(get_etl_executor),
+) -> EtlActionAcceptedPayload:
+    """Trigger historical shares-outstanding backfill for `exchange`.
+
+    Fetches yfinance's `get_shares_full(start=start_date)` per
+    ticker and inserts one instrument_shares row per filing-date
+    snapshot. Once populated, compute-market-cap produces COMPUTED
+    rows over the full backfill range (no APPROX fallback).
+
+    Long-running: ~90 min for a full NSE pass. Returns 202
+    immediately; poll /v1/fundamentals/runs?phase=shares_backfill
+    for progress.
+    """
+    _require_executor(executor)
+    _validate_exchange_or_400(exchange, config)
+    logger.info(
+        "Admin: ETL shares backfill requested",
+        extra={
+            "exchange": exchange,
+            "start_date": start_date.isoformat(),
+            "force": force,
+        },
+    )
+    executor.submit(
+        _run_shares_backfill_safe,
+        db_engine, exchange, start_date, force,
+    )
+    return EtlActionAcceptedPayload(
+        action="backfill-shares", run_id=None,
+        accepted_at=datetime.now(timezone.utc),
+        notes=(
+            f"Shares backfill ({exchange}) submitted from "
+            f"{start_date.isoformat()}. Long-running; ~90 minutes. "
+            f"Poll /v1/fundamentals/runs?phase=shares_backfill for "
+            f"progress."
+        ),
+    )
+
+
 # ---------- Status endpoints (GET) ---------- #
 
 
@@ -444,4 +505,22 @@ def _run_backfill_safe(db_engine, config, exchange, start_date, tier_filter):
     except Exception:
         logger.exception(
             "Background backfill failed", extra={"exchange": exchange},
+        )
+
+def _run_shares_backfill_safe(
+    db_engine, exchange: str, start_date: date, force: bool,
+) -> None:
+    """Wrap run_shares_backfill in a try/except that logs and
+    swallows. Runs on the etl_executor thread; uncaught exceptions
+    here become noisy executor tracebacks with no operator context."""
+    try:
+        from ....fundamentals.runners import run_shares_backfill
+        run_shares_backfill(
+            db_engine, exchange,
+            start_date=start_date, force=force,
+        )
+    except Exception:
+        logger.exception(
+            "run_shares_backfill failed for %s from %s",
+            exchange, start_date,
         )

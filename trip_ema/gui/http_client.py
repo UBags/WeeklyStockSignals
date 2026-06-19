@@ -107,6 +107,29 @@ class TripEmaHttpClient:
             params["tier"] = tier
         return self._post("/v1/admin/etl/backfill", params=params)
 
+    def backfill_historical_shares(
+            self,
+            *,
+            exchange: str,
+            start_date,  # datetime.date
+            force: bool = False,
+    ) -> dict:
+        """POST /v1/admin/etl/backfill-shares.
+
+        Fires a long-running yfinance historical-shares backfill for
+        `exchange` from `start_date`. Returns the 202 acceptance
+        payload (action, accepted_at, notes). Progress visible via
+        /v1/fundamentals/runs?phase=shares_backfill.
+        """
+        return self._post(
+            "/v1/admin/etl/backfill-shares",
+            params={
+                "exchange": exchange,
+                "start_date": start_date.isoformat(),
+                "force": "true" if force else "false",
+            },
+        )
+
     # ---------- ETL status reads (GET) ---------- #
 
     def get_etl_status(

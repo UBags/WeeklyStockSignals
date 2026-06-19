@@ -382,6 +382,64 @@ def cmd_refresh_shares(args, config: Config) -> int:
         db_engine.dispose()
 
 
+# ---------- ADDITION 1: cmd_backfill_shares ---------- #
+
+def cmd_backfill_shares(args, config):
+    """Yfinance historical-shares-outstanding backfill for an exchange.
+
+    Differs from refresh-shares: instead of inserting ONE row per
+    ticker with as_of_date=today, this fetches yfinance's full
+    historical shares series via get_shares_full(start=...) and
+    inserts MANY rows per ticker — one per quarterly filing date
+    that yfinance reports.
+
+    Once instrument_shares has historical rows, compute-market-cap's
+    asof lookup (already date-aware) produces COMPUTED rows for the
+    full backfill range — no more APPROX_TODAYS_SHARES gaps.
+
+    Wall-clock cost: ~2s per ticker × 2600 tickers ≈ 90 min.
+    Resumable: a Ctrl-C closes the run as PARTIAL with a checkpoint;
+    re-run with --resume RUN_ID to pick up where you left off.
+    """
+    from .runners import run_shares_backfill
+    from datetime import date as _date
+
+    validate_exchange(args.exchange, config)  # noqa: F821
+    db_engine = create_engine_from_config(config)  # noqa: F821
+    try:
+        start_date = _date.fromisoformat(args.start_date)
+    except ValueError as e:
+        print(
+            f"Invalid --start-date {args.start_date!r}: {e}",
+            file=sys.stderr,  # noqa: F821
+        )
+        return 2
+
+    try:
+        run_id = run_shares_backfill(
+            db_engine,
+            args.exchange,
+            start_date=start_date,
+            resume_run_id=args.resume,
+            force=args.force,
+        )
+        with db_engine.connect() as conn:
+            r = FundamentalsRunRepository(conn).get(run_id)  # noqa: F821
+        if r is None:
+            print(f"run_id={run_id} (no row found?)", file=sys.stderr)  # noqa: F821
+            return 1
+        print(
+            f"run_id={r.run_id} status={r.status} "
+            f"succeeded={r.succeeded} failed={r.failed}"
+        )
+        if r.status == "SUCCESS":
+            return 0
+        if r.status == "PARTIAL":
+            return 1
+        return 2
+    finally:
+        db_engine.dispose()
+
 # ---------- refresh-financials (Phase 3.A) ---------- #
 
 
@@ -1421,6 +1479,29 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
         help="Resume a previously-interrupted shares run from its checkpoint",
     )
 
+    bs = sub.add_parser(
+        "backfill-shares",
+        help="Fetch historical shares-outstanding from yfinance for every "
+             "active ticker. Inserts MANY snapshots per ticker (one per "
+             "filing date). Once populated, compute-market-cap will produce "
+             "COMPUTED rows for the full historical range. Takes ~90 min.",
+    )
+    _add_exchange_arg(bs)
+    bs.add_argument(
+        "--start-date", required=True, metavar="YYYY-MM-DD",
+        help="Earliest date to backfill shares for (e.g. 2016-06-01). "
+             "yfinance typically has ~16 months of history per ticker; "
+             "older requests return whatever's available.",
+    )
+    bs.add_argument(
+        "--force", action="store_true",
+        help="Re-run even if a successful backfill exists from the last 80 days",
+    )
+    bs.add_argument(
+        "--resume", type=int, default=None, metavar="RUN_ID",
+        help="Resume a previously-interrupted backfill from its checkpoint",
+    )
+
     rf = sub.add_parser(
         "refresh-financials",
         help="Fetch quarterly revenue + EBITDA from yfinance for every "
@@ -1683,6 +1764,7 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
         "build-industry-indices":       cmd_build_industry_indices,
         "compute-index-values":         cmd_compute_index_values,
         "rebalance-industry-index":     cmd_rebalance_industry_index,
+        "backfill-shares":              cmd_backfill_shares,
         "compute-indicator-state":      cmd_compute_indicator_state,
         "compute-signals":              cmd_compute_signals,
         "run-eod-pipeline":             cmd_run_eod_pipeline,

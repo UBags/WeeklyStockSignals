@@ -55,6 +55,7 @@ from ..persistence.fundamentals_repo import (
     InstrumentIndustryRepository,
     InstrumentSharesRepository,
 )
+
 from .industry_fetch import (
     IndustryFetchPermanent,
     IndustryFetchRateLimited,
@@ -62,6 +63,13 @@ from .industry_fetch import (
     IndustryInfo,
     fetch_industry,
 )
+
+# from .backfill_shares_fetch import (
+#     HistoricalSharesFetchPermanent,
+#     HistoricalSharesFetchRateLimited,
+#     HistoricalSharesFetchTransient,
+#     fetch_historical_shares,
+# )
 
 logger = logging.getLogger(__name__)
 
@@ -715,6 +723,237 @@ def run_shares_refresh(
     )
     return run_id
 
+
+def run_shares_backfill(
+        db_engine,
+        exchange: str,
+        *,
+        start_date,  # date
+        resume_run_id=None,  # Optional[int]
+        force: bool = False,
+        request_delay_s: float = None,  # uses DEFAULT_REQUEST_DELAY_S
+        fetch_fn=None,
+) -> int:
+    """Backfill historical shares-outstanding for every active ticker
+    on `exchange`. For each ticker, yfinance's `get_shares_full(start)`
+    returns a time series of filing-date snapshots; the runner inserts
+    one `instrument_shares` row per snapshot.
+
+    Once this populates the table, `compute-market-cap` (with its
+    existing `get_as_of` asof lookup) automatically uses the
+    correct historical shares for each trade_date, yielding COMPUTED
+    rows over the full backfill range.
+
+    Same exit semantics as run_shares_refresh:
+      SUCCESS — all tickers fetched at least one snapshot
+      PARTIAL — some succeeded, some failed
+      FAILED  — every attempt failed
+      RUNNING is never a close state.
+
+    Parameters:
+      db_engine, exchange — as run_shares_refresh.
+      start_date — earliest date to backfill. yfinance typically
+        has snapshots back ~16 months for Indian tickers; older
+        dates return whatever's available without erroring.
+      resume_run_id — resume from a PARTIAL run's checkpoint.
+      force — bypass the 80-day skip-if-recent guard. The guard
+        keys off phase='shares_backfill' so it's independent of
+        the regular shares-refresh guard.
+      request_delay_s — sleep between yfinance calls.
+      fetch_fn — injected for testability; defaults to the real
+        fetch_historical_shares from backfill_shares_fetch.
+
+    Returns the run_id of the fundamentals_run row.
+    """
+    from .backfill_shares_fetch import (
+        HistoricalSharesFetchPermanent,
+        HistoricalSharesFetchRateLimited,
+        HistoricalSharesFetchTransient,
+        fetch_historical_shares,
+    )
+    # These are already imported in runners.py at module level:
+    #   logger, time, datetime, timezone
+    #   FundamentalsRunRepository, InstrumentSharesRepository, transaction
+    #   DEFAULT_REQUEST_DELAY_S, RATE_LIMIT_COOLOFF_S, CHECKPOINT_EVERY
+    #   _load_active_tickers_for_exchange, _resume_from_checkpoint,
+    #   _checkpoint, _terminal_status
+
+    if fetch_fn is None:
+        fetch_fn = fetch_historical_shares
+    if request_delay_s is None:
+        request_delay_s = DEFAULT_REQUEST_DELAY_S  # noqa: F821
+
+    # ----- 0. Skip-if-recent guard ----- #
+    if not force and resume_run_id is None:
+        with db_engine.connect() as conn:
+            last = FundamentalsRunRepository(conn).last_completed(  # noqa: F821
+                phase="shares_backfill", exchange=exchange,
+            )
+        if last is not None and last.completed_at is not None:
+            age = (datetime.now(timezone.utc) - last.completed_at).days  # noqa: F821
+            if age < 80:
+                logger.info(  # noqa: F821
+                    "Skipping shares backfill for %s: last SUCCESS "
+                    "run %d completed %d days ago (use force=True to override)",
+                    exchange, last.run_id, age,
+                )
+                return last.run_id
+
+    # ----- 1. Determine the ticker list ----- #
+    if resume_run_id is not None:
+        run_id, ticker_list, cursor_index = _resume_from_checkpoint(  # noqa: F821
+            db_engine, resume_run_id, expected_phase="shares_backfill",
+        )
+        logger.info(  # noqa: F821
+            "Resuming shares backfill run %d at index %d/%d",
+            run_id, cursor_index, len(ticker_list),
+        )
+    else:
+        ticker_list = _load_active_tickers_for_exchange(db_engine, exchange)  # noqa: F821
+        if not ticker_list:
+            logger.warning(  # noqa: F821
+                "No active tickers for exchange %s — skipping shares backfill",
+                exchange,
+            )
+            with transaction(db_engine) as conn:  # noqa: F821
+                run_id = FundamentalsRunRepository(conn).open(  # noqa: F821
+                    phase="shares_backfill", exchange=exchange,
+                    notes=f"No active tickers (start={start_date.isoformat()})",
+                )
+                FundamentalsRunRepository(conn).close(  # noqa: F821
+                    run_id, status="SUCCESS", succeeded=0, failed=0, skipped=0,
+                )
+            return run_id
+        with transaction(db_engine) as conn:  # noqa: F821
+            run_id = FundamentalsRunRepository(conn).open(  # noqa: F821
+                phase="shares_backfill", exchange=exchange,
+                notes=(
+                    f"Shares backfill of {len(ticker_list)} tickers "
+                    f"from {start_date.isoformat()}"
+                ),
+            )
+            FundamentalsRunRepository(conn).update_progress(  # noqa: F821
+                run_id,
+                progress_json={
+                    "ticker_list": [
+                        {"id": t["id"], "symbol": t["symbol"],
+                         "instrument_type": t.get("instrument_type", "EQ")}
+                        for t in ticker_list
+                    ],
+                    "cursor_index": 0,
+                    "start_date": start_date.isoformat(),
+                },
+            )
+        cursor_index = 0
+
+    # ----- 2. Main loop ----- #
+    succeeded = 0
+    failed = 0
+    skipped = 0
+    snapshots_total = 0  # tracked for the log line
+
+    try:
+        for idx in range(cursor_index, len(ticker_list)):
+            t = ticker_list[idx]
+            tid, symbol = t["id"], t["symbol"]
+
+            try:
+                snapshots = fetch_fn(symbol, exchange, start_date)
+                # Insert all snapshots in one transaction per ticker.
+                # Each upsert is idempotent on (ticker_id, as_of_date)
+                # so re-running over the same range is safe.
+                with transaction(db_engine) as conn:  # noqa: F821
+                    repo = InstrumentSharesRepository(conn)  # noqa: F821
+                    for snap in snapshots:
+                        repo.insert_snapshot(
+                            tid,
+                            as_of_date=snap.as_of_date,
+                            shares_outstanding=snap.shares_outstanding,
+                            shares_source="YFINANCE",
+                        )
+                succeeded += 1
+                snapshots_total += len(snapshots)
+            except HistoricalSharesFetchRateLimited as e:
+                logger.warning(  # noqa: F821
+                    "Rate limited on %s (%s): sleeping %.1fs",
+                    symbol, e, RATE_LIMIT_COOLOFF_S,  # noqa: F821
+                )
+                _checkpoint(db_engine, run_id, ticker_list, idx,  # noqa: F821
+                            succeeded, failed, skipped)
+                time.sleep(RATE_LIMIT_COOLOFF_S)  # noqa: F821
+                # Retry once after cool-off.
+                try:
+                    snapshots = fetch_fn(symbol, exchange, start_date)
+                    with transaction(db_engine) as conn:  # noqa: F821
+                        repo = InstrumentSharesRepository(conn)  # noqa: F821
+                        for snap in snapshots:
+                            repo.insert_snapshot(
+                                tid,
+                                as_of_date=snap.as_of_date,
+                                shares_outstanding=snap.shares_outstanding,
+                                shares_source="YFINANCE",
+                            )
+                    succeeded += 1
+                    snapshots_total += len(snapshots)
+                except Exception as e2:
+                    logger.error(  # noqa: F821
+                        "Failed retry after rate-limit cool-off for %s: %s",
+                        symbol, e2,
+                    )
+                    failed += 1
+            except (
+                    HistoricalSharesFetchTransient,
+                    HistoricalSharesFetchPermanent,
+            ) as e:
+                logger.warning(  # noqa: F821
+                    "Failed to backfill shares for %s: %s", symbol, e,
+                )
+                failed += 1
+            except Exception as e:
+                logger.exception(  # noqa: F821
+                    "Unexpected error backfilling shares for %s: %s",
+                    symbol, e,
+                )
+                failed += 1
+
+            if (idx + 1) % CHECKPOINT_EVERY == 0:  # noqa: F821
+                _checkpoint(db_engine, run_id, ticker_list, idx + 1,  # noqa: F821
+                            succeeded, failed, skipped)
+                logger.info(  # noqa: F821
+                    "Checkpoint: %d/%d processed (s=%d f=%d snaps=%d) on %s",
+                    idx + 1, len(ticker_list),
+                    succeeded, failed, snapshots_total, exchange,
+                )
+
+            if request_delay_s > 0:
+                time.sleep(request_delay_s)  # noqa: F821
+
+    except KeyboardInterrupt:
+        logger.warning(  # noqa: F821
+            "KeyboardInterrupt — closing shares backfill run %d as PARTIAL",
+            run_id,
+        )
+        with transaction(db_engine) as conn:  # noqa: F821
+            FundamentalsRunRepository(conn).close(  # noqa: F821
+                run_id, status="PARTIAL",
+                succeeded=succeeded, failed=failed, skipped=skipped,
+                notes=f"Interrupted by KeyboardInterrupt; snapshots={snapshots_total}",
+            )
+        raise
+
+    # ----- 3. Close out ----- #
+    status = _terminal_status(succeeded, failed)  # noqa: F821
+    with transaction(db_engine) as conn:  # noqa: F821
+        FundamentalsRunRepository(conn).close(  # noqa: F821
+            run_id, status=status,
+            succeeded=succeeded, failed=failed, skipped=skipped,
+            notes=f"snapshots_written={snapshots_total}",
+        )
+    logger.info(  # noqa: F821
+        "Shares backfill run %d (%s) finished: status=%s s=%d f=%d snaps=%d",
+        run_id, exchange, status, succeeded, failed, snapshots_total,
+    )
+    return run_id
 
 # ============================================================
 # Phase 3 — quarterly financials refresh
