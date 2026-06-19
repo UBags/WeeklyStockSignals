@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy import Engine, text
 
 from ....api import (
@@ -44,6 +44,167 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/signals", tags=["signals"])
 
+
+
+@router.get(
+    "/industry/{industry_name}/history",
+    response_model=SignalHistoryPayload,
+)
+def get_industry_history(
+    industry_name: str,
+    years: int = Query(
+        default=3, ge=1, le=20,
+        description="How many years of history to return.",
+    ),
+    db_engine: Engine = Depends(get_db_engine),
+) -> SignalHistoryPayload:
+    """Industry-index history with synthetic ±0.25% OHLC candles.
+
+    The industry index is a daily-value series (`industry_index_value`),
+    not OHLC. For chart consistency we synthesize a weekly bar per
+    Pine-style Monday-IST-anchored week:
+      - close   = last day's index value in the week
+      - delta   = 0.0025 * close                  (the ±0.25% body)
+      - direction = sign(close - prev_week_close)
+      - up week  : open = close - delta,  high = close + delta, low = open
+      - down week: open = close + delta,  low  = close - delta, high = open
+    Volume is reported as 0 (industries don't have volume).
+
+    Indicator overlays (EMAs / bands / regime) come from
+    `indicator_state` rows for this industry, sampled at the last
+    trading day of each week. Signal events list is empty —
+    `signal_events` is ticker-only by design.
+
+    Returns 404 if the industry is unknown. Returns an empty bars
+    list (with notes) if the industry has no values in the requested
+    window.
+    """
+    with db_engine.connect() as conn:
+        # No hard-gate on industry_index existence — the table may
+        # not have a row for this industry if build-industry-indices
+        # hasn't been run yet, but industry_index_value may still
+        # have data (or we may want to return an empty-bars payload
+        # so the GUI degrades gracefully instead of showing "fetch
+        # failed").
+        since = datetime.now(timezone.utc) - timedelta(days=365 * years)
+        rows = conn.execute(text("""
+            SELECT
+                v.trade_date,
+                v.value,
+                s.med_ema, s.long_ema, s.longest_ema,
+                s.atr,
+                s.upper_inner_band, s.lower_inner_band,
+                s.upper_mid_band,   s.lower_mid_band,
+                s.upper_outer_band, s.lower_outer_band,
+                s.display_regime, s.core_regime
+            FROM industry_index_value v
+            LEFT JOIN indicator_state s
+                   ON s.industry_name = v.industry_name
+                  AND s.trade_date = v.trade_date
+            WHERE v.industry_name = :n
+              AND v.trade_date >= :since
+            ORDER BY v.trade_date ASC
+        """), {"n": industry_name, "since": since.date()}).all()
+
+    if not rows:
+        return SignalHistoryPayload(
+            exchange="INDEX", symbol=industry_name, instrument="INDUSTRY",
+            timeframe="1W",
+            bars=[], signal_events=[],
+            warmup_bars_count=0,
+            notes="No values for this industry in the requested window.",
+        )
+
+    # Group rows by IST-Monday-anchored week. Use the trade_date
+    # directly (no tz on DATE columns); a date d sits in the week
+    # starting at the Monday on-or-before d.
+    from collections import OrderedDict
+    weeks: "OrderedDict[date, list]" = OrderedDict()
+    for r in rows:
+        d = r.trade_date
+        # Monday-of-week. weekday(): Mon=0..Sun=6.
+        week_start = d - timedelta(days=d.weekday())
+        weeks.setdefault(week_start, []).append(r)
+
+    # Synthesize per-week bars. Iterate so we can carry prev_close.
+    bars: list[HistoricalBarPayload] = []
+    warmup_count = 0
+    prev_close: float | None = None
+    for week_start, week_rows in weeks.items():
+        # Last day's row carries this week's close AND the indicator
+        # values we sample for display.
+        last = week_rows[-1]
+        close = float(last.value)
+        delta = 0.0025 * close
+        if prev_close is None or close == prev_close:
+            # First week or flat — render as a doji-ish up bar so
+            # the body still has a body. Open=close-delta, low=open,
+            # high=close+delta.
+            open_ = close - delta
+            high = close + delta
+            low = open_
+        elif close > prev_close:
+            open_ = close - delta
+            high = close + delta
+            low = open_
+        else:
+            open_ = close + delta
+            high = open_
+            low = close - delta
+
+        is_warmed_up = last.med_ema is not None
+        if not is_warmed_up:
+            warmup_count += 1
+
+        # Map display_regime SMALLINT (-1/0/+1) to the same enum-name
+        # strings the ticker endpoint uses.
+        display_bg = (
+            "BULLISH" if last.display_regime == 1
+            else "BEARISH" if last.display_regime == -1
+            else "NEUTRAL"
+        )
+        core_bg = (
+            "BULLISH" if last.core_regime == 1
+            else "BEARISH" if last.core_regime == -1
+            else "NEUTRAL"
+        )
+
+        # bar_timestamp: encode the Monday as a UTC datetime at 00:00.
+        # Same shape as the ticker endpoint's bar_timestamps.
+        bar_ts = datetime.combine(
+            week_start, datetime.min.time(), tzinfo=timezone.utc,
+        )
+        bars.append(HistoricalBarPayload(
+            bar_timestamp=bar_ts,
+            open=open_, high=high, low=low, close=close,
+            volume=1.0,
+            med_ema=_finite_or_none(last.med_ema),
+            long_ema=_finite_or_none(last.long_ema),
+            longest_ema=_finite_or_none(last.longest_ema),
+            atr=_finite_or_none(last.atr),
+            upper_inner=_finite_or_none(last.upper_inner_band),
+            lower_inner=_finite_or_none(last.lower_inner_band),
+            upper_mid=_finite_or_none(last.upper_mid_band),
+            lower_mid=_finite_or_none(last.lower_mid_band),
+            upper_outer=_finite_or_none(last.upper_outer_band),
+            lower_outer=_finite_or_none(last.lower_outer_band),
+            core_bg=core_bg,
+            display_bg=display_bg,
+            is_warmed_up=is_warmed_up,
+        ))
+        prev_close = close
+
+    return SignalHistoryPayload(
+        exchange="INDEX", symbol=industry_name, instrument="INDUSTRY",
+        timeframe="1W",
+        bars=bars,
+        signal_events=[],
+        warmup_bars_count=warmup_count,
+        notes=(
+            f"Synthesized {len(bars)} weekly bars from "
+            f"{len(rows)} daily values; +/-0.25% body width."
+        ),
+    )
 
 @router.get(
     "/{exchange}/{symbol}",
@@ -293,162 +454,3 @@ def _finite_or_none(v: float) -> float | None:
     return float(v)
 
 
-@router.get(
-    "/industry/{industry_name}/history",
-    response_model=SignalHistoryPayload,
-)
-def get_industry_history(
-    industry_name: str,
-    years: int = Query(
-        default=3, ge=1, le=20,
-        description="How many years of history to return.",
-    ),
-    db_engine: Engine = Depends(get_db_engine),
-) -> SignalHistoryPayload:
-    """Industry-index history with synthetic ±0.25% OHLC candles.
-
-    The industry index is a daily-value series (`industry_index_value`),
-    not OHLC. For chart consistency we synthesize a weekly bar per
-    Pine-style Monday-IST-anchored week:
-      - close   = last day's index value in the week
-      - delta   = 0.0025 * close                  (the ±0.25% body)
-      - direction = sign(close - prev_week_close)
-      - up week  : open = close - delta,  high = close + delta, low = open
-      - down week: open = close + delta,  low  = close - delta, high = open
-    Volume is reported as 0 (industries don't have volume).
-
-    Indicator overlays (EMAs / bands / regime) come from
-    `indicator_state` rows for this industry, sampled at the last
-    trading day of each week. Signal events list is empty —
-    `signal_events` is ticker-only by design.
-
-    Returns 404 if the industry is unknown. Returns an empty bars
-    list (with notes) if the industry has no values in the requested
-    window.
-    """
-    with db_engine.connect() as conn:
-        # No hard-gate on industry_index existence — the table may
-        # not have a row for this industry if build-industry-indices
-        # hasn't been run yet, but industry_index_value may still
-        # have data (or we may want to return an empty-bars payload
-        # so the GUI degrades gracefully instead of showing "fetch
-        # failed").
-        since = datetime.now(timezone.utc) - timedelta(days=365 * years)
-        rows = conn.execute(text("""
-            SELECT
-                v.trade_date,
-                v.value,
-                s.med_ema, s.long_ema, s.longest_ema,
-                s.atr,
-                s.upper_inner_band, s.lower_inner_band,
-                s.upper_mid_band,   s.lower_mid_band,
-                s.upper_outer_band, s.lower_outer_band,
-                s.display_regime, s.core_regime
-            FROM industry_index_value v
-            LEFT JOIN indicator_state s
-                   ON s.industry_name = v.industry_name
-                  AND s.trade_date = v.trade_date
-            WHERE v.industry_name = :n
-              AND v.trade_date >= :since
-            ORDER BY v.trade_date ASC
-        """), {"n": industry_name, "since": since.date()}).all()
-
-    if not rows:
-        return SignalHistoryPayload(
-            exchange="INDEX", symbol=industry_name, instrument="INDUSTRY",
-            timeframe="1W",
-            bars=[], signal_events=[],
-            warmup_bars_count=0,
-            notes="No values for this industry in the requested window.",
-        )
-
-    # Group rows by IST-Monday-anchored week. Use the trade_date
-    # directly (no tz on DATE columns); a date d sits in the week
-    # starting at the Monday on-or-before d.
-    from collections import OrderedDict
-    weeks: "OrderedDict[date, list]" = OrderedDict()
-    for r in rows:
-        d = r.trade_date
-        # Monday-of-week. weekday(): Mon=0..Sun=6.
-        week_start = d - timedelta(days=d.weekday())
-        weeks.setdefault(week_start, []).append(r)
-
-    # Synthesize per-week bars. Iterate so we can carry prev_close.
-    bars: list[HistoricalBarPayload] = []
-    warmup_count = 0
-    prev_close: float | None = None
-    for week_start, week_rows in weeks.items():
-        # Last day's row carries this week's close AND the indicator
-        # values we sample for display.
-        last = week_rows[-1]
-        close = float(last.value)
-        delta = 0.0025 * close
-        if prev_close is None or close == prev_close:
-            # First week or flat — render as a doji-ish up bar so
-            # the body still has a body. Open=close-delta, low=open,
-            # high=close+delta.
-            open_ = close - delta
-            high = close + delta
-            low = open_
-        elif close > prev_close:
-            open_ = close - delta
-            high = close + delta
-            low = open_
-        else:
-            open_ = close + delta
-            high = open_
-            low = close - delta
-
-        is_warmed_up = last.med_ema is not None
-        if not is_warmed_up:
-            warmup_count += 1
-
-        # Map display_regime SMALLINT (-1/0/+1) to the same enum-name
-        # strings the ticker endpoint uses.
-        display_bg = (
-            "BULLISH" if last.display_regime == 1
-            else "BEARISH" if last.display_regime == -1
-            else "NEUTRAL"
-        )
-        core_bg = (
-            "BULLISH" if last.core_regime == 1
-            else "BEARISH" if last.core_regime == -1
-            else "NEUTRAL"
-        )
-
-        # bar_timestamp: encode the Monday as a UTC datetime at 00:00.
-        # Same shape as the ticker endpoint's bar_timestamps.
-        bar_ts = datetime.combine(
-            week_start, datetime.min.time(), tzinfo=timezone.utc,
-        )
-        bars.append(HistoricalBarPayload(
-            bar_timestamp=bar_ts,
-            open=open_, high=high, low=low, close=close,
-            volume=1.0,
-            med_ema=_finite_or_none(last.med_ema),
-            long_ema=_finite_or_none(last.long_ema),
-            longest_ema=_finite_or_none(last.longest_ema),
-            atr=_finite_or_none(last.atr),
-            upper_inner=_finite_or_none(last.upper_inner_band),
-            lower_inner=_finite_or_none(last.lower_inner_band),
-            upper_mid=_finite_or_none(last.upper_mid_band),
-            lower_mid=_finite_or_none(last.lower_mid_band),
-            upper_outer=_finite_or_none(last.upper_outer_band),
-            lower_outer=_finite_or_none(last.lower_outer_band),
-            core_bg=core_bg,
-            display_bg=display_bg,
-            is_warmed_up=is_warmed_up,
-        ))
-        prev_close = close
-
-    return SignalHistoryPayload(
-        exchange="INDEX", symbol=industry_name, instrument="INDUSTRY",
-        timeframe="1W",
-        bars=bars,
-        signal_events=[],
-        warmup_bars_count=warmup_count,
-        notes=(
-            f"Synthesized {len(bars)} weekly bars from "
-            f"{len(rows)} daily values; +/-0.25% body width."
-        ),
-    )
