@@ -151,7 +151,11 @@ class SignalGenerationPanel(QGroupBox):
         meta_row.addWidget(sep_label)
 
         self._metadata_grid = QGridLayout()
+        # Two (label, value) slot-pairs per row:
+        # cols 0,1 = slot 0; cols 2,3 = slot 1. Stretch the
+        # value columns so they share leftover width evenly.
         self._metadata_grid.setColumnStretch(1, 1)
+        self._metadata_grid.setColumnStretch(3, 1)
         meta_row.addLayout(self._metadata_grid)
         meta_row.addStretch(1)
         outer.addLayout(meta_row)
@@ -177,13 +181,27 @@ class SignalGenerationPanel(QGroupBox):
         if not exchanges:
             return
 
-        for row_idx, ex in enumerate(exchanges[:_MAX_METADATA_ROWS]):
+        # 2-column × 3-row grid of (label, value) slot-pairs.
+        # Slot index maps row-major:
+        #   slot 0 → row 0, cols 0|1
+        #   slot 1 → row 0, cols 2|3
+        #   slot 2 → row 1, cols 0|1
+        #   ...
+        # Up to 6 exchanges fit; beyond that we silently drop (the
+        # picker itself stays the source of truth for the list).
+        _SLOT_COLS = 2
+        _SLOT_MAX = 6
+        for slot_idx, ex in enumerate(exchanges[:_SLOT_MAX]):
+            row = slot_idx // _SLOT_COLS
+            col_pair = slot_idx % _SLOT_COLS
+            label_col = col_pair * 2        # 0 or 2
+            value_col = col_pair * 2 + 1    # 1 or 3
             ex_label = QLabel(f"{ex}:")
             ex_label.setStyleSheet("font-weight: 600;")
             value_label = QLabel("(loading\u2026)")
             value_label.setStyleSheet("color: #666;")
-            self._metadata_grid.addWidget(ex_label, row_idx, 0)
-            self._metadata_grid.addWidget(value_label, row_idx, 1)
+            self._metadata_grid.addWidget(ex_label, row, label_col)
+            self._metadata_grid.addWidget(value_label, row, value_col)
             self._metadata_labels[ex] = value_label
 
         self._refresh_metadata_rows()
