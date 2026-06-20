@@ -489,3 +489,71 @@ class SignalEvent:
 
     # --- audit ---
     computed_at: datetime
+
+# Allowed values for stock_benchmark_stats.benchmark_kind (Phase 6-3).
+BENCHMARK_KINDS = ("INDUSTRY", "NIFTY")
+
+# Allowed values for window_label on both benchmark stats tables.
+# These map to fixed observation counts (26 / 52 / 156 weekly returns)
+# defined as WINDOW_RETURNS in benchmark_stats_compute.py.
+WINDOW_LABELS = ("SHORT", "MEDIUM", "LONG")
+
+# Concrete benchmark_id for the NIFTY proxy. Same constant used by
+# the IndustryPanel fallback (_NIFTY50_FALLBACK).
+NIFTY_BENCHMARK_ID = "NIFTY"
+
+
+@dataclass(frozen=True, slots=True)
+class StockBenchmarkStats:
+    """One row from stock_benchmark_stats.
+
+    Per-(stock, benchmark, window, as_of) regression snapshot.
+    Composite PK is enforced at the DB level; the dataclass mirrors
+    every column.
+
+    Metric fields are Optional[float] because runners write None for
+    stocks with too few observations (n_weeks < 8) and for the
+    degenerate-zero-variance case.
+
+    benchmark_kind disambiguates "industry" (benchmark_id =
+    industry_name) from "nifty" (benchmark_id = 'NIFTY'). Carrying
+    both fields makes the row self-describing — JOINs don't need
+    to peek at industry_index to interpret benchmark_id.
+    """
+    ticker_id: int
+    benchmark_kind: str               # one of BENCHMARK_KINDS
+    benchmark_id: str                 # industry_name OR 'NIFTY'
+    window_label: str                 # one of WINDOW_LABELS
+    as_of_date: date
+    n_weeks: int
+    beta: Optional[float]
+    alpha_annual: Optional[float]
+    r_squared: Optional[float]
+    sigma_annual: Optional[float]
+    rs_pct: Optional[float]
+    info_ratio: Optional[float]
+    computed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class IndustryBenchmarkStats:
+    """One row from industry_benchmark_stats.
+
+    Mirror of StockBenchmarkStats minus ticker_id and benchmark_kind
+    (industries are always vs NIFTY in Phase 6-3; if a future phase
+    adds industry-vs-industry comparisons, add a benchmark_kind column
+    via migration and a discriminator field here).
+    """
+    industry_name: str
+    benchmark_id: str                 # 'NIFTY'
+    window_label: str
+    as_of_date: date
+    n_weeks: int
+    beta: Optional[float]
+    alpha_annual: Optional[float]
+    r_squared: Optional[float]
+    sigma_annual: Optional[float]
+    rs_pct: Optional[float]
+    info_ratio: Optional[float]
+    computed_at: datetime
+
