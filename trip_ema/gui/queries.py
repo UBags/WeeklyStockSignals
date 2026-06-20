@@ -404,3 +404,83 @@ def top_n_tickers_in_industry_by_mcap(
         )
         for r in rows
     ]
+
+# ---------- Overall Indicators (Tickers tab right column) ---------- #
+
+@dataclass(frozen=True)
+class IndustryIndicators:
+    """Summary indicators about the industry a ticker belongs to.
+
+    Populates the "Overall Indicators" card on the Tickers tab. All
+    fields nullable so the renderer can show "—" for tickers whose
+    industry has no indicator_state coverage yet.
+
+    regime: latest display_regime for the industry (-1 / 0 / +1).
+    trend:  sign of (med_ema_latest - med_ema_two_bars_back). Same
+            tri-state semantics as regime so the renderer can reuse
+            the bullish/bearish/neutral coloring logic.
+    """
+    industry_name: Optional[str]
+    regime: Optional[int]              # -1 / 0 / +1
+    trend: Optional[int]               # -1 / 0 / +1
+    latest_trade_date: Optional[date]
+    # Reserved for Phase 6-3 (stock_benchmark_stats); None until then.
+    industry_alpha: Optional[float] = None
+    industry_beta: Optional[float] = None
+    stock_alpha_vs_industry: Optional[float] = None
+    stock_beta_vs_industry: Optional[float] = None
+
+
+def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
+    """Return regime + trend for the industry this ticker belongs to.
+
+    One SQL roundtrip joining instrument_industry to indicator_state.
+    Limit 3 because trend needs the latest row plus the row two weekly
+    bars back; the middle row is fetched only because LIMIT 3 is
+    cleaner than two correlated subqueries.
+
+    Returns an all-None IndustryIndicators if the ticker has no
+    industry classification or the industry has no indicator_state
+    rows yet (newly indexed industries during initial backfill).
+    """
+    rows = conn.execute(text("""
+        SELECT s.med_ema, s.display_regime, s.trade_date, ii.industry
+        FROM instrument_industry ii
+        JOIN indicator_state s
+          ON s.industry_name = ii.industry
+        WHERE ii.ticker_id = :tid
+          AND s.industry_name IS NOT NULL
+        ORDER BY s.trade_date DESC
+        LIMIT 3
+    """), {"tid": ticker_id}).all()
+
+    if not rows:
+        return IndustryIndicators(
+            industry_name=None, regime=None, trend=None,
+            latest_trade_date=None,
+        )
+
+    latest = rows[0]
+    industry = latest.industry
+    regime = (
+        int(latest.display_regime)
+        if latest.display_regime is not None else None
+    )
+
+    trend: Optional[int] = None
+    if len(rows) >= 3:
+        delta = float(rows[0].med_ema) - float(rows[2].med_ema)
+        if delta > 0:
+            trend = 1
+        elif delta < 0:
+            trend = -1
+        else:
+            trend = 0
+
+    return IndustryIndicators(
+        industry_name=industry,
+        regime=regime,
+        trend=trend,
+        latest_trade_date=latest.trade_date,
+    )
+

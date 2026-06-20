@@ -75,9 +75,9 @@ from PySide6.QtWidgets import (
 from ..db import GuiDbSession
 from ..http_client import ApiError, TripEmaHttpClient
 from ..queries import (
-    SignalEventRow, SymbolHistoryRow, TickerRow,
-    last_run_signals, list_tickers, recent_signal_events,
-    ticker_symbol_history, ticker_universe_summary,
+    IndustryIndicators, SignalEventRow, SymbolHistoryRow, TickerRow,
+    industry_indicators_for_ticker, last_run_signals, list_tickers,
+    recent_signal_events, ticker_symbol_history, ticker_universe_summary,
 )
 from ..workers import RefreshScheduler, submit
 
@@ -368,7 +368,7 @@ class TickersView(QWidget):
 
         body = QHBoxLayout()
         body.setSpacing(10)
-        body.addWidget(self._build_table(), 3)
+        body.addWidget(self._build_table(), 2)
         body.addWidget(self._build_detail_panel(), 1)
         outer.addLayout(body, 1)
 
@@ -452,20 +452,67 @@ class TickersView(QWidget):
         layout.addWidget(QLabel("Recent signal events:"))
         self._events_box = QTextEdit()
         self._events_box.setReadOnly(True)
-        # Phase 16d — keep each event on its own line. Without this,
-        # QTextEdit's default soft-wrap would split one event line
-        # across two visible lines when the panel is narrow, making
-        # the descending-time grouping hard to read.
         self._events_box.setLineWrapMode(QTextEdit.NoWrap)
-        self._events_box.setStyleSheet("font-family: monospace; font-size: 12px;")
-        layout.addWidget(self._events_box, 1)
+        # Phase 6-2: smaller font so the longer "Week DD-MM-YY at
+        # DD-MM-YY HH:MM   SIGNAL @ ₹PRICE" format fits without
+        # truncation. Halved height (was stretchy, now capped ~95px)
+        # to make room for the Overall Indicators card below.
+        self._events_box.setStyleSheet(
+            "font-family: monospace; font-size: 10px;"
+        )
+        self._events_box.setMaximumHeight(95)
+        layout.addWidget(self._events_box)
+
+        # ---- Overall Indicators card (Phase 6-2) ---- #
+        # Regime + trend from the industry this ticker belongs to.
+        # The four α/β slots are placeholders for Phase 6-3 — rendered
+        # as "—" today; the runner that populates them is the next
+        # vertical slice.
+        indicators_box = QGroupBox("Overall Indicators")
+        ind_layout = QVBoxLayout(indicators_box)
+        ind_layout.setSpacing(2)
+        ind_layout.setContentsMargins(8, 6, 8, 6)
+
+        self._ind_regime_label = QLabel("Industry regime: —")
+        self._ind_regime_label.setStyleSheet("font-size: 11px;")
+        ind_layout.addWidget(self._ind_regime_label)
+
+        self._ind_trend_label = QLabel("Industry trend: —")
+        self._ind_trend_label.setStyleSheet("font-size: 11px;")
+        ind_layout.addWidget(self._ind_trend_label)
+
+        # Phase 6-3 placeholders — populated later by
+        # stock_benchmark_stats / industry_benchmark_stats tables.
+        _placeholder_style = "font-size: 11px; color: #888;"
+        self._ind_industry_alpha_label = QLabel("Industry α: —")
+        self._ind_industry_alpha_label.setStyleSheet(_placeholder_style)
+        ind_layout.addWidget(self._ind_industry_alpha_label)
+
+        self._ind_industry_beta_label = QLabel("Industry β: —")
+        self._ind_industry_beta_label.setStyleSheet(_placeholder_style)
+        ind_layout.addWidget(self._ind_industry_beta_label)
+
+        self._ind_stock_alpha_label = QLabel("Stock α vs Industry: —")
+        self._ind_stock_alpha_label.setStyleSheet(_placeholder_style)
+        ind_layout.addWidget(self._ind_stock_alpha_label)
+
+        self._ind_stock_beta_label = QLabel("Stock β vs Industry: —")
+        self._ind_stock_beta_label.setStyleSheet(_placeholder_style)
+        ind_layout.addWidget(self._ind_stock_beta_label)
+
+        layout.addWidget(indicators_box)
 
         layout.addWidget(QLabel("Symbol history:"))
         self._history_box = QTextEdit()
         self._history_box.setReadOnly(True)
         self._history_box.setStyleSheet("font-family: monospace; font-size: 12px;")
-        self._history_box.setMaximumHeight(120)
+        self._history_box.setMaximumHeight(90)
         layout.addWidget(self._history_box)
+
+        # Absorb any remaining vertical space so the panel doesn't
+        # stretch its widgets unnaturally now that none of them are
+        # stretchy.
+        layout.addStretch(1)
 
         return box
 
@@ -568,6 +615,7 @@ class TickersView(QWidget):
         self._render_detail(row)
         self._fetch_signal_events(row.ticker_id)
         self._fetch_symbol_history(row.ticker_id)
+        self._fetch_industry_indicators(row.ticker_id)
         self._reprime_button.setEnabled(self._http.token_configured)
         self._view_chart_button.setEnabled(True)
 
@@ -606,17 +654,26 @@ class TickersView(QWidget):
         if not events:
             self._events_box.setPlainText("(no signal events for this ticker)")
             return
-        # Phase 16e — render computed_at (when the engine fired the
-        # signal) in IST, not bar_timestamp (the bar's start). Two
-        # signal_events on the same weekly bar will share their
-        # bar_timestamp but have distinct computed_at values; the
-        # IST rendering separates them visually.
+        # Phase 6-2 — render BOTH timestamps:
+        #   "Week DD-MM-YY"   = the weekly bar's bar_timestamp
+        #                       (Monday-IST-anchored bar start)
+        #   "at DD-MM-YY HH:MM" = computed_at (when the runner/scheduler
+        #                       emitted the row, IST). Useful to see
+        #                       generation time during a live tick.
         ist = ZoneInfo("Asia/Kolkata")
         lines = []
         for e in events:
-            ts = e.computed_at.astimezone(ist).strftime("%Y-%m-%d %H:%M")
+            bar_ts = getattr(e, "bar_timestamp", None)
+            if bar_ts is not None:
+                bar_str = bar_ts.astimezone(ist).strftime("%d-%m-%y")
+            else:
+                bar_str = "—"
+            gen_str = e.computed_at.astimezone(ist).strftime(
+                "%d-%m-%y %H:%M",
+            )
             lines.append(
-                f"{ts} : {e.timeframe} {e.signal} @ {e.price_at_signal:.2f}"
+                f"Week {bar_str} at {gen_str}   "
+                f"{e.signal:>14} @ ₹{e.price_at_signal:,.2f}"
             )
         self._events_box.setPlainText("\n".join(lines))
 
@@ -646,6 +703,80 @@ class TickersView(QWidget):
 
     def _on_history_failed(self, message: str) -> None:
         self._history_box.setPlainText(f"(error: {message})")
+
+    # ---------- Overall Indicators card (Phase 6-2) ---------- #
+
+    # Regime / trend colors — match the Pine display convention.
+    _BULLISH_COLOR = "#2e7d32"   # green
+    _BEARISH_COLOR = "#c62828"   # red
+    _NEUTRAL_COLOR = "#666666"   # grey
+    _UNKNOWN_COLOR = "#888888"
+
+    def _fetch_industry_indicators(self, ticker_id: int) -> None:
+        db = self._db
+        def fetch():
+            with db.connect() as conn:
+                return industry_indicators_for_ticker(conn, ticker_id)
+        submit(
+            fetch,
+            on_finished=self._on_indicators_received,
+            on_failed=self._on_indicators_failed,
+        )
+
+    def _on_indicators_received(self, ind: IndustryIndicators) -> None:
+        # Regime line: BULLISH (green) / BEARISH (red) / NEUTRAL (grey).
+        regime_text, regime_color = self._format_tristate(
+            ind.regime, ("BEARISH", "NEUTRAL", "BULLISH"),
+        )
+        # Industry name is included so the operator sees WHICH industry
+        # this row is talking about; helpful when sector classification
+        # is wrong / surprising.
+        industry_suffix = (
+            f" <small>({ind.industry_name})</small>"
+            if ind.industry_name else ""
+        )
+        self._ind_regime_label.setText(
+            f"<b>Industry regime:</b> "
+            f"<font color='{regime_color}'>{regime_text}</font>"
+            f"{industry_suffix}"
+        )
+
+        # Trend line: Up / Down / Flat with same color scheme.
+        trend_text, trend_color = self._format_tristate(
+            ind.trend, ("Down", "Flat", "Up"),
+        )
+        self._ind_trend_label.setText(
+            f"<b>Industry trend:</b> "
+            f"<font color='{trend_color}'>{trend_text}</font>"
+        )
+
+        # The four α/β rows stay as placeholders until Phase 6-3 ships
+        # the stock_benchmark_stats + industry_benchmark_stats tables.
+        # When that lands we wire ind.industry_alpha etc. through.
+
+    def _on_indicators_failed(self, message: str) -> None:
+        self._ind_regime_label.setText(
+            f"<b>Industry regime:</b> "
+            f"<font color='{self._UNKNOWN_COLOR}'>error</font>"
+        )
+        self._ind_trend_label.setText(
+            f"<b>Industry trend:</b> "
+            f"<font color='{self._UNKNOWN_COLOR}'>error</font>"
+        )
+        logger.warning("industry_indicators fetch failed: %s", message)
+
+    def _format_tristate(
+        self, value: Optional[int], labels: tuple[str, str, str],
+    ) -> tuple[str, str]:
+        '''Map -1/0/+1 to (label, color). labels=(neg, zero, pos).
+        Returns ('—', neutral-grey) for None.'''
+        if value is None:
+            return ("—", self._UNKNOWN_COLOR)
+        if value > 0:
+            return (labels[2], self._BULLISH_COLOR)
+        if value < 0:
+            return (labels[0], self._BEARISH_COLOR)
+        return (labels[1], self._NEUTRAL_COLOR)
 
     # ---------- reprime action ---------- #
 
