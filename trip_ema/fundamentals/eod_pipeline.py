@@ -159,6 +159,10 @@ def run_eod_pipeline(
         run_signal_events_for_all_industries,
         run_signal_events_for_all_tickers,
     )
+    from .benchmark_stats_runners import (
+        run_benchmark_stats_for_all_industries,
+        run_benchmark_stats_for_all_tickers,
+    )
 
     result = PipelineResult(
         exchange=exchange,
@@ -516,6 +520,26 @@ def run_eod_pipeline(
         exchange, result.overall_status,
         result.duration_seconds or 0.0,
     )
+
+    # Phase 6-3: benchmark stats (alpha/beta/RS/R²). Cheap if
+    # already current for the as_of_date — the skip guard returns
+    # in milliseconds. Full recompute ~10-15 min.
+    from datetime import date as _date
+    from datetime import timedelta as _td
+    today = _date.today()
+    # Anchor as_of_date to the Monday of the current week (matches
+    # bar_timestamp aggregation everywhere else in the system).
+    as_of = today - _td(days=today.weekday())
+    if _benchmark_stats_already_current(db_engine, as_of):
+        logger.info(
+            "benchmark stats already current for as_of=%s; skipping",
+            as_of,
+        )
+    else:
+        logger.info("benchmark stats: starting compute for as_of=%s", as_of)
+        run_benchmark_stats_for_all_industries(db_engine, as_of_date=as_of)
+        run_benchmark_stats_for_all_tickers(db_engine, as_of_date=as_of)
+        logger.info("benchmark stats: complete")
     return result
 
 
@@ -540,3 +564,25 @@ def _status_from_counts(succeeded: int, failed: int, skipped: int) -> StepStatus
     if failed > 0:
         return StepStatus.PARTIAL
     return StepStatus.SUCCESS
+
+# ---------- Phase 6-3: benchmark stats hook ---------- #
+
+
+def _benchmark_stats_already_current(db_engine, as_of_date) -> bool:
+    """Skip-if-recent guard for the benchmark stats step.
+
+    Returns True if stock_benchmark_stats already has rows for the
+    given as_of_date — meaning a prior EoD run on the same date
+    already computed them. Makes mid-week EoD runs (which fire daily
+    but don't change the weekly-bar close) sub-second no-ops on this
+    step, while Friday EoD runs (when the weekly bar actually closes)
+    do the full ~10-15 min compute.
+    """
+    from sqlalchemy import text as _text
+    with db_engine.connect() as conn:
+        row = conn.execute(_text("""
+            SELECT 1 FROM stock_benchmark_stats
+            WHERE as_of_date = :d LIMIT 1
+        """), {"d": as_of_date}).first()
+    return row is not None
+

@@ -41,6 +41,7 @@ import requests
 
 from ..domain import NotificationBatch
 from .batcher import render_html, render_text
+from .benchmark_rerank import fetch_rank_scores
 from .enrichment import BatchEnrichment
 
 logger = logging.getLogger(__name__)
@@ -142,7 +143,21 @@ class EmailTransport:
             return None
         try:
             enrichment = self.enrichment_provider(batch)
-            return render_html(batch, enrichment)
+            # Phase 6-3: compute per-ticker rank scores so BUY events
+            # can be sorted by composite RS/R² momentum metric instead
+            # of alphabetical. One SQL roundtrip vs stock_benchmark_stats
+            # + industry_benchmark_stats; sub-100ms at full scale.
+            try:
+                with self._db_engine.connect() as conn:
+                    ticker_ids = [ev.ticker.ticker_id for ev in batch.events]
+                    rank_scores = fetch_rank_scores(conn, ticker_ids)
+            except Exception:
+                logger.exception(
+                    "rank-score fetch failed; emails will fall back to "
+                    "alphabetical BUY sort"
+                )
+                rank_scores = None
+            return render_html(batch, enrichment, rank_scores=rank_scores)
         except Exception:
             logger.exception(
                 "Enrichment / HTML render failed; falling back to text-only "
