@@ -20,6 +20,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy import Engine, text
+from sqlalchemy.engine.base import Connection
 
 from ....api import (
     TickerNotPrimedError,
@@ -29,9 +30,9 @@ from ....api import (
 from ....cache import SignalCache
 from ....config import Config
 from ....domain import OHLCVBar, TickerRef, Timeframe
-from ....engine import TickerEngine
 from ....indicators.aggregation import daily_to_weekly
 from ..dependencies import get_cache, get_config, get_db_engine
+from .signal_history import build_signal_history_payload
 from ..schemas import (
     HistoricalBarPayload,
     HistoricalSignalEventPayload,
@@ -39,12 +40,33 @@ from ..schemas import (
     TerseResponsePayload,
     VerboseResponsePayload,
 )
+from ....persistence import TickersRepository
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/signals", tags=["signals"])
 
-
+@router.get(
+    "/v1/signals/{exchange}/{symbol}/history",
+    response_model=SignalHistoryPayload,
+)
+def get_signal_history(
+    exchange: str, symbol: str,
+    instrument: str = "EQ",
+    years: int = 3,
+    conn: Connection = Depends(get_connection),
+) -> SignalHistoryPayload:
+    ref = TickerRef(exchange=exchange, symbol=symbol, instrument=instrument)
+    ticker = TickersRepository(conn).get_by_ref(ref)
+    if ticker is None:
+        raise HTTPException(404, f"ticker not found: {exchange}/{symbol}")
+    return build_signal_history_payload(
+        conn,
+        ticker_id=ticker.ticker_id,
+        ticker_ref=ref,
+        timeframe=Timeframe.WEEKLY,
+        years_back=years,
+    )
 
 @router.get(
     "/industry/{industry_name}/history",
