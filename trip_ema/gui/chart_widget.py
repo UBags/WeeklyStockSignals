@@ -568,6 +568,21 @@ class ChartWidget(QWidget):
 
     # ---------- Crosshair / mouse ---------- #
 
+    def leaveEvent(self, event):
+        """Hide crosshair when the mouse exits the widget bounds.
+
+        Fixes the fast-mouse trail bug on the IndustryPanel mini grid:
+        sigMouseMoved doesn't deliver a final out-of-bounds event when
+        the cursor crosses directly into a neighbor ChartWidget, so
+        without this hook the prior chart's crosshair lines and floating
+        price/date labels stay frozen at the last on-plot position.
+        Qt's widget-level leaveEvent fires reliably in that case.
+        """
+        self._hide_crosshair()
+        if self._mode == ChartMode.MAIN:
+            self.cursor_left.emit()
+        super().leaveEvent(event)
+
     def _on_mouse_moved(self, pos) -> None:
         if not self._last_payload or not self._bars_by_index:
             return
