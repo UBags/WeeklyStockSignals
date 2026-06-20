@@ -47,6 +47,7 @@ from ..chart_widget import ChartMode, ChartWidget
 from ..db import GuiDbSession
 from ..http_client import ApiError, TripEmaHttpClient
 from ..queries import ticker_universe_with_recent_signals
+from ..benchmark_rerank_client import fetch_rank_scores
 from ..signals_helpers import (
     format_date_label,
     format_price_label,
@@ -333,19 +334,39 @@ class SignalsView(QWidget):
     # ====================  Ticker combo  ==================== #
 
     def _populate_ticker_combo(self) -> None:
-        """Same flow as Phase A: fetch via the recent-signal-aware
-        query and build a sectioned QStandardItemModel."""
+        """Fetch the recent-signal-aware ticker universe AND each
+        ticker's composite rank_score so the recent-signal section can
+        be sorted by momentum DESC. Phase 6-3."""
         def fetch():
             with self._db.connect() as conn:
-                return ticker_universe_with_recent_signals(conn)
+                rows = ticker_universe_with_recent_signals(conn)
+                ticker_ids = [
+                    r.ticker_id for r in rows
+                    if getattr(r, "ticker_id", None) is not None
+                ]
+                rank_scores = fetch_rank_scores(conn, ticker_ids)
+            return rows, rank_scores
         submit(
             fetch,
             on_finished=self._on_combo_rows_received,
             on_failed=self._on_combo_rows_failed,
         )
 
-    def _on_combo_rows_received(self, rows: list) -> None:
+    def _on_combo_rows_received(self, payload) -> None:
+        # Phase 6-3: payload is (rows, rank_scores). Recent-signal
+        # section is sorted by rank_score DESC; the 'other' section
+        # stays alphabetical so operators browsing by name aren't
+        # surprised.
+        rows, rank_scores = payload
         recent, other = partition_ticker_rows(rows)
+
+        def _rank_sort_key(row):
+            tid = getattr(row, "ticker_id", None)
+            score = rank_scores.get(tid, 0.0) if tid is not None else 0.0
+            return (-score, row.symbol.lower())
+
+        recent = sorted(recent, key=_rank_sort_key)
+        other = sorted(other, key=lambda r: r.symbol.lower())
         model = QStandardItemModel(self)
         grey_brush = QBrush(QColor(_DROPDOWN_GREY_BG))
         buy_brush = QBrush(QColor(_DROPDOWN_BUY_BG))
@@ -371,6 +392,14 @@ class SignalsView(QWidget):
                 (row.exchange, row.symbol, row.instrument_type),
                 Qt.UserRole,
             )
+            # Phase 6-3: hover-tooltip exposes the rank_score so the
+            # operator can see WHY the row sits where it does in the
+            # ranked recent-signal section.
+            tid = getattr(row, "ticker_id", None)
+            if tid is not None and tid in rank_scores:
+                item.setToolTip(
+                    f"{row.symbol}  rank_score = {rank_scores[tid]:+.4f}"
+                )
             if grey:
                 item.setData(grey_brush, Qt.BackgroundRole)
             else:

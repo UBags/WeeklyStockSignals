@@ -263,6 +263,9 @@ class TickerComboRow:
     `has_recent_signal` drives the partition; `latest_signal`
     drives the color (BUY=green, SELL=red, EXIT_*=blue).
     """
+    # Phase 6-3: surfaced so the Signals tab dropdown can map rows
+    # to rank_scores for sorting + tooltip rendering.
+    ticker_id: int
     exchange: str
     symbol: str
     instrument_type: str
@@ -318,7 +321,8 @@ def ticker_universe_with_recent_signals(
             )
             ORDER BY ticker_id, computed_at DESC
         )
-        SELECT t.exchange, t.symbol, t.instrument_type, t.full_name,
+        SELECT t.ticker_id, t.exchange, t.symbol, t.instrument_type,
+               t.full_name,
                (r.ticker_id IS NOT NULL) AS has_recent_signal,
                r.signal_type AS latest_signal
         FROM tickers t
@@ -334,6 +338,7 @@ def ticker_universe_with_recent_signals(
     rows = conn.execute(text(sql), params)
     return [
         TickerComboRow(
+            ticker_id=int(r.ticker_id),
             exchange=r.exchange,
             symbol=r.symbol,
             instrument_type=r.instrument_type,
@@ -407,6 +412,31 @@ def top_n_tickers_in_industry_by_mcap(
 
 # ---------- Overall Indicators (Tickers tab right column) ---------- #
 
+
+@dataclass(frozen=True)
+class BenchmarkWindowSnapshot:
+    """One window's worth of benchmark stats for a stock + its industry.
+
+    Returned as a member of IndustryIndicators.short/medium/long. The
+    rank_score is computed at fetch time using the same formula as
+    notifications/benchmark_rerank:
+        0.5 × stock_rs_pct + 0.3 × industry_rs_pct + 0.2 × stock_r2
+    Surfacing it on the GUI makes the email ordering auditable
+    end-to-end. None for all fields when the corresponding stats row
+    is missing (sub-threshold history).
+    """
+    # Industry vs NIFTY
+    industry_alpha: Optional[float]
+    industry_beta: Optional[float]
+    industry_rs_pct: Optional[float]
+    # Stock vs Industry
+    stock_alpha: Optional[float]
+    stock_beta: Optional[float]
+    stock_rs_pct: Optional[float]
+    stock_r2: Optional[float]
+    # Composite for ranking
+    rank_score: Optional[float]
+
 @dataclass(frozen=True)
 class IndustryIndicators:
     """Summary indicators about the industry a ticker belongs to.
@@ -424,26 +454,30 @@ class IndustryIndicators:
     regime: Optional[int]              # -1 / 0 / +1
     trend: Optional[int]               # -1 / 0 / +1
     latest_trade_date: Optional[date]
-    # Reserved for Phase 6-3 (stock_benchmark_stats); None until then.
-    industry_alpha: Optional[float] = None
-    industry_beta: Optional[float] = None
-    stock_alpha_vs_industry: Optional[float] = None
-    stock_beta_vs_industry: Optional[float] = None
+    # Phase 6-3 (revised): benchmark stats indexed by window. Three
+    # snapshots — SHORT (26w), MEDIUM (52w), LONG (156w) — so the
+    # Tickers tab can render them in a tabbed view. Any window may be
+    # None when no stats row exists yet (sub-threshold history).
+    short: Optional["BenchmarkWindowSnapshot"] = None
+    medium: Optional["BenchmarkWindowSnapshot"] = None
+    long: Optional["BenchmarkWindowSnapshot"] = None
 
 
 def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
-    """Return regime + trend for the industry this ticker belongs to.
+    """Return regime + trend + Phase 6-3 windowed benchmark stats.
 
-    One SQL roundtrip joining instrument_industry to indicator_state.
-    Limit 3 because trend needs the latest row plus the row two weekly
-    bars back; the middle row is fetched only because LIMIT 3 is
-    cleaner than two correlated subqueries.
+    Three SQL roundtrips (all cheap; <15ms total):
+      1. indicator_state — latest 3 weekly rows for regime + trend.
+      2. stock_benchmark_stats — latest row per window
+         (SHORT/MEDIUM/LONG), INDUSTRY benchmark.
+      3. industry_benchmark_stats — latest row per window for the
+         industry vs NIFTY.
 
-    Returns an all-None IndustryIndicators if the ticker has no
-    industry classification or the industry has no indicator_state
-    rows yet (newly indexed industries during initial backfill).
+    The composite rank_score is computed here per-window using the
+    same formula as notifications/benchmark_rerank:
+        0.5 × stock_RS + 0.3 × industry_RS + 0.2 × R²
     """
-    rows = conn.execute(text("""
+    state_rows = conn.execute(text("""
         SELECT s.med_ema, s.display_regime, s.trade_date, ii.industry
         FROM instrument_industry ii
         JOIN indicator_state s
@@ -454,13 +488,13 @@ def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
         LIMIT 3
     """), {"tid": ticker_id}).all()
 
-    if not rows:
+    if not state_rows:
         return IndustryIndicators(
             industry_name=None, regime=None, trend=None,
             latest_trade_date=None,
         )
 
-    latest = rows[0]
+    latest = state_rows[0]
     industry = latest.industry
     regime = (
         int(latest.display_regime)
@@ -468,8 +502,8 @@ def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
     )
 
     trend: Optional[int] = None
-    if len(rows) >= 3:
-        delta = float(rows[0].med_ema) - float(rows[2].med_ema)
+    if len(state_rows) >= 3:
+        delta = float(state_rows[0].med_ema) - float(state_rows[2].med_ema)
         if delta > 0:
             trend = 1
         elif delta < 0:
@@ -477,10 +511,66 @@ def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
         else:
             trend = 0
 
+    # Stock vs Industry — latest row per window. DISTINCT ON gives
+    # us one row per window_label, ordered by latest as_of_date.
+    stock_rows = conn.execute(text("""
+        SELECT DISTINCT ON (window_label)
+               window_label, alpha_annual, beta, rs_pct, r_squared
+        FROM stock_benchmark_stats
+        WHERE ticker_id = :tid
+          AND benchmark_kind = 'INDUSTRY'
+        ORDER BY window_label, as_of_date DESC
+    """), {"tid": ticker_id}).all()
+    stock_by_window = {r.window_label: r for r in stock_rows}
+
+    # Industry vs NIFTY — latest row per window.
+    industry_rows = conn.execute(text("""
+        SELECT DISTINCT ON (window_label)
+               window_label, alpha_annual, beta, rs_pct
+        FROM industry_benchmark_stats
+        WHERE industry_name = :n
+        ORDER BY window_label, as_of_date DESC
+    """), {"n": industry}).all()
+    industry_by_window = {r.window_label: r for r in industry_rows}
+
+    def _f(value):
+        return float(value) if value is not None else None
+
+    def _build_snapshot(window_label: str) -> Optional[BenchmarkWindowSnapshot]:
+        s = stock_by_window.get(window_label)
+        i = industry_by_window.get(window_label)
+        if s is None and i is None:
+            return None
+        ind_alpha = _f(i.alpha_annual) if i else None
+        ind_beta = _f(i.beta) if i else None
+        ind_rs = _f(i.rs_pct) if i else None
+        s_alpha = _f(s.alpha_annual) if s else None
+        s_beta = _f(s.beta) if s else None
+        s_rs = _f(s.rs_pct) if s else None
+        s_r2 = _f(s.r_squared) if s else None
+        # rank_score uses the SAME 0.5/0.3/0.2 weights for every window
+        # so a stock's LONG rank_score can be compared meaningfully with
+        # its SHORT rank_score (high LONG, low SHORT = momentum fading).
+        rank_score = (
+            0.5 * (s_rs or 0.0)
+            + 0.3 * (ind_rs or 0.0)
+            + 0.2 * (s_r2 or 0.0)
+        )
+        return BenchmarkWindowSnapshot(
+            industry_alpha=ind_alpha, industry_beta=ind_beta,
+            industry_rs_pct=ind_rs,
+            stock_alpha=s_alpha, stock_beta=s_beta,
+            stock_rs_pct=s_rs, stock_r2=s_r2,
+            rank_score=rank_score,
+        )
+
     return IndustryIndicators(
         industry_name=industry,
         regime=regime,
         trend=trend,
         latest_trade_date=latest.trade_date,
+        short=_build_snapshot("SHORT"),
+        medium=_build_snapshot("MEDIUM"),
+        long=_build_snapshot("LONG"),
     )
 

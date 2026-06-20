@@ -69,16 +69,18 @@ from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QTableView, QTextEdit, QVBoxLayout, QWidget,
+    QTableView, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..db import GuiDbSession
 from ..http_client import ApiError, TripEmaHttpClient
 from ..queries import (
-    IndustryIndicators, SignalEventRow, SymbolHistoryRow, TickerRow,
-    industry_indicators_for_ticker, last_run_signals, list_tickers,
-    recent_signal_events, ticker_symbol_history, ticker_universe_summary,
+    BenchmarkWindowSnapshot, IndustryIndicators, SignalEventRow,
+    SymbolHistoryRow, TickerRow, industry_indicators_for_ticker,
+    last_run_signals, list_tickers, recent_signal_events,
+    ticker_symbol_history, ticker_universe_summary,
 )
+from ..benchmark_rerank_client import fetch_rank_scores
 from ..workers import RefreshScheduler, submit
 
 logger = logging.getLogger(__name__)
@@ -124,6 +126,13 @@ class TickerTableModel(QAbstractTableModel):
         # Drives the row's Qt.BackgroundRole. Empty dict = no recent
         # signals, no coloring. Updated atomically via set_rows().
         self._last_signals: dict[int, str] = {}
+        # Phase 6-3 — composite rank_score per ticker (0.5×RS_stock +
+        # 0.3×RS_industry + 0.2×R²). The sort proxy reads this to put
+        # high-momentum signalled tickers above low-momentum ones in
+        # the same signal group. Missing keys treated as 0.0 at sort
+        # time so a sub-threshold ticker (no stats yet) lands in the
+        # middle rather than the bottom.
+        self._rank_scores: dict[int, float] = {}
 
     # ---------- mutators ---------- #
 
@@ -131,6 +140,7 @@ class TickerTableModel(QAbstractTableModel):
         self,
         rows: list[TickerRow],
         last_signals: Optional[dict[int, str]] = None,
+        rank_scores: Optional[dict[int, float]] = None,
     ) -> None:
         """Replace the entire row set. Bulk update is cheaper than
         per-row delete-and-insert for our refresh cadence.
@@ -138,15 +148,18 @@ class TickerTableModel(QAbstractTableModel):
         `last_signals` (Phase 16d): optional dict {ticker_id: signal_type}
         for tickers that fired in the most recent compute pass. When
         provided, rows whose ticker_id is in this dict are rendered with
-        a light background color matching the signal type. When omitted
-        (or None), the previous coloring is cleared — passing the
-        previous dict through is the caller's responsibility. Existing
-        single-argument callers (tests, legacy paths) keep working
-        unchanged; they implicitly clear coloring.
+        a light background color matching the signal type.
+
+        `rank_scores` (Phase 6-3): optional dict {ticker_id: rank_score}
+        for the sort proxy. When provided, tickers within the same
+        signal group are ordered by rank_score DESC (high-momentum
+        first). When omitted, the prior ordering (symbol ASC within
+        group) stands. Missing-from-dict treated as 0.0 at sort time.
         """
         self.beginResetModel()
         self._rows = rows
         self._last_signals = last_signals if last_signals is not None else {}
+        self._rank_scores = rank_scores if rank_scores is not None else {}
         self.endResetModel()
 
     def row_at(self, source_row: int) -> Optional[TickerRow]:
@@ -160,6 +173,13 @@ class TickerTableModel(QAbstractTableModel):
         by ticker_id. The custom sort proxy reads this to put signalled
         rows at the top of the table."""
         return self._last_signals
+
+    @property
+    def rank_scores(self) -> dict[int, float]:
+        """Read-only view of {ticker_id: rank_score}. The sort proxy
+        reads this to order rows within each signal group by momentum
+        DESC (Phase 6-3). Missing keys = 0.0 at the use site."""
+        return self._rank_scores
 
     # ---------- QAbstractTableModel API ---------- #
 
@@ -302,15 +322,26 @@ class TickerSortFilterProxy(QSortFilterProxyModel):
         if left_group != right_group:
             return left_group < right_group
 
-        # Layer 2a: same signalled group → alphabetical by symbol.
-        # case-insensitive so "abc" sorts with "ABC".
+        # Layer 2a (Phase 6-3): same signalled group → rank_score DESC.
+        # Surfaces high-momentum BUYs above low-momentum BUYs (same for
+        # SELL/EXIT). Symbol ASC is the tiebreak. Tickers without a
+        # rank_score (sub-threshold history) get 0.0 — they land in
+        # the middle rather than being demoted to the bottom of the
+        # signalled section (lacking stats != bad momentum).
         if left_group != self.UNSIGNALLED_GROUP:
+            ranks = src.rank_scores
+            left_rs = ranks.get(left_row.ticker_id, 0.0)
+            right_rs = ranks.get(right_row.ticker_id, 0.0)
+            if left_rs != right_rs:
+                return left_rs > right_rs   # DESC
             return left_row.symbol.lower() < right_row.symbol.lower()
 
         # Layer 2b: both unsignalled → defer to whatever column the
         # user has clicked. The view's initial sortByColumn() call
         # makes this Tier ASC by default; subsequent column-header
-        # clicks change it.
+        # clicks change it. Rank-score sorting deliberately does NOT
+        # apply here — the unsignalled section is for browsing the
+        # universe, and operators expect their column clicks to win.
         return super().lessThan(left, right)
 
     def _group_rank(self, signal_type: Optional[str]) -> int:
@@ -463,11 +494,11 @@ class TickersView(QWidget):
         self._events_box.setMaximumHeight(95)
         layout.addWidget(self._events_box)
 
-        # ---- Overall Indicators card (Phase 6-2) ---- #
-        # Regime + trend from the industry this ticker belongs to.
-        # The four α/β slots are placeholders for Phase 6-3 — rendered
-        # as "—" today; the runner that populates them is the next
-        # vertical slice.
+        # ---- Overall Indicators card (Phase 6-3 tabbed) ---- #
+        # Regime + trend at the top (per-industry, not per-window),
+        # followed by a 3-tab QTabWidget with stats for 26W / 52W / 3Y.
+        # Each tab carries 7 rows: industry α/β, stock α/β vs industry,
+        # stock RS%, stock R², and the composite rank_score.
         indicators_box = QGroupBox("Overall Indicators")
         ind_layout = QVBoxLayout(indicators_box)
         ind_layout.setSpacing(2)
@@ -481,24 +512,42 @@ class TickersView(QWidget):
         self._ind_trend_label.setStyleSheet("font-size: 11px;")
         ind_layout.addWidget(self._ind_trend_label)
 
-        # Phase 6-3 placeholders — populated later by
-        # stock_benchmark_stats / industry_benchmark_stats tables.
-        _placeholder_style = "font-size: 11px; color: #888;"
-        self._ind_industry_alpha_label = QLabel("Industry α: —")
-        self._ind_industry_alpha_label.setStyleSheet(_placeholder_style)
-        ind_layout.addWidget(self._ind_industry_alpha_label)
-
-        self._ind_industry_beta_label = QLabel("Industry β: —")
-        self._ind_industry_beta_label.setStyleSheet(_placeholder_style)
-        ind_layout.addWidget(self._ind_industry_beta_label)
-
-        self._ind_stock_alpha_label = QLabel("Stock α vs Industry: —")
-        self._ind_stock_alpha_label.setStyleSheet(_placeholder_style)
-        ind_layout.addWidget(self._ind_stock_alpha_label)
-
-        self._ind_stock_beta_label = QLabel("Stock β vs Industry: —")
-        self._ind_stock_beta_label.setStyleSheet(_placeholder_style)
-        ind_layout.addWidget(self._ind_stock_beta_label)
+        # Three-window tab widget. _tab_labels is a nested dict:
+        #   { 'SHORT' | 'MEDIUM' | 'LONG':
+        #       { metric_name: QLabel, ... }
+        #   }
+        # Populated by _on_indicators_received from the matching
+        # BenchmarkWindowSnapshot on the IndustryIndicators payload.
+        self._indicator_tabs = QTabWidget()
+        self._indicator_tabs.setStyleSheet(
+            "QTabBar::tab { font-size: 10px; padding: 2px 8px; }"
+        )
+        self._tab_labels: dict[str, dict[str, QLabel]] = {}
+        for window_key, tab_label in (
+            ("SHORT", "26W"), ("MEDIUM", "52W"), ("LONG", "3Y"),
+        ):
+            tab_widget = QWidget()
+            tab_layout = QVBoxLayout(tab_widget)
+            tab_layout.setSpacing(1)
+            tab_layout.setContentsMargins(6, 4, 6, 4)
+            labels: dict[str, QLabel] = {}
+            for metric in (
+                "industry_alpha", "industry_beta",
+                "stock_alpha", "stock_beta",
+                "stock_rs", "stock_r2",
+            ):
+                lbl = QLabel("—")
+                lbl.setStyleSheet("font-size: 11px;")
+                tab_layout.addWidget(lbl)
+                labels[metric] = lbl
+            # rank_score gets its own bold style (it's the email key)
+            rank_lbl = QLabel("—")
+            rank_lbl.setStyleSheet("font-size: 11px; font-weight: bold;")
+            tab_layout.addWidget(rank_lbl)
+            labels["rank_score"] = rank_lbl
+            self._indicator_tabs.addTab(tab_widget, tab_label)
+            self._tab_labels[window_key] = labels
+        ind_layout.addWidget(self._indicator_tabs)
 
         layout.addWidget(indicators_box)
 
@@ -565,7 +614,13 @@ class TickersView(QWidget):
                 # initial deploys / a still-priming service; that's
                 # fine, the model treats it as "no coloring".
                 signals = last_run_signals(conn)
-            return rows, summary, signals
+                # Phase 6-3 — composite rank scores for the sort
+                # proxy. One SQL roundtrip against benchmark stats
+                # tables. Empty dict (pre-Phase-6-3 deploys) means
+                # the proxy falls back to symbol-ASC within group.
+                ticker_ids = [r.ticker_id for r in rows]
+                rank_scores = fetch_rank_scores(conn, ticker_ids)
+            return rows, summary, signals, rank_scores
 
         submit(
             fetch_rows,
@@ -574,8 +629,10 @@ class TickersView(QWidget):
         )
 
     def _on_rows_received(self, payload) -> None:
-        rows, summary, signals = payload
-        self._model.set_rows(rows, last_signals=signals)
+        rows, summary, signals, rank_scores = payload
+        self._model.set_rows(
+            rows, last_signals=signals, rank_scores=rank_scores,
+        )
         self._summary_label.setText(
             f"Active: {summary['active']}  Delisted: {summary['delisted']}  "
             f"T1: {summary['tier_1']}  T2: {summary['tier_2']}  "
@@ -728,9 +785,6 @@ class TickersView(QWidget):
         regime_text, regime_color = self._format_tristate(
             ind.regime, ("BEARISH", "NEUTRAL", "BULLISH"),
         )
-        # Industry name is included so the operator sees WHICH industry
-        # this row is talking about; helpful when sector classification
-        # is wrong / surprising.
         industry_suffix = (
             f" <small>({ind.industry_name})</small>"
             if ind.industry_name else ""
@@ -750,9 +804,65 @@ class TickersView(QWidget):
             f"<font color='{trend_color}'>{trend_text}</font>"
         )
 
-        # The four α/β rows stay as placeholders until Phase 6-3 ships
-        # the stock_benchmark_stats + industry_benchmark_stats tables.
-        # When that lands we wire ind.industry_alpha etc. through.
+        # Phase 6-3: populate each of the 3 tabs from the matching
+        # snapshot. None snapshots → all rows show "—".
+        for window_key, snap in (
+            ("SHORT", ind.short),
+            ("MEDIUM", ind.medium),
+            ("LONG", ind.long),
+        ):
+            self._populate_indicator_tab(window_key, snap)
+
+    def _populate_indicator_tab(
+        self, window_key: str,
+        snap: Optional[BenchmarkWindowSnapshot],
+    ) -> None:
+        """Update the 7 labels on one tab from a snapshot.
+
+        window_key: 'SHORT' / 'MEDIUM' / 'LONG'
+        snap: None means no stats for this window — show "—" everywhere.
+        """
+        labels = self._tab_labels[window_key]
+        if snap is None:
+            placeholder = (
+                f"<font color='{self._UNKNOWN_COLOR}'>—</font>"
+            )
+            labels["industry_alpha"].setText(
+                f"<b>Industry α (vs NIFTY):</b> {placeholder}")
+            labels["industry_beta"].setText(
+                f"<b>Industry β (vs NIFTY):</b> {placeholder}")
+            labels["stock_alpha"].setText(
+                f"<b>Stock α vs Industry:</b> {placeholder}")
+            labels["stock_beta"].setText(
+                f"<b>Stock β vs Industry:</b> {placeholder}")
+            labels["stock_rs"].setText(
+                f"<b>Stock RS% vs Industry:</b> {placeholder}")
+            labels["stock_r2"].setText(
+                f"<b>Stock R² vs Industry:</b> {placeholder}")
+            labels["rank_score"].setText(
+                f"<b>Rank score:</b> {placeholder}")
+            return
+        labels["industry_alpha"].setText(
+            f"<b>Industry α (vs NIFTY):</b> "
+            f"{self._fmt_pct_colored(snap.industry_alpha)}")
+        labels["industry_beta"].setText(
+            f"<b>Industry β (vs NIFTY):</b> "
+            f"{self._fmt_float(snap.industry_beta, 2)}")
+        labels["stock_alpha"].setText(
+            f"<b>Stock α vs Industry:</b> "
+            f"{self._fmt_pct_colored(snap.stock_alpha)}")
+        labels["stock_beta"].setText(
+            f"<b>Stock β vs Industry:</b> "
+            f"{self._fmt_float(snap.stock_beta, 2)}")
+        labels["stock_rs"].setText(
+            f"<b>Stock RS% vs Industry:</b> "
+            f"{self._fmt_pct_colored(snap.stock_rs_pct)}")
+        labels["stock_r2"].setText(
+            f"<b>Stock R² vs Industry:</b> "
+            f"{self._fmt_float(snap.stock_r2, 2)}")
+        labels["rank_score"].setText(
+            f"<b>Rank score:</b> "
+            f"{self._fmt_score_colored(snap.rank_score)}")
 
     def _on_indicators_failed(self, message: str) -> None:
         self._ind_regime_label.setText(
@@ -777,6 +887,35 @@ class TickersView(QWidget):
         if value < 0:
             return (labels[0], self._BEARISH_COLOR)
         return (labels[1], self._NEUTRAL_COLOR)
+
+    def _fmt_pct_colored(self, value: Optional[float]) -> str:
+        '''Format a decimal (0.034) as a colored percentage string
+        ("<font color=green>+3.4%</font>"). Returns plain "—" for None.'''
+        if value is None:
+            return f"<font color='{self._UNKNOWN_COLOR}'>—</font>"
+        color = (
+            self._BULLISH_COLOR if value > 0
+            else self._BEARISH_COLOR if value < 0
+            else self._NEUTRAL_COLOR
+        )
+        return f"<font color='{color}'>{value * 100:+.1f}%</font>"
+
+    def _fmt_score_colored(self, value: Optional[float]) -> str:
+        '''Format rank_score with 4 decimals + sign + color.'''
+        if value is None:
+            return f"<font color='{self._UNKNOWN_COLOR}'>—</font>"
+        color = (
+            self._BULLISH_COLOR if value > 0
+            else self._BEARISH_COLOR if value < 0
+            else self._NEUTRAL_COLOR
+        )
+        return f"<font color='{color}'>{value:+.4f}</font>"
+
+    def _fmt_float(self, value: Optional[float], places: int = 2) -> str:
+        '''Format a plain number, no color (β / R²).'''
+        if value is None:
+            return f"<font color='{self._UNKNOWN_COLOR}'>—</font>"
+        return f"{value:.{places}f}"
 
     # ---------- reprime action ---------- #
 
