@@ -2737,3 +2737,150 @@ def _signal_event_from_row(row):
         close_at_event=float(row[7]),
         computed_at=row[8],
     )
+
+# ---------- Phase 6-3: benchmark stats repositories ---------- #
+
+
+class StockBenchmarkStatsRepository:
+    """Per-(stock, benchmark, window) regression stats. PK
+    (ticker_id, benchmark_kind, window_label, as_of_date); weekly
+    recompute appends a new row per series."""
+
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    def upsert_batch(self, rows: list) -> int:
+        """Upsert a list of StockBenchmarkStats. Idempotent on PK."""
+        for r in rows:
+            self._conn.execute(text("""
+                INSERT INTO stock_benchmark_stats (
+                    ticker_id, benchmark_kind, benchmark_id, window_label,
+                    as_of_date, n_weeks,
+                    beta, alpha_annual, r_squared, sigma_annual,
+                    rs_pct, info_ratio, computed_at
+                ) VALUES (
+                    :tid, :bk, :bid, :wl,
+                    :asof, :nw,
+                    :beta, :alpha, :r2, :sigma,
+                    :rs, :ir, NOW()
+                )
+                ON CONFLICT (ticker_id, benchmark_kind, window_label, as_of_date)
+                DO UPDATE SET
+                    benchmark_id = EXCLUDED.benchmark_id,
+                    n_weeks = EXCLUDED.n_weeks,
+                    beta = EXCLUDED.beta,
+                    alpha_annual = EXCLUDED.alpha_annual,
+                    r_squared = EXCLUDED.r_squared,
+                    sigma_annual = EXCLUDED.sigma_annual,
+                    rs_pct = EXCLUDED.rs_pct,
+                    info_ratio = EXCLUDED.info_ratio,
+                    computed_at = NOW()
+            """), {
+                "tid": r.ticker_id, "bk": r.benchmark_kind,
+                "bid": r.benchmark_id, "wl": r.window_label,
+                "asof": r.as_of_date, "nw": r.n_weeks,
+                "beta": r.beta, "alpha": r.alpha_annual,
+                "r2": r.r_squared, "sigma": r.sigma_annual,
+                "rs": r.rs_pct, "ir": r.info_ratio,
+            })
+        return len(rows)
+
+    def get_latest_for_ticker(self, ticker_id: int) -> list:
+        """Latest as_of_date row per (benchmark_kind, window_label)
+        for one ticker. Returns up to 6 rows."""
+        rows = self._conn.execute(text("""
+            SELECT DISTINCT ON (benchmark_kind, window_label)
+                ticker_id, benchmark_kind, benchmark_id, window_label,
+                as_of_date, n_weeks, beta, alpha_annual, r_squared,
+                sigma_annual, rs_pct, info_ratio, computed_at
+            FROM stock_benchmark_stats
+            WHERE ticker_id = :tid
+            ORDER BY benchmark_kind, window_label, as_of_date DESC
+        """), {"tid": ticker_id}).all()
+        return [_stock_bench_from_row(r) for r in rows]
+
+
+class IndustryBenchmarkStatsRepository:
+    """Per-(industry, NIFTY, window) regression stats."""
+
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    def upsert_batch(self, rows: list) -> int:
+        for r in rows:
+            self._conn.execute(text("""
+                INSERT INTO industry_benchmark_stats (
+                    industry_name, benchmark_id, window_label,
+                    as_of_date, n_weeks,
+                    beta, alpha_annual, r_squared, sigma_annual,
+                    rs_pct, info_ratio, computed_at
+                ) VALUES (
+                    :ind, :bid, :wl,
+                    :asof, :nw,
+                    :beta, :alpha, :r2, :sigma,
+                    :rs, :ir, NOW()
+                )
+                ON CONFLICT (industry_name, benchmark_id, window_label, as_of_date)
+                DO UPDATE SET
+                    n_weeks = EXCLUDED.n_weeks,
+                    beta = EXCLUDED.beta,
+                    alpha_annual = EXCLUDED.alpha_annual,
+                    r_squared = EXCLUDED.r_squared,
+                    sigma_annual = EXCLUDED.sigma_annual,
+                    rs_pct = EXCLUDED.rs_pct,
+                    info_ratio = EXCLUDED.info_ratio,
+                    computed_at = NOW()
+            """), {
+                "ind": r.industry_name, "bid": r.benchmark_id,
+                "wl": r.window_label, "asof": r.as_of_date,
+                "nw": r.n_weeks, "beta": r.beta,
+                "alpha": r.alpha_annual, "r2": r.r_squared,
+                "sigma": r.sigma_annual, "rs": r.rs_pct,
+                "ir": r.info_ratio,
+            })
+        return len(rows)
+
+    def get_latest_for_industry(self, industry_name: str) -> list:
+        rows = self._conn.execute(text("""
+            SELECT DISTINCT ON (window_label)
+                industry_name, benchmark_id, window_label,
+                as_of_date, n_weeks, beta, alpha_annual, r_squared,
+                sigma_annual, rs_pct, info_ratio, computed_at
+            FROM industry_benchmark_stats
+            WHERE industry_name = :n
+            ORDER BY window_label, as_of_date DESC
+        """), {"n": industry_name}).all()
+        return [_industry_bench_from_row(r) for r in rows]
+
+
+def _stock_bench_from_row(row):
+    from ..fundamentals import StockBenchmarkStats
+    return StockBenchmarkStats(
+        ticker_id=int(row[0]), benchmark_kind=row[1],
+        benchmark_id=row[2], window_label=row[3],
+        as_of_date=row[4], n_weeks=int(row[5]),
+        beta=float(row[6]) if row[6] is not None else None,
+        alpha_annual=float(row[7]) if row[7] is not None else None,
+        r_squared=float(row[8]) if row[8] is not None else None,
+        sigma_annual=float(row[9]) if row[9] is not None else None,
+        rs_pct=float(row[10]) if row[10] is not None else None,
+        info_ratio=float(row[11]) if row[11] is not None else None,
+        computed_at=row[12],
+    )
+
+
+def _industry_bench_from_row(row):
+    from ..fundamentals import IndustryBenchmarkStats
+    return IndustryBenchmarkStats(
+        industry_name=row[0], benchmark_id=row[1],
+        window_label=row[2], as_of_date=row[3],
+        n_weeks=int(row[4]),
+        beta=float(row[5]) if row[5] is not None else None,
+        alpha_annual=float(row[6]) if row[6] is not None else None,
+        r_squared=float(row[7]) if row[7] is not None else None,
+        sigma_annual=float(row[8]) if row[8] is not None else None,
+        rs_pct=float(row[9]) if row[9] is not None else None,
+        info_ratio=float(row[10]) if row[10] is not None else None,
+        computed_at=row[11],
+    )
+

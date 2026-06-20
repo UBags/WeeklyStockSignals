@@ -1017,6 +1017,101 @@ def _exit_code_from_report(report) -> int:
     return 0
 
 
+# ---------- compute-benchmark-stats (Phase 6-3) ---------- #
+
+
+def cmd_compute_benchmark_stats(args, config) -> int:
+    """Compute alpha/beta/RS regression statistics for stocks and
+    industries vs their benchmarks (INDUSTRY index + NIFTY).
+
+    Writes to stock_benchmark_stats and industry_benchmark_stats.
+    Idempotent on (ticker/industry, benchmark, window, as_of_date)
+    so --force is a no-op (kept for symmetry with sibling commands).
+
+    Modes:
+      --all-tickers      → 2,267 × up to 6 rows
+      --all-industries   → 60 × 3 rows
+      --ticker / --exchange → single ticker (6 rows)
+      --industry NAME    → single industry (3 rows)
+    """
+    from datetime import date as _date
+    from sqlalchemy import text as _text
+
+    from .benchmark_stats_runners import (
+        run_benchmark_stats_for_all_industries,
+        run_benchmark_stats_for_all_tickers,
+        run_benchmark_stats_for_industry,
+        run_benchmark_stats_for_ticker,
+    )
+    from ..persistence.connection import create_engine_from_config
+
+    as_of: _date | None = None
+    if getattr(args, "as_of_date", None):
+        as_of = _date.fromisoformat(args.as_of_date)
+
+    engine = create_engine_from_config(config)
+
+    # Industry-only mode
+    if getattr(args, "all_industries", False):
+        result = run_benchmark_stats_for_all_industries(
+            engine, as_of_date=as_of,
+        )
+        print("compute-benchmark-stats --all-industries:")
+        print(f"  succeeded: {len(result['succeeded'])}, "
+              f"skipped: {len(result['skipped'])}, "
+              f"failed: {len(result['failed'])}")
+        for name, err in result["failed"][:10]:
+            print(f"  FAILED  {name:50s} {err[:80]}")
+        return 0 if not result["failed"] else 1
+
+    # Ticker-only mode
+    if getattr(args, "all_tickers", False):
+        result = run_benchmark_stats_for_all_tickers(
+            engine,
+            exchange=getattr(args, "exchange", None),
+            as_of_date=as_of,
+        )
+        print("compute-benchmark-stats --all-tickers:")
+        print(f"  succeeded: {len(result['succeeded'])}, "
+              f"skipped: {len(result['skipped'])}, "
+              f"failed: {len(result['failed'])}")
+        for tid, sym, err in result["failed"][:10]:
+            print(f"  FAILED  ticker_id={tid} {sym:12s} {err[:80]}")
+        return 0 if not result["failed"] else 1
+
+    # Single-industry mode
+    if getattr(args, "industry", None):
+        n = run_benchmark_stats_for_industry(
+            engine, args.industry, as_of_date=as_of,
+        )
+        print(f"compute-benchmark-stats {args.industry}: wrote {n} rows")
+        return 0 if n > 0 else 1
+
+    # Single-ticker mode
+    if getattr(args, "ticker", None):
+        if not getattr(args, "exchange", None):
+            print("ERROR: --ticker requires --exchange")
+            return 2
+        with engine.connect() as conn:
+            row = conn.execute(_text("""
+                SELECT ticker_id FROM tickers
+                WHERE exchange = :ex AND symbol = :sym
+            """), {"ex": args.exchange, "sym": args.ticker}).first()
+        if row is None:
+            print(f"ERROR: {args.exchange}:{args.ticker} not found")
+            return 2
+        n = run_benchmark_stats_for_ticker(
+            engine, row.ticker_id, as_of_date=as_of,
+        )
+        print(f"compute-benchmark-stats {args.exchange}:{args.ticker}: "
+              f"wrote {n} rows")
+        return 0 if n > 0 else 1
+
+    print("ERROR: must pass one of "
+          "--all-tickers / --all-industries / --ticker / --industry")
+    return 2
+
+
 # ---------- compute-signals (Phase 6-1) ---------- #
 
 
@@ -1759,6 +1854,40 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
              "the full history compute for every phase.",
     )
 
+
+    p_bench = sub.add_parser(
+        "compute-benchmark-stats",
+        help="Compute alpha/beta/RS regression stats vs benchmarks "
+             "(Phase 6-3). Writes to stock_benchmark_stats and "
+             "industry_benchmark_stats.",
+    )
+    mode = p_bench.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--all-tickers", action="store_true",
+                       help="Recompute for every active ticker.")
+    mode.add_argument("--all-industries", action="store_true",
+                       help="Recompute for every active industry.")
+    mode.add_argument("--ticker", type=str,
+                       help="Single ticker symbol (requires --exchange).")
+    mode.add_argument("--industry", type=str,
+                       help="Single industry name.")
+    # --exchange is required only with --ticker; the other modes
+    # (--all-tickers / --all-industries / --industry) ignore it.
+    # Validated in cmd_compute_benchmark_stats.
+    p_bench.add_argument(
+        "--exchange", type=str, required=False,
+        help="Exchange for --ticker (e.g. NSE). Ignored in other modes.",
+    )
+    p_bench.add_argument(
+        "--as-of-date", type=str,
+        help="ISO date (YYYY-MM-DD). Defaults to latest aligned "
+             "series date. Use to backfill historical snapshots.",
+    )
+    p_bench.add_argument(
+        "--force", action="store_true",
+        help="No-op (every upsert is idempotent on PK); kept for "
+             "symmetry with sibling compute commands.",
+    )
+
     return {
         "refresh-industry":             cmd_refresh_industry,
         "set-industry-override":        cmd_set_industry_override,
@@ -1774,5 +1903,6 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
         "backfill-shares":              cmd_backfill_shares,
         "compute-indicator-state":      cmd_compute_indicator_state,
         "compute-signals":              cmd_compute_signals,
+        "compute-benchmark-stats":      cmd_compute_benchmark_stats,
         "run-eod-pipeline":             cmd_run_eod_pipeline,
     }
