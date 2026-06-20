@@ -1,131 +1,336 @@
-"""SignalCache — read-mostly cache of the latest BarState per ticker.
+"""SignalCache — read-mostly cache of the latest persisted snapshot per
+(ticker_id, timeframe).
 
-The ComputeScheduler is the *only writer*. Readers (HTTP API, the
-SubscriberDistributor) acquire no lock; they read whatever entry is
-currently in the dict. Updates are atomic at the per-key level: a write
-replaces an immutable CachedSignal with another immutable CachedSignal.
+# Step 9a — legacy half removed
 
-We use a single threading.Lock to serialize *writes* against each other —
-not against reads — so two concurrent compute paths (shouldn't happen,
-but defensive) can't lose updates.
+The legacy `CachedSignal` / `build_cached_signal` / `put` / `get` /
+`has` / `all_signals` / `stale_signals` / `__len__` / `remove`
+surface (built around the `TickerEngine` + `BarState` world) is
+gone. Only the snapshot shape remains. Compute scheduler (Step 9c)
+no longer writes the legacy shape; admin_health (Step 9c) no
+longer reads it.
+
+# Snapshot shape
+
+Per (ticker_id, timeframe) the cache holds:
+
+  - `latest_indicator_state`: subset of the latest `indicator_state`
+    row (EMAs, ATR, six bands, `display_regime`, `computed_at`).
+  - `latest_signal_event`:    subset of the latest `signal_events`
+    row (`event_id`, `bar_timestamp`, `signal`, `price_at_signal`,
+    `computed_at`).
+  - `stale_since`: when set, the compute scheduler detected a data
+    gap on this ticker on/at the given UTC wall-clock and is
+    refusing to advance the snapshot until the ETL backfills.
+    Cleared on the next pass that finds the gap closed.
+
+Both components may be None during early lifecycle (a ticker with
+indicator_state but no signal yet, or vice versa).
+
+# Concurrency
+
+The orchestrator (Step 6's `generate_live_signal_for_ticker`,
+invoked by the compute scheduler) is the single writer to the
+signal-event component. Phase 7 (wired in Step 9b) is the single
+writer to the indicator-state component. The compute scheduler is
+the single writer to the stale flag. Reads are lock-free and rely
+on dict-lookup atomicity under the GIL; writes serialise on a
+single lock for cross-writer safety even though contention isn't
+expected.
 """
 
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Iterator
+from dataclasses import dataclass, replace
+from datetime import date, datetime
+from typing import Optional
 
-from ..domain import BarState, ChangeSignal, TickerRef, Timeframe
+from ..domain import (
+    ChangeSignal,
+    SignalEvent,
+    TickerRef,
+    Timeframe,
+)
 
 
-CacheKey = tuple[TickerRef, Timeframe]
+# ============================================================
+# Snapshot dataclasses
+# ============================================================
 
 
 @dataclass(frozen=True, slots=True)
-class CachedSignal:
-    """The unit of cache content. Immutable — replacement, not mutation."""
+class IndicatorStateSnapshot:
+    """Subset of one `indicator_state` row, mirrored into the cache.
 
-    ticker: TickerRef
-    timeframe: Timeframe
-    latest_state: BarState
-    latest_close: float                   # bar.close of the most recent ingested bar
-    state_history: tuple[BarState, ...]   # most recent last
-    last_change: ChangeSignal             # most recent CHANGE event (not NO_CHANGE)
-    last_change_bar: datetime | None      # bar_timestamp of the last change event
-    last_change_computed_at: datetime | None
-    computed_at: datetime                 # when this snapshot was last written
-    stale_since: datetime | None = None
-    """A2 (Phase 9): when set, this entry represents the *last good* state
-    before a data gap was detected. The ComputeScheduler refuses to
-    advance the engine for this ticker until the gap is filled by the
-    ETL. `stale_since` is the wall-clock timestamp of the first compute
-    pass that observed the gap. Set to None whenever a compute pass
-    proceeds normally — clearing the stale flag once data is fresh again.
+    Carries exactly what the read endpoints and any "current state at
+    a glance" reader needs. The full row is still in Postgres; this
+    is the latest week's values for sub-millisecond reads.
     """
+    trade_date: date
+    """The IST-Monday this row covers."""
+    med_ema: float
+    long_ema: float
+    longest_ema: float
+    atr: float
+    upper_inner_band: float
+    lower_inner_band: float
+    upper_mid_band: float
+    lower_mid_band: float
+    upper_outer_band: float
+    lower_outer_band: float
+    display_regime: int
+    """-1 BEARISH / 0 NEUTRAL / +1 BULLISH. Same encoding as the
+    indicator_state column."""
+    computed_at: datetime
+    """When Phase 7 last wrote this row."""
+
+
+@dataclass(frozen=True, slots=True)
+class SignalEventSnapshot:
+    """Subset of one `signal_events` row, mirrored into the cache.
+
+    `bar_timestamp` is the weekly bar's IST-Monday anchor; `signal`
+    is the ChangeSignal enum value; `computed_at` is when the event
+    was emitted (simulated day for backfill rows, NOW() for live
+    ticks).
+    """
+    event_id: int
+    bar_timestamp: datetime
+    signal: ChangeSignal
+    price_at_signal: float
+    computed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CachedSnapshot:
+    """Per-(ticker_id, timeframe) cache entry.
+
+    Either component can be None while the other is populated:
+      - A ticker may have an `indicator_state` row but no
+        `signal_event` yet (the price has stayed neutral / mid-band
+        all year). Cache has indicator_state, signal_event=None.
+      - A ticker can in principle have a signal_event but no
+        indicator_state yet (extremely unusual; would happen only if
+        Step 5 backfill ran before Phase 7 finished). Cache has
+        signal_event, indicator_state=None.
+
+    Both None means the entry should not have been put — the
+    lifecycle prime skips tickers with neither row.
+
+    `stale_since` is set by the compute scheduler when a data gap is
+    detected. Readers should treat a non-None `stale_since` as "this
+    snapshot is the last good state; new ticks won't land until the
+    ETL backfills the gap."
+    """
+    ticker_id: int
+    ticker_ref: TickerRef
+    """Mirrored for read-endpoint convenience — saves a tickers lookup."""
+    timeframe: Timeframe
+    latest_indicator_state: Optional[IndicatorStateSnapshot]
+    latest_signal_event: Optional[SignalEventSnapshot]
+    snapshot_taken_at: datetime
+    """When this cache entry was last refreshed end-to-end (i.e.
+    via lifecycle prime or a `put_snapshot`). The component
+    `computed_at` fields tell you when each component was produced
+    by its respective writer."""
+    stale_since: Optional[datetime] = None
+    """When the compute scheduler last observed a data gap on this
+    ticker. None means no gap. Set by `mark_stale`, cleared by
+    `clear_stale`."""
+
+
+# ============================================================
+# The cache class
+# ============================================================
 
 
 class SignalCache:
-    """Read-mostly per-ticker cache. Thread-safe under the access pattern
-    documented in the module docstring."""
+    """Read-mostly per-(ticker_id, timeframe) cache.
 
-    def __init__(self):
-        self._entries: dict[CacheKey, CachedSignal] = {}
+    Reads (`get_snapshot`, `all_snapshots`, `all_stale_snapshots`)
+    are lock-free and rely on dict-lookup atomicity under the GIL.
+
+    Writes (`put_snapshot`, `update_signal_event`,
+    `update_indicator_state`, `mark_stale`, `clear_stale`,
+    `remove_snapshot`) serialise on a single lock — we don't expect
+    contention since each writer family has a single producer, but
+    the lock is cheap.
+    """
+
+    def __init__(self) -> None:
+        self._snapshots: dict[tuple[int, Timeframe], CachedSnapshot] = {}
         self._write_lock = threading.Lock()
 
     # ---------- Reads (lock-free) ---------- #
 
-    def get(self, ticker: TickerRef, timeframe: Timeframe) -> CachedSignal | None:
-        """O(1) lookup. Returns the immutable snapshot or None.
-        Lock-free — relies on the GIL for atomicity of the dict lookup."""
-        return self._entries.get((ticker, timeframe))
+    def get_snapshot(
+        self, ticker_id: int, timeframe: Timeframe,
+    ) -> Optional[CachedSnapshot]:
+        """O(1) lookup by ticker_id. Returns the immutable snapshot
+        or None if not seeded yet."""
+        return self._snapshots.get((ticker_id, timeframe))
 
-    def has(self, ticker: TickerRef, timeframe: Timeframe) -> bool:
-        return (ticker, timeframe) in self._entries
+    def has_snapshot(self, ticker_id: int, timeframe: Timeframe) -> bool:
+        return (ticker_id, timeframe) in self._snapshots
 
-    def all_signals(self) -> list[CachedSignal]:
-        """Snapshot of every cached signal. Iteration is safe because dict
-        copy is atomic under the GIL."""
-        return list(self._entries.values())
+    def all_snapshots(self) -> list[CachedSnapshot]:
+        """Atomic copy of every cached entry."""
+        return list(self._snapshots.values())
 
-    def stale_signals(self) -> list[CachedSignal]:
-        """A2 (Phase 9): every cached signal whose `stale_since` is set
-        (the ticker has a data gap and the scheduler is refusing to
-        advance until the ETL backfills). Used by `/readyz` and
-        `/v1/admin/stale-tickers`."""
-        return [s for s in self._entries.values() if s.stale_since is not None]
+    def all_stale_snapshots(self) -> list[CachedSnapshot]:
+        """Every cached entry with a non-None `stale_since`. Used by
+        the admin `/v1/admin/stale-tickers` route."""
+        return [s for s in self._snapshots.values() if s.stale_since is not None]
 
-    def __len__(self) -> int:
-        return len(self._entries)
+    def snapshot_count(self) -> int:
+        """Number of entries. Replaces the legacy `len(cache)` —
+        intentionally a named method rather than `__len__` so the
+        rewrite-or-error from any leftover legacy `len()` call is
+        loud."""
+        return len(self._snapshots)
 
-    # ---------- Writes (single-writer-friendly) ---------- #
+    # ---------- Writes ---------- #
 
-    def put(self, signal: CachedSignal) -> None:
-        """Replace the entry for (signal.ticker, signal.timeframe). Atomic.
-
-        We take a lock here just to keep two concurrent writers honest, but
-        we don't expect writers to contend — the ComputeScheduler is the
-        only writer."""
-        key = (signal.ticker, signal.timeframe)
+    def put_snapshot(self, snapshot: CachedSnapshot) -> None:
+        """Replace the entry for `(snapshot.ticker_id,
+        snapshot.timeframe)`. Used by `prime_cache_from_db` to seed
+        every ticker at startup and by tests."""
+        key = (snapshot.ticker_id, snapshot.timeframe)
         with self._write_lock:
-            self._entries[key] = signal
+            self._snapshots[key] = snapshot
 
-    def remove(self, ticker: TickerRef, timeframe: Timeframe) -> bool:
-        """Drop an entry. Returns True if something was removed."""
+    def update_signal_event(
+        self,
+        ticker_id: int,
+        timeframe: Timeframe,
+        event: SignalEvent,
+    ) -> None:
+        """Refresh just the `latest_signal_event` component for a
+        `(ticker_id, timeframe)`.
+
+        Matches the signature of `SignalCacheWriter` from Step 4's
+        `signals/persist_signals.py`, so Step 6's
+        `generate_live_signal_for_ticker(...,
+        signal_cache_writer=signal_cache.update_signal_event)`
+        wires in directly as a bound method.
+
+        Behaviour when no entry exists yet for `(ticker_id,
+        timeframe)`:
+          - Creates one with `latest_indicator_state=None` and the
+            supplied event as `latest_signal_event`. A subsequent
+            indicator_state update will fill in the missing
+            component. This lets events land before the startup
+            prime finishes.
+        """
+        new_event_snap = SignalEventSnapshot(
+            event_id=0,  # writer doesn't know the DB-assigned id; harmless
+            bar_timestamp=event.bar_timestamp,
+            signal=event.signal,
+            price_at_signal=event.price_at_signal,
+            computed_at=event.computed_at,
+        )
         with self._write_lock:
-            return self._entries.pop((ticker, timeframe), None) is not None
+            existing = self._snapshots.get((ticker_id, timeframe))
+            if existing is None:
+                self._snapshots[(ticker_id, timeframe)] = CachedSnapshot(
+                    ticker_id=ticker_id,
+                    ticker_ref=event.ticker,
+                    timeframe=timeframe,
+                    latest_indicator_state=None,
+                    latest_signal_event=new_event_snap,
+                    snapshot_taken_at=event.computed_at,
+                    stale_since=None,
+                )
+            else:
+                self._snapshots[(ticker_id, timeframe)] = replace(
+                    existing,
+                    latest_signal_event=new_event_snap,
+                    snapshot_taken_at=event.computed_at,
+                )
+
+    def update_indicator_state(
+        self,
+        ticker_id: int,
+        ticker_ref: TickerRef,
+        timeframe: Timeframe,
+        state: IndicatorStateSnapshot,
+    ) -> None:
+        """Refresh just the `latest_indicator_state` component.
+
+        Called by Phase 7 (wired in Step 9b) whenever a new weekly
+        indicator_state row is written. `ticker_ref` is required
+        because, in the first-write-for-this-ticker case, we have
+        to construct a new snapshot and need the readable identity.
+        """
+        with self._write_lock:
+            existing = self._snapshots.get((ticker_id, timeframe))
+            if existing is None:
+                self._snapshots[(ticker_id, timeframe)] = CachedSnapshot(
+                    ticker_id=ticker_id,
+                    ticker_ref=ticker_ref,
+                    timeframe=timeframe,
+                    latest_indicator_state=state,
+                    latest_signal_event=None,
+                    snapshot_taken_at=state.computed_at,
+                    stale_since=None,
+                )
+            else:
+                self._snapshots[(ticker_id, timeframe)] = replace(
+                    existing,
+                    latest_indicator_state=state,
+                    snapshot_taken_at=state.computed_at,
+                )
+
+    def mark_stale(
+        self,
+        ticker_id: int,
+        timeframe: Timeframe,
+        when: datetime,
+    ) -> None:
+        """Flag a snapshot as stale due to an observed data gap.
+
+        Called by the compute scheduler when it detects missing
+        bars on a ticker. The snapshot itself is left untouched —
+        the indicator_state and signal_event components keep their
+        last-known-good values. The `stale_since` field is set if
+        not already, or left at its existing value (we record the
+        time of FIRST detection, not the most recent observation).
+
+        No-op when the cache has no entry for the pair.
+        """
+        with self._write_lock:
+            existing = self._snapshots.get((ticker_id, timeframe))
+            if existing is None:
+                return
+            if existing.stale_since is not None:
+                return  # don't overwrite the first-detection time
+            self._snapshots[(ticker_id, timeframe)] = replace(
+                existing, stale_since=when,
+            )
+
+    def clear_stale(self, ticker_id: int, timeframe: Timeframe) -> None:
+        """Clear the stale flag. Called by the compute scheduler on
+        a pass that finds the gap filled.
+
+        No-op when the cache has no entry, or when the entry is
+        already non-stale.
+        """
+        with self._write_lock:
+            existing = self._snapshots.get((ticker_id, timeframe))
+            if existing is None or existing.stale_since is None:
+                return
+            self._snapshots[(ticker_id, timeframe)] = replace(
+                existing, stale_since=None,
+            )
+
+    def remove_snapshot(self, ticker_id: int, timeframe: Timeframe) -> bool:
+        """Drop an entry. Returns True iff something was removed."""
+        with self._write_lock:
+            return self._snapshots.pop((ticker_id, timeframe), None) is not None
 
     # ---------- Test helpers ---------- #
 
     def clear(self) -> None:
         with self._write_lock:
-            self._entries.clear()
-
-
-def build_cached_signal(
-    *,
-    ticker: TickerRef,
-    timeframe: Timeframe,
-    latest_state: BarState,
-    latest_close: float,
-    state_history: list[BarState],
-    last_change: ChangeSignal,
-    last_change_bar: datetime | None,
-    last_change_computed_at: datetime | None,
-    computed_at: datetime,
-    stale_since: datetime | None = None,
-) -> CachedSignal:
-    """Convenience factory that freezes the history into a tuple."""
-    return CachedSignal(
-        ticker=ticker,
-        timeframe=timeframe,
-        latest_state=latest_state,
-        latest_close=latest_close,
-        state_history=tuple(state_history),
-        last_change=last_change,
-        last_change_bar=last_change_bar,
-        last_change_computed_at=last_change_computed_at,
-        computed_at=computed_at,
-        stale_since=stale_since,
-    )
+            self._snapshots.clear()

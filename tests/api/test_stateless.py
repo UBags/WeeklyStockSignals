@@ -1,101 +1,187 @@
-"""Tests for the stateless compute functions (function (a))."""
+"""Tests for the rewritten `api/stateless.py`.
+
+The OLD module built a throwaway `TickerEngine`. The NEW module
+uses `compute_regime` + `generate_signal` directly. The HTTP route
+`/v1/compute` keeps working through this transition; these tests
+pin its behaviour.
+
+Pure unit tests — no DB, no FastAPI. Synthetic bars are crafted to
+exercise specific regime transitions deterministically (same shapes
+as the Step 5 walker tests).
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import math
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from trip_ema.api import (
-    TerseResponse,
-    VerboseResponse,
+from trip_ema.api.stateless import (
     compute_full_terse,
     compute_full_verbose,
 )
-from trip_ema.domain import ChangeSignal, IndicatorParams, OHLCVBar, TickerRef, Timeframe
+from trip_ema.domain import (
+    ChangeSignal,
+    CoreRegime,
+    OHLCVBar,
+    TickerRef,
+    Timeframe,
+)
+from trip_ema.fundamentals.indicator_primitives import INDICATOR_DEFAULTS
 
 
-NIFTY = TickerRef("NSE", "NIFTY", "INDEX")
+_IST = ZoneInfo("Asia/Kolkata")
+_TICKER = TickerRef(exchange="NSE", symbol="SYNTH", instrument="EQ")
 
 
-def _bars(n: int, start_close: float = 100.0) -> list[OHLCVBar]:
-    """Generate n weekly bars, each rising 1 point."""
-    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+def _weekly_bar(
+    monday: date, *, close: float,
+    hl_spread: float = 0.5, vol: float = 1_000_000.0,
+) -> OHLCVBar:
+    """A synthetic WEEKLY bar timestamped at IST Monday."""
+    ts_ist = datetime.combine(monday, time(0, 0), tzinfo=_IST)
+    half = hl_spread / 2
+    return OHLCVBar(
+        timestamp=ts_ist.astimezone(timezone.utc),
+        open=close, high=close + half, low=close - half, close=close,
+        volume=vol,
+    )
+
+
+def _flat_weekly(start_monday: date, n_weeks: int, close: float,
+                 hl_spread: float = 0.5) -> list[OHLCVBar]:
     return [
-        OHLCVBar(
-            timestamp=start + timedelta(weeks=i),
-            open=start_close + i,
-            high=start_close + i + 1,
-            low=start_close + i - 1,
-            close=start_close + i + 0.5,
-            volume=1000.0,
-        )
-        for i in range(n)
+        _weekly_bar(start_monday + timedelta(weeks=i), close=close,
+                    hl_spread=hl_spread)
+        for i in range(n_weeks)
     ]
 
 
-def test_compute_full_verbose_returns_verbose_response():
-    bars = _bars(80)
-    history, latest = bars[:-1], bars[-1]
-    response = compute_full_verbose(
-        ticker=NIFTY,
-        history=history,
-        latest_bar=latest,
-        timeframe=Timeframe.WEEKLY,
-        params=IndicatorParams(),
-    )
-    assert isinstance(response, VerboseResponse)
-    assert response.ticker == NIFTY
-    assert response.timeframe == Timeframe.WEEKLY
-    assert isinstance(response.bars, tuple)
-    # state_history_retain defaults to 200; we have 80 bars total.
-    assert len(response.bars) == 80
-    # Last bar in response is the latest_bar we ingested.
-    assert response.bars[-1].timestamp == latest.timestamp
+def _ramp_weekly(start_monday: date, n_weeks: int,
+                 *, p0: float, p1: float,
+                 hl_spread: float = 0.5) -> list[OHLCVBar]:
+    out = []
+    for i in range(n_weeks):
+        frac = i / max(1, n_weeks - 1)
+        price = p0 + frac * (p1 - p0)
+        out.append(_weekly_bar(start_monday + timedelta(weeks=i),
+                              close=price, hl_spread=hl_spread))
+    return out
 
 
-def test_compute_full_terse_returns_terse_response():
-    bars = _bars(80)
-    history, latest = bars[:-1], bars[-1]
-    response = compute_full_terse(
-        ticker=NIFTY,
-        history=history,
-        latest_bar=latest,
-        timeframe=Timeframe.WEEKLY,
-        params=IndicatorParams(),
-    )
-    assert isinstance(response, TerseResponse)
-    assert response.latest_bar_timestamp == latest.timestamp
-    assert response.latest_price == latest.close
-    assert isinstance(response.latest_change, ChangeSignal)
+# ===========================================================================
+# compute_full_verbose
+# ===========================================================================
 
 
-def test_compute_full_with_empty_history_only_one_bar():
-    """Edge case: history is empty, only the latest_bar is provided.
-    Should not crash. Latest change is NO_CHANGE (nothing to compare against)."""
-    latest = _bars(1)[0]
-    response = compute_full_terse(
-        ticker=NIFTY,
-        history=[],
-        latest_bar=latest,
-        timeframe=Timeframe.WEEKLY,
-        params=IndicatorParams(),
-    )
-    assert response.latest_change == ChangeSignal.NO_CHANGE
+class TestComputeFullVerbose:
+
+    def test_empty_history_with_one_bar_returns_one_state(self):
+        latest = _weekly_bar(date(2025, 6, 9), close=100.0)
+        result = compute_full_verbose(
+            ticker=_TICKER, history=[], latest_bar=latest,
+            timeframe=Timeframe.WEEKLY,
+            params=INDICATOR_DEFAULTS,
+        )
+        # 1 bar — warmup, no real regime, but a BarState placeholder.
+        assert len(result.bars) == 1
+        assert result.latest_change == ChangeSignal.NO_CHANGE
+
+    def test_warmup_only_emits_neutral_states(self):
+        bars = _flat_weekly(date(2024, 1, 1), n_weeks=5, close=100.0)
+        result = compute_full_verbose(
+            ticker=_TICKER, history=bars[:-1], latest_bar=bars[-1],
+            timeframe=Timeframe.WEEKLY,
+            params=INDICATOR_DEFAULTS,
+        )
+        # All 5 bars in warmup → all NEUTRAL.
+        assert all(s.display_bg == CoreRegime.NEUTRAL for s in result.bars)
+        assert result.latest_change == ChangeSignal.NO_CHANGE
+
+    def test_long_flat_then_crash_classifies_sell(self):
+        # `_classify_regime_transition` looks only at the last two
+        # bars. To exercise the SELL path we need the second-to-last
+        # bar to be GREEN/NEUTRAL and the latest bar to be BEARISH.
+        # Multi-week ramps push the BEARISH transition deeper into
+        # history, so collapse the crash into a single sharp bar.
+        history = _flat_weekly(date(2022, 1, 3), n_weeks=156, close=100.0)
+        latest = _weekly_bar(date(2025, 1, 6), close=50.0, hl_spread=2.0)
+        result = compute_full_verbose(
+            ticker=_TICKER, history=history, latest_bar=latest,
+            timeframe=Timeframe.WEEKLY,
+            params=INDICATOR_DEFAULTS,
+        )
+        # Sanity: the latest bar should be BEARISH on a -50% gap.
+        assert result.bars[-1].display_bg == CoreRegime.BEARISH
+        # Second-to-last is the last flat bar — should NOT be BEARISH.
+        assert result.bars[-2].display_bg != CoreRegime.BEARISH
+        # Transition GREEN/NEUTRAL → BEARISH = SELL.
+        assert result.latest_change == ChangeSignal.SELL
+
+    def test_state_history_retain_clips_output(self):
+        bars = _flat_weekly(date(2022, 1, 3), n_weeks=200, close=100.0)
+        result = compute_full_verbose(
+            ticker=_TICKER, history=bars[:-1], latest_bar=bars[-1],
+            timeframe=Timeframe.WEEKLY,
+            params=INDICATOR_DEFAULTS,
+            state_history_retain=20,
+        )
+        assert len(result.bars) == 20
+
+    def test_ticker_and_timeframe_preserved(self):
+        latest = _weekly_bar(date(2025, 6, 9), close=100.0)
+        result = compute_full_verbose(
+            ticker=_TICKER, history=[], latest_bar=latest,
+            timeframe=Timeframe.WEEKLY,
+            params=INDICATOR_DEFAULTS,
+        )
+        assert result.ticker == _TICKER
+        assert result.timeframe == Timeframe.WEEKLY
+
+    def test_core_bg_equals_display_bg(self):
+        """Under the unified regime model, core_bg == display_bg at
+        the wire boundary."""
+        bars = (
+            _flat_weekly(date(2022, 1, 3), n_weeks=156, close=100.0)
+            + _ramp_weekly(date(2025, 1, 6), n_weeks=4, p0=100.0, p1=70.0)
+        )
+        result = compute_full_verbose(
+            ticker=_TICKER, history=bars[:-1], latest_bar=bars[-1],
+            timeframe=Timeframe.WEEKLY,
+            params=INDICATOR_DEFAULTS,
+        )
+        for bar in result.bars:
+            assert bar.core_bg == bar.display_bg
 
 
-def test_compute_full_with_history_retain_limits_output():
-    """state_history_retain should cap the number of bars returned."""
-    bars = _bars(100)
-    history, latest = bars[:-1], bars[-1]
-    response = compute_full_verbose(
-        ticker=NIFTY,
-        history=history,
-        latest_bar=latest,
-        timeframe=Timeframe.WEEKLY,
-        params=IndicatorParams(),
-        state_history_retain=20,
-    )
-    assert len(response.bars) == 20
-    # Returned bars are the last 20 — assert the most recent is present.
-    assert response.bars[-1].timestamp == latest.timestamp
+# ===========================================================================
+# compute_full_terse
+# ===========================================================================
+
+
+class TestComputeFullTerse:
+
+    def test_empty_history_with_one_bar_returns_no_change(self):
+        latest = _weekly_bar(date(2025, 6, 9), close=100.0)
+        result = compute_full_terse(
+            ticker=_TICKER, history=[], latest_bar=latest,
+            timeframe=Timeframe.WEEKLY,
+            params=INDICATOR_DEFAULTS,
+        )
+        assert result.latest_change == ChangeSignal.NO_CHANGE
+        assert result.latest_price == 100.0
+        assert result.latest_bar_timestamp == latest.timestamp
+
+    def test_long_flat_then_crash_classifies_sell(self):
+        history = _flat_weekly(date(2022, 1, 3), n_weeks=156, close=100.0)
+        latest = _weekly_bar(date(2025, 1, 6), close=50.0, hl_spread=2.0)
+        result = compute_full_terse(
+            ticker=_TICKER, history=history, latest_bar=latest,
+            timeframe=Timeframe.WEEKLY,
+            params=INDICATOR_DEFAULTS,
+        )
+        assert result.latest_change == ChangeSignal.SELL
+        # latest_price is the latest_bar's close.
+        assert result.latest_price == 50.0
