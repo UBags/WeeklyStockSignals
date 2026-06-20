@@ -208,13 +208,22 @@ def last_run_signals(
     older than 60s before the global max (shouldn't happen but
     surfaces cleanly as no coloring).
     """
+    # Phase 6-2 fix: the unification moved industry signal_events into
+    # the same table as ticker signal_events. Industry compute runs
+    # AFTER ticker compute in the EoD pipeline, so an unscoped
+    # MAX(computed_at) anchors to the industry tick — and the 60-second
+    # window then excludes the ticker rows. Scope the MAX to ticker
+    # rows only.
     rows = conn.execute(text("""
         SELECT DISTINCT ON (s.ticker_id) s.ticker_id, s.signal_type
         FROM signal_events s
         JOIN tickers t USING (ticker_id)
         WHERE t.exchange = :ex
+          AND s.ticker_id IS NOT NULL
           AND s.computed_at >= (
-              (SELECT MAX(computed_at) FROM signal_events)
+              (SELECT MAX(computed_at)
+               FROM signal_events
+               WHERE ticker_id IS NOT NULL)
               - INTERVAL '60 seconds'
           )
         ORDER BY s.ticker_id, s.bar_timestamp DESC
