@@ -348,7 +348,8 @@ def get_signal_history(
         # markers from before the user-requested view.
         user_window_start = datetime.now(timezone.utc) - timedelta(days=365 * years)
         event_rows = conn.execute(text("""
-            SELECT event_id, bar_timestamp, signal_type, price_at_signal
+            SELECT event_id, bar_timestamp, computed_at,
+                   signal_type, price_at_signal
             FROM signal_events
             WHERE ticker_id = :tid
               AND bar_timestamp >= :since
@@ -358,6 +359,7 @@ def get_signal_history(
             HistoricalSignalEventPayload(
                 event_id=e.event_id,
                 bar_timestamp=e.bar_timestamp,
+                computed_at=e.computed_at,
                 signal=e.signal_type,
                 price_at_signal=float(e.price_at_signal),
             )

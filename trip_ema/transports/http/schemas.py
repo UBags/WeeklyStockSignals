@@ -487,10 +487,17 @@ class HistoricalBarPayload(BaseModel):
 
 
 class HistoricalSignalEventPayload(BaseModel):
-    """One row from signal_events for the chart's marker layer."""
+    """One row from signal_events for the chart's marker layer.
+
+    `bar_timestamp` is the close-of-bar that triggered the signal
+    (Pine-style); `computed_at` is when the signal was actually
+    emitted by the compute job (server clock). The GUI's 'Last 5
+    signals' list uses `computed_at` so users see WHEN the signal
+    was generated, not which weekly bucket it fired on."""
     model_config = ConfigDict(frozen=True)
     event_id: int
     bar_timestamp: datetime
+    computed_at: datetime
     signal: str
     """'BUY' / 'SELL' / 'NO_CHANGE'."""
     price_at_signal: float
