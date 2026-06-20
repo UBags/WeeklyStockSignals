@@ -28,3 +28,4 @@ secrets/*
 !secrets/.gitkeep
 !secrets/*.example
 !secrets/README.md
+generated_signals/
