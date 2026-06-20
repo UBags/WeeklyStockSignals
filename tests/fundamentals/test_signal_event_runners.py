@@ -96,9 +96,9 @@ class TestRunSignalEventsForIndustry:
     def test_writes_events_for_known_sequence(self, db_engine):
         """display_sequence: 0,1,1,0,-1,-1,0 should fire:
           bar 1: BUY (0→1)
-          bar 3: EXIT_BUY (1→0)
+          bar 3: EXIT_FROM_BUY (1→0)
           bar 4: SELL (0→-1)
-          bar 6: EXIT_SELL (-1→0)
+          bar 6: EXIT_FROM_SELL (-1→0)
         4 events total."""
         _setup_industry_with_indicator_states(
             db_engine, "IT - Services",
@@ -116,7 +116,7 @@ class TestRunSignalEventsForIndustry:
         assert r.succeeded == 4
         # 4 events with the expected kinds.
         kinds = sorted(e.event_kind for e in events)
-        assert kinds == ["BUY", "EXIT_BUY", "EXIT_SELL", "SELL"]
+        assert kinds == ["BUY", "EXIT_FROM_BUY", "EXIT_FROM_SELL", "SELL"]
 
     def test_close_at_event_reflects_index_value(self, db_engine):
         """The close_at_event field should match the
@@ -220,13 +220,13 @@ class TestRunSignalEventsForIndustry:
 
     def test_delete_then_insert_clears_stale_rows(self, db_engine):
         """If the indicator_state changes and a re-compute is forced,
-        the old signal_event rows should be deleted, not just
+        the old signal_events rows should be deleted, not just
         upserted-on-top. Otherwise stale rows linger.
 
         Scenario: first compute with display [0,1,0] → 2 events.
         Then mutate display to [0,-1,0] (the row at bar 1 changes
-        from +1 to -1) → recompute should now have SELL+EXIT_SELL,
-        and NO BUY/EXIT_BUY left from the prior run."""
+        from +1 to -1) → recompute should now have SELL+EXIT_FROM_SELL,
+        and NO BUY/EXIT_FROM_BUY left from the prior run."""
         _setup_industry_with_indicator_states(
             db_engine, "IT - Services",
             display_sequence=[0, 1, 0],
@@ -247,8 +247,8 @@ class TestRunSignalEventsForIndustry:
                 "IT - Services",
             )
         kinds = sorted(e.event_kind for e in events)
-        # Should be just SELL and EXIT_SELL now; no BUY or EXIT_BUY.
-        assert kinds == ["EXIT_SELL", "SELL"]
+        # Should be just SELL and EXIT_FROM_SELL now; no BUY or EXIT_FROM_BUY.
+        assert kinds == ["EXIT_FROM_SELL", "SELL"]
 
     def test_raises_if_industry_does_not_exist(self, db_engine):
         with pytest.raises(ValueError, match="does not exist"):

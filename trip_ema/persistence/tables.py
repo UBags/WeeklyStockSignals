@@ -72,10 +72,22 @@ signal_events = Table(
     "signal_events",
     metadata,
     Column("event_id", BigInteger, primary_key=True),
-    Column("ticker_id", Integer, ForeignKey("tickers.ticker_id"), nullable=False),
-    Column("timeframe", String(8), nullable=False),
+    # Migration 0016 made ticker_id and timeframe nullable so industry
+    # rows can omit them. The CHECK constraint enforces that exactly
+    # one of (ticker_id+timeframe) or industry_name is set.
+    Column("ticker_id", Integer, ForeignKey("tickers.ticker_id"), nullable=True),
+    Column("timeframe", String(8), nullable=True),
+    # Industry-level rows (Phase 6-2 unification). FK to industry_index.
+    Column(
+        "industry_name", String(128),
+        ForeignKey("industry_index.industry_name"), nullable=True,
+    ),
     Column("bar_timestamp", DateTime(timezone=True), nullable=False),
     Column("signal_type", String(16), nullable=False),
+    # Regime context added by migration 0016. Nullable for backward
+    # compat with rows written before Phase 6-1 design.
+    Column("regime_before", Integer, nullable=True),
+    Column("regime_after", Integer, nullable=True),
     Column("price_at_signal", Float, nullable=False),
     Column("computed_at", DateTime(timezone=True), nullable=False),
     CheckConstraint(

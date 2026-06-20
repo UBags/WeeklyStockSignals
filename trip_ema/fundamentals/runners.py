@@ -787,7 +787,7 @@ def run_shares_backfill(
     if not force and resume_run_id is None:
         with db_engine.connect() as conn:
             last = FundamentalsRunRepository(conn).last_completed(  # noqa: F821
-                phase="shares_backfill", exchange=exchange,
+                phase="shares", exchange=exchange,
             )
         if last is not None and last.completed_at is not None:
             age = (datetime.now(timezone.utc) - last.completed_at).days  # noqa: F821
@@ -802,7 +802,7 @@ def run_shares_backfill(
     # ----- 1. Determine the ticker list ----- #
     if resume_run_id is not None:
         run_id, ticker_list, cursor_index = _resume_from_checkpoint(  # noqa: F821
-            db_engine, resume_run_id, expected_phase="shares_backfill",
+            db_engine, resume_run_id, expected_phase="shares",
         )
         logger.info(  # noqa: F821
             "Resuming shares backfill run %d at index %d/%d",
@@ -817,7 +817,7 @@ def run_shares_backfill(
             )
             with transaction(db_engine) as conn:  # noqa: F821
                 run_id = FundamentalsRunRepository(conn).open(  # noqa: F821
-                    phase="shares_backfill", exchange=exchange,
+                    phase="shares", exchange=exchange,
                     notes=f"No active tickers (start={start_date.isoformat()})",
                 )
                 FundamentalsRunRepository(conn).close(  # noqa: F821
@@ -826,7 +826,7 @@ def run_shares_backfill(
             return run_id
         with transaction(db_engine) as conn:  # noqa: F821
             run_id = FundamentalsRunRepository(conn).open(  # noqa: F821
-                phase="shares_backfill", exchange=exchange,
+                phase="shares", exchange=exchange,
                 notes=(
                     f"Shares backfill of {len(ticker_list)} tickers "
                     f"from {start_date.isoformat()}"
@@ -2581,6 +2581,48 @@ def run_signal_events_for_all_industries(
     }
 
 
+def _fetch_bars_at_timeframe(conn, ticker_id, timeframe):
+    """Fetch bars for per-ticker compute, aggregating 1D → 1W on the fly.
+
+    ohlcv_bars stores raw 1D bars from the ETL; 1W is always derived
+    via on-demand daily→weekly aggregation. The live ComputeScheduler
+    does this in-process; the per-ticker batch runners now match that
+    behavior by routing through this helper instead of asking the
+    repo for a timeframe that isn't physically stored.
+
+    Returns a list of OHLCVBar objects (empty if no usable source).
+    """
+    from sqlalchemy import text as _text
+    from ..persistence.bars_repo import BarsRepository
+    from ..indicators.aggregation import daily_to_weekly
+    from ..domain import Timeframe
+
+    rows = conn.execute(_text("""
+        SELECT DISTINCT timeframe FROM ohlcv_bars WHERE ticker_id = :tid
+    """), {"tid": ticker_id}).all()
+    available = {r.timeframe for r in rows}
+
+    if timeframe in available:
+        return BarsRepository(conn).fetch_history(
+            ticker_id, Timeframe(timeframe), limit=10000,
+        )
+    if timeframe == "1W" and "1D" in available:
+        tz_row = conn.execute(_text(
+            "SELECT COALESCE(tz, 'UTC') AS tz "
+            "FROM tickers WHERE ticker_id = :tid"
+        ), {"tid": ticker_id}).first()
+        tz = tz_row.tz if tz_row else "UTC"
+        daily_bars = BarsRepository(conn).fetch_history(
+            ticker_id, Timeframe.DAILY, limit=10000,
+        )
+        return daily_to_weekly(
+            daily_bars, include_partial_last_week=True, tz=tz,
+        )
+    return []
+
+
+
+
 # ============================================================
 # Phase 7: per-ticker indicator state + signal events
 # ============================================================
@@ -2685,13 +2727,11 @@ def run_indicator_state_for_ticker(
                     )
                 return run_id
 
-    # Read the full OHLCV history (chronological order from fetch_history).
+    # Read OHLCV bars. ohlcv_bars stores 1D only; weekly is
+    # aggregated on-demand via the helper (matches the live
+    # ComputeScheduler's behavior).
     with db_engine.connect() as conn:
-        # Use a large limit — most tickers have <500 weekly bars even
-        # over multi-year history. 10000 is a safe upper bound.
-        bars = BarsRepository(conn).fetch_history(
-            ticker_id, tf_enum, limit=10000,
-        )
+        bars = _fetch_bars_at_timeframe(conn, ticker_id, timeframe)
     if len(bars) < min_bars:
         raise ValueError(
             f"run_indicator_state_for_ticker: ticker_id={ticker_id} "
@@ -2956,14 +2996,13 @@ def run_signal_events_for_ticker(
                 return run_id
 
     # Read indicator_state (oldest-first for the walk) and OHLCV
-    # bars (for close lookup).
+    # bars for close lookup. Bars come from the helper so weekly
+    # aggregation matches what indicator_state was built from.
     with db_engine.connect() as conn:
         states = IndicatorStateRepository(conn).get_history_for_ticker(
             ticker_id, timeframe,
         )
-        bars = BarsRepository(conn).fetch_history(
-            ticker_id, tf_enum, limit=10000,
-        )
+        bars = _fetch_bars_at_timeframe(conn, ticker_id, timeframe)
 
     if not states:
         raise ValueError(

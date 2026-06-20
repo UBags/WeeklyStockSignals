@@ -65,22 +65,57 @@ class SignalsRepository:
         ticker_id: int,
         event: SignalEvent,
     ) -> int:
-        """Append a signal event. Returns the new event_id."""
+        """Append a signal event. Returns the event_id of the new (or
+        already-existing) row.
+
+        Idempotent on the partial unique index added by migration 0016:
+          (ticker_id, timeframe, bar_timestamp, signal_type)
+        If a row already matches, this returns its existing event_id
+        rather than failing the transaction. The live ComputeScheduler
+        can re-detect the same signal across multiple compute passes
+        (e.g. after engine re-prime); the unique index collapses those
+        re-detections into one row.
+        """
         if event.signal == ChangeSignal.NO_CHANGE:
             raise ValueError("NO_CHANGE signals should not be inserted as events")
+        # INSERT ... ON CONFLICT DO NOTHING returns no row on conflict,
+        # so we fall back to a SELECT to fetch the pre-existing event_id.
+        # The two paths share the same WHERE so a single round-trip in
+        # the common (non-conflict) case is preserved.
+        signal_type_str = _SIGNAL_TO_STR[event.signal]
         stmt = (
             pg_insert(signal_events)
             .values(
                 ticker_id=ticker_id,
                 timeframe=event.timeframe.value,
                 bar_timestamp=event.bar_timestamp,
-                signal_type=_SIGNAL_TO_STR[event.signal],
+                signal_type=signal_type_str,
                 price_at_signal=event.price_at_signal,
                 computed_at=event.computed_at,
             )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    signal_events.c.ticker_id,
+                    signal_events.c.timeframe,
+                    signal_events.c.bar_timestamp,
+                    signal_events.c.signal_type,
+                ],
+            )
             .returning(signal_events.c.event_id)
         )
-        return self._conn.execute(stmt).scalar_one()
+        result = self._conn.execute(stmt).scalar()
+        if result is not None:
+            return int(result)
+        # Conflict path — row already exists. Fetch its event_id.
+        existing = self._conn.execute(
+            select(signal_events.c.event_id).where(
+                signal_events.c.ticker_id == ticker_id,
+                signal_events.c.timeframe == event.timeframe.value,
+                signal_events.c.bar_timestamp == event.bar_timestamp,
+                signal_events.c.signal_type == signal_type_str,
+            )
+        ).scalar_one()
+        return int(existing)
 
     def recent_events_for_ticker(
         self,

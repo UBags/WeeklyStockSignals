@@ -2690,7 +2690,7 @@ class TestSignalEventWrites:
         with transaction(db_engine) as conn:
             repo = SignalEventRepository(conn)
             repo.upsert(_make_signal(
-                "IT - Services", date(2026, 1, 8), "EXIT_BUY",
+                "IT - Services", date(2026, 1, 8), "EXIT_FROM_BUY",
                 regime_before=1, regime_after=-1,
             ))
             repo.upsert(_make_signal(
@@ -2702,13 +2702,13 @@ class TestSignalEventWrites:
                 "IT - Services",
             )
         kinds = {r.event_kind for r in rows}
-        assert kinds == {"EXIT_BUY", "SELL"}
+        assert kinds == {"EXIT_FROM_BUY", "SELL"}
 
     def test_batch_upsert(self, db_engine):
         _setup_industry_for_signals(db_engine)
         events = [
             _make_signal("IT - Services", date(2026, 1, 8), "BUY"),
-            _make_signal("IT - Services", date(2026, 1, 15), "EXIT_BUY",
+            _make_signal("IT - Services", date(2026, 1, 15), "EXIT_FROM_BUY",
                          regime_before=1, regime_after=0),
             _make_signal("IT - Services", date(2026, 1, 22), "SELL",
                          regime_before=0, regime_after=-1),
@@ -2775,10 +2775,10 @@ class TestSignalEventReads:
         _setup_industry_for_signals(db_engine, "Industry B")
         with transaction(db_engine) as conn:
             repo = SignalEventRepository(conn)
-            # Industry A: 2 BUY, 1 EXIT_BUY.
+            # Industry A: 2 BUY, 1 EXIT_FROM_BUY.
             repo.upsert(_make_signal("Industry A", date(2026, 1, 8), "BUY"))
             repo.upsert(_make_signal(
-                "Industry A", date(2026, 1, 22), "EXIT_BUY",
+                "Industry A", date(2026, 1, 22), "EXIT_FROM_BUY",
                 regime_before=1, regime_after=0,
             ))
             repo.upsert(_make_signal("Industry A", date(2026, 2, 5), "BUY"))
@@ -2806,7 +2806,7 @@ class TestSignalEventReads:
                 from_date=date(2026, 1, 1),
                 to_date=date(2026, 1, 31),
             )
-        # Only the first BUY (1/8) and the EXIT_BUY (1/22) — the
+        # Only the first BUY (1/8) and the EXIT_FROM_BUY (1/22) — the
         # 2/5 BUY is filtered out.
         assert len(rows) == 2
         dates = {r.trade_date for r in rows}
@@ -2818,7 +2818,7 @@ class TestSignalEventReads:
             rows = SignalEventRepository(conn).list_for_date_range(
                 date(2026, 1, 1), date(2026, 1, 31),
             )
-        # All events in Jan 2026: Industry A's BUY+EXIT_BUY, Industry B's SELL.
+        # All events in Jan 2026: Industry A's BUY+EXIT_FROM_BUY, Industry B's SELL.
         assert len(rows) == 3
 
     def test_list_for_date_range_kind_filter(self, db_engine):
@@ -2838,7 +2838,10 @@ class TestSignalEventReads:
             counts = SignalEventRepository(conn).count_by_kind_for_industry(
                 "Industry A",
             )
-        assert counts == {"BUY": 2, "EXIT_BUY": 1, "SELL": 0, "EXIT_SELL": 0}
+        assert counts == {
+            "BUY": 2, "EXIT_FROM_BUY": 1,
+            "SELL": 0, "EXIT_FROM_SELL": 0,
+        }
 
     def test_coverage_summary(self, db_engine):
         self._setup_with_events(db_engine)
@@ -2898,7 +2901,7 @@ class TestSignalEventDelete:
             repo = SignalEventRepository(conn)
             repo.upsert(_make_signal("IT - Services", date(2026, 1, 8), "BUY"))
             repo.upsert(_make_signal(
-                "IT - Services", date(2026, 1, 22), "EXIT_BUY",
+                "IT - Services", date(2026, 1, 22), "EXIT_FROM_BUY",
                 regime_before=1, regime_after=0,
             ))
         with transaction(db_engine) as conn:
@@ -2908,35 +2911,45 @@ class TestSignalEventDelete:
 
 class TestSignalEventDBConstraints:
     """Tests that the DB CHECK constraints reject invalid rows even
-    if a bug in the repo layer let them through."""
+    if a bug in the repo layer let them through.
+
+    Post-0016: these target the unified signal_events table with
+    the new column names (bar_timestamp, signal_type, price_at_signal).
+    """
 
     def test_db_rejects_bad_event_kind(self, db_engine):
         from sqlalchemy.exc import IntegrityError
         _setup_industry_for_signals(db_engine)
+        bar_ts = datetime(2026, 1, 8, tzinfo=timezone.utc)
         with transaction(db_engine) as conn:
             with pytest.raises(IntegrityError):
                 conn.execute(text("""
-                    INSERT INTO signal_event (
-                        ticker_id, timeframe, industry_name, trade_date,
-                        event_kind, regime_before, regime_after,
-                        close_at_event
+                    INSERT INTO signal_events (
+                        ticker_id, timeframe, industry_name,
+                        bar_timestamp, signal_type,
+                        regime_before, regime_after,
+                        price_at_signal, computed_at
                     ) VALUES (
-                        NULL, NULL, 'IT - Services', :td,
-                        'INVALID', 0, 1, 100.0
+                        NULL, NULL, 'IT - Services',
+                        :ts, 'INVALID',
+                        0, 1, 100.0, NOW()
                     )
-                """), {"td": date(2026, 1, 8)})
+                """), {"ts": bar_ts})
 
     def test_db_rejects_neither_key_set(self, db_engine):
         from sqlalchemy.exc import IntegrityError
+        bar_ts = datetime(2026, 1, 8, tzinfo=timezone.utc)
         with transaction(db_engine) as conn:
             with pytest.raises(IntegrityError):
                 conn.execute(text("""
-                    INSERT INTO signal_event (
-                        ticker_id, timeframe, industry_name, trade_date,
-                        event_kind, regime_before, regime_after,
-                        close_at_event
+                    INSERT INTO signal_events (
+                        ticker_id, timeframe, industry_name,
+                        bar_timestamp, signal_type,
+                        regime_before, regime_after,
+                        price_at_signal, computed_at
                     ) VALUES (
-                        NULL, NULL, NULL, :td,
-                        'BUY', 0, 1, 100.0
+                        NULL, NULL, NULL,
+                        :ts, 'BUY',
+                        0, 1, 100.0, NOW()
                     )
-                """), {"td": date(2026, 1, 8)})
+                """), {"ts": bar_ts})

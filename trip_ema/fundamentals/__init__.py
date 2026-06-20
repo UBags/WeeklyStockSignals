@@ -439,11 +439,13 @@ class IndicatorState:
     computed_at: datetime
 
 
-# Allowed values for signal_event.event_kind. Added in migration
-# 0015 (Phase 6-1). Mirrors the operator's Pine Script signal names
-# but in plain English to avoid Pine-specific terminology in the
-# domain layer.
-SIGNAL_EVENT_KINDS = ("BUY", "SELL", "EXIT_BUY", "EXIT_SELL")
+# Allowed values for signal_events.signal_type. Phase 6-1 used
+# the short forms 'EXIT_BUY' / 'EXIT_SELL' on its own signal_event
+# table; migration 0016 unifies into signal_events whose existing
+# value set is the long form 'EXIT_FROM_BUY' / 'EXIT_FROM_SELL' —
+# matching the live ComputeScheduler path. We standardize on the
+# long forms here, and signal_compute.py emits accordingly.
+SIGNAL_EVENT_KINDS = ("BUY", "SELL", "EXIT_FROM_BUY", "EXIT_FROM_SELL")
 
 
 @dataclass(frozen=True, slots=True)

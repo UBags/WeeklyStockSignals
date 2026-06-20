@@ -2350,23 +2350,44 @@ def _indicator_from_row(row):
     )
 
 
-# ---------- SignalEventRepository (Phase 6-1) ---------- #
+# ---------- SignalEventRepository (Phase 6-2: unified table) ---------- #
+
+# Migration 0016 unified the previously separate signal_events (live
+# per-ticker) and signal_event (Phase 6-1 per-industry / backfill) into
+# one table: signal_events. The dataclass interface (SignalEvent in
+# fundamentals/__init__.py) is unchanged — fields are still trade_date,
+# event_kind, close_at_event — but the underlying columns are
+# bar_timestamp (TIMESTAMPTZ), signal_type (VARCHAR), price_at_signal
+# (DOUBLE). All SQL below maps between the two by aliasing on SELECT
+# and explicit naming on INSERT/WHERE.
+
+_SIGNAL_EVENT_SELECT = (
+    "ticker_id, timeframe, industry_name, "
+    "bar_timestamp::date AS trade_date, "
+    "signal_type AS event_kind, "
+    "regime_before, regime_after, "
+    "price_at_signal AS close_at_event, "
+    "computed_at"
+)
 
 
 class SignalEventRepository:
     """Sparse signal events derived from indicator_state regime
-    transitions.
+    transitions, persisted to the unified signal_events table.
 
     Reads cover the common Phase 6+ access patterns:
       - get_for_industry(name): full history for one industry.
+      - get_for_ticker(ticker_id, timeframe): full history for one
+        ticker series.
       - list_for_date_range(from, to, kind): all events of a kind
         across all series in a window.
       - list_recent(kind, days, limit): scanner-style "what fired
         recently".
-      - count_by_kind(): summary for status displays.
+      - count_by_kind_for_industry(): summary for status displays.
 
     Writes:
-      - upsert (one-row): idempotent on (series, trade_date, kind).
+      - upsert (one-row): idempotent on series-identity uniqueness
+        constraints added in migration 0016.
       - batch_upsert: many events in one transaction, used by the
         runner.
       - delete_for_industry / delete_for_ticker: full wipe for
@@ -2386,8 +2407,7 @@ class SignalEventRepository:
         limit: Optional[int] = None,
     ) -> list:
         """All events for one industry, newest-first. Optional
-        filters on event kinds (e.g. ["BUY", "EXIT_BUY"]) and date
-        range."""
+        filters on event kinds and date range."""
         conditions = ["industry_name = :n"]
         params: dict = {"n": industry_name}
         if kinds:
@@ -2399,19 +2419,20 @@ class SignalEventRepository:
                         f"must be in {SIGNAL_EVENT_KINDS}"
                     )
             placeholders = ", ".join(f":k{i}" for i in range(len(kinds)))
-            conditions.append(f"event_kind IN ({placeholders})")
+            conditions.append(f"signal_type IN ({placeholders})")
             for i, k in enumerate(kinds):
                 params[f"k{i}"] = k
         if from_date is not None:
-            conditions.append("trade_date >= :fd")
+            conditions.append("bar_timestamp >= :fd")
             params["fd"] = from_date
         if to_date is not None:
-            conditions.append("trade_date <= :td")
+            conditions.append("bar_timestamp::date <= :td")
             params["td"] = to_date
         sql = f"""
-            SELECT * FROM signal_event
+            SELECT {_SIGNAL_EVENT_SELECT}
+            FROM signal_events
             WHERE {' AND '.join(conditions)}
-            ORDER BY trade_date DESC, event_kind
+            ORDER BY bar_timestamp DESC, signal_type
         """
         if limit is not None:
             sql += " LIMIT :lim"
@@ -2427,8 +2448,7 @@ class SignalEventRepository:
         limit: Optional[int] = None,
     ) -> list:
         """All events for one ticker series. Same shape as
-        get_for_industry. Phase 6-1 schema supports this but no
-        runner writes to it yet."""
+        get_for_industry."""
         conditions = ["ticker_id = :tid", "timeframe = :tf"]
         params: dict = {"tid": ticker_id, "tf": timeframe}
         if kinds:
@@ -2440,19 +2460,20 @@ class SignalEventRepository:
                         f"must be in {SIGNAL_EVENT_KINDS}"
                     )
             placeholders = ", ".join(f":k{i}" for i in range(len(kinds)))
-            conditions.append(f"event_kind IN ({placeholders})")
+            conditions.append(f"signal_type IN ({placeholders})")
             for i, k in enumerate(kinds):
                 params[f"k{i}"] = k
         if from_date is not None:
-            conditions.append("trade_date >= :fd")
+            conditions.append("bar_timestamp >= :fd")
             params["fd"] = from_date
         if to_date is not None:
-            conditions.append("trade_date <= :td")
+            conditions.append("bar_timestamp::date <= :td")
             params["td"] = to_date
         sql = f"""
-            SELECT * FROM signal_event
+            SELECT {_SIGNAL_EVENT_SELECT}
+            FROM signal_events
             WHERE {' AND '.join(conditions)}
-            ORDER BY trade_date DESC, event_kind
+            ORDER BY bar_timestamp DESC, signal_type
         """
         if limit is not None:
             sql += " LIMIT :lim"
@@ -2470,7 +2491,7 @@ class SignalEventRepository:
         date X and Y' across all industries (or tickers, or both).
         """
         from ..fundamentals import SIGNAL_EVENT_KINDS
-        conditions = ["trade_date BETWEEN :fd AND :td"]
+        conditions = ["bar_timestamp::date BETWEEN :fd AND :td"]
         params: dict = {"fd": from_date, "td": to_date}
         if kind is not None:
             if kind not in SIGNAL_EVENT_KINDS:
@@ -2478,7 +2499,7 @@ class SignalEventRepository:
                     f"unknown event_kind {kind!r}; "
                     f"must be in {SIGNAL_EVENT_KINDS}"
                 )
-            conditions.append("event_kind = :k")
+            conditions.append("signal_type = :k")
             params["k"] = kind
         if series_kind == "TICKER":
             conditions.append("ticker_id IS NOT NULL")
@@ -2490,10 +2511,11 @@ class SignalEventRepository:
                 f"got {series_kind!r}"
             )
         sql = f"""
-            SELECT * FROM signal_event
+            SELECT {_SIGNAL_EVENT_SELECT}
+            FROM signal_events
             WHERE {' AND '.join(conditions)}
-            ORDER BY trade_date DESC, industry_name NULLS LAST,
-                     ticker_id NULLS LAST, event_kind
+            ORDER BY bar_timestamp DESC, industry_name NULLS LAST,
+                     ticker_id NULLS LAST, signal_type
         """
         if limit is not None:
             sql += " LIMIT :lim"
@@ -2510,7 +2532,9 @@ class SignalEventRepository:
         """Scanner-style: events of a kind in the last N days,
         newest-first. None for kind means all kinds."""
         from ..fundamentals import SIGNAL_EVENT_KINDS
-        conditions = [f"trade_date >= CURRENT_DATE - INTERVAL '{int(days)} days'"]
+        conditions = [
+            f"bar_timestamp >= (CURRENT_DATE - INTERVAL '{int(days)} days')",
+        ]
         params: dict = {"lim": limit}
         if kind is not None:
             if kind not in SIGNAL_EVENT_KINDS:
@@ -2518,13 +2542,14 @@ class SignalEventRepository:
                     f"unknown event_kind {kind!r}; "
                     f"must be in {SIGNAL_EVENT_KINDS}"
                 )
-            conditions.append("event_kind = :k")
+            conditions.append("signal_type = :k")
             params["k"] = kind
         sql = f"""
-            SELECT * FROM signal_event
+            SELECT {_SIGNAL_EVENT_SELECT}
+            FROM signal_events
             WHERE {' AND '.join(conditions)}
-            ORDER BY trade_date DESC, industry_name NULLS LAST,
-                     ticker_id NULLS LAST, event_kind
+            ORDER BY bar_timestamp DESC, industry_name NULLS LAST,
+                     ticker_id NULLS LAST, signal_type
             LIMIT :lim
         """
         rows = self._conn.execute(text(sql), params)
@@ -2536,13 +2561,13 @@ class SignalEventRepository:
         """Per-kind event count for one industry. Used by status
         displays."""
         rows = self._conn.execute(text("""
-            SELECT event_kind, COUNT(*)
-            FROM signal_event
+            SELECT signal_type, COUNT(*)
+            FROM signal_events
             WHERE industry_name = :n
-            GROUP BY event_kind
+            GROUP BY signal_type
         """), {"n": industry_name})
         counts = {k: 0 for k in (
-            "BUY", "SELL", "EXIT_BUY", "EXIT_SELL",
+            "BUY", "SELL", "EXIT_FROM_BUY", "EXIT_FROM_SELL",
         )}
         for kind, count in rows:
             counts[kind] = int(count)
@@ -2555,8 +2580,8 @@ class SignalEventRepository:
         Used by fundamentals-status."""
         rows = self._conn.execute(text("""
             SELECT industry_name, COUNT(*),
-                   MIN(trade_date), MAX(trade_date)
-            FROM signal_event
+                   MIN(bar_timestamp::date), MAX(bar_timestamp::date)
+            FROM signal_events
             WHERE industry_name IS NOT NULL
             GROUP BY industry_name
             ORDER BY industry_name
@@ -2570,7 +2595,13 @@ class SignalEventRepository:
         regime values before hitting the DB (in addition to the DB
         CHECK constraints).
 
-        Idempotent on (series_identity, trade_date, event_kind).
+        Idempotent on the partial unique indexes added by migration
+        0016: (ticker_id, timeframe, bar_timestamp, signal_type)
+        for ticker rows; (industry_name, bar_timestamp, signal_type)
+        for industry rows.
+
+        The dataclass uses trade_date (date); we cast it to
+        bar_timestamp (TIMESTAMPTZ at 00:00 UTC) for storage.
         """
         from ..fundamentals import SIGNAL_EVENT_KINDS
         # Application-level validation.
@@ -2604,22 +2635,29 @@ class SignalEventRepository:
                 "industry_name must be set; got neither"
             )
 
+        # trade_date (date) → TIMESTAMPTZ at 00:00 UTC. Use Postgres
+        # cast so the conversion happens server-side and is consistent
+        # with the migration's data-translation cast.
+        bar_ts_sql = "((:td)::timestamp AT TIME ZONE 'UTC')"
+
         if industry_set:
-            self._conn.execute(text("""
-                INSERT INTO signal_event (
-                    ticker_id, timeframe, industry_name, trade_date,
-                    event_kind, regime_before, regime_after,
-                    close_at_event, computed_at
+            self._conn.execute(text(f"""
+                INSERT INTO signal_events (
+                    ticker_id, timeframe, industry_name,
+                    bar_timestamp, signal_type,
+                    regime_before, regime_after,
+                    price_at_signal, computed_at
                 ) VALUES (
-                    NULL, NULL, :ind, :td,
-                    :kind, :rb, :ra, :close, NOW()
+                    NULL, NULL, :ind,
+                    {bar_ts_sql}, :kind,
+                    :rb, :ra, :close, NOW()
                 )
-                ON CONFLICT (industry_name, trade_date, event_kind)
+                ON CONFLICT (industry_name, bar_timestamp, signal_type)
                 WHERE industry_name IS NOT NULL
                 DO UPDATE SET
                     regime_before = EXCLUDED.regime_before,
                     regime_after = EXCLUDED.regime_after,
-                    close_at_event = EXCLUDED.close_at_event,
+                    price_at_signal = EXCLUDED.price_at_signal,
                     computed_at = NOW()
             """), {
                 "ind": event.industry_name, "td": event.trade_date,
@@ -2628,21 +2666,23 @@ class SignalEventRepository:
                 "close": float(event.close_at_event),
             })
         else:
-            self._conn.execute(text("""
-                INSERT INTO signal_event (
-                    ticker_id, timeframe, industry_name, trade_date,
-                    event_kind, regime_before, regime_after,
-                    close_at_event, computed_at
+            self._conn.execute(text(f"""
+                INSERT INTO signal_events (
+                    ticker_id, timeframe, industry_name,
+                    bar_timestamp, signal_type,
+                    regime_before, regime_after,
+                    price_at_signal, computed_at
                 ) VALUES (
-                    :tid, :tf, NULL, :td,
-                    :kind, :rb, :ra, :close, NOW()
+                    :tid, :tf, NULL,
+                    {bar_ts_sql}, :kind,
+                    :rb, :ra, :close, NOW()
                 )
-                ON CONFLICT (ticker_id, timeframe, trade_date, event_kind)
+                ON CONFLICT (ticker_id, timeframe, bar_timestamp, signal_type)
                 WHERE ticker_id IS NOT NULL
                 DO UPDATE SET
                     regime_before = EXCLUDED.regime_before,
                     regime_after = EXCLUDED.regime_after,
-                    close_at_event = EXCLUDED.close_at_event,
+                    price_at_signal = EXCLUDED.price_at_signal,
                     computed_at = NOW()
             """), {
                 "tid": event.ticker_id, "tf": event.timeframe,
@@ -2665,24 +2705,25 @@ class SignalEventRepository:
         """Wipe all signal events for one industry. Used by the
         runner's full-recompute path."""
         result = self._conn.execute(text("""
-            DELETE FROM signal_event
+            DELETE FROM signal_events
             WHERE industry_name = :n
         """), {"n": industry_name})
         return result.rowcount
 
     def delete_for_ticker(self, ticker_id: int, timeframe: str) -> int:
         result = self._conn.execute(text("""
-            DELETE FROM signal_event
+            DELETE FROM signal_events
             WHERE ticker_id = :tid AND timeframe = :tf
         """), {"tid": ticker_id, "tf": timeframe})
         return result.rowcount
 
 
 def _signal_event_from_row(row):
-    """Unpack a row of signal_event SELECT * into SignalEvent.
+    """Unpack a row from `SELECT _SIGNAL_EVENT_SELECT FROM
+    signal_events` into a SignalEvent dataclass.
 
-    Column order matters and must match the CREATE TABLE in
-    migration 0015 exactly.
+    Column order matches _SIGNAL_EVENT_SELECT — if that constant
+    changes, this must change with it.
     """
     from ..fundamentals import SignalEvent
     return SignalEvent(
@@ -2691,8 +2732,8 @@ def _signal_event_from_row(row):
         industry_name=row[2],
         trade_date=row[3],
         event_kind=row[4],
-        regime_before=int(row[5]),
-        regime_after=int(row[6]),
+        regime_before=int(row[5]) if row[5] is not None else 0,
+        regime_after=int(row[6]) if row[6] is not None else 0,
         close_at_event=float(row[7]),
         computed_at=row[8],
     )

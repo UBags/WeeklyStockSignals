@@ -24,9 +24,19 @@ Resumability:
     fails fatally, the operator re-runs the pipeline; the steps that
     already succeeded will skip-if-recent.
 
-Per-ticker compute (Phase 7) is **opt-in via the include_tickers
-flag**. Per-industry runs are always part of the pipeline; per-ticker
-adds ~3500 tickers × indicator+signals on top.
+Per-ticker compute (Phase 7) is **part of the standard pipeline
+order** as of Phase 6-2. Order per the operator's specification:
+  1. fetch stock data (industry / shares / financials / market cap)
+  2. calculate EMAs per stock
+  3. calculate and store signals per stock
+  4. calculate industry_index (build + values)
+  5. calculate industry EMAs
+  6. calculate industry signals (regions)
+
+The include_tickers flag remains for callers that explicitly want
+to skip the per-stock phases (e.g. an ad-hoc industries-only re-run
+after changing the precedence logic). The CLI defaults to True so
+the operator's pipeline runs end-to-end without an extra flag.
 """
 from __future__ import annotations
 
@@ -110,7 +120,7 @@ def run_eod_pipeline(
     db_engine: Engine,
     exchange: str,
     *,
-    include_tickers: bool = False,
+    include_tickers: bool = True,
     timeframe: str = "1W",
     force: bool = False,
     progress_callback: Optional[Callable[[StepResult], None]] = None,
@@ -122,10 +132,10 @@ def run_eod_pipeline(
       exchange: 'NSE' or 'BSE'. Per-exchange steps run only for this
         exchange; cross-exchange steps (compute-market-cap, index
         values, indicator state, signals) process all data.
-      include_tickers: if True, also run the per-ticker indicator
-        and signal compute. Default False because that's ~3500
-        tickers — significantly more work than the ~60-industry
-        default pipeline.
+      include_tickers: if False, skip the per-stock indicator and
+        signal compute steps. Default True so the canonical
+        per-stock → per-industry pipeline runs end-to-end. Set False
+        only when you want an industries-only run.
       timeframe: timeframe for per-ticker compute (only used if
         include_tickers=True). Default '1W'.
       force: pass force=True to each step's runner, bypassing all
@@ -426,17 +436,23 @@ def run_eod_pipeline(
                 f"{exchange} tf={timeframe} (skipped {skipped}, "
                 f"failed {failed})")
 
-    # Assemble the step list in execution order.
+    # Assemble the step list in execution order, matching the
+    # operator's spec:
+    #   fetch stock data
+    #     → calc per-stock EMAs
+    #     → calc per-stock signals
+    #     → build industry indices
+    #     → calc industry index values
+    #     → calc industry EMAs
+    #     → calc industry signals (regions)
+    # Per-stock comes before per-industry: they're independent (industry
+    # indices are built from market cap aggregation, not ticker EMAs)
+    # but the operator wants per-stock signals visible first.
     steps_to_run: list[tuple[str, Callable]] = [
         ("refresh-industry", _step_industry_refresh),
         ("refresh-shares", _step_shares_refresh),
         ("refresh-financials", _step_financials_refresh),
         ("compute-market-cap", _step_market_cap),
-        ("build-industry-indices", _step_index_build),
-        ("compute-index-values", _step_index_values),
-        ("compute-indicator-state (industries)",
-         _step_indicator_state_industries),
-        ("compute-signals (industries)", _step_signals_industries),
     ]
     if include_tickers:
         steps_to_run.extend([
@@ -444,6 +460,13 @@ def run_eod_pipeline(
              _step_indicator_state_tickers),
             ("compute-signals (tickers)", _step_signals_tickers),
         ])
+    steps_to_run.extend([
+        ("build-industry-indices", _step_index_build),
+        ("compute-index-values", _step_index_values),
+        ("compute-indicator-state (industries)",
+         _step_indicator_state_industries),
+        ("compute-signals (industries)", _step_signals_industries),
+    ])
 
     # Pre-populate the result with PENDING entries so callers can see
     # the full plan even if the pipeline aborts early.

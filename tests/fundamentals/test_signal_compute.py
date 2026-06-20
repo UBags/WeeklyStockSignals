@@ -104,32 +104,31 @@ class TestBuyAndExitBuy:
         assert e.industry_name == "X"
 
     def test_buy_fires_on_minus_one_to_one(self):
-        """Direct -1 → +1 should fire BOTH EXIT_SELL and BUY on
-        the same bar (bar 2). On bar 1 we also get a SELL because
-        prev_display starts at 0 (nz default).
-        Total events: 3."""
+        """Direct -1 → +1 with precedence: only BUY fires on bar 2,
+        not EXIT_FROM_SELL (suppressed because BUY wins on a direct
+        flip). On bar 1 we also get a SELL because prev_display
+        starts at 0 (nz default).
+        Total events: 2."""
         states = [
             _state("X", date(2026, 1, 1), display=-1),
             _state("X", date(2026, 1, 8), display=1),
         ]
         events = compute_signal_events_from_states(states, _close)
-        # Total events: SELL on bar 1, then EXIT_SELL+BUY on bar 2.
-        assert len(events) == 3
+        # Total events: SELL on bar 1, then BUY only on bar 2
+        # (EXIT_FROM_SELL suppressed by precedence).
+        assert len(events) == 2
         # SELL on bar 1.
         bar1 = [e for e in events if e.trade_date == date(2026, 1, 1)]
         assert len(bar1) == 1
         assert bar1[0].event_kind == "SELL"
         assert bar1[0].regime_before == 0
         assert bar1[0].regime_after == -1
-        # EXIT_SELL and BUY on bar 2.
+        # BUY only on bar 2 (EXIT_FROM_SELL suppressed).
         bar2 = [e for e in events if e.trade_date == date(2026, 1, 8)]
-        assert len(bar2) == 2
-        bar2_kinds = {e.event_kind for e in bar2}
-        assert bar2_kinds == {"EXIT_SELL", "BUY"}
-        # Both bar-2 events should have regime_before=-1, regime_after=+1.
-        for e in bar2:
-            assert e.regime_before == -1
-            assert e.regime_after == 1
+        assert len(bar2) == 1
+        assert bar2[0].event_kind == "BUY"
+        assert bar2[0].regime_before == -1
+        assert bar2[0].regime_after == 1
 
     def test_exit_buy_fires_on_one_to_zero(self):
         states = [
@@ -137,10 +136,10 @@ class TestBuyAndExitBuy:
             _state("X", date(2026, 1, 8), display=0),
         ]
         events = compute_signal_events_from_states(states, _close)
-        # Bar 1: BUY (prev=0 default), bar 2: EXIT_BUY.
+        # Bar 1: BUY (prev=0 default), bar 2: EXIT_FROM_BUY.
         assert len(events) == 2
         assert events[0].event_kind == "BUY"
-        assert events[1].event_kind == "EXIT_BUY"
+        assert events[1].event_kind == "EXIT_FROM_BUY"
         assert events[1].regime_before == 1
         assert events[1].regime_after == 0
 
@@ -167,8 +166,8 @@ class TestSellAndExitSell:
         assert len(events) == 2
         # Bar 1 fires SELL because prev=0 default.
         assert events[0].event_kind == "SELL"
-        # Bar 2 fires EXIT_SELL.
-        assert events[1].event_kind == "EXIT_SELL"
+        # Bar 2 fires EXIT_FROM_SELL.
+        assert events[1].event_kind == "EXIT_FROM_SELL"
         assert events[1].regime_before == -1
         assert events[1].regime_after == 0
 
@@ -198,35 +197,32 @@ class TestPineNzBehavior:
 
 
 class TestComplexSequence:
-    """Realistic sequence: 0 → +1 (BUY) → +1 (no event) → 0 (EXIT_BUY)
-    → -1 (SELL) → -1 (no event) → +1 (EXIT_SELL + BUY same bar) → 0
-    (EXIT_BUY)."""
+    """Realistic sequence with precedence applied: 0 → +1 (BUY) → +1
+    (no event) → 0 (EXIT_FROM_BUY) → -1 (SELL) → -1 (no event) → +1
+    (BUY only — EXIT_FROM_SELL suppressed) → 0 (EXIT_FROM_BUY)."""
 
     def test_complex_walk(self):
         sequence = [
             (date(2026, 1, 1), 0),    # no event (still 0)
             (date(2026, 1, 8), 1),    # BUY
             (date(2026, 1, 15), 1),   # no event
-            (date(2026, 1, 22), 0),   # EXIT_BUY
+            (date(2026, 1, 22), 0),   # EXIT_FROM_BUY
             (date(2026, 1, 29), -1),  # SELL
             (date(2026, 2, 5), -1),   # no event
-            (date(2026, 2, 12), 1),   # EXIT_SELL + BUY
-            (date(2026, 2, 19), 0),   # EXIT_BUY
+            (date(2026, 2, 12), 1),   # BUY (EXIT_FROM_SELL suppressed)
+            (date(2026, 2, 19), 0),   # EXIT_FROM_BUY
         ]
         states = [_state("X", td, display=d) for td, d in sequence]
         events = compute_signal_events_from_states(states, _close)
 
-        # Hand-computed expected events:
+        # Hand-computed expected events under precedence rules:
         expected = [
             (date(2026, 1, 8), "BUY", 0, 1),
-            (date(2026, 1, 22), "EXIT_BUY", 1, 0),
+            (date(2026, 1, 22), "EXIT_FROM_BUY", 1, 0),
             (date(2026, 1, 29), "SELL", 0, -1),
-            (date(2026, 2, 12), "EXIT_SELL", -1, 1),
             (date(2026, 2, 12), "BUY", -1, 1),
-            (date(2026, 2, 19), "EXIT_BUY", 1, 0),
+            (date(2026, 2, 19), "EXIT_FROM_BUY", 1, 0),
         ]
-        # Order within a bar can vary (BUY/EXIT_SELL same bar) —
-        # compare as tuples but tolerate within-bar ordering.
         actual_tuples = sorted(
             [(e.trade_date, e.event_kind, e.regime_before, e.regime_after)
              for e in events]

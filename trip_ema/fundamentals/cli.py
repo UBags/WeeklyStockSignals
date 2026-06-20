@@ -1237,7 +1237,7 @@ def cmd_run_eod_pipeline(args, config: Config) -> int:
     try:
         print(
             f"Running EoD pipeline on {args.exchange} "
-            f"(include_tickers={args.include_tickers}, "
+            f"(include_tickers={not args.skip_tickers}, "
             f"timeframe={args.timeframe or '1W'}, force={args.force})"
         )
         print()
@@ -1265,7 +1265,7 @@ def cmd_run_eod_pipeline(args, config: Config) -> int:
 
         result = run_eod_pipeline(
             db_engine, args.exchange,
-            include_tickers=args.include_tickers,
+            include_tickers=not args.skip_tickers,
             timeframe=args.timeframe or "1W",
             force=args.force,
             progress_callback=progress,
@@ -1736,9 +1736,16 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
     eod.add_argument(
         "--include-tickers", action="store_true",
         dest="include_tickers",
-        help="Also run per-ticker indicator+signal compute. Adds "
-             "~3500 tickers of work to the pipeline; not run by "
-             "default for daily operation.",
+        help="DEPRECATED no-op kept for backward compat. The per-stock "
+             "phases are now always part of the pipeline. Use "
+             "--skip-tickers to opt out.",
+    )
+    eod.add_argument(
+        "--skip-tickers", action="store_true",
+        dest="skip_tickers",
+        help="Skip the per-stock indicator+signal phases. Use only when "
+             "you want an industries-only re-run; the canonical pipeline "
+             "order is per-stock first, then per-industry.",
     )
     eod.add_argument(
         "--timeframe", default=None, metavar="1W|1D|...",

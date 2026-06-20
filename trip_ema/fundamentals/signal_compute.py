@@ -5,23 +5,38 @@ for one series, emit the SignalEvent rows that fired.
 
 Four signal kinds, all derived from display_regime transitions:
 
-    BUY       : display_regime went from non-+1 to +1
-    SELL      : display_regime went from non--1 to -1
-    EXIT_BUY  : display_regime went from +1 to non-+1
-    EXIT_SELL : display_regime went from -1 to non--1
+    BUY            : display_regime went from non-+1 to +1
+    SELL           : display_regime went from non--1 to -1
+    EXIT_FROM_BUY  : display_regime went from +1 to non-+1
+    EXIT_FROM_SELL : display_regime went from -1 to non--1
 
 Matches the operator's Pine Script:
     longCondition      = display == 1 and prev != 1   → BUY
-    exitLongCondition  = prev == 1 and display != 1   → EXIT_BUY
+    exitLongCondition  = prev == 1 and display != 1   → EXIT_FROM_BUY
     shortCondition     = display == -1 and prev != -1 → SELL
-    exitShortCondition = prev == -1 and display != -1 → EXIT_SELL
+    exitShortCondition = prev == -1 and display != -1 → EXIT_FROM_SELL
 
-Single-bar transitions can produce TWO events on the same bar.
-Example: display goes from +1 to -1 directly:
-    EXIT_BUY (prev=+1, after=-1)
-    SELL    (prev=+1, after=-1)
-Both fire. This matches Pine — both conditionals evaluate
-independently on the same bar.
+Precedence (operator override of Pine semantics):
+  BUY / SELL always WIN over EXIT_FROM_BUY / EXIT_FROM_SELL on
+  the same bar. When display_regime jumps directly +1 → -1 or
+  -1 → +1, only the new-side OPEN event fires; the opposite-side
+  EXIT is suppressed.
+
+  Rationale: a regime flip is, semantically, a single decision —
+  'now flat-and-short' or 'now flat-and-long'. Emitting both an
+  EXIT and an OPEN for the same flip muddies downstream views
+  (Last 5 signals, email notifications) without adding any
+  information the OPEN alone doesn't carry.
+
+  Single-direction exits (regime → 0) are unaffected —
+  EXIT_FROM_BUY / EXIT_FROM_SELL still fire alone when leaving a
+  position to flat.
+
+Example of suppression:
+  regime +1 → -1  : SELL fires; EXIT_FROM_BUY suppressed.
+  regime -1 → +1  : BUY fires;  EXIT_FROM_SELL suppressed.
+  regime +1 →  0  : EXIT_FROM_BUY fires (no opposite-side OPEN).
+  regime -1 →  0  : EXIT_FROM_SELL fires (no opposite-side OPEN).
 
 The first bar's `prev` is treated as 0 (nz() default in Pine).
 This means a bar where display_regime is +1 on the very first bar
@@ -71,10 +86,24 @@ def compute_signal_events_from_states(
         curr = state.display_regime
         close_value = float(close_lookup(state.trade_date))
 
-        # Determine which (if any) of the 4 signals fired on this
-        # bar. Up to 2 events can fire on one bar when display
-        # goes directly from +1 to -1 or vice versa.
-        if curr == 1 and prev_display != 1:
+        # Detect which signals NATURALLY fire on this bar from the
+        # regime transition, before applying precedence suppression.
+        buy_fires       = (curr == 1 and prev_display != 1)
+        sell_fires      = (curr == -1 and prev_display != -1)
+        exit_buy_fires  = (prev_display == 1 and curr != 1)
+        exit_sell_fires = (prev_display == -1 and curr != -1)
+
+        # Precedence: a direct +1 ↔ -1 flip emits only the new-side
+        # OPEN; the opposite-side EXIT is suppressed.
+        #   +1 → -1 : SELL wins  (EXIT_FROM_BUY suppressed)
+        #   -1 → +1 : BUY wins   (EXIT_FROM_SELL suppressed)
+        # Single-side exits (regime → 0) are untouched.
+        if buy_fires and exit_sell_fires:
+            exit_sell_fires = False
+        if sell_fires and exit_buy_fires:
+            exit_buy_fires = False
+
+        if buy_fires:
             events.append(SignalEvent(
                 ticker_id=state.ticker_id,
                 timeframe=state.timeframe,
@@ -86,7 +115,7 @@ def compute_signal_events_from_states(
                 close_at_event=close_value,
                 computed_at=now,
             ))
-        if curr == -1 and prev_display != -1:
+        if sell_fires:
             events.append(SignalEvent(
                 ticker_id=state.ticker_id,
                 timeframe=state.timeframe,
@@ -98,25 +127,25 @@ def compute_signal_events_from_states(
                 close_at_event=close_value,
                 computed_at=now,
             ))
-        if prev_display == 1 and curr != 1:
+        if exit_buy_fires:
             events.append(SignalEvent(
                 ticker_id=state.ticker_id,
                 timeframe=state.timeframe,
                 industry_name=state.industry_name,
                 trade_date=state.trade_date,
-                event_kind="EXIT_BUY",
+                event_kind="EXIT_FROM_BUY",
                 regime_before=prev_display,
                 regime_after=curr,
                 close_at_event=close_value,
                 computed_at=now,
             ))
-        if prev_display == -1 and curr != -1:
+        if exit_sell_fires:
             events.append(SignalEvent(
                 ticker_id=state.ticker_id,
                 timeframe=state.timeframe,
                 industry_name=state.industry_name,
                 trade_date=state.trade_date,
-                event_kind="EXIT_SELL",
+                event_kind="EXIT_FROM_SELL",
                 regime_before=prev_display,
                 regime_after=curr,
                 close_at_event=close_value,
