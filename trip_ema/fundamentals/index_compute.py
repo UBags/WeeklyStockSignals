@@ -19,15 +19,26 @@ Design overview (see docs/FUNDAMENTALS_PHASES_1_TO_8.md §20):
     weight_i = mcap_i / Σ mcap_j across the picked top-N. Fixed at
     rebalance.
 
-  Daily value:
-    value(t) = base_value × Σ_i [
+  Daily value (CHAIN-LINKED — see _effective_base_value):
+    value(t) = effective_base × Σ_i [
         weight_i × close_i(t) / close_i(rebalance_date)
     ]
-    where the sum is over CONSTITUENTS-PRESENT-ON-DAY-t. Missing
-    constituents (delisted or no mcap row that day) are dropped
-    and the surviving constituents' weights are re-normalized via
-    division by Σ surviving weights. `renormalized=True` is
-    recorded on the value row for those days.
+    where:
+      - The sum is over CONSTITUENTS-PRESENT-ON-DAY-t. Missing
+        constituents (delisted or no mcap row that day) are dropped
+        and the surviving constituents' weights are re-normalized
+        via division by Σ surviving weights. `renormalized=True` is
+        recorded on the value row for those days.
+      - `effective_base` is the per-rebalance-period base value:
+          • First rebalance: effective_base = idx.base_value
+          • Subsequent rebalances: effective_base = the prior
+            period's last computed value (i.e. value on
+            rebalance_date - 1 day, computed with the OLD
+            constituents).
+        This guarantees value(rebal_date) ≡ value(rebal_date - 1)
+        so the curve is CONTINUOUS across rebalances. Standard
+        index-construction term: "chain-linking" or "divisor
+        adjustment" — how S&P 500, NIFTY, etc. do it.
 
 What this module deliberately does NOT do:
   - DB writes from the public API. Selection returns
@@ -341,12 +352,23 @@ def compute_index_value_for_date(
         return None
 
     # Modified Laspeyres sum with renormalization:
-    # value = base × Σ_i_present [(w_i / Σ_w_present) × ratio_i]
+    # value = effective_base × Σ_i_present [(w_i / Σ_w_present) × ratio_i]
+    #
+    # Chain-linking: at every rebalance after the FIRST, we replace
+    # idx.base_value with the prior period's last value. That makes
+    # value(rebalance_date) ≡ value(rebalance_date - 1), eliminating
+    # the visual discontinuity where constituents change. See
+    # _effective_base_value below.
     weighted_sum = sum(
         (w / sum_present_weights) * ratio
         for w, ratio in present
     )
-    value = idx.base_value * weighted_sum
+    effective_base = _effective_base_value(
+        db_engine, industry_name,
+        effective_rebalance_date,
+        default_base=idx.base_value,
+    )
+    value = effective_base * weighted_sum
 
     if value <= 0:
         # Defensive: the value should be > 0 unless all closes are
@@ -367,3 +389,68 @@ def compute_index_value_for_date(
         renormalized=renormalized,
         effective_rebalance_date=effective_rebalance_date,
     )
+
+
+# ---------- chain-link helper ---------- #
+
+
+def _effective_base_value(
+    db_engine: Engine,
+    industry_name: str,
+    rebalance_date: date,
+    *,
+    default_base: float,
+) -> float:
+    """Return the per-rebalance effective base value (chain-linking).
+
+    Logic:
+      - If `rebalance_date` is the EARLIEST rebalance for this index,
+        return `default_base` (the index's configured base_value).
+        Nothing to chain to.
+      - Otherwise return the LAST industry_index_value row strictly
+        BEFORE `rebalance_date`. That's the prior period's closing
+        value, computed with the OLD constituents. Using it as the
+        base for the new period makes the curve continuous on the
+        rebalance date itself.
+      - If the prior-period value is unknown (e.g. the backfill
+        hasn't filled the gap yet), fall back to `default_base` and
+        log a warning. The chain breaks for that one rebalance but
+        downstream periods still link.
+
+    Note: the runner walks dates ascending, so by the time we hit a
+    new rebalance period the prior period's last value is already
+    in industry_index_value. One SQL per call — acceptable cost.
+    """
+    with db_engine.connect() as conn:
+        # Find the earliest rebalance for this industry.
+        earliest = conn.execute(text("""
+            SELECT MIN(rebalance_date)
+            FROM industry_index_constituent
+            WHERE industry_name = :n
+        """), {"n": industry_name}).scalar()
+
+        if earliest is None or earliest >= rebalance_date:
+            # No prior rebalance — use configured base.
+            return default_base
+
+        # Most recent industry_index_value strictly BEFORE
+        # rebalance_date — i.e., the prior period's last value.
+        prior_value = conn.execute(text("""
+            SELECT value
+            FROM industry_index_value
+            WHERE industry_name = :n
+              AND trade_date < :rd
+            ORDER BY trade_date DESC
+            LIMIT 1
+        """), {"n": industry_name, "rd": rebalance_date}).scalar()
+
+    if prior_value is None or prior_value <= 0:
+        logger.warning(
+            "_effective_base_value: no prior-period value for %r "
+            "before rebalance %s — chain breaks here; falling back "
+            "to default_base=%s",
+            industry_name, rebalance_date, default_base,
+        )
+        return default_base
+
+    return float(prior_value)
