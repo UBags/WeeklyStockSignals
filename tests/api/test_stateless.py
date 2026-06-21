@@ -29,7 +29,7 @@ from trip_ema.domain import (
     TickerRef,
     Timeframe,
 )
-from trip_ema.fundamentals.indicator_primitives import INDICATOR_DEFAULTS
+from trip_ema.domain import IndicatorParams
 
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -83,7 +83,7 @@ class TestComputeFullVerbose:
         result = compute_full_verbose(
             ticker=_TICKER, history=[], latest_bar=latest,
             timeframe=Timeframe.WEEKLY,
-            params=INDICATOR_DEFAULTS,
+            params=IndicatorParams(),
         )
         # 1 bar — warmup, no real regime, but a BarState placeholder.
         assert len(result.bars) == 1
@@ -94,7 +94,7 @@ class TestComputeFullVerbose:
         result = compute_full_verbose(
             ticker=_TICKER, history=bars[:-1], latest_bar=bars[-1],
             timeframe=Timeframe.WEEKLY,
-            params=INDICATOR_DEFAULTS,
+            params=IndicatorParams(),
         )
         # All 5 bars in warmup → all NEUTRAL.
         assert all(s.display_bg == CoreRegime.NEUTRAL for s in result.bars)
@@ -111,7 +111,7 @@ class TestComputeFullVerbose:
         result = compute_full_verbose(
             ticker=_TICKER, history=history, latest_bar=latest,
             timeframe=Timeframe.WEEKLY,
-            params=INDICATOR_DEFAULTS,
+            params=IndicatorParams(),
         )
         # Sanity: the latest bar should be BEARISH on a -50% gap.
         assert result.bars[-1].display_bg == CoreRegime.BEARISH
@@ -125,7 +125,7 @@ class TestComputeFullVerbose:
         result = compute_full_verbose(
             ticker=_TICKER, history=bars[:-1], latest_bar=bars[-1],
             timeframe=Timeframe.WEEKLY,
-            params=INDICATOR_DEFAULTS,
+            params=IndicatorParams(),
             state_history_retain=20,
         )
         assert len(result.bars) == 20
@@ -135,7 +135,7 @@ class TestComputeFullVerbose:
         result = compute_full_verbose(
             ticker=_TICKER, history=[], latest_bar=latest,
             timeframe=Timeframe.WEEKLY,
-            params=INDICATOR_DEFAULTS,
+            params=IndicatorParams(),
         )
         assert result.ticker == _TICKER
         assert result.timeframe == Timeframe.WEEKLY
@@ -150,7 +150,7 @@ class TestComputeFullVerbose:
         result = compute_full_verbose(
             ticker=_TICKER, history=bars[:-1], latest_bar=bars[-1],
             timeframe=Timeframe.WEEKLY,
-            params=INDICATOR_DEFAULTS,
+            params=IndicatorParams(),
         )
         for bar in result.bars:
             assert bar.core_bg == bar.display_bg
@@ -168,7 +168,7 @@ class TestComputeFullTerse:
         result = compute_full_terse(
             ticker=_TICKER, history=[], latest_bar=latest,
             timeframe=Timeframe.WEEKLY,
-            params=INDICATOR_DEFAULTS,
+            params=IndicatorParams(),
         )
         assert result.latest_change == ChangeSignal.NO_CHANGE
         assert result.latest_price == 100.0
@@ -180,7 +180,7 @@ class TestComputeFullTerse:
         result = compute_full_terse(
             ticker=_TICKER, history=history, latest_bar=latest,
             timeframe=Timeframe.WEEKLY,
-            params=INDICATOR_DEFAULTS,
+            params=IndicatorParams(),
         )
         assert result.latest_change == ChangeSignal.SELL
         # latest_price is the latest_bar's close.

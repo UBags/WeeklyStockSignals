@@ -43,10 +43,18 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    # The flat-shape IndicatorParams from the domain layer. Used by
+    # `EngineParams.from_domain` to bridge in from the public/config
+    # contract. Import is type-only to avoid a cycle:
+    # domain.state has no fundamentals dependency, and we want to
+    # keep it that way.
+    from ..domain import IndicatorParams as DomainIndicatorParams
 
 
 # ============================================================
@@ -462,11 +470,21 @@ def compute_atr_bands(
 
 
 @dataclass(frozen=True, slots=True)
-class IndicatorParams:
-    """All Phase 5 tunable parameters bundled together.
+class EngineParams:
+    """All Phase 5 tunable parameters bundled together — the
+    INTERNAL compute shape.
 
-    Defaults match the operator's Pine Script. Phase 5-4 (CLI)
-    will surface a subset of these for command-line override.
+    This class groups per-EMA knobs into nested TripleEMAParams
+    instances. Callers wiring up from config should not construct
+    this directly; use `EngineParams.from_domain(...)` to bridge
+    from the flat-shape `trip_ema.domain.IndicatorParams` instead.
+
+    Defaults below match the operator's Pine Script and ARE
+    DIFFERENT from the domain class's defaults. Don't reconcile
+    them blindly — the divergence is intentional for industry
+    indices (which use INDICATOR_DEFAULTS) vs. ticker series (which
+    receive an explicit params built from config via from_domain).
+    Operator should sign off on any change to the values below.
     """
     med: TripleEMAParams = MED_DEFAULT
     long: TripleEMAParams = LONG_DEFAULT
@@ -476,8 +494,47 @@ class IndicatorParams:
     hl_range_avg_length: int = 26
     volume_smoothing: int = 2
 
+    @classmethod
+    def from_domain(cls, p: "DomainIndicatorParams") -> "EngineParams":
+        """Build an EngineParams from the flat-shape domain
+        IndicatorParams that comes out of Config.to_indicator_params().
 
-INDICATOR_DEFAULTS = IndicatorParams()
+        The domain class is the public/config contract (one field per
+        knob); EngineParams is the internal compute shape that groups
+        per-EMA knobs into TripleEMAParams. This adapter is the only
+        place that knows both shapes — every other caller should go
+        through it rather than reaching into either type.
+
+        Note on field names: the domain's flat names use the user-
+        facing labels (`med_base`, `med_s1`, `med_s2`, `med_final`);
+        TripleEMAParams uses the engine-internal labels
+        (`base_len`, `first_smoothing`, `hull_n`, `final_smoothing`).
+        The mapping is fixed by the Pine port and documented on
+        TripleEMAParams.
+        """
+        return cls(
+            med=TripleEMAParams(
+                base_len=p.med_base, first_smoothing=p.med_s1,
+                hull_n=p.med_s2, final_smoothing=p.med_final,
+            ),
+            long=TripleEMAParams(
+                base_len=p.long_base, first_smoothing=p.long_s1,
+                hull_n=p.long_s2, final_smoothing=p.long_final,
+            ),
+            longest=TripleEMAParams(
+                base_len=p.longest_base, first_smoothing=p.longest_s1,
+                hull_n=p.longest_s2, final_smoothing=p.longest_final,
+            ),
+            atr_length=p.atr_length,
+            atr_bands=ATRBandParams(
+                inner_multiplier=p.inner_mult,
+                mid_multiplier=p.mid_mult,
+                outer_multiplier=p.outer_mult,
+            ),
+            volume_smoothing=p.volume_sma_length,
+        )
+
+INDICATOR_DEFAULTS = EngineParams()
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,7 +558,7 @@ def compute_indicator_series(
     high: pd.Series,
     low: pd.Series,
     *,
-    params: IndicatorParams = INDICATOR_DEFAULTS,
+    params: EngineParams = INDICATOR_DEFAULTS,
     synthetic_atr_for_index: bool = False,
 ) -> IndicatorSeries:
     """Compute all per-bar indicator series for a given OHLCV input.
@@ -684,7 +741,7 @@ def compute_bar_states(
     *,
     trade_dates: pd.Series,
     series: "IndicatorSeries",
-    params: IndicatorParams = INDICATOR_DEFAULTS,
+    params: EngineParams = INDICATOR_DEFAULTS,
     open_: Optional[pd.Series] = None,
 ) -> list[dict]:
     """Walk the bar series and produce a per-bar dict of full

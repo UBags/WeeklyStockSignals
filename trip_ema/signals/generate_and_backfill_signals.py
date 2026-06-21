@@ -68,7 +68,7 @@ from trip_ema.domain import (
 )
 from trip_ema.fundamentals.indicator_primitives import (
     INDICATOR_DEFAULTS,
-    IndicatorParams,
+    EngineParams,
     compute_indicator_series,
 )
 from trip_ema.indicators.aggregation import _monday_of, daily_to_weekly
@@ -112,7 +112,7 @@ def walk_and_generate_events(
     start_date: date,
     end_date: date,
     *,
-    indicator_params: IndicatorParams = INDICATOR_DEFAULTS,
+    indicator_params: EngineParams = INDICATOR_DEFAULTS,
     week_anchor_tz: str = "Asia/Kolkata",
 ) -> tuple[list[SignalEvent], BackfillResult]:
     """Pure day-by-day forward-walk over daily bars.
@@ -369,7 +369,7 @@ def run_backfill_for_ticker(
     start_date: date,
     end_date: date,
     *,
-    indicator_params: IndicatorParams = INDICATOR_DEFAULTS,
+    indicator_params: EngineParams = INDICATOR_DEFAULTS,
     warmup_days: int = 730,
     week_anchor_tz: str = "Asia/Kolkata",
 ) -> BackfillResult:

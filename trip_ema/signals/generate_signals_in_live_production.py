@@ -71,7 +71,7 @@ from trip_ema.domain import (
 )
 from trip_ema.fundamentals.indicator_primitives import (
     INDICATOR_DEFAULTS,
-    IndicatorParams,
+    EngineParams,
     compute_indicator_series,
 )
 from trip_ema.indicators.aggregation import daily_to_weekly
@@ -130,7 +130,7 @@ def generate_live_signal_for_ticker(
     timeframe: Timeframe,
     *,
     now: Optional[datetime] = None,
-    indicator_params: IndicatorParams = INDICATOR_DEFAULTS,
+    indicator_params: EngineParams = INDICATOR_DEFAULTS,
     history_window_days: int = 730,
     week_anchor_tz: str = "Asia/Kolkata",
     signal_cache_writer: Optional[SignalCacheWriter] = None,

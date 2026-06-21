@@ -93,10 +93,10 @@ def test_compute_rejects_extra_field(http_app):
 
 def test_compute_does_not_touch_cache(http_app):
     """Stateless: the cache should remain empty after a compute call."""
-    assert len(http_app.cache) == 0
+    assert http_app.cache.snapshot_count() == 0
     response = http_app.client.post("/v1/compute", json=_compute_body())
     assert response.status_code == 200
-    assert len(http_app.cache) == 0
+    assert http_app.cache.snapshot_count() == 0
 
 
 def test_compute_uses_default_timeframe(http_app):

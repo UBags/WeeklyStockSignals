@@ -52,6 +52,7 @@ from ..domain import (
 from ..fundamentals.indicator_primitives import compute_indicator_series
 from ..regime import BarInputs, Regime, compute_regime
 from .responses import TerseResponse, VerboseResponse
+from ..fundamentals.indicator_primitives import EngineParams
 
 
 # ============================================================
@@ -165,7 +166,8 @@ def _walk_bars(
     volumes = pd.Series([b.volume for b in bars])
     highs = pd.Series([b.high for b in bars])
     lows = pd.Series([b.low for b in bars])
-    series = compute_indicator_series(closes, volumes, highs, lows, params=params)
+    engine_params = EngineParams.from_domain(params)
+    series = compute_indicator_series(closes, volumes, highs, lows, params=engine_params)
 
     states: list[BarState] = []
     trajectory: list[Optional[Regime]] = []
