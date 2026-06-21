@@ -1458,7 +1458,7 @@ class TestGetIndustrySignalEvents:
                 "IT - Services", date(2026, 1, 8), "BUY",
             ))
             repo.upsert(_make_signal_row(
-                "IT - Services", date(2026, 1, 22), "EXIT_BUY",
+                "IT - Services", date(2026, 1, 22), "EXIT_FROM_BUY",
                 regime_before=1, regime_after=0,
             ))
             repo.upsert(_make_signal_row(
@@ -1545,7 +1545,7 @@ class TestGetRecentSignalEvents:
             ))
             repo.upsert(_make_signal_row(
                 "IT - Services", date.today() - timedelta(days=100),
-                "EXIT_BUY", regime_before=1, regime_after=0,
+                "EXIT_FROM_BUY", regime_before=1, regime_after=0,
             ))
         r = real_db_client.get(
             "/v1/fundamentals/signal-events/recent?days=7",

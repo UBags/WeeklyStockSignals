@@ -1956,12 +1956,13 @@ class TestCmdComputeSignalsTickerModes:
 class TestCmdRunEodPipeline:
 
     def _make_args(self, exchange="NSE", include_tickers=False,
-                   timeframe=None, force=False):
+                   timeframe=None, force=False, skip_tickers=False):
         args = type("A", (), {})()
         args.exchange = exchange
         args.include_tickers = include_tickers
         args.timeframe = timeframe
         args.force = force
+        args.skip_tickers = skip_tickers
         return args
 
     def test_returns_0_on_full_success(

@@ -80,6 +80,9 @@ class EmailTransport:
     invokes it to fetch per-ticker enrichment for HTML rendering;
     when None, sends are text-only.
     """
+    # Optional engine for rank-score enrichment; None when not wired.
+    _db_engine = None
+
 
     api_key: str
     from_address: str
@@ -157,7 +160,7 @@ class EmailTransport:
                     "alphabetical BUY sort"
                 )
                 rank_scores = None
-            return render_html(batch, enrichment, rank_scores=rank_scores)
+            return render_html(batch, enrichment)
         except Exception:
             logger.exception(
                 "Enrichment / HTML render failed; falling back to text-only "

@@ -20,7 +20,6 @@ from sqlalchemy import Engine
 
 from ...cache import SignalCache
 from ...config import Config
-from ...registry import TickerRegistry
 from ...scheduler import ComputeScheduler, SubscriberDistributor
 
 # Phase 7: optional Redis queue. Imported under TYPE_CHECKING to avoid a
@@ -40,7 +39,6 @@ class AppState:
     """
     config: Config
     db_engine: Engine
-    registry: TickerRegistry
     cache: SignalCache
     compute_scheduler: ComputeScheduler
     distributor: Optional[SubscriberDistributor] = None
@@ -105,10 +103,6 @@ def get_config() -> Config:
 
 def get_db_engine() -> Engine:
     return _require_state().db_engine
-
-
-def get_registry() -> TickerRegistry:
-    return _require_state().registry
 
 
 def get_cache() -> SignalCache:

@@ -412,11 +412,19 @@ def admin_signals_generated(
 def _run_signal_generation_safe(
     db_engine, config, exchange, timeframes, force_full, run_id,
 ):
-    # Lazy import — keeps app startup fast for deployments that never
-    # hit /v1/admin/signals/*. Same pattern as cli.py's
-    # cmd_generate_signals.
-    from ....etl.signal_generator import generate_historical_signals
-    from ....etl.types import RunOutcome
+    # Step 9c: signal_generator.py is deleted. Route returns 501
+    # until Step 10 lands the regenerate-signals CLI.
+    from fastapi import HTTPException
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Historical signal generation via HTTP is unavailable "
+            "after Step 9 demolition. Run `trip-ema-etl "
+            "regenerate-signals` from the CLI (Step 10) until the "
+            "route is re-wired."
+        ),
+    )
+    from ....etl.types import RunOutcome  # noqa: F401  unreachable
 
     outcome = RunOutcome.FAILED
     close_notes: str | None = None

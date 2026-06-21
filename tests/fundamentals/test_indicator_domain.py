@@ -157,7 +157,7 @@ from trip_ema.fundamentals import SIGNAL_EVENT_KINDS, SignalEvent
 class TestSignalEventConstants:
 
     def test_signal_event_kinds(self):
-        assert SIGNAL_EVENT_KINDS == ("BUY", "SELL", "EXIT_BUY", "EXIT_SELL")
+        assert SIGNAL_EVENT_KINDS == ("BUY", "SELL", "EXIT_FROM_BUY", "EXIT_FROM_SELL")
         assert isinstance(SIGNAL_EVENT_KINDS, tuple)
 
 

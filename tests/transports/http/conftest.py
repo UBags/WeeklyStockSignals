@@ -6,6 +6,13 @@ etc.) for tests that only need to verify route behavior.
 
 Tests that DO need a real DB can use the `db_engine` fixture from the
 persistence conftest — re-exported below.
+
+# Step 9 note
+
+TickerRegistry is gone (deleted in 9a). The fixture no longer
+constructs one or overrides get_registry. Tests that previously
+asserted "this many engines were primed" need to be rewritten to
+assert against the cache snapshot count instead.
 """
 
 from __future__ import annotations
@@ -28,8 +35,6 @@ from trip_ema.config.schema import (
     MarketHoursConfig,
     SchedulingConfig,
 )
-from trip_ema.domain import IndicatorParams, Timeframe
-from trip_ema.registry import TickerRegistry
 from trip_ema.transports.http import create_app
 from trip_ema.transports.http.dependencies import (
     get_cache,
@@ -38,7 +43,6 @@ from trip_ema.transports.http.dependencies import (
     get_db_engine,
     get_distributor,
     get_redis_queue,
-    get_registry,
 )
 
 # Re-export the persistence DB fixtures for tests that need a real DB.
@@ -81,22 +85,20 @@ class HttpFixture:
     """Bundle of objects most HTTP tests need."""
     client: TestClient
     cache: SignalCache
-    registry: TickerRegistry
     config: Config
     compute_scheduler: object   # ComputeScheduler-like (may be stubbed)
 
 
 @pytest.fixture
 def http_app() -> Iterator[HttpFixture]:
-    """A wired-up FastAPI TestClient with empty registry/cache and no
-    real DB. Sufficient for testing route behavior in isolation.
+    """A wired-up FastAPI TestClient with empty cache and no real DB.
+    Sufficient for testing route behavior in isolation.
 
     The compute_scheduler dependency is overridden with a stub that
     reports 'never started, never completed' — this is healthy from
     /readyz's perspective (in tests we don't actually run schedulers).
     """
     cache = SignalCache()
-    registry = TickerRegistry(IndicatorParams(), [Timeframe.WEEKLY])
     config = _build_test_config()
 
     # Stub scheduler — never started, looks healthy.
@@ -110,7 +112,6 @@ def http_app() -> Iterator[HttpFixture]:
 
     app = create_app()
     app.dependency_overrides[get_cache] = lambda: cache
-    app.dependency_overrides[get_registry] = lambda: registry
     app.dependency_overrides[get_config] = lambda: config
     app.dependency_overrides[get_compute_scheduler] = lambda: stub_scheduler
     app.dependency_overrides[get_distributor] = lambda: None
@@ -120,7 +121,7 @@ def http_app() -> Iterator[HttpFixture]:
 
     with TestClient(app) as client:
         yield HttpFixture(
-            client=client, cache=cache, registry=registry, config=config,
+            client=client, cache=cache, config=config,
             compute_scheduler=stub_scheduler,
         )
     app.dependency_overrides.clear()

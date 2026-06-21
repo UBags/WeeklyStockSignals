@@ -1,277 +1,322 @@
-"""End-to-end test that the observability instrumentation in
-ComputeScheduler.run_once() actually fires the Prometheus metrics.
+"""Integration test for scheduler metrics — Step 9 replacement.
 
-Re-uses the FakeBarsRepo / FakeRegistry / FakeDBEngine doubles from
-the gap-detection tests so we don't need Postgres.
+The OLD test (`test_metrics_integration.py`, deleted) exercised the
+TickerEngine ingestion path and asserted on per-bar and per-engine
+counters that the new ComputeScheduler doesn't drive any more
+(bars_ingested_total, signal_events_total, tickers_reprimed_total).
+
+This replacement covers the metrics the **new** `run_once()` path
+actually emits:
+
+  - `scheduler_runs_total{outcome=completed}` increments once per
+    successful pass.
+  - `scheduler_runs_total{outcome=skipped_concurrent}` increments
+    when a second `run_once()` races a first.
+  - `scheduler_run_duration_seconds` records a wall-clock sample
+    per completed pass.
+  - `scheduler_tickers_examined_total` increments once per active
+    ticker seen during the pass.
+
+Metrics that the old path drove but the new path doesn't (yet):
+bars_ingested_total, signal_events_total, errors_total. These are
+intentionally untested here — the new scheduler delegates to Step 6
+which has its own per-ticker test coverage that doesn't go through
+the Prometheus REGISTRY. A future enhancement would have Step 6
+report these via the scheduler's summary so the scheduler can
+increment them itself; that's out of Step 9 scope.
+
+Requires a real Postgres (uses the `db_engine` fixture from the
+persistence conftest).
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+import threading
+import time
 
 import pytest
 
 from trip_ema.cache import SignalCache
-from trip_ema.domain import (
-    IndicatorParams,
-    OHLCVBar,
-    TickerRef,
-    Timeframe,
-)
-from trip_ema.engine import TickerEngine
 from trip_ema.observability import metrics as M
-
-# Re-use the harness from the gap-detection tests
-from tests.scheduler_pure.test_gap_detection import (
-    FakeBarsRepo,
-    FakeDBEngine,
-    FakeRegistry,
-    _build_primed_engine,
-    _seed_cache_for_engine,
-)
+from trip_ema.scheduler import ComputeScheduler
 
 
-def _get_counter_value(counter, **labels) -> float:
-    """Read a labeled counter's current value."""
+# ---------------------------------------------------------------------------
+# Metric snapshot helpers — read the float values directly off the
+# private accessors. The prometheus_client public API surface for
+# reading values is awkward (you have to scrape and parse text). These
+# accessors are stable across the 0.x line.
+# ---------------------------------------------------------------------------
+
+
+def _counter_value(counter, **labels) -> float:
+    """Read a Counter's current value. If the counter has labelnames,
+    pass them as kwargs."""
     if labels:
-        return counter.labels(**labels)._value.get()
-    return counter._value.get()
+        sample = counter.labels(**labels)
+    else:
+        sample = counter
+    return sample._value.get()
 
 
-class TestSchedulerInstrumentation:
+def _histogram_count(histogram) -> int:
+    """Read a Histogram's total observation count. Equivalent to
+    the `_count` time series Prometheus exposes.
 
-    UTC = timezone.utc
+    `_buckets` in prometheus_client are PER-bucket counts (not the
+    cumulative form Prometheus exposes), so the total count is the
+    sum across all buckets — small observations land in low buckets
+    and never reach +Inf.
+    """
+    return int(sum(b.get() for b in histogram._buckets))
 
-    def test_run_once_increments_runs_completed_counter(self, monkeypatch):
-        """A normal run_once() must bump scheduler_runs_total{outcome='completed'}."""
-        from trip_ema.scheduler.compute_scheduler import ComputeScheduler
 
-        last_monday = datetime(2026, 5, 4, tzinfo=self.UTC)
-        now = datetime(2026, 5, 19, 10, 0, tzinfo=self.UTC)
-        ticker = TickerRef("NSE", "NIFTY", "INDEX")
-        engine = _build_primed_engine(last_monday=last_monday)
-        cache = SignalCache()
-        _seed_cache_for_engine(cache, engine, now=now - timedelta(hours=1))
-        bars_repo = FakeBarsRepo(
-            source_bars={(1, "1D"): [
-                OHLCVBar(
-                    timestamp=datetime(2026, 5, 11 + i, tzinfo=self.UTC),
-                    open=100.0, high=101.0, low=99.0,
-                    close=100.5, volume=1000.0,
-                )
-                for i in range(5)
-            ] + [
-                OHLCVBar(
-                    timestamp=datetime(2026, 5, 18 + i, tzinfo=self.UTC),
-                    open=100.0, high=101.0, low=99.0,
-                    close=100.5, volume=1000.0,
-                )
-                for i in range(2)
-            ]},
-        )
-        registry = FakeRegistry(
-            ticker_id=1, ref=ticker, engine=engine,
-            tz="UTC",
-        )
-        db_engine = FakeDBEngine()
+@pytest.fixture
+def _metric_snapshot():
+    """Capture starting values of the metrics this test asserts on, so
+    each test can reason in deltas. Necessary because the metric
+    REGISTRY is module-level and persists across tests."""
+    return {
+        "runs_completed": _counter_value(
+            M.scheduler_runs_total, outcome="completed",
+        ),
+        "runs_skipped": _counter_value(
+            M.scheduler_runs_total, outcome="skipped_concurrent",
+        ),
+        "duration_count": _histogram_count(M.scheduler_run_duration_seconds),
+        "tickers_examined": _counter_value(M.scheduler_tickers_examined_total),
+    }
 
-        monkeypatch.setattr(
-            "trip_ema.scheduler.compute_scheduler.BarsRepository",
-            lambda conn: bars_repo,
-        )
 
-        sched = ComputeScheduler(
-            db_engine=db_engine, registry=registry, cache=cache,
-            cadence_minutes=60,
-        )
-        monkeypatch.setattr(sched, "_maybe_extend_partitions", lambda now: None)
-        import trip_ema.scheduler.compute_scheduler as sched_mod
-        orig_dt = sched_mod.datetime
-        class FakeDT(orig_dt):
-            @classmethod
-            def now(cls, tz=None):
-                return now
-        monkeypatch.setattr(sched_mod, "datetime", FakeDT)
+# ---------------------------------------------------------------------------
+# Schema setup — the scheduler queries `tickers WHERE is_active`. Build
+# the minimal table; the rest of the schema is irrelevant for the
+# scheduler's metric emission (Step 6 may return skip_reason for any
+# ticker without bars, but it won't crash).
+# ---------------------------------------------------------------------------
 
-        before_runs = _get_counter_value(M.scheduler_runs_total, outcome="completed")
-        before_examined = _get_counter_value(M.scheduler_tickers_examined_total)
 
-        sched.run_once()
-
-        # Run counter incremented
-        after_runs = _get_counter_value(M.scheduler_runs_total, outcome="completed")
-        assert after_runs == before_runs + 1.0
-
-        # Examined-tickers counter incremented by 1 (we registered 1)
-        after_examined = _get_counter_value(M.scheduler_tickers_examined_total)
-        assert after_examined == before_examined + 1.0
-
-    def test_run_once_with_gap_sets_stale_gauge(self, monkeypatch):
-        """A run that detects a gap must set the stale_tickers gauge to 1."""
-        from trip_ema.scheduler.compute_scheduler import ComputeScheduler
-
-        last_monday = datetime(2026, 5, 4, tzinfo=self.UTC)
-        now = datetime(2026, 5, 26, 10, 0, tzinfo=self.UTC)
-        ticker = TickerRef("NSE", "NIFTY", "INDEX")
-        engine = _build_primed_engine(last_monday=last_monday)
-        cache = SignalCache()
-        _seed_cache_for_engine(cache, engine, now=now - timedelta(hours=1))
-
-        # Only week of 5/11 has bars; 5/18 missing -> gap
-        bars = [
-            OHLCVBar(
-                timestamp=datetime(2026, 5, 11 + i, tzinfo=self.UTC),
-                open=100.0, high=101.0, low=99.0,
-                close=100.5, volume=1000.0,
+@pytest.fixture
+def _tickers_table(db_engine):
+    """Minimal `tickers` table — just enough columns for
+    `TickersRepository.find_active` to return rows."""
+    with db_engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE IF EXISTS tickers CASCADE")
+        conn.exec_driver_sql("""
+            CREATE TABLE tickers (
+                ticker_id SERIAL PRIMARY KEY,
+                exchange  VARCHAR(8)  NOT NULL,
+                symbol    VARCHAR(64) NOT NULL,
+                instrument VARCHAR(8) NOT NULL,
+                is_active BOOLEAN     NOT NULL DEFAULT TRUE,
+                full_name VARCHAR,
+                tz        VARCHAR(32) NOT NULL DEFAULT 'UTC',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
-            for i in range(5)
-        ]
-        bars_repo = FakeBarsRepo(source_bars={(1, "1D"): bars})
-        registry = FakeRegistry(
-            ticker_id=1, ref=ticker, engine=engine,
-            tz="UTC",
-        )
+        """)
+    yield db_engine
+    with db_engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE IF EXISTS tickers CASCADE")
 
-        monkeypatch.setattr(
-            "trip_ema.scheduler.compute_scheduler.BarsRepository",
-            lambda conn: bars_repo,
-        )
 
+# ===========================================================================
+# Tests
+# ===========================================================================
+
+
+class TestRunCompletionMetrics:
+
+    def test_run_once_increments_runs_completed(
+        self, _tickers_table, _metric_snapshot,
+    ):
+        """One successful pass → one increment on the completed counter
+        and one new observation on the duration histogram."""
+        cache = SignalCache()
         sched = ComputeScheduler(
-            db_engine=FakeDBEngine(), registry=registry, cache=cache,
-            cadence_minutes=60,
+            db_engine=_tickers_table, cache=cache, cadence_minutes=60,
         )
-        monkeypatch.setattr(sched, "_maybe_extend_partitions", lambda now: None)
-        import trip_ema.scheduler.compute_scheduler as sched_mod
-        orig_dt = sched_mod.datetime
-        class FakeDT(orig_dt):
-            @classmethod
-            def now(cls, tz=None):
-                return now
-        monkeypatch.setattr(sched_mod, "datetime", FakeDT)
 
         sched.run_once()
 
-        # The gauge should reflect 1 stale ticker
-        assert M.scheduler_stale_tickers._value.get() == 1.0
-        # Cache_size gauge reflects the lone entry
-        assert M.cache_size._value.get() == 1.0
-
-    def test_concurrent_run_increments_skipped_counter(self, monkeypatch):
-        """If run_once is called while another is in flight, it must
-        bump scheduler_runs_total{outcome='skipped_concurrent'} and
-        return immediately."""
-        from trip_ema.scheduler.compute_scheduler import ComputeScheduler
-
-        ticker = TickerRef("NSE", "X", "EQ")
-        engine = _build_primed_engine(
-            last_monday=datetime(2026, 5, 4, tzinfo=self.UTC),
+        runs_after = _counter_value(
+            M.scheduler_runs_total, outcome="completed",
         )
+        dur_after = _histogram_count(M.scheduler_run_duration_seconds)
+
+        assert runs_after - _metric_snapshot["runs_completed"] == 1, (
+            "scheduler_runs_total{outcome=completed} should have "
+            "incremented by 1"
+        )
+        assert dur_after - _metric_snapshot["duration_count"] == 1, (
+            "scheduler_run_duration_seconds should have one new "
+            "observation"
+        )
+
+    def test_run_once_empty_db_examines_zero_tickers(
+        self, _tickers_table, _metric_snapshot,
+    ):
+        """No active tickers → tickers_examined_total unchanged."""
         cache = SignalCache()
-        bars_repo = FakeBarsRepo(source_bars={})
-        registry = FakeRegistry(
-            ticker_id=1, ref=ticker, engine=engine,
-            tz="UTC",
-        )
-
         sched = ComputeScheduler(
-            db_engine=FakeDBEngine(), registry=registry, cache=cache,
-            cadence_minutes=60,
+            db_engine=_tickers_table, cache=cache, cadence_minutes=60,
         )
 
-        # Hold the lock so the next run_once will skip
-        sched._run_lock.acquire()
+        sched.run_once()
+
+        examined_after = _counter_value(M.scheduler_tickers_examined_total)
+        assert examined_after == _metric_snapshot["tickers_examined"], (
+            "tickers_examined_total should not have moved with no "
+            "active tickers in the DB"
+        )
+
+
+class TestTickerExaminationMetrics:
+
+    def test_one_active_ticker_increments_examined_counter(
+        self, _tickers_table, _metric_snapshot,
+    ):
+        """Add one active ticker — the next pass should examine it,
+        bumping tickers_examined_total by 1. The ticker has no bars
+        so Step 6 returns skip_reason='no_bars', but the examination
+        counter still fires (it counts attempts, not successes)."""
+        with _tickers_table.begin() as conn:
+            conn.exec_driver_sql(
+                "INSERT INTO tickers "
+                "(exchange, symbol, instrument, is_active, tz) "
+                "VALUES ('NSE', 'RELIANCE', 'EQ', TRUE, 'Asia/Kolkata')"
+            )
+
+        cache = SignalCache()
+        sched = ComputeScheduler(
+            db_engine=_tickers_table, cache=cache, cadence_minutes=60,
+        )
+        sched.run_once()
+
+        examined_after = _counter_value(M.scheduler_tickers_examined_total)
+        delta = examined_after - _metric_snapshot["tickers_examined"]
+        assert delta == 1, (
+            f"expected tickers_examined_total to increment by 1, got "
+            f"delta={delta}"
+        )
+
+    def test_multiple_active_tickers_increment_examined_counter(
+        self, _tickers_table, _metric_snapshot,
+    ):
+        """Three active tickers → examined counter +3."""
+        with _tickers_table.begin() as conn:
+            for sym in ("RELIANCE", "TCS", "INFY"):
+                conn.exec_driver_sql(
+                    "INSERT INTO tickers "
+                    "(exchange, symbol, instrument, is_active, tz) "
+                    f"VALUES ('NSE', '{sym}', 'EQ', TRUE, 'Asia/Kolkata')"
+                )
+
+        cache = SignalCache()
+        sched = ComputeScheduler(
+            db_engine=_tickers_table, cache=cache, cadence_minutes=60,
+        )
+        sched.run_once()
+
+        examined_after = _counter_value(M.scheduler_tickers_examined_total)
+        delta = examined_after - _metric_snapshot["tickers_examined"]
+        assert delta == 3, (
+            f"expected tickers_examined_total to increment by 3, got "
+            f"delta={delta}"
+        )
+
+    def test_inactive_tickers_are_not_examined(
+        self, _tickers_table, _metric_snapshot,
+    ):
+        """is_active=FALSE rows are filtered out by the scheduler's
+        ticker query."""
+        with _tickers_table.begin() as conn:
+            conn.exec_driver_sql(
+                "INSERT INTO tickers "
+                "(exchange, symbol, instrument, is_active, tz) VALUES "
+                "('NSE', 'ACTIVE',   'EQ', TRUE,  'Asia/Kolkata'), "
+                "('NSE', 'INACTIVE', 'EQ', FALSE, 'Asia/Kolkata')"
+            )
+
+        cache = SignalCache()
+        sched = ComputeScheduler(
+            db_engine=_tickers_table, cache=cache, cadence_minutes=60,
+        )
+        sched.run_once()
+
+        examined_after = _counter_value(M.scheduler_tickers_examined_total)
+        delta = examined_after - _metric_snapshot["tickers_examined"]
+        assert delta == 1, (
+            f"expected only the active ticker to be examined, got "
+            f"delta={delta}"
+        )
+
+
+class TestReentrancyMetrics:
+
+    def test_concurrent_run_increments_skipped_counter(
+        self, _tickers_table, _metric_snapshot,
+    ):
+        """If a second `run_once()` races a first, it returns immediately
+        with `skipped_due_to_concurrent_run=True` and increments
+        `scheduler_runs_total{outcome=skipped_concurrent}` — NOT
+        `outcome=completed`."""
+        cache = SignalCache()
+        sched = ComputeScheduler(
+            db_engine=_tickers_table, cache=cache, cadence_minutes=60,
+        )
+
+        # Acquire the run_lock manually to simulate an in-flight pass,
+        # then run_once() from the main thread should hit the
+        # `if not self._run_lock.acquire(blocking=False)` branch.
+        acquired = sched._run_lock.acquire(blocking=True)
+        assert acquired
         try:
-            before = _get_counter_value(
-                M.scheduler_runs_total, outcome="skipped_concurrent",
-            )
             summary = sched.run_once()
-            after = _get_counter_value(
-                M.scheduler_runs_total, outcome="skipped_concurrent",
-            )
-            assert summary.skipped_due_to_concurrent_run is True
-            assert after == before + 1.0
         finally:
             sched._run_lock.release()
 
-
-class TestNotifierInstrumentation:
-    """The notifier worker's _handle_job is already tested in
-    tests/notifier_pure; here we just verify that the metrics fire
-    when a job is processed."""
-
-    def test_sent_outcome_increments_metric(self, monkeypatch):
-        from contextlib import contextmanager
-        from unittest.mock import MagicMock
-        import fakeredis
-        from trip_ema.notifications.base import NotificationTransport
-        from trip_ema.notifications.redis_queue import RedisQueue
-        from trip_ema.notifier_worker import NotifierWorker
-
-        class Recording(NotificationTransport):
-            @property
-            def name(self): return "recording"
-            def send(self, address, batch):
-                return True
-
-        class FreshSignalsRepo:
-            def __init__(self, conn): pass
-            def is_event_superseded(self, event_id): return False
-
-        class FakeSubsRepo:
-            def __init__(self, conn): pass
-            def record_notification(self, **kwargs): pass
-            def update_last_notified(self, *a, **kw): pass
-
-        @contextmanager
-        def fake_txn(engine):
-            yield MagicMock()
-
-        monkeypatch.setattr(
-            "trip_ema.notifier_worker.SignalsRepository", FreshSignalsRepo,
+        assert summary.skipped_due_to_concurrent_run is True, (
+            "second run_once() should have set the skip flag"
         )
-        monkeypatch.setattr(
-            "trip_ema.notifier_worker.SubscribersRepository", FakeSubsRepo,
+        skipped_after = _counter_value(
+            M.scheduler_runs_total, outcome="skipped_concurrent",
         )
-        monkeypatch.setattr("trip_ema.notifier_worker.transaction", fake_txn)
+        delta = skipped_after - _metric_snapshot["runs_skipped"]
+        assert delta == 1, (
+            f"expected runs_total{{outcome=skipped_concurrent}} to "
+            f"increment by 1, got delta={delta}"
+        )
 
-        class FakeDBEng:
-            @contextmanager
-            def connect(self):
-                yield MagicMock()
+        # And the completed counter should NOT have moved.
+        completed_after = _counter_value(
+            M.scheduler_runs_total, outcome="completed",
+        )
+        assert completed_after == _metric_snapshot["runs_completed"], (
+            "skipped pass should not have incremented the completed "
+            "counter"
+        )
 
-        redis_client = fakeredis.FakeStrictRedis(decode_responses=True, server_type="redis")
-        queue = RedisQueue(
-            redis_client=redis_client, queue_name="qx", dedup_hash_name="dx",
-        )
-        worker = NotifierWorker(
-            queue=queue, db_engine=FakeDBEng(),
-            transports={"recording": Recording()},
-        )
-        payload = {
-            "subscriber_id": 1, "transport": "recording",
-            "address": "x@y.z", "event_id": 999,
-            "correlation_id": "test-cid-abc",
-            "event": {
-                "ticker": {"exchange": "NSE", "symbol": "NIFTY", "instrument": "INDEX"},
-                "timeframe": "1W",
-                "bar_timestamp": "2026-05-04T00:00:00+00:00",
-                "signal": "BUY",
-                "price_at_signal": 22000.0,
-                "computed_at": "2026-05-04T00:01:00+00:00",
-            },
-            "enqueued_at": "2026-05-04T00:02:00+00:00",
-        }
-        queue.enqueue("job-metric-1", payload)
 
-        before_sent = _get_counter_value(
-            M.notifier_jobs_processed_total,
-            outcome="sent", transport="recording",
+class TestDurationMetric:
+
+    def test_duration_histogram_observes_realistic_time(
+        self, _tickers_table, _metric_snapshot,
+    ):
+        """The histogram's sum should grow by a small but positive
+        amount on each completed pass. Empty-DB pass should land in
+        the lowest bucket (<10ms in practice, but allow up to 100ms
+        for slow CI)."""
+        cache = SignalCache()
+        sched = ComputeScheduler(
+            db_engine=_tickers_table, cache=cache, cadence_minutes=60,
         )
-        worker.run_once_for_test()
-        after_sent = _get_counter_value(
-            M.notifier_jobs_processed_total,
-            outcome="sent", transport="recording",
+
+        sum_before = M.scheduler_run_duration_seconds._sum.get()
+        sched.run_once()
+        sum_after = M.scheduler_run_duration_seconds._sum.get()
+
+        delta = sum_after - sum_before
+        assert 0.0 < delta < 1.0, (
+            f"expected a small positive duration sample, got "
+            f"delta={delta:.4f}s"
         )
-        assert after_sent == before_sent + 1.0

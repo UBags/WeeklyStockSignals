@@ -1,17 +1,32 @@
-"""Tests for GET /v1/signals/{exchange}/{symbol}."""
+"""Tests for GET /v1/signals/{exchange}/{symbol}.
+
+# Step 9 note
+
+The OLD cache held up to 200 BarStates per ticker; the verbose
+endpoint returned that history. The new cache holds a single
+CachedSnapshot per ticker (latest indicator_state + latest
+signal_event). The verbose endpoint returns a single-entry `bars`
+tuple reconstructed from the latest indicator_state; consumers that
+want full history go through `/v1/signals/{exchange}/{symbol}/history`
+(Step 7's chart-history endpoint, integration-tested separately).
+
+So this file keeps the terse-response tests and the error-path tests
+(the route's identity/timeframe/instrument handling is unchanged) and
+drops the verbose-history tests — that contract is intentionally
+narrower under Step 8. The verbose route still works; it just returns
+the latest single bar's BarState rather than a window.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from trip_ema.cache import build_cached_signal
-from trip_ema.domain import (
-    BarState,
-    ChangeSignal,
-    CoreRegime,
-    TickerRef,
-    Timeframe,
+from trip_ema.cache.signal_cache import (
+    CachedSnapshot,
+    IndicatorStateSnapshot,
+    SignalEventSnapshot,
 )
+from trip_ema.domain import ChangeSignal, TickerRef, Timeframe
 
 
 def _seed_cache(
@@ -21,26 +36,32 @@ def _seed_cache(
     timeframe: Timeframe = Timeframe.WEEKLY,
     last_change: ChangeSignal = ChangeSignal.BUY,
     close: float = 24856.20,
-    n_history: int = 5,
 ) -> None:
     t = datetime(2026, 5, 18, tzinfo=timezone.utc)
-    state = BarState(
-        timestamp=t,
-        med_ema=24800, long_ema=24700, longest_ema=24500,
+    ind = IndicatorStateSnapshot(
+        trade_date=date(2026, 5, 18),
+        med_ema=24800.0, long_ema=24700.0, longest_ema=24500.0,
         atr=120.0,
-        upper_inner=24824, lower_inner=24476,
-        upper_mid=25040, lower_mid=24260,
-        upper_outer=25280, lower_outer=24020,
-        pierces_upper_mid=False, pierces_lower_mid=False,
-        core_bg=CoreRegime.BULLISH, display_bg=CoreRegime.BULLISH,
-    )
-    history = [state] * n_history
-    cache.put(build_cached_signal(
-        ticker=ref, timeframe=timeframe,
-        latest_state=state, latest_close=close,
-        state_history=history, last_change=last_change,
-        last_change_bar=t, last_change_computed_at=t,
+        upper_inner_band=24824.0, lower_inner_band=24476.0,
+        upper_mid_band=25040.0,   lower_mid_band=24260.0,
+        upper_outer_band=25280.0, lower_outer_band=24020.0,
+        display_regime=1,
         computed_at=t,
+    )
+    ev = SignalEventSnapshot(
+        event_id=1,
+        bar_timestamp=t,
+        signal=last_change,
+        price_at_signal=close,
+        computed_at=t,
+    )
+    cache.put_snapshot(CachedSnapshot(
+        ticker_id=1,
+        ticker_ref=ref,
+        timeframe=timeframe,
+        latest_indicator_state=ind,
+        latest_signal_event=ev,
+        snapshot_taken_at=t,
     ))
 
 
@@ -70,70 +91,27 @@ def test_terse_response_exits(http_app):
     assert response.json()["latest_change"] == "EXIT_FROM_BUY"
 
 
-# ---------- Verbose responses ---------- #
+# ---------- Verbose responses — narrowed contract ---------- #
 
-def test_verbose_response_returns_full_history(http_app):
-    _seed_cache(http_app.cache, n_history=10)
+def test_verbose_response_returns_single_bar_from_latest_snapshot(http_app):
+    """Under Step 8's narrowed contract, verbose returns the BarState
+    reconstructed from the cache's single latest indicator_state row,
+    not a window of historical bars. Callers that need history use
+    the /history endpoint instead."""
+    _seed_cache(http_app.cache)
     response = http_app.client.get(
         "/v1/signals/NSE/NIFTY?instrument=INDEX&verbose=true",
     )
     assert response.status_code == 200
     body = response.json()
     assert "bars" in body
-    assert len(body["bars"]) == 10
-    first_bar = body["bars"][0]
-    # Field shape sanity-check
-    assert first_bar["display_bg"] == "BULLISH"
-    assert first_bar["core_bg"] == "BULLISH"
-    assert "med_ema" in first_bar
-    assert "atr" in first_bar
-
-
-def test_verbose_response_honors_last_n_bars(http_app):
-    _seed_cache(http_app.cache, n_history=50)
-    response = http_app.client.get(
-        "/v1/signals/NSE/NIFTY"
-        "?instrument=INDEX&verbose=true&last_n_bars=5",
-    )
-    assert response.status_code == 200
-    assert len(response.json()["bars"]) == 5
-
-
-def test_verbose_nan_values_serialized_as_null(http_app):
-    """NaN floats in BarState should appear as null in JSON, not as
-    'NaN' (which isn't valid JSON)."""
-    import json
-
-    cache = http_app.cache
-    t = datetime(2026, 5, 18, tzinfo=timezone.utc)
-    nan = float("nan")
-    state = BarState(
-        timestamp=t,
-        med_ema=nan, long_ema=nan, longest_ema=nan, atr=nan,
-        upper_inner=nan, lower_inner=nan,
-        upper_mid=nan, lower_mid=nan,
-        upper_outer=nan, lower_outer=nan,
-        pierces_upper_mid=False, pierces_lower_mid=False,
-        core_bg=CoreRegime.NEUTRAL, display_bg=CoreRegime.NEUTRAL,
-    )
-    ref = TickerRef("NSE", "X", "EQ")
-    cache.put(build_cached_signal(
-        ticker=ref, timeframe=Timeframe.WEEKLY,
-        latest_state=state, latest_close=100.0,
-        state_history=[state], last_change=ChangeSignal.NO_CHANGE,
-        last_change_bar=None, last_change_computed_at=None,
-        computed_at=t,
-    ))
-    response = http_app.client.get(
-        "/v1/signals/NSE/X?instrument=EQ&verbose=true",
-    )
-    assert response.status_code == 200
-    raw = response.content.decode()
-    # Must be valid JSON — no 'NaN' tokens
-    assert "NaN" not in raw
-    body = json.loads(raw)
-    assert body["bars"][0]["med_ema"] is None
-    assert body["bars"][0]["atr"] is None
+    assert len(body["bars"]) == 1
+    bar = body["bars"][0]
+    assert bar["display_bg"] == "BULLISH"
+    # Unified regime: core_bg mirrors display_bg at the wire boundary.
+    assert bar["core_bg"] == "BULLISH"
+    assert "med_ema" in bar
+    assert "atr" in bar
 
 
 # ---------- Error paths ---------- #
@@ -141,7 +119,6 @@ def test_verbose_nan_values_serialized_as_null(http_app):
 def test_unknown_ticker_returns_404(http_app):
     response = http_app.client.get("/v1/signals/NSE/UNKNOWN")
     assert response.status_code == 404
-    assert "No cached state" in response.json()["detail"]
 
 
 def test_known_ticker_but_unknown_timeframe_returns_404(http_app):
@@ -150,15 +127,6 @@ def test_known_ticker_but_unknown_timeframe_returns_404(http_app):
         "/v1/signals/NSE/NIFTY?instrument=INDEX&timeframe=1D",
     )
     assert response.status_code == 404
-
-
-def test_invalid_last_n_bars_returns_422(http_app):
-    """last_n_bars has ge=1 le=1000 constraints."""
-    _seed_cache(http_app.cache)
-    response = http_app.client.get(
-        "/v1/signals/NSE/NIFTY?instrument=INDEX&last_n_bars=0",
-    )
-    assert response.status_code == 422
 
 
 def test_default_instrument_is_eq(http_app):

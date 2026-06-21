@@ -100,6 +100,11 @@ class SignalsRepository:
                     signal_events.c.bar_timestamp,
                     signal_events.c.signal_type,
                 ],
+                # Partial unique index uq_signal_events_ticker (migration
+                # 0016) has WHERE ticker_id IS NOT NULL. Postgres requires
+                # the same predicate on the ON CONFLICT clause for it to
+                # match a partial index.
+                index_where=signal_events.c.ticker_id.isnot(None),
             )
             .returning(signal_events.c.event_id)
         )

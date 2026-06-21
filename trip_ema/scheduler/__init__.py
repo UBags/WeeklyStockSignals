@@ -8,7 +8,6 @@ from ._wall_clock import (
 from .compute_scheduler import (
     ComputeRunSummary,
     ComputeScheduler,
-    _seconds_until_next_tick,  # legacy alias; new code uses _wall_clock names
 )
 from .market_calendar import (
     TradingCalendar,

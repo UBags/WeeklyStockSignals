@@ -23,11 +23,10 @@ from sqlalchemy import Engine, text
 
 from ....cache import SignalCache
 from ....notifications.circuit_breaker import CircuitBreakingTransport
-from ....registry import TickerRegistry
 from ....scheduler import ComputeScheduler, SubscriberDistributor
 from ..dependencies import (
     get_cache, get_compute_scheduler, get_db_engine, get_distributor,
-    get_orchestrator_pool, get_redis_queue, get_registry,
+    get_orchestrator_pool, get_redis_queue,
     require_admin_token,
 )
 from ..schemas import HealthCardPayload, HealthSnapshotPayload
@@ -49,7 +48,6 @@ _STATUS_RANK = {"crit": 3, "warn": 2, "ok": 1, "unknown": 0}
 @router.get("", response_model=HealthSnapshotPayload)
 def health_snapshot(
     db_engine: Engine = Depends(get_db_engine),
-    registry: TickerRegistry = Depends(get_registry),
     cache: SignalCache = Depends(get_cache),
     compute_scheduler: ComputeScheduler = Depends(get_compute_scheduler),
     distributor: SubscriberDistributor | None = Depends(get_distributor),
@@ -71,7 +69,7 @@ def health_snapshot(
     cards.append(_compute_scheduler_card(compute_scheduler, orchestrator_pool))
 
     # 4. Cache — populated entry count vs registered ticker count
-    cards.append(_cache_card(cache, registry))
+    cards.append(_cache_card(cache))
 
     # 5. Circuit breakers — pulled from the distributor in legacy mode
     cards.append(_circuit_breakers_card(distributor, redis_queue))
@@ -286,35 +284,26 @@ def _compute_scheduler_card(
             headline="State unavailable", detail=str(e),
         )
 
-def _cache_card(cache: SignalCache, registry: TickerRegistry) -> HealthCardPayload:
-    """Cache should hold one entry per registered ticker × active
-    timeframe. Mismatch indicates priming failed for some tickers.
+def _cache_card(cache: SignalCache) -> HealthCardPayload:
+    """Cache should hold one snapshot per active ticker. Empty cache
+    means the lifecycle prime hasn't run or both indicator_state and
+    signal_events are empty.
 
-    Uses len(cache) / len(registry) directly — same accessors the
-    /healthz endpoint uses. (Earlier versions of this function tried
-    cache.size() and registry.ticker_refs which don't exist on the
-    actual classes, so the card always fell through to grey 'unknown'.)
+    Step 9c: counts `cache.snapshot_count()` rather than `len(cache)`,
+    and drops the registry comparison (registry is deleted in 9a).
     """
     try:
-        n_entries = len(cache)
-        n_registered = len(registry)
-        if n_registered == 0:
+        n_entries = cache.snapshot_count()
+        if n_entries == 0:
             return HealthCardPayload(
                 name="Signal cache", status="unknown",
-                headline="No tickers registered",
-                detail="Run prime-all to populate.",
-            )
-        coverage = n_entries / n_registered
-        if coverage < 0.5:
-            return HealthCardPayload(
-                name="Signal cache", status="warn",
-                headline=f"{n_entries:,} entries / {n_registered:,} tickers",
-                detail=f"Coverage {coverage * 100:.0f}% — priming may have failed.",
+                headline="Cache empty",
+                detail="Run prime-all to populate from indicator_state + signal_events.",
             )
         return HealthCardPayload(
             name="Signal cache", status="ok",
-            headline=f"{n_entries:,} entries / {n_registered:,} tickers",
-            detail=f"Coverage {coverage * 100:.0f}%.",
+            headline=f"{n_entries:,} snapshots",
+            detail="Populated from persisted indicator_state + signal_events.",
         )
     except Exception as e:
         return HealthCardPayload(

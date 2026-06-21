@@ -6,7 +6,7 @@ Boot sequence:
     3. Load + validate config
     4. Open DB engine
     5. Apply pending migrations
-    6. Build TickerRegistry and SignalCache; prime from DB
+    6. Build SignalCache; prime from DB
     7. Build ComputeScheduler; start its background thread
     8. Build transports + SubscriberDistributor (optional, if subscribers configured)
     9. Wire dependencies into the FastAPI app
@@ -32,7 +32,6 @@ from datetime import timedelta
 from pathlib import Path
 from typing import NoReturn
 
-from .api import prime_all_tickers
 from .cache import SignalCache
 from .config import load_config
 from .domain import Timeframe
@@ -40,7 +39,6 @@ from .notifications import EmailTransport, NullTransport, WebhookTransport
 from .persistence import (
     create_engine_from_config,
 )
-from .registry import TickerRegistry
 from .scheduler import (
     ComputeScheduler,
     MarketHoursService,
@@ -118,30 +116,16 @@ def _build_app_state(config_path: Path) -> AppState:
         logger.error("Migration failed: %s", e)
         raise
 
-    logger.info("Building registry and cache")
-    registry = TickerRegistry(
-        params=config.to_indicator_params(),
-        timeframes=[config.scheduling.default_timeframe],
-        history_limit=config.cache.max_history_bars,
-        state_history_retain=config.cache.state_history_retain,
-    )
+    logger.info("Building cache")
     cache = SignalCache()
 
     logger.info("Priming all tickers from DB")
-    result = prime_all_tickers(
-        db_engine=db_engine, registry=registry, cache=cache,
-    )
-    logger.info(
-        "Lifecycle: primed=%d, skipped=%d, failed=%d, cache=%d",
-        result.prime_result.tickers_primed,
-        result.prime_result.tickers_skipped_no_bars,
-        result.prime_result.tickers_failed,
-        result.cache_entries_populated,
-    )
+    from trip_ema.api.lifecycle import prime_cache_from_db
+    result = prime_cache_from_db(db_engine=db_engine, cache=cache)
+    logger.info("Cache primed: %d snapshots", result.snapshots_populated)
 
     compute_scheduler = ComputeScheduler(
         db_engine=db_engine,
-        registry=registry,
         cache=cache,
         cadence_minutes=config.scheduling.compute_cadence_minutes,
     )
@@ -249,7 +233,6 @@ def _build_app_state(config_path: Path) -> AppState:
     return AppState(
         config=config,
         db_engine=db_engine,
-        registry=registry,
         cache=cache,
         compute_scheduler=compute_scheduler,
         distributor=distributor,

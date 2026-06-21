@@ -2,41 +2,49 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from trip_ema.cache import build_cached_signal
-from trip_ema.domain import (
-    BarState,
-    ChangeSignal,
-    CoreRegime,
-    TickerRef,
-    Timeframe,
+import pytest
+from fastapi.testclient import TestClient
+
+from trip_ema.cache import SignalCache
+from trip_ema.cache.signal_cache import (
+    CachedSnapshot,
+    IndicatorStateSnapshot,
 )
+from trip_ema.domain import TickerRef, Timeframe
+from trip_ema.transports.http import create_app
+from trip_ema.transports.http.dependencies import (
+    get_cache,
+    get_compute_scheduler,
+    get_config,
+    get_distributor,
+    get_redis_queue,
+)
+from tests.transports.http.conftest import _build_test_config
 
 
-def _populate_cache(cache, registry):
-    """Seed cache + registry with one entry so readyz returns 200."""
+def _populate_cache(cache: SignalCache) -> None:
+    """Seed the cache with one snapshot so readyz returns 200."""
     t = datetime(2026, 5, 18, tzinfo=timezone.utc)
-    state = BarState(
-        timestamp=t, med_ema=100, long_ema=100, longest_ema=100, atr=2.0,
-        upper_inner=102, lower_inner=98, upper_mid=105, lower_mid=95,
-        upper_outer=110, lower_outer=90,
-        pierces_upper_mid=False, pierces_lower_mid=False,
-        core_bg=CoreRegime.BULLISH, display_bg=CoreRegime.BULLISH,
+    ind = IndicatorStateSnapshot(
+        trade_date=date(2026, 5, 18),
+        med_ema=100.0, long_ema=100.0, longest_ema=100.0, atr=2.0,
+        upper_inner_band=102.0, lower_inner_band=98.0,
+        upper_mid_band=105.0,   lower_mid_band=95.0,
+        upper_outer_band=110.0, lower_outer_band=90.0,
+        display_regime=1,
+        computed_at=t,
     )
     ref = TickerRef("NSE", "NIFTY", "INDEX")
-    cache.put(build_cached_signal(
-        ticker=ref, timeframe=Timeframe.WEEKLY,
-        latest_state=state, latest_close=24800.0,
-        state_history=[state], last_change=ChangeSignal.NO_CHANGE,
-        last_change_bar=None, last_change_computed_at=None,
-        computed_at=t,
+    cache.put_snapshot(CachedSnapshot(
+        ticker_id=1,
+        ticker_ref=ref,
+        timeframe=Timeframe.WEEKLY,
+        latest_indicator_state=ind,
+        latest_signal_event=None,
+        snapshot_taken_at=t,
     ))
-    # registry needs to be non-empty too; just inject one engine
-    from trip_ema.engine import TickerEngine
-    from trip_ema.domain import IndicatorParams
-    eng = TickerEngine(ref, Timeframe.WEEKLY, IndicatorParams())
-    registry.register_engine(ref, Timeframe.WEEKLY, eng, ticker_id=1)
 
 
 def test_healthz_returns_200_on_empty_state(http_app):
@@ -45,53 +53,39 @@ def test_healthz_returns_200_on_empty_state(http_app):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
+    # registry_size is a legacy wire field that mirrors cache_size now.
     assert body["registry_size"] == 0
     assert body["cache_size"] == 0
 
 
 def test_readyz_returns_503_on_empty_state(http_app):
-    """readyz requires primed registry and cache."""
+    """readyz requires a populated cache."""
     response = http_app.client.get("/readyz")
     assert response.status_code == 503
 
 
 def test_readyz_returns_200_when_primed(http_app):
-    _populate_cache(http_app.cache, http_app.registry)
+    _populate_cache(http_app.cache)
     response = http_app.client.get("/readyz")
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ready"
-    assert body["registry_size"] == 1
     assert body["cache_size"] == 1
+    assert body["registry_size"] == 1   # mirrors cache_size
 
 
 def test_healthz_reports_sizes(http_app):
-    _populate_cache(http_app.cache, http_app.registry)
+    _populate_cache(http_app.cache)
     response = http_app.client.get("/healthz")
     assert response.status_code == 200
     body = response.json()
-    assert body["registry_size"] == 1
     assert body["cache_size"] == 1
+    assert body["registry_size"] == 1
 
 
 # ============================================================
 # Phase 7: thread liveness in /readyz
 # ============================================================
-
-from datetime import datetime, timedelta, timezone
-import pytest
-from fastapi.testclient import TestClient
-
-from trip_ema.transports.http import create_app
-from trip_ema.transports.http.dependencies import (
-    get_cache,
-    get_compute_scheduler,
-    get_config,
-    get_distributor,
-    get_redis_queue,
-    get_registry,
-)
-from tests.transports.http.conftest import _build_test_config
 
 
 class _StubScheduler:
@@ -109,18 +103,14 @@ class _StubScheduler:
 
 
 def _build_app_with(scheduler, distributor=None, redis_queue=None):
-    """Build a fresh TestClient with the stubs we want."""
-    from trip_ema.cache import SignalCache
-    from trip_ema.domain import IndicatorParams, Timeframe
-    from trip_ema.registry import TickerRegistry
-
+    """Build a fresh TestClient with the stubs we want, cache pre-seeded
+    so the only failure axes are the scheduler / distributor / redis
+    stubs."""
     cache = SignalCache()
-    registry = TickerRegistry(IndicatorParams(), [Timeframe.WEEKLY])
-    _populate_cache(cache, registry)   # make registry/cache non-empty
+    _populate_cache(cache)
 
     app = create_app()
     app.dependency_overrides[get_cache] = lambda: cache
-    app.dependency_overrides[get_registry] = lambda: registry
     app.dependency_overrides[get_config] = lambda: _build_test_config()
     app.dependency_overrides[get_compute_scheduler] = lambda: scheduler
     app.dependency_overrides[get_distributor] = lambda: distributor
@@ -130,7 +120,7 @@ def _build_app_with(scheduler, distributor=None, redis_queue=None):
 
 def test_readyz_503_when_compute_scheduler_died():
     """If the scheduler reports unhealthy (e.g., thread died), /readyz
-    must return 503 even if cache and registry are populated."""
+    must return 503 even if cache is populated."""
     scheduler = _StubScheduler(
         alive=False,
         last_run=datetime(2026, 5, 18, tzinfo=timezone.utc),

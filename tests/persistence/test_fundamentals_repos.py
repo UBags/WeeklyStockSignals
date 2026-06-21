@@ -2561,7 +2561,7 @@ class TestIndicatorStateDBConstraints:
                         display_regime
                     ) VALUES (
                         :tid, '1w', 'X', :td,
-                        1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0
+                        1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0
                     )
                 """), {"tid": tid, "td": date(2026, 5, 22)})
 
@@ -2579,7 +2579,7 @@ class TestIndicatorStateDBConstraints:
                         display_regime
                     ) VALUES (
                         NULL, NULL, NULL, :td,
-                        1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0
+                        1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0
                     )
                 """), {"td": date(2026, 5, 22)})
 
@@ -2598,7 +2598,7 @@ class TestIndicatorStateDBConstraints:
                         display_regime
                     ) VALUES (
                         :tid, '1w', NULL, :td,
-                        1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 5, 0
+                        1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 5
                     )
                 """), {"tid": tid, "td": date(2026, 5, 22)})
 
