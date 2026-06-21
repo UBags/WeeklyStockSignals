@@ -1517,7 +1517,7 @@ class TestCmdFundamentalsStatusShowsIndicatorCoverage:
                 upper_inner_band=859.0, lower_inner_band=830.0,
                 upper_mid_band=882.0, lower_mid_band=815.0,
                 upper_outer_band=915.0, lower_outer_band=798.0,
-                core_regime=-1, display_regime=-1,
+                display_regime=-1,
                 pierces_upper_mid=False, pierces_lower_mid=False,
                 dist_to_med_in_hl_units=None,
                 dist_to_long_in_hl_units=None,

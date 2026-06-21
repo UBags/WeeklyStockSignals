@@ -59,19 +59,19 @@ class TestDefiniteGreen:
     def test_close_strictly_above_upper_inner_paints_green(self):
         assert compute_regime(
             Regime.NEUTRAL, None, None, None, _bar(close=111.0),
-        ) == Regime.GREEN
+        ) == Regime.BULLISH
 
     def test_close_exactly_at_upper_inner_paints_green(self):
         """Spec uses `>=`, so equality counts."""
         assert compute_regime(
             Regime.NEUTRAL, None, None, None, _bar(close=110.0),
-        ) == Regime.GREEN
+        ) == Regime.BULLISH
 
     def test_definite_green_wins_regardless_of_previous_regime(self):
-        for prev in (Regime.NEUTRAL, Regime.GREEN, Regime.RED):
+        for prev in (Regime.NEUTRAL, Regime.BULLISH, Regime.BEARISH):
             assert compute_regime(
                 prev, 100.0, 95.0, 105.0, _bar(close=115.0),
-            ) == Regime.GREEN, f"failed for prev={prev}"
+            ) == Regime.BULLISH, f"failed for prev={prev}"
 
 
 # ---------------------------------------------------------------------------
@@ -82,18 +82,18 @@ class TestDefiniteRed:
     def test_close_strictly_below_lower_inner_paints_red(self):
         assert compute_regime(
             Regime.NEUTRAL, None, None, None, _bar(close=89.0),
-        ) == Regime.RED
+        ) == Regime.BEARISH
 
     def test_close_exactly_at_lower_inner_paints_red(self):
         assert compute_regime(
             Regime.NEUTRAL, None, None, None, _bar(close=90.0),
-        ) == Regime.RED
+        ) == Regime.BEARISH
 
     def test_definite_red_wins_regardless_of_previous_regime(self):
-        for prev in (Regime.NEUTRAL, Regime.GREEN, Regime.RED):
+        for prev in (Regime.NEUTRAL, Regime.BULLISH, Regime.BEARISH):
             assert compute_regime(
                 prev, 100.0, 95.0, 105.0, _bar(close=85.0),
-            ) == Regime.RED, f"failed for prev={prev}"
+            ) == Regime.BEARISH, f"failed for prev={prev}"
 
 
 # ---------------------------------------------------------------------------
@@ -108,17 +108,17 @@ class TestGreenContinuationLeg1:
         # Inside corridor (between lower_inner=90 and upper_inner=110)
         # AND at lower envelope.
         assert compute_regime(
-            Regime.GREEN,
+            Regime.BULLISH,
             previous_close=100.0,
             previous_lower_envelope=95.0,
             previous_upper_envelope=105.0,
             bar=_bar(close=95.0),  # close == lower_envelope
-        ) == Regime.GREEN
+        ) == Regime.BULLISH
 
     def test_close_above_lower_envelope_continues_green(self):
         assert compute_regime(
-            Regime.GREEN, 100.0, 95.0, 105.0, _bar(close=100.0),
-        ) == Regime.GREEN
+            Regime.BULLISH, 100.0, 95.0, 105.0, _bar(close=100.0),
+        ) == Regime.BULLISH
 
     def test_leg1_does_not_apply_when_prev_was_not_green(self):
         # Same bar, prev=NEUTRAL → no continuation, falls through to NEUTRAL.
@@ -137,18 +137,18 @@ class TestGreenContinuationLeg2:
         # → leg 1 fails (92 < 95).
         # Yesterday: prev_close=98 >= prev_lower_envelope=97 → leg 2 holds.
         assert compute_regime(
-            Regime.GREEN,
+            Regime.BULLISH,
             previous_close=98.0,
             previous_lower_envelope=97.0,
             previous_upper_envelope=105.0,
             bar=_bar(close=92.0),
-        ) == Regime.GREEN
+        ) == Regime.BULLISH
 
     def test_leg2_fails_when_prev_close_below_prev_lower_envelope(self):
         # Today's close above lower_inner but yesterday's close was
         # already below the ribbon → neither leg holds.
         assert compute_regime(
-            Regime.GREEN,
+            Regime.BULLISH,
             previous_close=94.0,
             previous_lower_envelope=97.0,
             previous_upper_envelope=105.0,
@@ -159,12 +159,12 @@ class TestGreenContinuationLeg2:
         # Today's close strictly below lower_inner → rule (b) fires
         # FIRST (definite_red), so we never reach the continuation.
         assert compute_regime(
-            Regime.GREEN,
+            Regime.BULLISH,
             previous_close=98.0,
             previous_lower_envelope=97.0,
             previous_upper_envelope=105.0,
             bar=_bar(close=89.0),
-        ) == Regime.RED
+        ) == Regime.BEARISH
 
     def test_leg2_just_above_lower_inner_continues_green(self):
         """When close == lower_inner exactly, rule (b) fires FIRST
@@ -173,12 +173,12 @@ class TestGreenContinuationLeg2:
         Pick close=90.1 — just clears rule (b), leg 1 still fails
         (90.1 < lower_envelope=95), leg 2 holds → GREEN."""
         assert compute_regime(
-            Regime.GREEN,
+            Regime.BULLISH,
             previous_close=98.0,
             previous_lower_envelope=97.0,
             previous_upper_envelope=105.0,
             bar=_bar(close=90.1),
-        ) == Regime.GREEN
+        ) == Regime.BULLISH
 
 
 class TestGreenContinuationFailure:
@@ -191,7 +191,7 @@ class TestGreenContinuationFailure:
         #           below lower_envelope=95 (leg 1 fails).
         # And prev_close below prev_lower_envelope → leg 2 fails.
         assert compute_regime(
-            Regime.GREEN,
+            Regime.BULLISH,
             previous_close=94.0,
             previous_lower_envelope=97.0,
             previous_upper_envelope=105.0,
@@ -206,17 +206,17 @@ class TestGreenContinuationFailure:
 class TestRedContinuationLeg1:
     def test_close_at_upper_envelope_continues_red(self):
         assert compute_regime(
-            Regime.RED,
+            Regime.BEARISH,
             previous_close=100.0,
             previous_lower_envelope=95.0,
             previous_upper_envelope=105.0,
             bar=_bar(close=105.0),  # close == upper_envelope
-        ) == Regime.RED
+        ) == Regime.BEARISH
 
     def test_close_below_upper_envelope_continues_red(self):
         assert compute_regime(
-            Regime.RED, 100.0, 95.0, 105.0, _bar(close=100.0),
-        ) == Regime.RED
+            Regime.BEARISH, 100.0, 95.0, 105.0, _bar(close=100.0),
+        ) == Regime.BEARISH
 
     def test_leg1_does_not_apply_when_prev_was_not_red(self):
         assert compute_regime(
@@ -230,16 +230,16 @@ class TestRedContinuationLeg2:
         # → leg 1 fails (108 > 105).
         # Yesterday: prev_close=102 <= prev_upper_envelope=103 → leg 2 holds.
         assert compute_regime(
-            Regime.RED,
+            Regime.BEARISH,
             previous_close=102.0,
             previous_lower_envelope=95.0,
             previous_upper_envelope=103.0,
             bar=_bar(close=108.0),
-        ) == Regime.RED
+        ) == Regime.BEARISH
 
     def test_leg2_fails_when_prev_close_above_prev_upper_envelope(self):
         assert compute_regime(
-            Regime.RED,
+            Regime.BEARISH,
             previous_close=106.0,
             previous_lower_envelope=95.0,
             previous_upper_envelope=103.0,
@@ -252,12 +252,12 @@ class TestRedContinuationLeg2:
         upper_envelope=103, close=109.9 → leg 1 fails (109.9 > 103),
         leg 2 prev-conditions hold → RED."""
         assert compute_regime(
-            Regime.RED,
+            Regime.BEARISH,
             previous_close=102.0,
             previous_lower_envelope=95.0,
             previous_upper_envelope=103.0,
             bar=_bar(close=109.9),
-        ) == Regime.RED
+        ) == Regime.BEARISH
 
 
 class TestRedContinuationFailure:
@@ -266,7 +266,7 @@ class TestRedContinuationFailure:
         #            below upper_inner=110 (rule a doesn't fire).
         # prev_close=106 > prev_upper_envelope=103 → leg 2 fails.
         assert compute_regime(
-            Regime.RED,
+            Regime.BEARISH,
             previous_close=106.0,
             previous_lower_envelope=95.0,
             previous_upper_envelope=103.0,
@@ -283,21 +283,21 @@ class TestPriority:
         """prev=RED, today's close >= upper_inner → GREEN, not red-continued.
         This is the sharp reversal case."""
         assert compute_regime(
-            Regime.RED,
+            Regime.BEARISH,
             previous_close=92.0,
             previous_lower_envelope=95.0,
             previous_upper_envelope=105.0,
             bar=_bar(close=112.0),
-        ) == Regime.GREEN
+        ) == Regime.BULLISH
 
     def test_definite_red_beats_green_continuation_on_flip(self):
         assert compute_regime(
-            Regime.GREEN,
+            Regime.BULLISH,
             previous_close=108.0,
             previous_lower_envelope=95.0,
             previous_upper_envelope=105.0,
             bar=_bar(close=88.0),
-        ) == Regime.RED
+        ) == Regime.BEARISH
 
 
 # ---------------------------------------------------------------------------
@@ -308,12 +308,12 @@ class TestFirstBar:
     def test_first_bar_can_paint_green_via_rule_a(self):
         assert compute_regime(
             Regime.NEUTRAL, None, None, None, _bar(close=115.0),
-        ) == Regime.GREEN
+        ) == Regime.BULLISH
 
     def test_first_bar_can_paint_red_via_rule_b(self):
         assert compute_regime(
             Regime.NEUTRAL, None, None, None, _bar(close=85.0),
-        ) == Regime.RED
+        ) == Regime.BEARISH
 
     def test_first_bar_falls_to_neutral_when_in_corridor(self):
         # No previous → no continuation possible; price between inner
@@ -329,11 +329,11 @@ class TestFirstBar:
         # that's the only path.
         # close=100, lower_envelope=95 → leg 1 holds.
         assert compute_regime(
-            Regime.GREEN, None, None, None, _bar(close=100.0),
-        ) == Regime.GREEN
+            Regime.BULLISH, None, None, None, _bar(close=100.0),
+        ) == Regime.BULLISH
         # close=92 → leg 1 fails (92 < 95); leg 2 blocked by None.
         assert compute_regime(
-            Regime.GREEN, None, None, None, _bar(close=92.0),
+            Regime.BULLISH, None, None, None, _bar(close=92.0),
         ) == Regime.NEUTRAL
 
 
@@ -344,19 +344,19 @@ class TestFirstBar:
 class TestWarmup:
     def test_nan_close_returns_neutral(self):
         assert compute_regime(
-            Regime.GREEN, 100.0, 95.0, 105.0,
+            Regime.BULLISH, 100.0, 95.0, 105.0,
             _bar(close=math.nan),
         ) == Regime.NEUTRAL
 
     def test_nan_band_returns_neutral(self):
         assert compute_regime(
-            Regime.GREEN, 100.0, 95.0, 105.0,
+            Regime.BULLISH, 100.0, 95.0, 105.0,
             _bar(close=100.0, upper_inner=math.nan),
         ) == Regime.NEUTRAL
 
     def test_nan_envelope_returns_neutral(self):
         assert compute_regime(
-            Regime.GREEN, 100.0, 95.0, 105.0,
+            Regime.BULLISH, 100.0, 95.0, 105.0,
             _bar(close=100.0, lower_envelope=math.nan),
         ) == Regime.NEUTRAL
 
@@ -381,20 +381,20 @@ class TestMultiBarWalks:
         r1 = compute_regime(
             Regime.NEUTRAL, None, None, None, _bar(close=115.0),
         )
-        assert r1 == Regime.GREEN
+        assert r1 == Regime.BULLISH
 
         # Bar 2: close=100 (inside lower_envelope=95) → continuation, GREEN.
         r2 = compute_regime(
             r1, 115.0, 95.0, 105.0, _bar(close=100.0),
         )
-        assert r2 == Regime.GREEN
+        assert r2 == Regime.BULLISH
 
         # Bar 3: close=92 (below lower_envelope, above lower_inner) AND
         # prev_close=100 was above prev_lower_envelope=95 → leg 2 holds, GREEN.
         r3 = compute_regime(
             r2, 100.0, 95.0, 105.0, _bar(close=92.0),
         )
-        assert r3 == Regime.GREEN
+        assert r3 == Regime.BULLISH
 
         # Bar 4: close=92 again; prev_close=92 was BELOW prev_lower_envelope=95
         # → leg 2 fails; leg 1 also fails → drops to NEUTRAL.
@@ -407,14 +407,14 @@ class TestMultiBarWalks:
         r1 = compute_regime(
             Regime.NEUTRAL, None, None, None, _bar(close=115.0),
         )
-        assert r1 == Regime.GREEN
+        assert r1 == Regime.BULLISH
 
         # Big down bar — close=85 → rule (b) fires; not red-continued
         # because there was no red state to continue. Just paints RED.
         r2 = compute_regime(
             r1, 115.0, 95.0, 105.0, _bar(close=85.0),
         )
-        assert r2 == Regime.RED
+        assert r2 == Regime.BEARISH
 
 
 # ---------------------------------------------------------------------------
@@ -426,9 +426,9 @@ class TestSymmetry:
     its mirror around 100 should produce RED."""
 
     @pytest.mark.parametrize("close,prev_close,expect", [
-        (115.0, None,  Regime.GREEN),
-        (100.0, 115.0, Regime.GREEN),  # leg 1 continuation
-        ( 92.0,  98.0, Regime.GREEN),  # leg 2 continuation
+        (115.0, None,  Regime.BULLISH),
+        (100.0, 115.0, Regime.BULLISH),  # leg 1 continuation
+        ( 92.0,  98.0, Regime.BULLISH),  # leg 2 continuation
         ( 92.0,  94.0, Regime.NEUTRAL),  # both continuation legs fail
     ])
     def test_mirror_around_100(self, close, prev_close, expect):
@@ -438,7 +438,7 @@ class TestSymmetry:
         # Green-side check.
         prev_lower_env = 95.0 if prev_close is not None else None
         prev_upper_env = 105.0 if prev_close is not None else None
-        prev_regime = Regime.GREEN if prev_close is not None else Regime.NEUTRAL
+        prev_regime = Regime.BULLISH if prev_close is not None else Regime.NEUTRAL
         green_result = compute_regime(
             prev_regime, prev_close, prev_lower_env, prev_upper_env,
             _bar(close=close),
@@ -447,7 +447,7 @@ class TestSymmetry:
 
         # Red-side mirror.
         mirror_prev_regime = (
-            Regime.RED if prev_close is not None else Regime.NEUTRAL
+            Regime.BEARISH if prev_close is not None else Regime.NEUTRAL
         )
         red_result = compute_regime(
             mirror_prev_regime,
@@ -457,8 +457,8 @@ class TestSymmetry:
             _bar(close=m(close)),
         )
         mirror_expect = {
-            Regime.GREEN: Regime.RED,
-            Regime.RED: Regime.GREEN,
+            Regime.BULLISH: Regime.BEARISH,
+            Regime.BEARISH: Regime.BULLISH,
             Regime.NEUTRAL: Regime.NEUTRAL,
         }[expect]
         assert red_result == mirror_expect, (

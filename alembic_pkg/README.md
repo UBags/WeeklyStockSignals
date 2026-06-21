@@ -1,72 +1,166 @@
-# `alembic_pkg/` — Alembic migration package (canonical schema source)
+# Step 3 — Migration `0018_collapse_regime_columns`
 
-Phase 12 made Alembic the **exclusive** migration system for `trip-ema`.
-Every schema change ships as an Alembic revision here; the legacy SQL
-files in `../migrations/legacy/` are archived for reference + parity
-testing only.
+Drops the `core_regime` column from `indicator_state`. The new regime
+classifier has a single unified regime per bar; the old core/display
+split is obsolete.
 
-## Contents
+`display_regime` stays untouched — same column name, same SMALLINT
+encoding, same downstream contract. The chart, the HTTP wire format,
+and every reader sees zero change at the column boundary.
 
-| Path | Purpose |
+## Files
+
+| Bundle path | Repo path |
 |---|---|
-| `env.py` | Alembic environment — loads `config.yaml`, builds the SQLAlchemy URL, runs migrations online/offline |
-| `script.py.mako` | Template Alembic uses when generating new revision files |
-| `README` | The default Alembic-generated README (essentially empty) |
-| `sql/` | Optional SQL bodies that Alembic revisions execute via `op.execute(text(open(...).read()))` |
-| `versions/` | The Alembic revision files — one per schema change |
+| `migrations/versions/0018_collapse_regime_columns.py` | wherever your existing Alembic `versions/` directory lives — almost certainly `trip_ema/migrations/alembic_pkg/versions/` based on the README structure I wrote in Step 0 |
+| `migrations_legacy/023_collapse_regime_columns.sql` | `trip_ema/migrations/legacy/` (or wherever the existing `021_indicator_state.sql` siblings live) — documentation only, not applied |
 
-## Revision catalogue
+If the actual repo paths differ, the only thing that matters is that
+`0018_collapse_regime_columns.py` lands in the same directory as
+`0017_benchmark_stats.py`. Use that file's location as the truth.
 
-| Revision | Adds / Changes | Notes |
-|---|---|---|
-| `0001_initial_schema` | Squashed schema — tables, indexes, partitions seeded by legacy files 001-010 | Pre-Phase-12 DBs are stamped at this revision via the alembic bridge without re-running DDL |
-| `0002_db_roles` | `trip_etl_user`, `trip_engine_user`, `trip_gui_user` + per-table GRANTs | Roles created `NOLOGIN`; operators grant LOGIN + set passwords |
-| `0003_drop_tickers_source_timeframe` | Removes obsolete columns from `tickers` | Cleanup post-Phase 11 |
-| `0004_exchange_state` | `exchange_state` table + NSE seed | Phase 14.6 — per-exchange last-action timestamps |
-| `0005_signal_backtest_runs` | `signal_backtest_runs` table + `etl_runs.exchange` column | Phase 15a — backtest resume tracking |
-| `0006_fundamentals_phase1` | `instrument_industry` + `industry_override` + `fundamentals_run` tables | Fundamentals Phase 1 — industry classification |
-| `0007_etf_classification` | Adds `INSTRUMENT_TYPE` to classification_source enum | Fundamentals Phase 1 ETF subbranch |
-| `0008_instrument_shares` | `instrument_shares` table | Fundamentals Phase 2 — shares-outstanding time series |
-| `0009_quarterly_financials` | `quarterly_financials` table | Fundamentals Phase 3.A — revenue/ebitda per quarter |
-| `0010_daily_market_cap` | `daily_market_cap` table | Fundamentals Phase 4A |
-| `0011_industry_index` | `industry_index` table | Fundamentals Phase 4B — index definitions |
-| `0012_industry_index_constituent` | `industry_index_constituent` table | Fundamentals Phase 4B — composition |
-| `0013_industry_index_value` | `industry_index_value` table | Fundamentals Phase 4B — daily index values |
-| `0014_indicator_state` | `indicator_state` table | Fundamentals Phase 5 — per-(industry or ticker) Triple-EMA stack |
-| `0015_signal_event` | `signal_event` table | Fundamentals Phase 6-1 — BUY/SELL/EXIT events |
+## What the migration does
 
-## Authoring a new migration
+### `upgrade()`
 
-```bash
-pip install trip-ema[migrations]
-alembic revision -m "describe what this migration does"
-# edit alembic_pkg/versions/<rev>_<slug>.py — use the op API
-alembic upgrade head
+```sql
+ALTER TABLE indicator_state
+    DROP CONSTRAINT IF EXISTS indicator_state_core_regime_chk;
+
+ALTER TABLE indicator_state
+    DROP COLUMN IF EXISTS core_regime;
 ```
 
-If the new revision creates / drops a table or alters columns in a way
-that changes the table set, **also** add a byte-equivalent legacy SQL
-file under `../migrations/legacy/NNN_*.sql` to keep the legacy-parity
-test (`tests/persistence/test_legacy_migrator.py`) green. See
-`../migrations/legacy/README.md` for the obligation.
+Drops the CHECK first for clarity in pg_dump diffs; Postgres would
+cascade it anyway on `DROP COLUMN`. The `IF EXISTS` guards make
+re-runs idempotent.
 
-## Runtime use
+### `downgrade()`
 
-`trip-ema` runs `alembic upgrade head` at startup. Failure is **fatal**
-(was a logged warning during Phase 11; tightened in Phase 12).
+```sql
+ALTER TABLE indicator_state
+    ADD COLUMN IF NOT EXISTS core_regime SMALLINT;
 
-For pre-Phase-12 databases that ran the legacy migrator through 010,
-`trip_ema.persistence.alembic_bridge.stamp_baseline_if_needed()` detects
-a populated `schema_migrations` table on first startup and stamps
-`0001_initial_schema` **without** re-running DDL. Subsequent
-`alembic upgrade head` then applies any post-squash revisions.
+UPDATE indicator_state
+SET core_regime = display_regime
+WHERE core_regime IS NULL;
 
-## Configuration
+ALTER TABLE indicator_state
+    ALTER COLUMN core_regime SET NOT NULL;
 
-Driven by `../alembic.ini`:
-- `script_location = alembic_pkg`
-- `sqlalchemy.url` is resolved at runtime by `env.py` from
-  `config.yaml`'s `database:` block
+ALTER TABLE indicator_state
+    ADD CONSTRAINT indicator_state_core_regime_chk
+    CHECK (core_regime IN (-1, 0, 1));
+```
 
-`env.py` resolves the password env-var (`password_env: TRIP_EMA_DB_PWD`)
-the same way the runtime app does.
+**Best-effort, not lossless.** Once the column is dropped, the
+original `core_regime` values are gone for good. The downgrade
+restores the schema shape and stamps each row with `display_regime`
+as the closest available stand-in (same encoding, same value space).
+Operators rolling back must not rely on `core_regime` carrying its
+original meaning after a downgrade.
+
+## End-to-end verification
+
+Verified against a fresh Postgres 16 cluster in a sandbox:
+
+| Phase | Outcome |
+|---|---|
+| Pre-upgrade | Three seed rows; both columns; both CHECK constraints present |
+| `upgrade()` | `core_regime` column dropped; `core_regime` CHECK dropped; `display_regime` column + values preserved unchanged; row count preserved |
+| `downgrade()` | `core_regime` column restored, populated from `display_regime` (values `0, 0, 1` matching `display_regime`); NOT NULL enforced; CHECK restored; illegal value `99` rejected by the restored CHECK |
+
+The downgrade values won't equal the original pre-upgrade values
+(seed had `core_regime = 1, 1, 1`; restored has `0, 0, 1` from
+`display_regime`). That's the documented data-loss tradeoff.
+
+## DO NOT `alembic upgrade head` YET
+
+This file is ready to commit alongside Step 3 so the diff is
+reviewable, but it must not be applied to any running database until
+all application code has stopped referencing `core_regime`. Those
+sites are:
+
+| File | What it does today | Needs |
+|---|---|---|
+| `trip_ema/fundamentals/indicator_primitives.py` | Computes `core_regime_series` and emits `"core_regime"` in the per-bar indicator-state dict | Drop the computation + the dict key |
+| `trip_ema/fundamentals/runners.py` | Passes `core_regime=bs["core_regime"]` to `IndicatorStateRepository.upsert` (two call sites) | Drop the kwarg |
+| `trip_ema/persistence/fundamentals_repo.py` | `find_indicator_states` accepts an optional `core_regime=` filter; `upsert` accepts `core_regime` | Drop the filter + the upsert param |
+| `trip_ema/transports/http/routes/fundamentals.py` | Pydantic schema exposes `core_regime: int` on the wire and copies it from the domain object | Drop the field |
+| `trip_ema/persistence/tables.py` | SQLAlchemy `Column("core_regime", SmallInteger, …)` | Drop the column |
+| `trip_ema/indicators/core_regime.py` | The state-machine module itself | Delete (Step 9 demolition) |
+| `trip_ema/indicators/ticker_engine.py` | Calls `step_core_regime` per bar | Delete (Step 9 demolition) |
+
+All of the above land in **Step 9 (demolition)**. The migration runs
+**after** Step 9 commits and **before** Step 10 (the regeneration
+batch). The recommended sequence:
+
+```
+... Steps 4–8 land (new writer, persist, live, backfill,
+                    chart endpoint, cache repurpose) ...
+
+Step 9 commit: demolition
+  - delete indicators/core_regime.py, display_regime.py,
+    change_classifier.py, ticker_engine.py
+  - drop core_regime from indicator_primitives.py,
+    runners.py, fundamentals_repo.py, routes/fundamentals.py,
+    tables.py
+
+# now safe to apply
+alembic upgrade head
+# (which applies 0018)
+
+Step 10: trip-ema-etl regenerate-signals --exchange NSE …
+```
+
+If `0018` is applied before Step 9, the running app crashes on the
+next write attempt to `indicator_state` because the SQL `INSERT`
+references a dropped column.
+
+## Paste-ready git block
+
+```bash
+# from repo root
+
+# Adjust the two cp destinations to match your actual repo layout.
+# I'm guessing trip_ema/migrations/alembic_pkg/versions/ based on the
+# README structure; replace with wherever 0017_benchmark_stats.py
+# lives.
+
+cp step3/migrations/versions/0018_collapse_regime_columns.py \
+   trip_ema/migrations/alembic_pkg/versions/0018_collapse_regime_columns.py
+
+cp step3/migrations_legacy/023_collapse_regime_columns.sql \
+   trip_ema/migrations/legacy/023_collapse_regime_columns.sql
+
+git add trip_ema/migrations/alembic_pkg/versions/0018_collapse_regime_columns.py \
+        trip_ema/migrations/legacy/023_collapse_regime_columns.sql
+
+git commit -m "migration 0018: collapse regime columns on indicator_state
+
+Drops core_regime — the old two-stage core/display split is obsolete
+under the new unified regime classifier (trip_ema/regime/compute_regime.py).
+
+display_regime stays untouched. Its name, type, and -1/0/+1 encoding
+are unchanged; only the semantic source changes (new unified classifier
+instead of the old gated path). No downstream contract change.
+
+upgrade(): drops indicator_state_core_regime_chk CHECK + the column.
+downgrade(): restores the column, best-effort populates from
+display_regime, enforces NOT NULL, restores the CHECK. Not lossless
+— original core_regime values are gone after upgrade.
+
+NOT YET APPLIED. alembic upgrade head must wait until the demolition
+commit removes every app-code reference to core_regime (see file
+docstring for the full list).
+
+Verified end-to-end on a fresh Postgres 16 cluster: upgrade drops
+column + CHECK, preserves display_regime values; downgrade restores
+shape, stamps from display_regime, rejects illegal values via the
+restored CHECK."
+
+git push origin master
+```
+
+Do **not** run `alembic upgrade head` after this commit. The
+migration sits in the repo; it gets applied only after Step 9 lands.

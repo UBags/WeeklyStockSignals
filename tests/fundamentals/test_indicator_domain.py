@@ -56,7 +56,6 @@ class TestIndicatorStateDataclass:
             "lower_mid_band": 1350.0,
             "upper_outer_band": 1612.5,
             "lower_outer_band": 1287.5,
-            "core_regime": 1,
             "display_regime": 1,
             "pierces_upper_mid": False,
             "pierces_lower_mid": False,
@@ -143,8 +142,7 @@ class TestIndicatorStateDataclass:
 
     def test_all_regime_values_accepted(self):
         for v in (-1, 0, 1):
-            s = self._make(core_regime=v, display_regime=v)
-            assert s.core_regime == v
+            s = self._make(display_regime=v)
             assert s.display_regime == v
 
 

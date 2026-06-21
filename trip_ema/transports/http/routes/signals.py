@@ -118,7 +118,7 @@ def get_industry_history(
                 s.upper_inner_band, s.lower_inner_band,
                 s.upper_mid_band,   s.lower_mid_band,
                 s.upper_outer_band, s.lower_outer_band,
-                s.display_regime, s.core_regime
+                s.display_regime
             FROM industry_index_value v
             LEFT JOIN indicator_state s
                    ON s.industry_name = v.industry_name
@@ -185,11 +185,9 @@ def get_industry_history(
             else "BEARISH" if last.display_regime == -1
             else "NEUTRAL"
         )
-        core_bg = (
-            "BULLISH" if last.core_regime == 1
-            else "BEARISH" if last.core_regime == -1
-            else "NEUTRAL"
-        )
+        # Unified regime: core_bg == display_bg at the wire boundary.
+        # Field kept for backward compat with consumers that read it.
+        core_bg = display_bg
 
         # bar_timestamp: encode the Monday as a UTC datetime at 00:00.
         # Same shape as the ticker endpoint's bar_timestamps.

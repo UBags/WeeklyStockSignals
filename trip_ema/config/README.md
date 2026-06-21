@@ -1,90 +1,41 @@
-# `trip_ema/config/` — Configuration schema, loader, and resolution
+# `trip_ema/config/` — YAML config loader, schema, secrets
 
-The single source of truth for what `config.yaml` is allowed to contain
-and how each block is parsed.
+Single source of truth for runtime configuration. YAML on disk →
+Pydantic-validated `Config` object → injected everywhere downstream.
+Secrets are never in the file: the file names environment variables
+or external secrets files.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `__init__.py` | Marker |
-| `loader.py` | `load_config(path)` — read YAML, resolve `*_env` env-var references, instantiate Pydantic `Config` |
-| `schema.py` | Pydantic models for every config block — `DatabaseConfig`, `EmaConfig`, `AtrConfig`, `MarketHoursEntry`, `HttpConfig`, `EtlConfig`, `RedisConfig`, `NotifierConfig`, `ObservabilityConfig`, `TransportsConfig` (with sub-models `CircuitBreakerConfig`, `BrevoConfig`), `DbRolesConfig`, `ExchangeIndicatorOverride`, ... |
-| `exchange_overrides.py` | (Phase 15a) `resolve_indicator_params(config, exchange, timeframe)` — checks `exchange_overrides[exchange][timeframe]`, falls back to the global `ema:`/`atr:` block |
-| `brevo_secrets.py` | Load + validate Brevo API key from a YAML file outside the main config (`secrets/brevo.yaml`). Called from `load_config()` — fail-fast on missing file, world/group-readable perms, missing `api_key` field, or wrong key prefix (`xkeysib-`) |
-| `config_example.yaml` + `example.yaml` | Example configs for documentation / tests |
+| `__init__.py` | Re-exports `Config`, `load_config`, `resolve_db_password` |
+| `loader.py` | `load_config(path) -> Config`. Reads YAML, resolves env-var references for secrets, validates into `Config`. Raises `ConfigError` on any failure |
+| `schema.py` | Pydantic v2 models mirroring the YAML one-to-one. Top-level `Config` + sub-schemas (`DatabaseConfig`, `EmaConfig`, `AtrConfig`, `MarketHoursConfig`, `TransportsConfig`, `OrchestratorConfig`, …) |
+| `exchange_overrides.py` | `resolve_indicator_params(config, exchange, timeframe)` — Phase 15a per-(exchange, timeframe) overrides for the backtest signal generator. The live engine uses one global `IndicatorParams` |
+| `brevo_secrets.py` | Loader for `secrets/brevo.yaml` (chmod-600, gitignored). Fail-fast at startup if missing, world/group-readable, or `api_key` prefix ≠ `xkeysib-` |
+| `example.yaml` | Minimal example — only `database`, `ema`, `atr`, `market_hours` are required. Everything else has safe defaults |
+| `config_example.yaml` | Extended example showing the optional fields and multi-market setup |
 
-## Lifecycle
+## What's required vs optional
 
-```
-load_config(path) 
-   yaml.safe_load
-   resolve_env_vars            # password_env: TRIP_EMA_DB_PWD  ->  read os.environ["TRIP_EMA_DB_PWD"]
-   Config(**parsed)            # Pydantic validation, model_validators run
-   return Config (frozen)      # consumed by app.py, CLI, GUI, etc.
-```
+Required: `database`, `ema`, `atr`, `market_hours`. Defaults exist for
+transports, orchestrator, scheduler tick intervals, observability,
+and all Phase 1+ fundamentals knobs. Durations default to minutes
+unless a suffix says otherwise.
 
-The resulting `Config` object is immutable. Config edits require a
-restart — there's no hot-reload path.
+## Secrets handling
 
-### Fail-fast at startup
+- DB password: env-var reference (`database.password_env: TRIP_EMA_DB_PASSWORD`).
+  Unset env var is a hard failure at load time.
+- Brevo API key: separate file via `transports.brevo.secrets_file`.
+  Loaded lazily on first email send (not at boot — absence of a
+  startup log line is not a regression).
+- Admin bearer token: env (`TRIP_EMA_ADMIN_TOKEN`). When unset, write
+  endpoints 401; the GUI degrades to read-only.
 
-Two classes of secrets are resolved during `load_config()` and crash
-the process loudly if missing or malformed:
+## Obsolete / do not use
 
-- **Env-var-referenced secrets** (DB password, Redis password, admin
-  token) — named via `*_env` fields. An unset env var raises
-  `ConfigError` at boot, not a silent fallback at connect time.
-- **File-based secrets** (Brevo API key) — named via a path field
-  (`transports.brevo.secrets_file`). The file must exist, must not be
-  world/group-readable, and must contain a well-formed `api_key`
-  field with the expected prefix (`xkeysib-` for Brevo).
-
-The contract is uniform: a misconfigured secret crashes at boot,
-never silently substitutes a no-op (`NullTransport` or similar) that
-would lose notifications between configuration mistake and operator
-intervention. This closes the bug class introduced by the prior
-SMTP transport's `TRIP_EMA_SMTP_HOST`-unset code path.
-
-## Phase 15a addition: `exchange_overrides`
-
-Optional top-level block:
-
-```yaml
-exchange_overrides:
-  NSE:
-    "1W":
-      ema: { ... }
-      atr: { ... }
-    "1D":
-      ema: { ... }
-      atr: { ... }
-```
-
-Consumed **only** by the backtest signal generator
-(`trip-ema-etl generate-signals` / `POST /v1/admin/signals/generate`).
-The live engine continues to use the global `ema:`/`atr:` block until
-Phase 17 migrates it (per design OOS-7).
-
-Validation:
-- `_validate_exchange_overrides` rejects unknown exchanges (not in
-  `market_hours`) and unknown timeframes (not in `{"1D", "1W"}`)
-- Fails at config-load time with a clear error rather than at runtime
-
-## Validation patterns
-
-- `model_validator(mode="after")` — for cross-block validation
-  (e.g. "if `redis:` is set, `notifier.queue_name` is required")
-- `field_validator` — for single-field constraints (port ranges,
-  cron expressions, etc.)
-- Frozen dataclasses everywhere — no mutation post-validation
-
-## Tests
-
-- `tests/config/test_loader.py` — env-var resolution, YAML parsing
-- `tests/config/test_schema_step2.py` — model validators
-- `tests/config/test_exchange_overrides.py` — Phase 15a resolution +
-  validation (12 tests)
-- `tests/config/test_db_roles.py` — Phase 12 DB-roles config block
-- `tests/config/test_alembic_bridge_no_db.py` — alembic upgrade bridge
-  decision logic
+- `TRIP_EMA_SMTP_HOST` and any raw-SMTP fields — Outlook personal
+  accounts have SMTP AUTH disabled (5.7.139); Gmail is OAuth-only
+  since Sept 2024. Brevo HTTP API is the only viable transport.

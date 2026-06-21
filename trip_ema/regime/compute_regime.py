@@ -72,7 +72,7 @@ def compute_regime(
 ) -> Regime:
     """Classify the current bar's regime.
 
-    Returns one of `Regime.GREEN`, `Regime.RED`, `Regime.NEUTRAL`.
+    Returns one of `Regime.BULLISH`, `Regime.BEARISH`, `Regime.NEUTRAL`.
 
     Rules are evaluated top-to-bottom; the first match wins:
 
@@ -105,15 +105,15 @@ def compute_regime(
 
     # (a) definite_green — close >= upper_inner ATR boundary
     if bar.close >= bar.upper_inner:
-        return Regime.GREEN
+        return Regime.BULLISH
 
     # (b) definite_red — close <= lower_inner ATR boundary
     if bar.close <= bar.lower_inner:
-        return Regime.RED
+        return Regime.BEARISH
 
     # (c) green_continuation — only if the previous bar was green AND we
     # have the previous-bar inputs the second leg needs.
-    if previous_regime == Regime.GREEN:
+    if previous_regime == Regime.BULLISH:
         # First leg: close still above the lower envelope (ribbon bottom).
         leg1 = bar.close >= bar.lower_envelope
         # Second leg: today closed above the lower-inner band AND yesterday's
@@ -126,10 +126,10 @@ def compute_regime(
             and previous_close >= previous_lower_envelope  # type: ignore[operator]
         )
         if leg1 or leg2:
-            return Regime.GREEN
+            return Regime.BULLISH
 
     # (d) red_continuation — mirror of (c).
-    if previous_regime == Regime.RED:
+    if previous_regime == Regime.BEARISH:
         leg1 = bar.close <= bar.upper_envelope
         leg2 = (
             _is_finite(previous_close, previous_upper_envelope)
@@ -137,7 +137,7 @@ def compute_regime(
             and previous_close <= previous_upper_envelope  # type: ignore[operator]
         )
         if leg1 or leg2:
-            return Regime.RED
+            return Regime.BEARISH
 
     # (e) neutral — nothing else matched.
     return Regime.NEUTRAL

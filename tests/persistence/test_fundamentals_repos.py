@@ -2025,7 +2025,7 @@ def _make_ticker_state(
         "upper_inner_band": 1505.0, "lower_inner_band": 1395.0,
         "upper_mid_band": 1550.0, "lower_mid_band": 1350.0,
         "upper_outer_band": 1612.5, "lower_outer_band": 1287.5,
-        "core_regime": 0, "display_regime": 0,
+        "display_regime": 0,
         "pierces_upper_mid": False, "pierces_lower_mid": False,
         "dist_to_med_in_hl_units": 0.5,
         "dist_to_long_in_hl_units": 1.2,
@@ -2062,7 +2062,7 @@ def _make_industry_state(
         "upper_inner_band": 1051.0, "lower_inner_band": 999.0,
         "upper_mid_band": 1060.0, "lower_mid_band": 990.0,
         "upper_outer_band": 1072.5, "lower_outer_band": 977.5,
-        "core_regime": 1, "display_regime": 1,
+        "display_regime": 1,
         "pierces_upper_mid": False, "pierces_lower_mid": False,
         "dist_to_med_in_hl_units": 0.3,
         "dist_to_long_in_hl_units": 0.7,
@@ -2094,7 +2094,7 @@ class TestIndicatorStateTickerWrites:
         td = date(2026, 5, 22)
         with transaction(db_engine) as conn:
             IndicatorStateRepository(conn).upsert_for_ticker(
-                _make_ticker_state(tid, td, core_regime=1, display_regime=1)
+                _make_ticker_state(tid, td, display_regime=1)
             )
         with db_engine.connect() as conn:
             row = IndicatorStateRepository(conn).get_at_for_ticker(
@@ -2104,7 +2104,6 @@ class TestIndicatorStateTickerWrites:
         assert row.ticker_id == tid
         assert row.timeframe == "1w"
         assert row.industry_name is None
-        assert row.core_regime == 1
         assert row.display_regime == 1
         assert row.med_ema == 1500.0
 
@@ -2249,16 +2248,6 @@ class TestIndicatorStateValidation:
             with pytest.raises(ValueError, match="ticker_id=None"):
                 IndicatorStateRepository(conn).upsert_for_industry(bad)
 
-    def test_rejects_bad_core_regime(self, db_engine, ticker_ids):
-        tid = ticker_ids[("NSE", "RELIANCE")]
-        with transaction(db_engine) as conn:
-            with pytest.raises(ValueError, match="core_regime"):
-                IndicatorStateRepository(conn).upsert_for_ticker(
-                    _make_ticker_state(
-                        tid, date(2026, 5, 22), core_regime=5,
-                    )
-                )
-
     def test_rejects_negative_atr(self, db_engine, ticker_ids):
         tid = ticker_ids[("NSE", "RELIANCE")]
         with transaction(db_engine) as conn:
@@ -2382,11 +2371,11 @@ class TestIndicatorStateCrossSeriesQueries:
             r = IndicatorStateRepository(conn)
             r.upsert_for_ticker(_make_ticker_state(
                 ticker_ids[("NSE", "RELIANCE")], td,
-                display_regime=1, core_regime=1,
+                display_regime=1,
             ))
             r.upsert_for_ticker(_make_ticker_state(
                 ticker_ids[("NSE", "TCS")], td,
-                display_regime=-1, core_regime=-1,
+                display_regime=-1,
             ))
         with db_engine.connect() as conn:
             r = IndicatorStateRepository(conn)
@@ -2569,7 +2558,7 @@ class TestIndicatorStateDBConstraints:
                         atr, upper_inner_band, lower_inner_band,
                         upper_mid_band, lower_mid_band,
                         upper_outer_band, lower_outer_band,
-                        core_regime, display_regime
+                        display_regime
                     ) VALUES (
                         :tid, '1w', 'X', :td,
                         1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0
@@ -2587,7 +2576,7 @@ class TestIndicatorStateDBConstraints:
                         atr, upper_inner_band, lower_inner_band,
                         upper_mid_band, lower_mid_band,
                         upper_outer_band, lower_outer_band,
-                        core_regime, display_regime
+                        display_regime
                     ) VALUES (
                         NULL, NULL, NULL, :td,
                         1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0
@@ -2606,7 +2595,7 @@ class TestIndicatorStateDBConstraints:
                         atr, upper_inner_band, lower_inner_band,
                         upper_mid_band, lower_mid_band,
                         upper_outer_band, lower_outer_band,
-                        core_regime, display_regime
+                        display_regime
                     ) VALUES (
                         :tid, '1w', NULL, :td,
                         1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 5, 0

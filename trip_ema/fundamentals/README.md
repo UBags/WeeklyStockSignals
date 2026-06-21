@@ -1,95 +1,66 @@
-# `trip_ema/fundamentals/` — Fundamentals vertical slice (Phases 1-8)
+# `trip_ema/fundamentals/` — Phase 1–6 fundamentals stack
 
-A parallel pipeline that enriches the ticker universe with sector /
-industry classification, shares outstanding, quarterly financials, daily
-market cap, modified-Laspeyres industry indices, the Triple-EMA indicator
-stack applied to those indices, and the four-kind signal-event derivation.
+Everything between raw OHLCV and emitted signal events: yfinance
+metadata fetches, daily market cap, industry indices, indicator
+state, and the signal events written to `signal_events`.
 
-The design rationale and per-phase decisions are in
-`../../docs/FUNDAMENTALS_PHASES_1_TO_8.md`.
-
-## How the CLI surface attaches
-
-The fundamentals subcommands are **not** a separate binary. They ship
-as part of `trip-ema-etl`. `cli.py::register_subparsers(subparsers, _add_exchange_arg)`
-is called from `trip_ema/etl/cli.py::_build_parser()`, which mounts every
-fundamentals subcommand onto the same argparse tree and merges the
-handlers into the shared dispatch table. From the operator's
-perspective there is one CLI; the split here is for code locality.
-
-So `trip-ema-etl refresh-industry --exchange NSE` reaches a handler
-defined in this module, dispatched by the ETL module's `main()`.
+The runner per phase is the unit of work; the EoD pipeline wires the
+8 phases together. Per-ticker work runs **before** per-industry work
+(non-negotiable — the industries reference the per-ticker state).
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `__init__.py` | Domain dataclasses (`IndustryClassification`, `IndustryOverride`, `FundamentalsRun`, `SharesOutstanding`, `QuarterlyFinancial`, `DailyMarketCap`, `IndustryIndex`, `IndustryIndexConstituent`, `IndustryIndexValue`, `IndicatorState`, `SignalEvent`) + tuple-of-literals enums for source / status / methodology fields |
-| `cli.py` | `register_subparsers(...)` — mounts subcommands onto `trip-ema-etl`'s argparse tree. Subcommands: `refresh-industry`, `backfill-etf-classification`, `refresh-shares`, `refresh-financials`, `compute-market-cap`, `build-industry-indices`, `compute-index-values`, `compute-indicator-state`, `compute-signals`, `set-industry-override`, `delete-industry-override`, `fundamentals-status`, `rebalance-industry-index`, `run-eod-pipeline` |
-| `eod_pipeline.py` | Orchestrates all 8-10 phases in order; per-step progress table; exit codes 0/1/2 |
-| `scheduler.py` | Skip-if-recent guard (80-day window) shared across Phase 1-3 refresh commands |
-| `runners.py` | Generic run-row management (open + close `fundamentals_run` rows; resume support) |
-| `industry_fetch.py` | Phase 1 — yfinance sector/industry classification fetch + ETF subbranch |
-| `shares_fetch.py` | Phase 2 — yfinance `sharesOutstanding` / `impliedSharesOutstanding` fetch |
-| `financials_fetch.py` | Phase 3.A — yfinance `quarterly_income_stmt` fetch (revenue + ebitda) |
-| `market_cap_fetch.py` | Phase 4A — historical mcap path (yfinance `histMarketCap`) |
-| `market_cap_compute.py` | Phase 4A — `close × shares` compute path (COMPUTED / APPROX_TODAYS_SHARES) |
-| `index_compute.py` | Phase 4B — modified-Laspeyres index construction + daily-value computation + mid-cycle delisting renormalization |
-| `indicator_primitives.py` | Phase 5 — math primitives for indicator-state derivation: bars-since-turn, pct-change-since-turn, pattern-label detection |
-| `signal_compute.py` | Phase 6-1 — derives `signal_event` rows from `indicator_state.display_regime` transitions |
+| `__init__.py` | Marker |
+| `cli.py` | CLI command handlers. Imported and registered by `trip_ema/etl/cli.py` (which stays a thin dispatcher). Convention: `(args, config) -> exit_code` (0/1/2) |
+| `runners.py` | One runner per phase (`run_industry_refresh`, `run_shares_refresh`, `run_financials_refresh`, `run_market_cap_compute`, `run_index_build`, `run_index_values`, `run_indicator_state`, `run_signal_compute`). Each owns transaction control, `fundamentals_run` row lifecycle, progress checkpointing, resumability |
+| `runner.py` *(if present)* | Shared runner helpers — context, dry-run guard, dispatch table |
+| `eod_pipeline.py` | Phase 4C orchestrator. `run_eod_pipeline(...)` wires the 8 phases as a single pipeline. Per-ticker **before** per-industry. `--skip-tickers` is the opt-out; `--include-tickers` is deprecated (no-op) |
+| `scheduler.py` | Quarterly fundamentals refresh — a background thread that wakes once per day, checks the calendar, fires `run_industry_refresh()` when the filing window opens and the last SUCCESS row is stale |
+| `industry_fetch.py` | `yfinance Ticker.info → IndustryInfo` for one symbol. Typed exceptions for rate-limit / transient / permanent so the runner can apply differentiated retry policy |
+| `shares_fetch.py` | `yfinance Ticker.info → SharesInfo` for one symbol. Current scalar shares outstanding |
+| `financials_fetch.py` | `yfinance Ticker.quarterly_income_stmt → list[QuarterlyFinancial]` for one symbol |
+| `backfill_shares_fetch.py` | `Ticker.get_shares_full(start=…)` — historical time series of shares-outstanding by filing date. Distinct from `shares_fetch` (current scalar) |
+| `market_cap_fetch.py` | yfinance historical `daily_market_cap` rows (`source=FETCHED`) for dates BEFORE our local `instrument_shares` coverage |
+| `market_cap_compute.py` | Daily market cap (`source=COMPUTED`) by joining `ohlcv_bars.close × instrument_shares.shares_outstanding` for dates within local coverage |
+| `index_compute.py` | Phase 4B-2. Index constituent picker (top-N by mcap per industry) + modified-Laspeyres value computer. Two pure functions; the runner wires them into rebalance + value-backfill loops |
+| `indicator_primitives.py` | Pine-Script-equivalent primitives (Phase 5-2). Pure pandas Series in / Series out. Implements the same math as the operator's Pine indicator |
+| `signal_compute.py` | Phase 6-1. Pure: a time-ordered list of `IndicatorState` rows → emitted `SignalEvent` rows. Four kinds derived from display-regime transitions: BUY, SELL, EXIT_FROM_BUY, EXIT_FROM_SELL |
+| `signal_generator.py` | Phase 15a. Historical replay across active tickers on an exchange. Reads `ohlcv_bars`, replays through a fresh `TickerEngine` per (ticker, timeframe), captures every non-`NO_CHANGE` event, merges to one JSON per exchange |
 
-## Pipeline ordering
+## EoD pipeline order
 
 ```
-1. refresh-industry          (Phase 1 — yfinance, skip-if-recent)
-2. (backfill-etf-classification)  (Phase 1 ETF subbranch)
-3. refresh-shares            (Phase 2 — yfinance)
-4. refresh-financials        (Phase 3.A — yfinance)
-5. compute-market-cap        (Phase 4A — local; backfill mode = yfinance)
-6. build-industry-indices    (Phase 4B — local)
-7. compute-index-values      (Phase 4B — local)
-8. compute-indicator-state   (Phase 5 — local)
-9. compute-signals           (Phase 6-1 — local)
-   --include-tickers:
-10. compute-indicator-state (per-ticker)  (Phase 7)
-11. compute-signals (per-ticker)          (Phase 7)
+1. refresh-industry         (per-ticker, sector/industry from yfinance)
+2. refresh-shares           (per-ticker, current shares outstanding)
+3. refresh-financials       (per-ticker, quarterly income)
+4. compute-market-cap       (per-ticker, daily_market_cap rows)
+5. build-industry-indices   (per-industry, constituent picks)
+6. compute-index-values     (per-industry, index values)
+7. compute-indicator-state  (per-ticker + per-industry indicator rows)
+8. compute-signals          (per-ticker + per-industry signal events)
 ```
 
-Each step's output is the next step's input. `run-eod-pipeline` chains
-them all in a single command (Phase 4C) with a per-step progress table.
+Per-ticker (1–4, 7t, 8t) runs **before** per-industry (5, 6, 7i, 8i).
 
-## Skip-if-recent guard (80 days)
+## Signal-event idempotency
 
-Phase 1-3 fetches consult `fundamentals_run` for a recent SUCCESS or
-PARTIAL row. If found within 80 days, the step is skipped. `--force`
-overrides. The intent: yfinance's per-ticker data is updated quarterly
-at most, so daily re-fetches waste API budget.
+`signal_events` (plural, unified in migration 0016) is the single
+canonical table. Writes go through `INSERT … ON CONFLICT DO NOTHING`
+guarded by partial unique indexes — re-runs and intra-week
+re-evaluations cannot duplicate.
 
-Steps 4-9 have their own (shorter) guards or no guard at all.
+## Signal kind vocabulary
 
-## Polymorphic identity (industries vs tickers)
+Long forms everywhere — `BUY`, `SELL`, `EXIT_FROM_BUY`, `EXIT_FROM_SELL`.
+No short forms. Direct regime flips emit only the new-side OPEN signal;
+no EXIT is emitted (precedence suppression).
 
-Tables `indicator_state` and `signal_event` are polymorphic: a row is
-EITHER for an industry index (`industry_name` populated) OR for a ticker
-(`ticker_id` + `timeframe` populated). DB CHECK constraints enforce
-"exactly one of the two non-NULL". Phase 5/6 ships the industry path;
-Phase 7 adds the ticker path.
+## Weekly aggregation
 
-## HTTP surface
-
-The fundamentals layer also exposes routes under `/v1/fundamentals/*`
-in `trip_ema/transports/http/routes/fundamentals.py` — read endpoints
-for the various tables, plus async POSTs that fire the same handlers
-on the service's `etl_executor`. Used by automation and (eventually)
-the GUI.
-
-## Tests
-
-`tests/fundamentals/` — 23 files, one per module + integration cases.
-Notable:
-- `test_eod_pipeline.py` — full multi-step orchestration (Phase 4C)
-- `test_index_compute.py` — modified-Laspeyres math + delisting renorm
-- `test_indicator_domain.py`, `test_indicator_primitives.py`,
-  `test_indicator_state_runners.py` — Phase 5
-- `test_signal_compute.py`, `test_signal_event_runners.py` — Phase 6
-- `test_per_ticker_runners.py` — Phase 7
+`date_trunc('week', bar_timestamp AT TIME ZONE 'Asia/Kolkata')` —
+Pine convention, Monday-IST anchored. Trade dates are stored as IST
+Mondays. The partial in-progress week is always emitted; intra-week
+re-evaluations may emit multiple rows for the same weekly bar
+across scheduled ticks (legitimate, not duplicates).

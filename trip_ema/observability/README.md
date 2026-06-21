@@ -1,58 +1,40 @@
-# `trip_ema/observability/` — Cross-cutting observability stack
+# `trip_ema/observability/` — metrics, tracing, correlation, logging
 
-Logs, metrics, tracing, and correlation-ID propagation. Consumed by
-every layer; depends on no other in-package layer (except `domain/`
-when needed).
+Cross-cutting plumbing for operations: Prometheus metrics, optional
+OpenTelemetry tracing, correlation-ID threading through the pipeline,
+and structured logging.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `__init__.py` | Marker |
-| `logging_config.py` | Structured JSON log formatter, log-level / handler setup. Switched on with `observability.log_json: true` in config |
-| `metrics.py` | Prometheus metric definitions — counters, histograms, gauges. Defensive no-op shims (`_NoOpMetric`, `_NoOpRegistry`) when `prometheus_client` isn't installed |
-| `metrics_server.py` | Starts the `/metrics` HTTP server on a separate port (`observability.metrics_port`) — only when `prometheus_client` is installed |
-| `tracing.py` | OpenTelemetry tracer factory. Defensive `_NoOpTracer` shim when `opentelemetry-api` isn't installed. Spans wrap `ComputeScheduler.run_once`, `SubscriberDistributor._enqueue_jobs`, `NotifierWorker._handle_job`, `generate_historical_signals` |
-| `correlation.py` | Correlation-ID context-var — minted at HTTP request boundary, tick boundary, distributor enqueue, notifier handle, backtest run start. Propagates through every log line, every DB row that has a `correlation_id` column, and every OTel span |
+| `__init__.py` | Re-exports `REGISTRY`, `configure_logging`, `correlation_id_var`, the public Prometheus counter / histogram factories |
+| `metrics.py` | Central Prometheus registry. All metrics on a single `CollectorRegistry` exposed as `REGISTRY`. Naming: `trip_ema_<subsystem>_<unit>_<total\|seconds>` for counters / durations |
+| `metrics_server.py` | Standalone Prometheus scrape endpoint on a separate port (typically 9090). Three reasons separate: firewall the scrape port, disable in dev without touching the main API, survives mid-shutdown of the main app |
+| `tracing.py` | OpenTelemetry — optional, off-by-default. Every span site calls `tracer.start_as_current_span(...)`. No-op tracer if no provider is initialised → near-zero cost when disabled, real spans when an exporter is wired up |
+| `correlation.py` | UUID4 correlation IDs threaded through scheduler → cache write → distributor → Redis → worker → transport. Grep-ability across log streams. Stored in a `contextvars.ContextVar` so it survives async/thread hand-offs |
+| `logging_config.py` | `configure_logging(level, json_output)`. JSON to stderr (production) or plain text (dev). Always includes the current `correlation_id` |
 
-## Invariant 3.12 — observability is additive
+## Boundaries
 
-A Tier-3 deployment without `prometheus_client` or
-`opentelemetry-api` installed must keep working. Achieved by:
-- All imports in this directory are guarded by `try/except ImportError`
-- Defensive no-op shims replace the real classes when imports fail
-- The rest of the codebase imports the real or shim symbol from
-  here — the call sites never know the difference
+- **No business logic.** Every module here is plumbing.
+- Importable from anywhere in `trip_ema`. Has no dependency on
+  `persistence`, `transports/http`, etc. — they depend on this.
+- Metric and span names are public-API: changing them breaks
+  dashboards and alerts.
 
-This is why `prometheus_client` and `opentelemetry-*` are **extras**
-in `pyproject.toml` rather than runtime dependencies.
+## Why correlation ≠ tracing
 
-## Where correlation IDs are minted
+OpenTelemetry tracing answers "what was the call graph and where did
+time go." Correlation IDs answer "tell me everything that happened
+for this one user-visible operation." They're complementary; a single
+correlation ID will appear on many spans in a trace.
 
-| Boundary | Minter |
-|---|---|
-| HTTP request | Middleware reads `X-Correlation-Id` header, or mints UUID |
-| Compute tick | `ComputeScheduler.run_once()` |
-| Distributor enqueue | `SubscriberDistributor._enqueue_jobs` |
-| Notifier dispatch | `NotifierWorker._handle_job` |
-| Backtest run | `generate_historical_signals` |
+## Operator quick reference
 
-## Logs / metrics / traces
-
-- **Logs** — JSON to stdout (default) or plain text. Every log line
-  carries the current correlation ID (when in context)
-- **Metrics** — Prometheus scrape on `observability.metrics_port`.
-  Key metrics: `trip_ema_compute_run_duration_seconds`,
-  `trip_ema_signals_emitted_total`,
-  `trip_ema_notifier_jobs_processed_total` (label `outcome=success|failed|dlq`),
-  `trip_ema_circuit_breaker_state` (gauge per transport)
-- **Traces** — OTLP / console exporter. Spans labeled with
-  correlation ID + tick boundary
-
-## Tests
-
-- `tests/observability/test_observability.py` — basic plumbing
-- `tests/observability/test_metrics_integration.py` — metric
-  registration + emission
-- `tests/observability/test_tracing.py` — span lifecycle, no-op
-  shim behavior
+```
+Logs:          /tmp/trip-ema.log
+Metrics:       http://<host>:9090/metrics
+JSON logs:     export TRIP_EMA_JSON_LOGS=1 before service start
+OTel exporter: configured via standard OTEL_* env vars
+```

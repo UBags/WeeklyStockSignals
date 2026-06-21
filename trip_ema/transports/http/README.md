@@ -1,84 +1,62 @@
-# `trip_ema/transports/http/` — FastAPI HTTP layer
+# `trip_ema/transports/http/` — FastAPI app
 
-The `trip-ema` service's HTTP surface. FastAPI app, dependency injection,
-Pydantic schemas, and the per-thematic-slice route routers.
+The HTTP transport. App factory, dependency container, schemas, the
+pulse pub/sub. Routes themselves live in `routes/`.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `__init__.py` | Marker |
-| `app.py` | `create_app(state, config)` — builds the FastAPI instance, registers routers, installs middleware (correlation-ID, observability) |
-| `dependencies.py` | DI factories — `get_db_engine`, `get_config`, `get_etl_executor`, `get_cache`, `get_registry`, `require_admin_token` (bearer-token gate) |
-| `schemas.py` | Shared Pydantic request / response models — `SignalGenerateRequest`, `SignalGenerateResponse`, ... (one section per phase that added schemas) |
-| `orchestrator_schemas.py` | Schemas specific to the orchestrator routes (status, pause/resume, run-now) |
-| `pulse_state.py` | Server-Sent Events plumbing for `/v1/pulse/stream` — broadcaster pattern with async subscribers |
+| `app.py` | `create_app() -> FastAPI`. Returns a configured app with all routers mounted. **Does not own runtime state** (registry, cache, schedulers) — those are wired separately via `dependencies.set_state()`, so tests can build an app and inject fakes. Participates in FastAPI's ASGI-lifespan protocol via the optional `shutdown_callback` |
+| `dependencies.py` | The FastAPI `Depends(...)` providers. Reads from a module-level container that the entry point populates at startup. Tests override via `app.dependency_overrides`. Includes `require_admin_token` for write-side gating |
+| `schemas.py` | HTTP request/response Pydantic models. Wrap/unwrap the internal `api.responses` types into wire-format JSON. Wire format and internal types evolve independently — most fields pass through 1:1, enums-by-value become human-readable strings on the wire |
+| `orchestrator_schemas.py` | Phase 14 payloads for orchestrator admin + pulse endpoints. Kept separate from `schemas.py` only to keep the Phase 14 diff reviewable; no functional reason to stay split |
+| `pulse_state.py` | `PulseState` — in-memory pub/sub. Concrete implementation of the `PulsePublisher` Protocol declared in `scheduler.market_orchestrator`. Lives here because the only consumers are HTTP (the SSE endpoint in `routes/pulse.py` and the snapshot endpoint) |
 
 ## Subdirectories
 
 | Path | Purpose |
 |---|---|
-| `routes/` | Router files, one per thematic slice (health, signals, compute, pulse, admin-*) |
+| `routes/` | All routers — `app.py` mounts them in `create_app()`. One module per concern. See `routes/README.md` |
 
-## App composition
+## Wiring pattern
 
 ```
-create_app(state, config) -> FastAPI
-    install correlation-id middleware
-    register public routers      (health, signals, compute, pulse)
-    register admin routers       (admin, admin_etl, admin_exchange_state,
-                                  admin_exchanges, admin_signals (P15b),
-                                  admin_subscribers, admin_notifications,
-                                  admin_orchestrator, admin_health, admin_reprime,
-                                  admin_circuit_breakers)
-    install OpenAPI tags / descriptions
-    return app
+entry point (trip-ema serve)
+   ├─ build config, engine, registry, cache, scheduler, pool
+   ├─ dependencies.set_state(...)        # populate container
+   ├─ app = create_app(shutdown_callback=stop_all)
+   └─ uvicorn.run(app)
+
+route handler
+   def handler(svc = Depends(get_some_svc)):  # type-hint visible in route signature
+       svc.do_thing()
+
+test
+   app = create_app()
+   app.dependency_overrides[get_some_svc] = lambda: FakeSvc()
+   client = TestClient(app)
 ```
 
-The app is then handed to `uvicorn.run(app, host=..., port=...)` from
-`trip_ema.app:main`.
+## Why split `app` and `dependencies`
 
-## Dependency injection pattern
+- `app.py` is concerned with mounting routers and wiring ASGI lifespan.
+- `dependencies.py` owns the runtime-state container.
+- Tests instantiate the app without the runtime state, then inject
+  whatever they want. Production wires the state once at startup.
 
-Routes declare their dependencies via FastAPI's `Depends()`:
+## Why `pulse_state` lives here, not in `scheduler/`
 
-```python
-@router.post("/v1/admin/etl/run-eod")
-def admin_etl_run_eod(
-    exchange: str,
-    db: Engine = Depends(get_db_engine),
-    executor: ThreadPoolExecutor = Depends(get_etl_executor),
-    config: Config = Depends(get_config),
-    _: None = Depends(require_admin_token),
-):
-    ...
-```
+The `PulsePublisher` Protocol is declared in
+`scheduler.market_orchestrator` (because the orchestrator publishes
+into it). The **concrete implementation** lives here because the only
+subscribers are HTTP endpoints. Moving it elsewhere would force a
+back-import from scheduler → http, which we don't want.
 
-`AppState` is the singleton that holds the actual instances; the
-`get_*` factories pull from it. Route handlers don't know about
-`AppState` directly.
+## Wire-format vs internal types
 
-## Admin gating
-
-`require_admin_token` reads `Authorization: Bearer <token>`, compares
-to `os.environ[config.http.admin_token_env]`:
-- Env var not set → 503 Service Unavailable
-- Missing / malformed header → 401 Unauthorized
-- Token mismatch → 403 Forbidden
-
-The env-var name (not the value) is in config so operators can rotate
-tokens without redeploying.
-
-## Tests
-
-- `tests/transports/http/` — full integration tests (DB-required) per
-  route: `test_health.py`, `test_compute.py`, `test_signals.py`,
-  `test_admin.py`, `test_admin_orchestrator.py`, `test_pulse_routes.py`,
-  `test_fundamentals_routes.py`, `test_create_app_step6.py`
-- `tests/transports_pure/` — pure-Python tests against mocked DB:
-  `test_admin_signals.py` (28 tests, Phase 15b), `test_admin_etl.py`,
-  `test_admin_exchanges.py`, `test_admin_exchange_state.py`,
-  `test_admin_circuit_breakers.py`, `test_admin_reprime.py`,
-  `test_admin_slice4.py`, `test_signal_history.py`,
-  `test_graceful_shutdown.py`
-- `tests/transports/test_pulse_state.py` — SSE plumbing
+`api.responses.TerseResponse` is an internal type. `schemas.TerseResponseOut`
+is its wire form. The mapping is thin but explicit. We deliberately
+don't `model_validate` the internal type into the wire type — they're
+written to evolve independently.

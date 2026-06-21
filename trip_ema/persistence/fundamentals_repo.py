@@ -1899,7 +1899,6 @@ class IndicatorStateRepository:
         self, trade_date: "date", *,
         series_kind: Optional[str] = None,  # 'TICKER' | 'INDUSTRY' | None
         display_regime: Optional[int] = None,
-        core_regime: Optional[int] = None,
     ) -> list:
         """Cross-series snapshot on a single date, optionally filtered
         by series kind and/or regime. Used by Phase 6+ "what fired
@@ -1926,9 +1925,6 @@ class IndicatorStateRepository:
         if display_regime is not None:
             conditions.append("display_regime = :dr")
             params["dr"] = display_regime
-        if core_regime is not None:
-            conditions.append("core_regime = :cr")
-            params["cr"] = core_regime
         sql = f"""
             SELECT * FROM indicator_state
             WHERE {' AND '.join(conditions)}
@@ -2038,7 +2034,7 @@ class IndicatorStateRepository:
                 atr, upper_inner_band, lower_inner_band,
                 upper_mid_band, lower_mid_band,
                 upper_outer_band, lower_outer_band,
-                core_regime, display_regime,
+                display_regime,
                 pierces_upper_mid, pierces_lower_mid,
                 dist_to_med_in_hl_units, dist_to_long_in_hl_units,
                 dist_to_longest_in_hl_units,
@@ -2057,7 +2053,7 @@ class IndicatorStateRepository:
                 :tid, :tf, NULL, :td,
                 :med, :long, :longest,
                 :atr, :uib, :lib, :umb, :lmb, :uob, :lob,
-                :cr, :dr,
+                :dr,
                 :pum, :plm,
                 :dmh, :dlh, :dxh, :mdmh, :mdlh, :mdxh,
                 :bmt, :blt, :bxt,
@@ -2079,7 +2075,6 @@ class IndicatorStateRepository:
                 lower_mid_band = EXCLUDED.lower_mid_band,
                 upper_outer_band = EXCLUDED.upper_outer_band,
                 lower_outer_band = EXCLUDED.lower_outer_band,
-                core_regime = EXCLUDED.core_regime,
                 display_regime = EXCLUDED.display_regime,
                 pierces_upper_mid = EXCLUDED.pierces_upper_mid,
                 pierces_lower_mid = EXCLUDED.pierces_lower_mid,
@@ -2117,7 +2112,7 @@ class IndicatorStateRepository:
                 atr, upper_inner_band, lower_inner_band,
                 upper_mid_band, lower_mid_band,
                 upper_outer_band, lower_outer_band,
-                core_regime, display_regime,
+                display_regime,
                 pierces_upper_mid, pierces_lower_mid,
                 dist_to_med_in_hl_units, dist_to_long_in_hl_units,
                 dist_to_longest_in_hl_units,
@@ -2136,7 +2131,7 @@ class IndicatorStateRepository:
                 NULL, NULL, :ind, :td,
                 :med, :long, :longest,
                 :atr, :uib, :lib, :umb, :lmb, :uob, :lob,
-                :cr, :dr,
+                :dr,
                 :pum, :plm,
                 :dmh, :dlh, :dxh, :mdmh, :mdlh, :mdxh,
                 :bmt, :blt, :bxt,
@@ -2158,7 +2153,6 @@ class IndicatorStateRepository:
                 lower_mid_band = EXCLUDED.lower_mid_band,
                 upper_outer_band = EXCLUDED.upper_outer_band,
                 lower_outer_band = EXCLUDED.lower_outer_band,
-                core_regime = EXCLUDED.core_regime,
                 display_regime = EXCLUDED.display_regime,
                 pierces_upper_mid = EXCLUDED.pierces_upper_mid,
                 pierces_lower_mid = EXCLUDED.pierces_lower_mid,
@@ -2228,11 +2222,6 @@ class IndicatorStateRepository:
                     "upsert_for_industry requires ticker_id=None and "
                     "timeframe=None"
                 )
-        if state.core_regime not in (-1, 0, 1):
-            raise ValueError(
-                f"core_regime must be in {{-1, 0, 1}}; "
-                f"got {state.core_regime!r}"
-            )
         if state.display_regime not in (-1, 0, 1):
             raise ValueError(
                 f"display_regime must be in {{-1, 0, 1}}; "
@@ -2270,7 +2259,6 @@ class IndicatorStateRepository:
             "lmb": state.lower_mid_band,
             "uob": state.upper_outer_band,
             "lob": state.lower_outer_band,
-            "cr": state.core_regime,
             "dr": state.display_regime,
             "pum": state.pierces_upper_mid,
             "plm": state.pierces_lower_mid,
@@ -2321,32 +2309,31 @@ def _indicator_from_row(row):
         lower_mid_band=float(row[11]),
         upper_outer_band=float(row[12]),
         lower_outer_band=float(row[13]),
-        core_regime=int(row[14]),
-        display_regime=int(row[15]),
-        pierces_upper_mid=bool(row[16]),
-        pierces_lower_mid=bool(row[17]),
-        dist_to_med_in_hl_units=(float(row[18]) if row[18] is not None else None),
-        dist_to_long_in_hl_units=(float(row[19]) if row[19] is not None else None),
-        dist_to_longest_in_hl_units=(float(row[20]) if row[20] is not None else None),
-        mean_dist_to_med_in_hl_units=(float(row[21]) if row[21] is not None else None),
-        mean_dist_to_long_in_hl_units=(float(row[22]) if row[22] is not None else None),
-        mean_dist_to_longest_in_hl_units=(float(row[23]) if row[23] is not None else None),
-        bars_since_med_turn=(int(row[24]) if row[24] is not None else None),
-        bars_since_long_turn=(int(row[25]) if row[25] is not None else None),
-        bars_since_longest_turn=(int(row[26]) if row[26] is not None else None),
-        pct_change_since_med_turn=(float(row[27]) if row[27] is not None else None),
-        pct_change_since_long_turn=(float(row[28]) if row[28] is not None else None),
-        pct_change_since_longest_turn=(float(row[29]) if row[29] is not None else None),
-        med_pattern_label=row[30],
-        long_pattern_label=row[31],
-        longest_pattern_label=row[32],
-        med_turn_buy=bool(row[33]),
-        med_turn_sell=bool(row[34]),
-        long_turn_buy=bool(row[35]),
-        long_turn_sell=bool(row[36]),
-        longest_turn_buy=bool(row[37]),
-        longest_turn_sell=bool(row[38]),
-        computed_at=row[39],
+        display_regime=int(row[14]),
+        pierces_upper_mid=bool(row[15]),
+        pierces_lower_mid=bool(row[16]),
+        dist_to_med_in_hl_units=(float(row[17]) if row[17] is not None else None),
+        dist_to_long_in_hl_units=(float(row[18]) if row[18] is not None else None),
+        dist_to_longest_in_hl_units=(float(row[19]) if row[19] is not None else None),
+        mean_dist_to_med_in_hl_units=(float(row[20]) if row[20] is not None else None),
+        mean_dist_to_long_in_hl_units=(float(row[21]) if row[21] is not None else None),
+        mean_dist_to_longest_in_hl_units=(float(row[22]) if row[22] is not None else None),
+        bars_since_med_turn=(int(row[23]) if row[23] is not None else None),
+        bars_since_long_turn=(int(row[24]) if row[24] is not None else None),
+        bars_since_longest_turn=(int(row[25]) if row[25] is not None else None),
+        pct_change_since_med_turn=(float(row[26]) if row[26] is not None else None),
+        pct_change_since_long_turn=(float(row[27]) if row[27] is not None else None),
+        pct_change_since_longest_turn=(float(row[28]) if row[28] is not None else None),
+        med_pattern_label=row[29],
+        long_pattern_label=row[30],
+        longest_pattern_label=row[31],
+        med_turn_buy=bool(row[32]),
+        med_turn_sell=bool(row[33]),
+        long_turn_buy=bool(row[34]),
+        long_turn_sell=bool(row[35]),
+        longest_turn_buy=bool(row[36]),
+        longest_turn_sell=bool(row[37]),
+        computed_at=row[38],
     )
 
 

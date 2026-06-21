@@ -117,14 +117,14 @@ def generate_signal(
     #           suppressed by the outer-band guard).
     buy_fires = (
         previous_state != PositionState.BUY
-        and current_regime == Regime.GREEN
+        and current_regime == Regime.BULLISH
         and (
             (
-                previous_regime != Regime.GREEN
+                previous_regime != Regime.BULLISH
                 and bar.close <= bar.upper_outer
             )
             or (
-                previous_regime == Regime.GREEN
+                previous_regime == Regime.BULLISH
                 and previous_close is not None
                 and previous_close <= bar.upper_inner
                 and bar.close >= bar.upper_inner
@@ -135,14 +135,14 @@ def generate_signal(
     # ---- Rule B: SELL (mirror of A) -------------------------------- #
     sell_fires = (
         previous_state != PositionState.SELL
-        and current_regime == Regime.RED
+        and current_regime == Regime.BEARISH
         and (
             (
-                previous_regime != Regime.RED
+                previous_regime != Regime.BEARISH
                 and bar.close >= bar.lower_outer
             )
             or (
-                previous_regime == Regime.RED
+                previous_regime == Regime.BEARISH
                 and previous_close is not None
                 and previous_close >= bar.lower_inner
                 and bar.close <= bar.lower_inner
@@ -164,14 +164,14 @@ def generate_signal(
     # Reached only when no BUY/SELL fired this bar.
     if (
         previous_state == PositionState.BUY
-        and current_regime != Regime.GREEN
+        and current_regime != Regime.BULLISH
     ):
         return SignalDecision(PositionState.FLAT, ChangeSignal.EXIT_FROM_BUY)
 
     # ---- Rule D: EXIT_FROM_SELL ------------------------------------ #
     if (
         previous_state == PositionState.SELL
-        and current_regime != Regime.RED
+        and current_regime != Regime.BEARISH
     ):
         return SignalDecision(PositionState.FLAT, ChangeSignal.EXIT_FROM_SELL)
 

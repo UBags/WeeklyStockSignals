@@ -1,54 +1,60 @@
-# `trip_ema/transports/http/routes/` — Per-thematic route files
+# `trip_ema/transports/http/routes/` — FastAPI routers
 
-One file per thematic slice. Each file exports a `router` (`APIRouter`)
-that `app.py` mounts.
+One router per concern. Mounted by `transports/http/app.py`. Admin
+routers gate writes with `require_admin_token`; pulse + health are
+unauthenticated.
 
-## Public routes (no auth)
+> Import convention: files here use **4-dot** relative imports to
+> reach the top-level package: `from ....api import ...`,
+> `from ....persistence import ...`, etc. 3-dot resolves to a
+> nonexistent `trip_ema.transports.X` — guaranteed to be the cause of
+> any `ModuleNotFoundError` after a refactor.
 
-| File | Endpoints | Purpose |
-|---|---|---|
-| `health.py` | `GET /healthz`, `GET /readyz` | Liveness + readiness. Readyz includes `cache_size`, `primed`, `stale_tickers_count` informationally |
-| `signals.py` | `GET /v1/signals/{exchange}/{symbol}`, `.../history` | Cached read of latest signal; bar-by-bar history (replays a fresh engine over the requested window — used by the GUI chart) |
-| `compute.py` | `POST /v1/compute/*` | Stateless on-demand compute over caller-supplied bars |
-| `pulse.py` | `GET /v1/pulse/stream` | Server-Sent Events stream of pulse events (one per orchestrator tick) |
+## Files
 
-## Admin routes (bearer-token gated)
+| File | Purpose |
+|---|---|
+| `__init__.py` | Marker |
+| `health.py` | `GET /healthz` (always 200 if the process is up — no DB or dependency check). `GET /readyz` (200 only if registry + cache non-empty, `ComputeScheduler` alive and ran within 2× its cadence, `SubscriberDistributor` alive). Used by load balancers |
+| `pulse.py` | **Unauthenticated** read-only orchestrator pulse. `GET /v1/pulse` (snapshot of recent events), `GET /v1/pulse/stream` (SSE of new events). Carries no secrets — only the same orchestrator statuses the operator can see via admin endpoints. Reverse-proxy basic auth is the answer if the posture changes |
+| `compute.py` | `POST /v1/compute` — the **(a)** stateless path. Builds a throwaway `TickerEngine`, primes with supplied history, ingests the latest bar, returns Terse or Verbose. **Does not touch cache, DB, or registry**. Use for ad-hoc analysis or tickers not in the warm set |
+| `admin.py` | Core admin levers (bearer-token gated). `POST /v1/admin/prime-all`, `POST /v1/admin/compute-now`, `GET /v1/admin/stale-tickers`, `POST /v1/admin/reprime-ticker/{exchange}/{symbol}`, `GET /v1/admin/circuit-breakers` (legacy mode only — queue mode says so) |
+| `admin_etl.py` | ETL action surface for the GUI. Each "fire" endpoint submits the runner to `AppState.etl_executor`, returns **202 Accepted** with the `run_id` (or `None` if the runner skipped, e.g. intraday on a holiday). GUI polls `GET /v1/admin/etl/status` |
+| `admin_exchange_state.py` | Phase 14.6b. `GET /v1/admin/exchange-state` (all rows), `GET /v1/admin/exchange-state/{exchange}` (one row, 404 if absent). Runner writes inside the same transaction that closes `etl_runs`, so `last_eod_run_at` here implies the `etl_runs` row reflects that same run |
+| `admin_exchanges.py` | Phase 14.6c. `GET /v1/admin/exchanges` — what's **available** for ETL actions (sourced from `config.market_hours`). Sibling of `/exchange-state` (what's *active*) |
+| `admin_health.py` | Slice 4. `GET /v1/admin/health-snapshot` — list of "cards" (status / headline / detail) per logical subsystem. The GUI's System Health dashboard renders these as a colour-coded grid. Cheap to compute — one SQL pass for DB-derived counts |
+| `admin_notifications.py` | Slice 4 + Phase 12 DLQ. `GET /v1/admin/notifications/recent` (joined log entries), `GET /v1/admin/notifications/dlq`, DLQ requeue / drop endpoints |
+| `admin_orchestrator.py` | Phase 14. `GET /v1/admin/orchestrator/status` (per-market), `POST /v1/admin/orchestrator/{exchange}/run-now`, `POST /v1/admin/orchestrator/run-now-all`. Fire-and-forget |
+| `admin_signals.py` | Phase 15b. `POST /v1/admin/signals/generate` (fires a backtest signal-generation run, returns 202 with `etl_runs.run_id`; concurrent-run guard per exchange). Plus the signal-history reader the GUI uses |
+| `admin_subscribers.py` | Slice 4 CRUD over `subscribers` + child `subscriptions`. `GET / list`, `GET /{id}`, `POST`, `PATCH`, `DELETE`, plus `POST /{id}/send-test` (test-notification email). Primary consumer: the GUI's Subscribers tab |
+| `fundamentals.py` | Phase 1 reads and admin actions. Reads under `/v1/fundamentals/*` (industry classifications, coverage stats, recent runs). Admin writes under `/v1/admin/fundamentals/*` (override CRUD, refresh fires, dry-run + commit modes) |
 
-| File | Endpoints | Purpose |
-|---|---|---|
-| `admin.py` | `POST /v1/admin/prime-all`, `POST /v1/admin/compute-now`, `GET /v1/admin/stale-tickers` | Misc admin actions |
-| `admin_health.py` | `GET /v1/admin/health-snapshot` | The 8-card system-health dashboard (consumed by the GUI's System Health tab) |
-| `admin_etl.py` | 7 routes: `run-eod`, `run-intraday`, `backfill`, `refresh-listings`, `recompute-tiers`, `unpark-all`; `GET /status`, `GET /parked` | ETL CLI surface re-exposed as HTTP |
-| `admin_exchange_state.py` | `GET /v1/admin/exchange-state[/{ex}]` | Per-exchange last-action timestamps (Phase 14.6) |
-| `admin_exchanges.py` | `GET /v1/admin/exchanges` | The configured exchange list (used by the GUI picker) |
-| `admin_subscribers.py` | Full CRUD over `/v1/admin/subscribers/*` + `PUT /{id}/filters`, `POST /{id}/test-notification` | Subscriber management |
-| `admin_notifications.py` | `GET /recent`, `GET /dlq`, `POST /dlq/{id}/replay`, `DELETE /dlq/{id}` | Notification log + DLQ workflow (Phase 12) |
-| `admin_orchestrator.py` | `GET /status`, `POST /{ex}/run-now`, `POST /{ex}/pause`, `POST /{ex}/resume` | Per-market orchestrator control |
-| `admin_signals.py` | `POST /v1/admin/signals/generate`, `GET /v1/admin/signals/generated` | **Phase 15b** — kick off / read backtest signal generation. Includes the `pg_advisory_xact_lock(hash(exchange))` concurrent-run guard |
-| `fundamentals.py` | Many routes under `/v1/fundamentals/*` | Read + compute endpoints for the Phases 1-8 fundamentals vertical slice — `industry-indices`, `signal-events`, `indicator-state`, `compute-*`, `runs`, `run-eod-pipeline`, `compute-market-cap`, `compute-index-values`, `compute-indicator-state`, `compute-signals` |
+## Conventions
 
-## Patterns
+- **Bearer-token writes.** Anything that mutates state goes through
+  `require_admin_token`. The GUI degrades to read-only when the token
+  is unset.
+- **Fire-and-forget for long jobs.** Returns 202 + `run_id`; the
+  client polls a status endpoint. Never block a request on a backfill.
+- **DTOs come from `schemas.py`.** Routes never import internal
+  domain types directly.
+- **Concurrent-run guards.** Anything that operates on
+  `(exchange, ticker, timeframe)` and could be invoked twice
+  (`/generate`, `/run-now`, …) holds a per-key lock for the duration.
 
-- **Read endpoints** — synchronous, return 200 with the payload
-- **Action endpoints** — async-action pattern:
-  1. Validate query params (400 on bad input)
-  2. Validate exchange against config
-  3. Check executor available (503 if None)
-  4. Open `etl_runs` row (kind, exchange, correlation_id)
-  5. Submit worker function to `etl_executor`
-  6. Return 202 with `run_id`
-- **Phase 15b variation** — `admin_signals.generate` adds a per-exchange
-  `pg_advisory_xact_lock` inside the same transaction as the SELECT-
-  then-INSERT pair to serialize concurrent requests for the same
-  exchange (prevents two POSTs both passing the "is one already
-  running?" guard)
+## Long-running endpoints
 
-## Tests
+| Endpoint | Status path |
+|---|---|
+| `/v1/admin/etl/fire/*` | `/v1/admin/etl/status` |
+| `/v1/admin/signals/generate` | `/v1/admin/signals/runs` |
+| `/v1/admin/orchestrator/*/run-now` | `/v1/admin/orchestrator/status` |
+| `/v1/admin/fundamentals/*/refresh` | `/v1/admin/fundamentals/runs` |
 
-- `tests/transports/http/` — full integration tests (DB-required)
-- `tests/transports_pure/` — pure-Python tests against mocked DB
-  fixtures
+All return **202** + an identifier. None block.
 
-The `admin_signals.py` route has the highest test count (28 in
-`tests/transports_pure/test_admin_signals.py`) because the concurrent-
-run guard, advisory lock, and run-row lifecycle have many branches.
+## Pulse vs admin
+
+The pulse stream is read-only and unauthenticated. Anything that
+*does* something — fires a job, mutates a row, changes config — is
+admin-gated.

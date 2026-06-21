@@ -100,7 +100,6 @@ class TestRunIndicatorStateForTicker:
         assert latest.ticker_id == tid
         assert latest.timeframe == "1W"
         assert latest.industry_name is None
-        assert latest.core_regime in (-1, 0, 1)
         assert latest.display_regime in (-1, 0, 1)
 
     def test_idempotent_via_skip_if_recent(self, db_engine):

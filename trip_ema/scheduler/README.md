@@ -1,72 +1,55 @@
-# `trip_ema/scheduler/` — Compute scheduler, market orchestrator, distributor
+# `trip_ema/scheduler/` — periodic loops + market orchestration
 
-The "what happens at each tick" layer. Owns the per-market tick loop,
-the per-tick fetch + ingest + cache-update sequence, and the dispatcher
-that turns regime changes into notification jobs.
+The wall-clock-driven side of the service: the periodic compute loop,
+the 15-minute notification distributor, the per-market orchestrator
+that fires the fetch → compute → distribute pipeline, and the
+multi-market calendar / hours services they consume.
+
+(The quarterly fundamentals scheduler lives in
+`trip_ema/fundamentals/scheduler.py` — different cadence, different
+job.)
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `__init__.py` | Marker |
-| `_wall_clock.py` | Thin wrapper around `datetime.now(tz=...)` — test seam for time |
-| `compute_scheduler.py` | `ComputeScheduler.run_once()` — per-tick: detect gaps, fetch fresh bars, ingest, write cache, emit `signal_events` on transition, fire `SubscriberDistributor.notify(...)`. The single writer for `SignalCache` and `signal_events` |
-| `market_calendar.py` | python-holidays + YAML override — "is this a trading day?" |
-| `market_hours.py` | Per-exchange open/close + tz; "is the market open right now?" |
-| `market_orchestrator.py` | `MarketOrchestrator` — owns the tick loop for **one** market. Combines `MarketHours` + `MarketCalendar` + `TickPlanner` to fire `ComputeScheduler.run_once()` at configured wall-clock instants |
-| `orchestrator_pool.py` | `OrchestratorPool` — manages one `MarketOrchestrator` per configured market (NSE, BSE, NYSE, …). Each runs in its own daemon thread |
-| `tick_planner.py` | Builds the tick schedule for a market day — post-open tick, intraday cadence, pre-close tick. Returns a list of "fire at" instants |
-| `subscriber_distributor.py` | Background thread that, on `notify(SignalEvent)`, walks the subscriber set, applies per-subscriber filters, and enqueues `NotificationJob`s (to Redis if configured, in-process otherwise) |
+| `__init__.py` | Re-exports `ComputeScheduler`, `SubscriberDistributor`, `MarketOrchestrator`, `OrchestratorPool`, the tick planner, the calendar, the hours service |
+| `compute_scheduler.py` | `ComputeScheduler` — periodic compute loop. On a wall-clock cadence, iterates every (ticker, tf) in the warm registry. Fetches new bars from the DB since the engine's last bar, distinguishes provisional (still-open bucket) from final, ingests accordingly, classifies any signal change against the previous compute's display state (read from the cache), persists a `SignalEvent` if changed, replaces the cache entry. **The only writer to `SignalCache`** |
+| `market_orchestrator.py` | `MarketOrchestrator` — one per exchange. Wall-clock-anchored loop (via `tick_planner.next_tick_after`) that fires at the per-market schedule (post-open + hourly + pre-close, trading days only). Each tick runs **fetch → compute → distribute** and publishes a summary to the `PulsePublisher` |
+| `orchestrator_pool.py` | `OrchestratorPool` — owns N `MarketOrchestrator`s + their lifecycle. Built at startup from `config.market_hours`. `start_all()` / `stop_all()` driven by `app.py`'s startup/shutdown hooks |
+| `subscriber_distributor.py` | `SubscriberDistributor` — the 15-minute notification loop. Per due subscriber: query pending events (subject to ticker/signal filters + per-subscriber 3-notifications cap), compose a batch, dispatch via the subscriber's transport, append a `notification_log` row. Honours `MarketHoursService.any_open()` by default (configurable) |
+| `tick_planner.py` | `next_tick_after(now, market, cal) -> utc_instant`. Two scheduling modes selected by whether `market.tick_schedule` is populated: explicit schedule (post-open / pre-close / hourly between) or fixed-cadence fallback |
+| `market_calendar.py` | `TradingCalendar` per market — generalises the old NSE-only calendar to arbitrary exchanges. Backing sources in priority order: YAML override → `holidays` package by country → weekday-only fallback |
+| `market_hours.py` | `MarketHoursService` — "is exchange X open at time T?". Stateless, thread-safe, configured from `Config.market_hours`. Open/close times in exchange-local TZ + ISO weekday list. Callers pass UTC; conversions happen internally |
+| `_wall_clock.py` | Tick-math helpers shared by all scheduler loops (`ComputeScheduler`, `SubscriberDistributor`, `MarketOrchestrator`). Avoids three subtly-different copies of `_seconds_until_next_tick` drifting apart |
 
-## Invariants
+## Threading model
 
-- **3.2 single-writer cache** — only `ComputeScheduler` writes to
-  `SignalCache` during normal operation (priming also writes, but
-  priming and scheduler don't run concurrently)
-- **3.10 single-writer signal_events** — only `ComputeScheduler`
-  inserts into `signal_events`. The notifier reads
-- **3.6 provisional rollback** — `ComputeScheduler` differentiates
-  provisional (intra-bucket) from final (closed-bucket) bars and
-  rolls back state on the next final bar after a provisional
+- `ComputeScheduler` runs on its own thread.
+- `SubscriberDistributor` runs on its own thread.
+- Each `MarketOrchestrator` runs on its own thread.
+- All sleep in **1-second chunks** so shutdown signals are picked up
+  promptly.
+- Shutdown is graceful: the pool's `stop_all()` sets stop events on
+  every loop and joins.
 
-## Tick lifecycle
+## Writer contract
 
-```
-MarketOrchestrator.thread_loop()
-   wait until next tick instant (from TickPlanner)
-   ComputeScheduler.run_once()
-      for ticker in registry.iter_engines():
-         bars = bars_repo.fetch_new_bars(ticker, since=cached_state.bar_timestamp)
-         if no new bars:
-             continue
-         engine.ingest(bars)
-         cache.write(ticker, engine.latest_state())
-         if regime transitioned:
-             signals_repo.insert(SignalEvent(...))
-             SubscriberDistributor.notify(event)
-```
+`ComputeScheduler` is the **only writer to `SignalCache`**. Readers
+(`api.cached`, `SubscriberDistributor`) acquire no lock. This invariant
+is what keeps the HTTP hot path lock-free.
 
-## Why one process per market
+## Stale-event suppression
 
-- Each market has different tz, holidays, hours — concurrency simplifies
-  per-market state ownership
-- Markets don't share state with each other (no cross-market signal
-  emits today), so threading them is safe
-- `OrchestratorPool` joins all threads on service shutdown
+The distributor's `find_pending_for_subscriber` query suppresses an
+older event for the same `(ticker, timeframe)` once a newer event
+exists, even if the older event has remaining notification budget.
+The subscriber sees the latest signal — not a backlog of obsolete
+ones.
 
-## Tests
+## Why a pool, not one orchestrator
 
-Two trees:
-- `tests/scheduler/` — full integration (DB-required); covers
-  `MarketOrchestrator`, `OrchestratorPool`, `ComputeScheduler`,
-  `SubscriberDistributor`, market hours/calendar, tick planner
-- `tests/scheduler_pure/` — pure-Python tests that need no DB —
-  notably `test_gap_detection.py`
-
-## Phase 14.6 — per-exchange visibility
-
-The `exchange_state` table tracks per-exchange last-action timestamps
-(`last_eod_at`, `last_intraday_at`, etc.). The orchestrator updates
-this on every tick; the GUI's System Health card reads it. The change
-makes "is NSE behind on ETL?" answerable in one query rather than
-inferring from `etl_runs`.
+Different markets have different calendars, different hours, and
+different rate-limit budgets. One pool member per market lets each
+move at its own pace; a single shared loop would have to take the
+slowest pace.

@@ -1,65 +1,48 @@
-# `trip_ema/persistence/` — Postgres repositories + migrator + connection
+# `trip_ema/persistence/` — SQLAlchemy Core repositories
 
-The data-access layer. Every table has a repository (`*_repo.py`); the
-repos are the only modules that issue raw SQL or use SQLAlchemy Core
-directly. Higher layers (engine, scheduler, transports) call the repos
-through their typed methods.
+Every table access goes through a repository. Repos take a
+`Connection` in their constructor — they don't own the engine. The
+caller controls the transaction (typically `with transaction(engine) as conn:`).
+Repos return domain objects, never tuples or ORM rows.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `__init__.py` | Marker |
-| `connection.py` | `create_engine(config)` (top-level role) and `create_engine_for_role(config, role)` (Phase 12 per-process least-privilege roles) |
-| `tables.py` | SQLAlchemy Core `Table()` definitions for every table. Used by repos as the canonical schema reference |
-| `migrator.py` | Legacy schema migrator — applies `migrations/legacy/NNN_*.sql` in order. Production startup no longer uses this (Alembic-only since Phase 12); kept for the legacy-parity test fixture |
-| `alembic_bridge.py` | (Phase 11+) Bridges legacy-migrator state into Alembic. `stamp_baseline_if_needed()` detects a populated `schema_migrations` table at startup and stamps Alembic's `alembic_version` at `0001_initial_schema` **without** re-running DDL |
+| `__init__.py` | Re-exports `transaction`, the engine factory, and the repository classes |
+| `connection.py` | Single source of truth for engine creation. Role-aware (Phase 12): app role for the service, read-only role for the GUI, migration role for Alembic |
+| `tables.py` | SQLAlchemy Core `Table` definitions, mirroring the migration SQL one-to-one. Used to build queries — **not** to create the schema. Migrations apply SQL directly; keeping these in sync is manual discipline |
+| `bars_repo.py` | OHLCV bars. Hot read path: `fetch_history(ticker_id, timeframe, limit)` (engine priming) and `fetch_since(ticker_id, timeframe, since)` (incremental ingest) |
+| `tickers_repo.py` | `tickers` table. Returns `TickerRef` domain objects |
+| `signals_repo.py` | `signal_events` (unified in 0016, plural). Append-only `insert_event` with `INSERT … ON CONFLICT DO NOTHING`. `find_pending_for_subscriber` is the distributor's centrepiece query — batches undelivered events with stale-event suppression (newer event for same (ticker, timeframe) supersedes) |
+| `exchange_state_repo.py` | Phase 14.6b `exchange_state` (one row per exchange). COALESCE semantics — writing one field never clobbers others |
+| `signal_backtest_runs_repo.py` | Phase 15a `signal_backtest_runs`. Per-(exchange, ticker_id, timeframe) resume tracking via `computed_through_date` |
+| `fundamentals_repo.py` | Phase 1 fundamentals — three repos in one file because the runner uses them together: `IndustryOverrideRepository`, `InstrumentIndustryRepository`, `InstrumentSharesRepository`, plus `FundamentalsRunRepository`, `DailyMarketCapRepository`, `QuarterlyFinancialsRepository`, `IndicatorStateRepository`, `SignalEventRepository` |
+| `subscribers_repo.py` | `subscribers` + `subscriptions` + `notification_log` writes (never reads — the "have I sent this before" join lives on `SignalsRepository`) |
+| `symbol_history_repo.py` | `symbol_history`. NSE renames a symbol → the ISIN matches an existing ticker → write a history row, update the ticker row in place to the new canonical symbol |
+| `corporate_actions_repo.py` | `corporate_actions`. Two write paths: reconciler-emitted `candidate_revision` rows (status `pending_review`) and yfinance `Ticker.actions` `split` / `dividend` rows |
+| `alembic_bridge.py` | Phase-12 bridge from the legacy `schema_migrations` table to Alembic. For databases that ran the legacy runner through 010, stamps them at Alembic's squashed initial revision |
+| `migrator.py` | The tiny legacy SQL runner. Discovers `NNN_*.sql`, applies each in a transaction, records the version. Preserved for history; no longer drives startup migrations after Phase 12 — Alembic is exclusive |
 
-## Repositories
+## Conventions
 
-| File | Owns | Notable |
-|---|---|---|
-| `tickers_repo.py` | `tickers` | Universe + tier + parked state |
-| `bars_repo.py` | `ohlcv_bars` | `weekly_buckets_with_bars` powers the gap-detection invariant |
-| `signals_repo.py` | `signal_events` | Append-only; written by `ComputeScheduler` only |
-| `signal_backtest_runs_repo.py` | `signal_backtest_runs` (Phase 15a) | Per-(exchange, ticker, timeframe) resume cursors for the backtest pipeline |
-| `subscribers_repo.py` | `subscribers` + filters + `notification_log` | CRUD-heavy; consumed by the GUI's Subscribers tab |
-| `exchange_state_repo.py` | `exchange_state` (Phase 14.6) | Per-exchange last-action timestamps; opens + closes `etl_runs` rows |
-| `fundamentals_repo.py` | All the fundamentals tables (Phases 1-7) — `instrument_industry`, `instrument_shares`, `quarterly_financials`, `daily_market_cap`, `industry_index`, `industry_index_constituent`, `industry_index_value`, `indicator_state`, `signal_event`, `industry_override`, `fundamentals_run` | Large module; one class per table |
+- **Connection-injected**, never engine-owning.
+- **Domain objects out**, never tuples or rows.
+- **Caller controls transactions** via `transaction(engine)`.
+- **No business logic** — query shapes only. Composition lives in
+  `etl/runner.py`, `fundamentals/runners.py`, and `scheduler/*`.
 
-## Connection patterns
+## Why Core, not ORM
 
-- **Top-level role (default).** `create_engine(config)` uses the
-  `database.user` + `database.password_env`. Used when Phase 12
-  roles are not enabled
-- **Per-process role (Phase 12, opt-in).** `create_engine_for_role(config, "etl")`
-  uses the etl/engine/gui role's credentials from `database.roles:`.
-  ETL processes use `trip_etl_user` (read+write on ETL tables);
-  the compute scheduler uses `trip_engine_user` (write on
-  `signal_events`, read on `ohlcv_bars`); GUI/HTTP read paths use
-  `trip_gui_user` (read-only everything)
-- Engine pooling sized for the workload — small (5-10 conns) for
-  the main service; per-CLI ephemeral for `trip-ema-etl`
+We want repos to return immutable domain dataclasses — not tracked
+ORM rows whose mutation has side effects. SQLAlchemy Core lets us
+write the queries we want, hand-roll the column lists, and stay out
+of identity-map territory.
 
-## Repo conventions
+## Migrations
 
-- Methods return frozen dataclasses (from `domain/` or
-  `fundamentals/__init__.py`), not raw SQLAlchemy Row objects
-- Writes return the inserted row's primary key
-- Bulk operations use `executemany` / `execute(insert(...).values(...))`
-  patterns; not row-by-row loops
-- Repos never start transactions internally — callers manage scope
-  via `engine.begin()` / `engine.connect()`. Lets callers chain
-  multi-repo updates in one transaction
-
-## Tests
-
-`tests/persistence/` — DB-required, uses `pytest-postgresql`. One file
-per repo:
-- `test_tickers_repo.py`, `test_bars_repo.py`, `test_signals_repo.py`,
-  `test_signal_backtest_runs_repo.py`, `test_subscribers_repo.py`,
-  `test_exchange_state_repo.py`, `test_fundamentals_repos.py`,
-  `test_gui_queries.py`
-- `test_migrator.py` — legacy migrator behavior
-- `test_legacy_migrator.py` — parity between Alembic + legacy SQL
-- `test_alembic_bridge.py` — bridge logic on DB
+Alembic is the only path that runs on startup (Phase 12). The legacy
+`NNN_*.sql` set under `migrations/` is preserved for history; Alembic
+revision 0001 squashes them. The `alembic_bridge` module marks
+already-migrated DBs at the squashed revision so they don't replay
+history.

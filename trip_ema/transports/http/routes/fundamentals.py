@@ -1178,7 +1178,6 @@ class IndicatorStatePayload(BaseModel):
     lower_mid_band: float
     upper_outer_band: float
     lower_outer_band: float
-    core_regime: int
     display_regime: int
     pierces_upper_mid: bool
     pierces_lower_mid: bool
@@ -1230,7 +1229,6 @@ def _indicator_state_payload(s) -> IndicatorStatePayload:
         lower_mid_band=s.lower_mid_band,
         upper_outer_band=s.upper_outer_band,
         lower_outer_band=s.lower_outer_band,
-        core_regime=s.core_regime,
         display_regime=s.display_regime,
         pierces_upper_mid=s.pierces_upper_mid,
         pierces_lower_mid=s.pierces_lower_mid,

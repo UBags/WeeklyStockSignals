@@ -8,7 +8,8 @@ Plus the response types and error classes used by all three.
 """
 
 from .cached import query_cached_terse, query_cached_verbose
-from .lifecycle import LifecycleResult, prime_all_tickers
+# trip_ema/api/__init__.py — drop legacy names, add the new one
+from .lifecycle import prime_cache_from_db, PrimeCacheResult
 from .responses import (
     InsufficientHistoryError,
     TerseResponse,
@@ -19,13 +20,11 @@ from .stateless import compute_full_terse, compute_full_verbose
 
 __all__ = [
     "InsufficientHistoryError",
-    "LifecycleResult",
     "TerseResponse",
     "TickerNotPrimedError",
     "VerboseResponse",
     "compute_full_terse",
     "compute_full_verbose",
-    "prime_all_tickers",
     "query_cached_terse",
     "query_cached_verbose",
 ]

@@ -83,7 +83,7 @@ class TestBuyFirstLeg:
             previous_regime=Regime.NEUTRAL,
             previous_close=100.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=115.0),  # 115 <= upper_outer=120
         )
         _expect(result, PositionState.BUY, ChangeSignal.BUY)
@@ -91,10 +91,10 @@ class TestBuyFirstLeg:
     def test_fires_from_flat_with_prev_red(self):
         # Sharp reversal: prev was RED, now GREEN.
         result = generate_signal(
-            previous_regime=Regime.RED,
+            previous_regime=Regime.BEARISH,
             previous_close=85.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=115.0),
         )
         _expect(result, PositionState.BUY, ChangeSignal.BUY)
@@ -103,10 +103,10 @@ class TestBuyFirstLeg:
         """Precedence E: state=SELL, prev=RED, now GREEN.
         BUY fires; EXIT_FROM_SELL suppressed; state SELL → BUY directly."""
         result = generate_signal(
-            previous_regime=Regime.RED,
+            previous_regime=Regime.BEARISH,
             previous_close=85.0,
             previous_state=PositionState.SELL,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=115.0),
         )
         _expect(result, PositionState.BUY, ChangeSignal.BUY)
@@ -118,7 +118,7 @@ class TestBuyFirstLeg:
             previous_regime=Regime.NEUTRAL,
             previous_close=100.0,
             previous_state=PositionState.SELL,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=115.0),
         )
         _expect(result, PositionState.BUY, ChangeSignal.BUY)
@@ -129,7 +129,7 @@ class TestBuyFirstLeg:
             previous_regime=Regime.NEUTRAL,
             previous_close=100.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=120.0),  # exactly at upper_outer
         )
         _expect(result, PositionState.BUY, ChangeSignal.BUY)
@@ -143,7 +143,7 @@ class TestBuyFirstLegSuppressed:
             previous_regime=Regime.NEUTRAL,
             previous_close=100.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=120.01),  # just past upper_outer
         )
         _expect(result, PositionState.FLAT, ChangeSignal.NO_CHANGE)
@@ -154,7 +154,7 @@ class TestBuyFirstLegSuppressed:
             previous_regime=Regime.NEUTRAL,
             previous_close=100.0,
             previous_state=PositionState.BUY,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=115.0),
         )
         _expect(result, PositionState.BUY, ChangeSignal.NO_CHANGE)
@@ -173,10 +173,10 @@ class TestBuySecondLeg:
         """Yesterday: regime green, close = 105 (below upper_inner=110).
         Today: regime still green, close = 111 (recrossed upward)."""
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=105.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=111.0),
         )
         _expect(result, PositionState.BUY, ChangeSignal.BUY)
@@ -186,10 +186,10 @@ class TestBuySecondLeg:
         both use `<=` / `>=` respectively, so this is the tightest
         legal case."""
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=110.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=110.0),
         )
         _expect(result, PositionState.BUY, ChangeSignal.BUY)
@@ -205,10 +205,10 @@ class TestBuySecondLeg:
                    today close = 112 >= upper_inner → second leg fires.
         """
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=108.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=112.0),
         )
         _expect(result, PositionState.BUY, ChangeSignal.BUY)
@@ -217,10 +217,10 @@ class TestBuySecondLeg:
 class TestBuySecondLegBlocked:
     def test_already_buy_state_blocks_second_leg(self):
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=105.0,
             previous_state=PositionState.BUY,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=111.0),
         )
         _expect(result, PositionState.BUY, ChangeSignal.NO_CHANGE)
@@ -228,10 +228,10 @@ class TestBuySecondLegBlocked:
     def test_prev_close_above_upper_inner_blocks(self):
         """prev_close > upper_inner means we weren't 'below' yesterday."""
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=115.0,  # already above upper_inner=110
             previous_state=PositionState.FLAT,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=116.0),
         )
         _expect(result, PositionState.FLAT, ChangeSignal.NO_CHANGE)
@@ -239,10 +239,10 @@ class TestBuySecondLegBlocked:
     def test_close_below_upper_inner_blocks(self):
         """close hasn't crossed upper_inner upward yet."""
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=105.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=109.99),
         )
         _expect(result, PositionState.FLAT, ChangeSignal.NO_CHANGE)
@@ -252,10 +252,10 @@ class TestBuySecondLegBlocked:
         non-NEUTRAL prev_regime (shouldn't happen, but…), the second
         leg must not fire."""
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=None,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=111.0),
         )
         _expect(result, PositionState.FLAT, ChangeSignal.NO_CHANGE)
@@ -271,17 +271,17 @@ class TestSellFirstLeg:
             previous_regime=Regime.NEUTRAL,
             previous_close=100.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=85.0),  # 85 >= lower_outer=80
         )
         _expect(result, PositionState.SELL, ChangeSignal.SELL)
 
     def test_fires_from_flat_with_prev_green(self):
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=115.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=85.0),
         )
         _expect(result, PositionState.SELL, ChangeSignal.SELL)
@@ -290,10 +290,10 @@ class TestSellFirstLeg:
         """Precedence F: state=BUY, sharp reversal to RED.
         SELL fires; EXIT_FROM_BUY suppressed; state BUY → SELL in one step."""
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=115.0,
             previous_state=PositionState.BUY,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=85.0),
         )
         _expect(result, PositionState.SELL, ChangeSignal.SELL)
@@ -303,7 +303,7 @@ class TestSellFirstLeg:
             previous_regime=Regime.NEUTRAL,
             previous_close=100.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=80.0),  # exactly at lower_outer
         )
         _expect(result, PositionState.SELL, ChangeSignal.SELL)
@@ -315,7 +315,7 @@ class TestSellFirstLegSuppressed:
             previous_regime=Regime.NEUTRAL,
             previous_close=100.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=79.99),
         )
         _expect(result, PositionState.FLAT, ChangeSignal.NO_CHANGE)
@@ -325,7 +325,7 @@ class TestSellFirstLegSuppressed:
             previous_regime=Regime.NEUTRAL,
             previous_close=100.0,
             previous_state=PositionState.SELL,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=85.0),
         )
         _expect(result, PositionState.SELL, ChangeSignal.NO_CHANGE)
@@ -338,20 +338,20 @@ class TestSellFirstLegSuppressed:
 class TestSellSecondLeg:
     def test_fires_when_close_recrosses_lower_inner_downward(self):
         result = generate_signal(
-            previous_regime=Regime.RED,
+            previous_regime=Regime.BEARISH,
             previous_close=95.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=89.0),
         )
         _expect(result, PositionState.SELL, ChangeSignal.SELL)
 
     def test_fires_at_lower_inner_boundary_both_sides(self):
         result = generate_signal(
-            previous_regime=Regime.RED,
+            previous_regime=Regime.BEARISH,
             previous_close=90.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=90.0),
         )
         _expect(result, PositionState.SELL, ChangeSignal.SELL)
@@ -360,40 +360,40 @@ class TestSellSecondLeg:
 class TestSellSecondLegBlocked:
     def test_already_sell_state_blocks(self):
         result = generate_signal(
-            previous_regime=Regime.RED,
+            previous_regime=Regime.BEARISH,
             previous_close=95.0,
             previous_state=PositionState.SELL,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=89.0),
         )
         _expect(result, PositionState.SELL, ChangeSignal.NO_CHANGE)
 
     def test_prev_close_below_lower_inner_blocks(self):
         result = generate_signal(
-            previous_regime=Regime.RED,
+            previous_regime=Regime.BEARISH,
             previous_close=85.0,  # already below lower_inner=90
             previous_state=PositionState.FLAT,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=84.0),
         )
         _expect(result, PositionState.FLAT, ChangeSignal.NO_CHANGE)
 
     def test_close_above_lower_inner_blocks(self):
         result = generate_signal(
-            previous_regime=Regime.RED,
+            previous_regime=Regime.BEARISH,
             previous_close=95.0,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=90.01),
         )
         _expect(result, PositionState.FLAT, ChangeSignal.NO_CHANGE)
 
     def test_prev_close_none_blocks(self):
         result = generate_signal(
-            previous_regime=Regime.RED,
+            previous_regime=Regime.BEARISH,
             previous_close=None,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=89.0),
         )
         _expect(result, PositionState.FLAT, ChangeSignal.NO_CHANGE)
@@ -407,7 +407,7 @@ class TestExitFromBuy:
     def test_fires_on_buy_to_neutral(self):
         """state=BUY, regime turns NEUTRAL → EXIT_FROM_BUY, state=FLAT."""
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=115.0,
             previous_state=PositionState.BUY,
             current_regime=Regime.NEUTRAL,
@@ -420,10 +420,10 @@ class TestExitFromBuy:
         (close < lower_outer). EXIT_FROM_BUY fires because no SELL
         suppresses it. State → FLAT."""
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=115.0,
             previous_state=PositionState.BUY,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=79.0),  # below lower_outer=80 → SELL blocked
         )
         _expect(result, PositionState.FLAT, ChangeSignal.EXIT_FROM_BUY)
@@ -446,7 +446,7 @@ class TestExitFromBuy:
 class TestExitFromSell:
     def test_fires_on_sell_to_neutral(self):
         result = generate_signal(
-            previous_regime=Regime.RED,
+            previous_regime=Regime.BEARISH,
             previous_close=85.0,
             previous_state=PositionState.SELL,
             current_regime=Regime.NEUTRAL,
@@ -458,10 +458,10 @@ class TestExitFromSell:
         """state=SELL, regime turns GREEN, but BUY first leg fails
         (close > upper_outer). EXIT_FROM_SELL fires."""
         result = generate_signal(
-            previous_regime=Regime.RED,
+            previous_regime=Regime.BEARISH,
             previous_close=85.0,
             previous_state=PositionState.SELL,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=121.0),  # above upper_outer=120 → BUY blocked
         )
         _expect(result, PositionState.FLAT, ChangeSignal.EXIT_FROM_SELL)
@@ -481,10 +481,10 @@ class TestPrecedence:
 
     def test_e_sell_to_buy_in_one_step(self):
         result = generate_signal(
-            previous_regime=Regime.RED,
+            previous_regime=Regime.BEARISH,
             previous_close=85.0,
             previous_state=PositionState.SELL,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=115.0),
         )
         # Critical: state goes SELL → BUY directly, signal is BUY (not
@@ -494,10 +494,10 @@ class TestPrecedence:
 
     def test_f_buy_to_sell_in_one_step(self):
         result = generate_signal(
-            previous_regime=Regime.GREEN,
+            previous_regime=Regime.BULLISH,
             previous_close=115.0,
             previous_state=PositionState.BUY,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=85.0),
         )
         assert result.new_state == PositionState.SELL
@@ -520,15 +520,15 @@ class TestNoOpCases:
         """state=BUY, prev=GREEN, current=GREEN, neither second-leg
         condition holds (close is comfortably inside)."""
         result = generate_signal(
-            Regime.GREEN, 115.0, PositionState.BUY,
-            Regime.GREEN, _bar(close=115.0),
+            Regime.BULLISH, 115.0, PositionState.BUY,
+            Regime.BULLISH, _bar(close=115.0),
         )
         _expect(result, PositionState.BUY, ChangeSignal.NO_CHANGE)
 
     def test_sell_continuation_inside_corridor_is_noop(self):
         result = generate_signal(
-            Regime.RED, 85.0, PositionState.SELL,
-            Regime.RED, _bar(close=85.0),
+            Regime.BEARISH, 85.0, PositionState.SELL,
+            Regime.BEARISH, _bar(close=85.0),
         )
         _expect(result, PositionState.SELL, ChangeSignal.NO_CHANGE)
 
@@ -546,7 +546,7 @@ class TestFirstBar:
             previous_regime=Regime.NEUTRAL,
             previous_close=None,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.GREEN,
+            current_regime=Regime.BULLISH,
             bar=_bar(close=115.0),
         )
         _expect(result, PositionState.BUY, ChangeSignal.BUY)
@@ -556,7 +556,7 @@ class TestFirstBar:
             previous_regime=Regime.NEUTRAL,
             previous_close=None,
             previous_state=PositionState.FLAT,
-            current_regime=Regime.RED,
+            current_regime=Regime.BEARISH,
             bar=_bar(close=85.0),
         )
         _expect(result, PositionState.SELL, ChangeSignal.SELL)
@@ -605,20 +605,20 @@ class TestMultiBarWalks:
         # Bar 1: first BUY.
         r1 = generate_signal(
             Regime.NEUTRAL, 100.0, PositionState.FLAT,
-            Regime.GREEN, _bar(close=115.0),
+            Regime.BULLISH, _bar(close=115.0),
         )
         _expect(r1, PositionState.BUY, ChangeSignal.BUY)
 
         # Bar 2: still green, comfortable continuation → no signal.
         r2 = generate_signal(
-            Regime.GREEN, 115.0, r1.new_state,
-            Regime.GREEN, _bar(close=118.0),
+            Regime.BULLISH, 115.0, r1.new_state,
+            Regime.BULLISH, _bar(close=118.0),
         )
         _expect(r2, PositionState.BUY, ChangeSignal.NO_CHANGE)
 
         # Bar 3: regime drops to NEUTRAL → EXIT_FROM_BUY.
         r3 = generate_signal(
-            Regime.GREEN, 118.0, r2.new_state,
+            Regime.BULLISH, 118.0, r2.new_state,
             Regime.NEUTRAL, _bar(close=100.0),
         )
         _expect(r3, PositionState.FLAT, ChangeSignal.EXIT_FROM_BUY)
@@ -635,19 +635,19 @@ class TestMultiBarWalks:
         """
         r1 = generate_signal(
             Regime.NEUTRAL, 100.0, PositionState.FLAT,
-            Regime.GREEN, _bar(close=125.0),
+            Regime.BULLISH, _bar(close=125.0),
         )
         _expect(r1, PositionState.FLAT, ChangeSignal.NO_CHANGE)
 
         r2 = generate_signal(
-            Regime.GREEN, 125.0, r1.new_state,
-            Regime.GREEN, _bar(close=108.0),
+            Regime.BULLISH, 125.0, r1.new_state,
+            Regime.BULLISH, _bar(close=108.0),
         )
         _expect(r2, PositionState.FLAT, ChangeSignal.NO_CHANGE)
 
         r3 = generate_signal(
-            Regime.GREEN, 108.0, r2.new_state,
-            Regime.GREEN, _bar(close=112.0),
+            Regime.BULLISH, 108.0, r2.new_state,
+            Regime.BULLISH, _bar(close=112.0),
         )
         _expect(r3, PositionState.BUY, ChangeSignal.BUY)
 
@@ -655,15 +655,15 @@ class TestMultiBarWalks:
         # Bar 1: enter BUY.
         r1 = generate_signal(
             Regime.NEUTRAL, 100.0, PositionState.FLAT,
-            Regime.GREEN, _bar(close=115.0),
+            Regime.BULLISH, _bar(close=115.0),
         )
         _expect(r1, PositionState.BUY, ChangeSignal.BUY)
 
         # Bar 2: massive down bar → RED, close inside SELL corridor.
         # Precedence F: SELL emitted, EXIT_FROM_BUY suppressed.
         r2 = generate_signal(
-            Regime.GREEN, 115.0, r1.new_state,
-            Regime.RED, _bar(close=85.0),
+            Regime.BULLISH, 115.0, r1.new_state,
+            Regime.BEARISH, _bar(close=85.0),
         )
         _expect(r2, PositionState.SELL, ChangeSignal.SELL)
 
@@ -680,13 +680,13 @@ class TestSymmetry:
         "prev_regime,prev_close,prev_state,current_regime,close,expect_state,expect_signal",
         [
             # Green-side cases: (we'll mirror them in the test body)
-            (Regime.NEUTRAL, 100.0, PositionState.FLAT, Regime.GREEN, 115.0,
+            (Regime.NEUTRAL, 100.0, PositionState.FLAT, Regime.BULLISH, 115.0,
              PositionState.BUY,  ChangeSignal.BUY),
-            (Regime.NEUTRAL, 100.0, PositionState.FLAT, Regime.GREEN, 120.01,
+            (Regime.NEUTRAL, 100.0, PositionState.FLAT, Regime.BULLISH, 120.01,
              PositionState.FLAT, ChangeSignal.NO_CHANGE),
-            (Regime.GREEN,   105.0, PositionState.FLAT, Regime.GREEN, 111.0,
+            (Regime.BULLISH,   105.0, PositionState.FLAT, Regime.BULLISH, 111.0,
              PositionState.BUY,  ChangeSignal.BUY),
-            (Regime.GREEN,   115.0, PositionState.BUY,  Regime.NEUTRAL, 100.0,
+            (Regime.BULLISH,   115.0, PositionState.BUY,  Regime.NEUTRAL, 100.0,
              PositionState.FLAT, ChangeSignal.EXIT_FROM_BUY),
         ],
     )
@@ -705,8 +705,8 @@ class TestSymmetry:
         mirror_close = 200.0 - close
         mirror_prev_close = None if prev_close is None else 200.0 - prev_close
         regime_mirror = {
-            Regime.GREEN: Regime.RED,
-            Regime.RED: Regime.GREEN,
+            Regime.BULLISH: Regime.BEARISH,
+            Regime.BEARISH: Regime.BULLISH,
             Regime.NEUTRAL: Regime.NEUTRAL,
         }
         state_mirror = {

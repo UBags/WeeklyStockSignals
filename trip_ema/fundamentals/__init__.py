@@ -351,7 +351,7 @@ class IndicatorState:
     Most fields mirror the Pine Script. A few notes on the less-
     obvious ones:
 
-    - `core_regime` / `display_regime`: -1 / 0 / +1. core is the
+    - `display_regime`: -1 / 0 / +1. core is the
       underlying state; display is the gated state that downstream
       strategy consumers actually read.
 
@@ -399,7 +399,6 @@ class IndicatorState:
     lower_outer_band: float
 
     # --- regime ---
-    core_regime: int
     display_regime: int
 
     # --- pierces ---

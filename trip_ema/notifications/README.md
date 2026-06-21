@@ -1,134 +1,67 @@
-# `trip_ema/notifications/` — Transports, batcher, breakers, Redis queue
+# `trip_ema/notifications/` — delivery pipeline + benchmark stats
 
-Everything between "the engine decided a regime changed" and "an email
-arrives in the subscriber's inbox". Three transports (email, webhook,
-Slack), per-transport circuit breakers, a Redis queue producer +
-consumer abstraction, and a small batcher that renders the message body.
+The pieces between an emitted `SignalEvent` and a delivered message
+in a subscriber's inbox. Composition, enrichment, transports, the
+Redis-backed queue, circuit breakers, and the Phase 6-3 benchmark
+stats that re-rank BUY signals before they ship.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `__init__.py` | Marker |
-| `base.py` | Abstract `NotificationTransport` + `NullTransport` (used by tests) |
-| `email_transport.py` | Brevo HTTP API delivery (POST to `/v3/smtp/email`). Replaced the SMTP implementation after Microsoft disabled `SmtpClientAuthentication` for new Outlook.com personal mailboxes and Gmail moved to OAuth-only |
-| `webhook_transport.py` | HTTP POST delivery (Slack-compatible JSON body) |
-| `circuit_breaker.py` | Per-transport failure-window breaker — opens after `failure_threshold` consecutive failures within a window; closes after `reset_timeout_seconds` of quiet; half-open lets `half_open_max_successes` succeed before fully closing |
-| `enrichment.py` | Per-batch enrichment lookups for HTML email rendering — resolves each ticker's market cap, sector/industry, sector zone (display_regime), sector direction (day-over-day industry-index delta), and last 5 signal events. `enrich_batch(engine, batch)` runs four SQL queries and returns a `BatchEnrichment` container. Degrades gracefully: missing data → None/0 → renderer prints `—`. Errors (DB down) are caught and return `EMPTY_ENRICHMENT` so email delivery never blocks on enrichment |
-| `batcher.py` | Renders `NotificationBatch` into three formats: **text** (one event per line), **HTML** (grouped by signal type, color-coded tables with per-ticker enrichment columns: Mkt Cap, Sector, Sector Zone, Sector Direction, Last 5 signals), and **JSON** (structured array for webhooks). HTML sections emitted in fixed order (BUY → SELL → Exit Buy → Exit Sell); within a section rows sorted alphabetically by symbol. All styles inline (Gmail strips `<style>` blocks). Indian-numbering helper formats market cap as `₹19,84,302 Cr` |
-| `redis_queue.py` | `RedisQueue` producer (used by `SubscriberDistributor`) + consumer (used by `NotifierWorker`). Also owns the DLQ data structure and the Redis HASH attempt counter |
+| `__init__.py` | Re-exports the transport interface + concrete transports + queue + circuit breaker |
+| `base.py` | `NotificationTransport` Protocol. `(address, NotificationBatch) -> bool`. True = delivered, False = retryable failure. Raises only on unrecoverable bugs |
+| `batcher.py` | `NotificationBatch` → transport-ready payloads. Three renderings: **text** (one event per line, used everywhere as text/plain), **html** (rich, colour-coded, grouped-by-signal-type, built around `enrichment`), and a webhook JSON shape |
+| `email_transport.py` | Brevo HTTP API transport (`POST /v3/smtp/email`). Replaces SMTP. Microsoft + Google have progressively disabled SMTP AUTH for personal mailboxes; HTTP API is the only reliable path. Verified sender: `weeklystocksignals@outlook.com`. API key from `secrets/brevo.yaml` via `config.brevo_secrets` |
+| `webhook_transport.py` | POSTs the JSON payload to the subscriber's URL. HTTP poster is injectable for tests (production: `requests`) |
+| `redis_queue.py` | Tiny Redis-backed work queue with atomic dedup. Two structures: a LIST (FIFO of pending jobs, LPUSH/BRPOP) and a HASH (job_id → enqueue timestamp for dedup) |
+| `circuit_breaker.py` | `CircuitBreakingTransport` wraps any `NotificationTransport` with a CLOSED → OPEN → HALF_OPEN state machine. Fast-fails calls when the underlying transport is sufficiently broken |
+| `enrichment.py` | Per-batch enrichment for HTML email. Looks up market cap, sector, sector's current display regime, day-over-day sector direction, and last-5 signals per ticker. Data is spread across `instrument_industry`, `daily_market_cap`, `indicator_state` (industry rows), and `signal_events` — this module joins them |
+| `benchmark_rerank.py` | Phase 6-3 composite rank score for ordering BUY signals in email. `rank_score = 0.5·stock_RS_26w + 0.3·industry_RS_26w + 0.2·R²_26w` |
+| `benchmark_rerank_client.py` | Re-export of `fetch_rank_scores` for the GUI. Keeps the GUI from importing across into `notifications/` directly — layering hygiene |
+| `benchmark_stats_compute.py` | Phase 6-3 regression math. Pure functions, no DB I/O. Per-week arithmetic returns; α, β, RS, R² over rolling 26-week windows |
+| `benchmark_stats_runners.py` | Phase 6-3 orchestration. Fetch → compute → write loop for `stock_benchmark_stats` and `industry_benchmark_stats` |
 
-## Email transport (Brevo HTTP API)
-
-`email_transport.py` posts to Brevo's transactional `/v3/smtp/email`
-endpoint with an `api-key` header. The key itself is read at startup
-from a YAML file outside the main config (see
-`../config/brevo_secrets.py` and `transports.brevo.secrets_file` in
-`config.yaml`); the loader validates file perms and key prefix, then
-crashes the process on any defect — there is **no env-var fallback**
-that could silently substitute `NullTransport` for misconfigured
-email. The old SMTP implementation's `TRIP_EMA_SMTP_HOST`-unset path
-lost weeks of notifications by silently substituting `NullTransport`
-at send time; the new contract makes that bug class structurally
-impossible.
-
-Sender verification is enforced by Brevo itself: the `From:` address
-listed in `transports.brevo.sender_email` must be confirmed in
-Brevo's Senders settings, or every send returns
-`400 invalid_parameter`. Setup is a one-time email-click flow.
-
-## Notifier worker
-
-The consumer side lives in `../notifier_worker.py` (top-level module,
-not in this directory). Architecture decision: the worker is a
-separate Python process from the engine — a wedged transport (Brevo
-API, webhook target) can't slow down compute.
-
-## Circuit breaker pattern
+## Pipeline
 
 ```
-closed (normal)
-   N consecutive failures within window
-      => open
-            after reset_timeout_seconds
-                => half_open
-                    M consecutive successes
-                       => closed
-                    any failure
-                       => open
+SignalEvent (committed)
+   │
+   ▼
+SubscriberDistributor (scheduler/) — fans out due subscribers
+   │
+   ▼
+NotificationBatch (per subscriber, with rank-re-ordered BUYs)
+   │
+   ├─ enrichment.enrich_batch  (per-ticker lookups)
+   │
+   ├─ batcher.render_text  ───┐
+   ├─ batcher.render_html  ───┤
+   └─ batcher.render_webhook ─┘
+                              ▼
+                       NotificationTransport (email / webhook / …)
+                              │
+                              └─ wrapped by CircuitBreakingTransport
+                              │
+                              └─ delivery attempt → notification_log row
 ```
 
-Defaults: `failure_threshold=5`, `reset_timeout_seconds=30`,
-`half_open_max_successes=1`. Configurable in `config.yaml` under
-`transports.circuit_breaker:`. When open, jobs go to the DLQ
-instead of being retried — protects upstream from amplifying
-failures.
+## Idempotency
 
-## At-least-once + dedup window
+The distributor uses `redis_queue`'s dedup HASH to guarantee
+at-most-one enqueue per `(subscriber_id, signal_event_id)`. Transport
+failure → False → retry; transport bug → exception → DLQ.
 
-Phase 9 invariant: within the dedup window (~1h), a duplicate is
-possible but silently de-deduped by `notification_log` hash. Missing
-a signal is worse than seeing it twice. The architecture doc §5
-documents this as intentional.
+## Brevo specifics
 
-## DLQ (Phase 12)
+- Key file: `secrets/brevo.yaml` (chmod 600, gitignored).
+- Loader: `config/brevo_secrets.py`. Fail-fast at startup if missing,
+  world/group-readable, or `api_key` prefix ≠ `xkeysib-`.
+- Transport initialises **lazily on first send**, not at boot.
+  Absence of an init log line after restart is not a regression.
 
-When a notification job fails to deliver `max_attempts` times
-(default 5), the worker moves it to a Redis-backed DLQ instead of
-cycling it back into the queue. The attempt counter lives in a
-persistent Redis HASH keyed by `job_id` — survives the distributor
-recreating the payload on each cycle.
+## Obsolete
 
-Admin endpoints (in `transports/http/routes/admin_notifications.py`):
-- `GET /v1/admin/notifications/dlq` — list entries
-- `POST /v1/admin/notifications/dlq/{job_id}/replay` — requeue
-- `DELETE /v1/admin/notifications/dlq/{job_id}` — permanent delete
-
-## Enrichment → HTML rendering pipeline
-
-When the `SubscriberDistributor` fires in legacy (in-process) mode,
-`app.py` wires an `enrichment_provider` closure into the
-`EmailTransport`. On each `send()`, the transport calls:
-
-```
-enrichment_provider(batch)
-  → enrich_batch(db_engine, batch)
-      → _fetch_ticker_basics(conn, refs)    # ticker_id + sector + industry + latest mcap
-      → _fetch_sector_zones(conn, industries)  # latest display_regime per industry
-      → _fetch_sector_directions(conn, industries)  # sign of day-over-day index-value change
-      → _fetch_recent_signals(conn, ticker_ids)  # last 5 signal_events per ticker
-  → BatchEnrichment (keyed by (exchange, symbol, instrument))
-
-render_html(batch, enrichment)
-  → grouped HTML tables per signal type
-```
-
-If enrichment fails (DB down, schema mismatch), `EmailTransport`
-falls back to text-only for that send — enrichment is decoration,
-not a delivery requirement.
-
-### Known bug (fixed): SQLAlchemy bind-name parsing
-
-`_fetch_ticker_basics` uses Postgres `unnest(:exchanges::text[],
-:symbols::text[], :instruments::text[])`. SQLAlchemy's `text()`
-parser detects bind names with a `:(\w+)(?!:)` lookahead —
-`:exchanges::text[]` caused it to bind `:exchange` (singular)
-instead of `:exchanges` (plural). The params dict supplied plural
-keys, so `execute()` raised, the broad `except` in `enrich_batch`
-swallowed it, and `EMPTY_ENRICHMENT` was returned — every email
-row showed `—` / NEUTRAL. Fix: wrap each cast as
-`(:exchanges)::text[]`. Regression test:
-`tests/notifications/test_enrichment.py`.
-
-## Tests
-
-- `tests/notifications/test_batcher.py`
-- `tests/notifications/test_html_render.py`
-- `tests/notifications/test_enrichment.py` — regression test for
-  the SQLAlchemy bind-name parsing bug in `_fetch_ticker_basics`
-- `tests/notifications/test_circuit_breaker.py`
-- `tests/notifications/test_redis_queue.py`, `test_redis_queue_dlq.py`
-- `tests/notifications/test_transports.py`
-- `tests/notifier/test_notifier_worker.py` (DB-required)
-- `tests/notifier_pure/test_worker_dlq.py`,
-  `tests/notifier_pure/test_worker_staleness.py` (no DB)
+- SMTP transport (Outlook.com personal: 5.7.139; Gmail: OAuth-only
+  since Sept 2024)
+- `TRIP_EMA_SMTP_HOST` env var and any raw-SMTP config fields

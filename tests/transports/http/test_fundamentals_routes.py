@@ -1203,7 +1203,7 @@ from trip_ema.persistence.fundamentals_repo import (
 
 
 def _make_indicator_row(industry_name: str, trade_date: date,
-                        *, core_regime: int = 0, display_regime: int = 0):
+                        *, display_regime: int = 0):
     """Helper: build a minimal valid IndicatorState for an industry."""
     return IndicatorState(
         ticker_id=None, timeframe=None,
@@ -1213,7 +1213,7 @@ def _make_indicator_row(industry_name: str, trade_date: date,
         upper_inner_band=859.0, lower_inner_band=830.0,
         upper_mid_band=882.0, lower_mid_band=815.0,
         upper_outer_band=915.0, lower_outer_band=798.0,
-        core_regime=core_regime, display_regime=display_regime,
+        display_regime=display_regime,
         pierces_upper_mid=False, pierces_lower_mid=False,
         dist_to_med_in_hl_units=None,
         dist_to_long_in_hl_units=None,
@@ -1256,7 +1256,7 @@ class TestGetIndustryIndicatorState:
                 (date(2025, 10, 15), 1),
             ]:
                 repo.upsert_for_industry(
-                    _make_indicator_row(name, td, core_regime=cr,
+                    _make_indicator_row(name, td,
                                         display_regime=cr)
                 )
 
@@ -1312,7 +1312,7 @@ class TestGetIndustryIndicatorState:
         # Spot-check key fields are present.
         for k in ["med_ema", "long_ema", "longest_ema", "atr",
                   "upper_inner_band", "lower_outer_band",
-                  "core_regime", "display_regime",
+                  "display_regime",
                   "med_pattern_label", "med_turn_buy"]:
             assert k in row
 

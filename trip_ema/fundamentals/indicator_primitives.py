@@ -484,7 +484,7 @@ INDICATOR_DEFAULTS = IndicatorParams()
 class IndicatorSeries:
     """All Phase 5-2 series outputs for a given input bar series.
 
-    Phase 5-3 will add core_regime / display_regime which are
+    Phase 5-3 will add display_regime which are
     inherently sequential. Phase 5-2 stops at the indicators
     themselves.
     """
@@ -547,7 +547,7 @@ def compute_indicator_series(
 # This is where the sequential state (bars-since-turn, pattern
 # labels) lives — the prior layers are pure functional.
 #
-# The regime states (core_regime, display_regime) are NOT computed
+# The regime states (display_regime) are NOT computed
 # here — Phase 5-3 adds them in a separate walk because they have
 # their own state machine and we want it isolated for clarity.
 # For Phase 5-2, all produced IndicatorState rows have regime=0.
@@ -729,18 +729,12 @@ def compute_bar_states(
     if open_ is None:
         open_ = close.shift(1)
 
-    # Compute regime Series upfront (each is a sequential walk
-    # over the bar series).
-    core_regime_series = compute_core_regime(
-        close,
-        series.emas.med, series.emas.long, series.emas.longest,
-        series.bands.upper_inner, series.bands.lower_inner,
-    )
-    display_regime_series = compute_display_regime(
-        close, open_, core_regime_series,
-        series.bands.upper_inner, series.bands.lower_inner,
-        series.bands.upper_outer, series.bands.lower_outer,
-    )
+    # Compute the unified display_regime upfront (one walk over the bar
+    # series). Step 9b replaced the old display_regime
+    # split with a single regime — see `trip_ema/regime/compute_regime.py`
+    # for the rules and `open_` is no longer consulted (the old
+    # display-gate's candleIsGreen flag is gone in the unified model).
+    regime_series = _compute_regime_series(close, series)
 
     # Detect turns on each EMA series.
     med_buys, med_sells = _detect_turns(series.emas.med)
@@ -903,8 +897,7 @@ def compute_bar_states(
             "lower_mid_band": series.bands.lower_mid.iloc[i],
             "upper_outer_band": series.bands.upper_outer.iloc[i],
             "lower_outer_band": series.bands.lower_outer.iloc[i],
-            "core_regime": int(core_regime_series.iloc[i]),
-            "display_regime": int(display_regime_series.iloc[i]),
+            "display_regime": int(regime_series.iloc[i]),
             "pierces_upper_mid": bool(pierces_upper_mid.iloc[i]),
             "pierces_lower_mid": bool(pierces_lower_mid.iloc[i]),
             "dist_to_med_in_hl_units": _none_if_nan(dist_to_med.iloc[i]),
@@ -986,262 +979,93 @@ def _none_if_nan(value):
 
 
 # ============================================================
-# Layer 6: Regime state machines (Phase 5-3)
+# Layer 6: Unified regime (Step 9b)
 # ============================================================
 #
-# Two state machines, both sequential through time:
+# Replaces the OLD display_regime state-machine pair
+# with a single regime computed per bar by the new
+# `trip_ema.regime.compute_regime` function. One walk through the
+# bar series; one regime value per bar; no candle-direction gate.
 #
-#   core_regime: -1 / 0 / +1, driven by price vs inner bands plus
-#     EMA filters. Sticky — once in a non-zero state, stays there
-#     until specific exit conditions fire.
+# The dict key produced by `compute_indicator_state_for_bars` is
+# still `display_regime` (preserving the schema column name); its
+# value now comes from this walker.
 #
-#   display_regime: -1 / 0 / +1, gated version of core_regime.
-#     Adds candle direction + anti-chase outer-band check for
-#     fresh entries.
+# Spec for the new regime rules — see
+# `trip_ema/regime/compute_regime.py` for the canonical source:
 #
-# Both are pure functions over their inputs (no DB access). They
-# return pandas Series of the same length as the inputs.
+#   (a) definite_green     close >= upper_inner
+#   (b) definite_red       close <= lower_inner
+#   (c) green_continuation prev_green AND (close >= lower_env OR
+#                          (close >= lower_inner AND
+#                           prev_close >= prev_lower_env))
+#   (d) red_continuation   mirror of (c)
+#   (e) neutral            otherwise
 #
-# Notes on Pine semantics:
-#
-#   - The "upper_band"/"lower_band" in the Pine state machines
-#     refers to the INNER ATR band (0.2 × ATR multiplier by
-#     default), NOT mid or outer. Easy to misread.
-#
-#   - State transitions are single-bar: on a bar where the +1
-#     exit conditions fire AND the -1 entry conditions also fire,
-#     the new state is -1 directly (not pass through 0).
-#
-#   - For industry indices (synthetic OHLC), candle direction is
-#     always False because close == open. Phase 5-3 uses
-#     close > prev_close as the synthetic candle direction for
-#     the display_regime gate. The caller controls this by
-#     passing `open` = `close.shift(1)` for indices.
+# Envelope = max / min of the three EMAs (med, long, longest).
 
 
-def compute_core_regime(
-    close: pd.Series,
-    med_ema: pd.Series,
-    long_ema: pd.Series,
-    longest_ema: pd.Series,
-    upper_inner_band: pd.Series,
-    lower_inner_band: pd.Series,
-) -> pd.Series:
-    """Walk the bar series and compute the core_regime state.
+def _compute_regime_series(close: pd.Series, series) -> pd.Series:
+    """Walk the bar series and apply `regime.compute_regime` per bar.
 
-    State machine (translated from Pine):
-
-        From state 0:
-            enter +1 if (close > upper_inner) AND green_ema_filter
-            enter -1 if (close < lower_inner) AND red_ema_filter
-            else stay 0
-
-        From state +1:
-            if (close < long_ema AND NOT long_slope_positive) OR NOT green_ema_filter:
-                if (close < lower_inner) AND red_ema_filter:
-                    new = -1
-                else:
-                    new = 0
-            else:
-                stay 1
-
-        From state -1:
-            (symmetric to +1)
-
-    EMA filters:
-        green = (med > longest) OR (long > longest)
-                OR (med rising AND long rising AND close > longest)
-        red = (med < longest) OR (long < longest)
-              OR (med falling AND long falling AND close < longest)
-
-    Returns a pd.Series of int64 with values in {-1, 0, 1}.
+    Returns a Series of int64 values in {-1, 0, +1}, same length as
+    `close`. On bars where any required indicator value is NaN
+    (warmup), the regime is sticky — we hold the previous regime
+    rather than resetting to NEUTRAL, matching the OLD
+    `compute_core_regime` behaviour and matching what live state
+    threading would do.
     """
+    from ..regime import BarInputs, Regime, compute_regime
+
     n = len(close)
     if n == 0:
         return pd.Series([], dtype="int64")
 
     out = np.zeros(n, dtype=np.int64)
-    state = 0
+    prev_regime: Regime = Regime.NEUTRAL
+    prev_close: float | None = None
+    prev_lower_env: float | None = None
+    prev_upper_env: float | None = None
 
     for i in range(n):
         c = close.iloc[i]
-        m = med_ema.iloc[i]
-        l = long_ema.iloc[i]
-        x = longest_ema.iloc[i]
-        ui = upper_inner_band.iloc[i]
-        li = lower_inner_band.iloc[i]
+        med = series.emas.med.iloc[i]
+        long_ = series.emas.long.iloc[i]
+        longest = series.emas.longest.iloc[i]
+        ui = series.bands.upper_inner.iloc[i]
+        li = series.bands.lower_inner.iloc[i]
+        uo = series.bands.upper_outer.iloc[i]
+        lo = series.bands.lower_outer.iloc[i]
 
-        # Any required value being NaN → can't compute regime. Stay
-        # at current state (regime is sticky; we don't reset to 0
-        # on NaN, but we also can't transition to a new state).
-        if (pd.isna(c) or pd.isna(m) or pd.isna(l) or pd.isna(x)
-            or pd.isna(ui) or pd.isna(li)):
-            out[i] = state
+        # Sticky-on-NaN: warmup bars carry the prior regime forward
+        # rather than dropping to NEUTRAL. Matches the OLD
+        # compute_core_regime semantics.
+        if (pd.isna(c) or pd.isna(med) or pd.isna(long_)
+                or pd.isna(longest)
+                or pd.isna(ui) or pd.isna(li)
+                or pd.isna(uo) or pd.isna(lo)):
+            out[i] = int(prev_regime)
             continue
 
-        # Slope checks (need prev EMA value).
-        if i > 0:
-            l_prev = long_ema.iloc[i - 1]
-            m_prev = med_ema.iloc[i - 1]
-            long_slope_positive = (not pd.isna(l_prev)) and (l > l_prev)
-            long_slope_negative = (not pd.isna(l_prev)) and (l < l_prev)
-            med_slope_positive = (not pd.isna(m_prev)) and (m > m_prev)
-            med_slope_negative = (not pd.isna(m_prev)) and (m < m_prev)
-        else:
-            long_slope_positive = False
-            long_slope_negative = False
-            med_slope_positive = False
-            med_slope_negative = False
-
-        # EMA filters.
-        green_filter = (
-            (m > x) or (l > x)
-            or (med_slope_positive and long_slope_positive and c > x)
+        upper_env = float(max(med, long_, longest))
+        lower_env = float(min(med, long_, longest))
+        bar_inputs = BarInputs(
+            close=float(c),
+            upper_inner=float(ui), lower_inner=float(li),
+            upper_outer=float(uo), lower_outer=float(lo),
+            upper_envelope=upper_env, lower_envelope=lower_env,
         )
-        red_filter = (
-            (m < x) or (l < x)
-            or (med_slope_negative and long_slope_negative and c < x)
+        current = compute_regime(
+            previous_regime=prev_regime,
+            previous_close=prev_close,
+            previous_lower_envelope=prev_lower_env,
+            previous_upper_envelope=prev_upper_env,
+            bar=bar_inputs,
         )
-
-        price_above_upper = c > ui
-        price_below_lower = c < li
-        price_above_long = c > l
-        price_below_long = c < l
-
-        # Transition logic.
-        if state == 1:
-            # Exit condition for +1.
-            exit_plus_one = (
-                (price_below_long and not long_slope_positive)
-                or not green_filter
-            )
-            if exit_plus_one:
-                # Possibly transition straight to -1.
-                if price_below_lower and red_filter:
-                    state = -1
-                else:
-                    state = 0
-            # else: stay at +1
-        elif state == -1:
-            # Exit condition for -1.
-            exit_minus_one = (
-                (price_above_long and not long_slope_negative)
-                or not red_filter
-            )
-            if exit_minus_one:
-                if price_above_upper and green_filter:
-                    state = 1
-                else:
-                    state = 0
-            # else: stay at -1
-        else:  # state == 0
-            if price_above_upper and green_filter:
-                state = 1
-            elif price_below_lower and red_filter:
-                state = -1
-
-        out[i] = state
-
-    return pd.Series(out, index=close.index)
-
-
-def compute_display_regime(
-    close: pd.Series,
-    open_: pd.Series,
-    core_regime: pd.Series,
-    upper_inner_band: pd.Series,
-    lower_inner_band: pd.Series,
-    upper_outer_band: pd.Series,
-    lower_outer_band: pd.Series,
-) -> pd.Series:
-    """Walk the bar series and compute the display_regime state.
-
-    Depends on core_regime (must be computed first) and adds:
-
-      - Candle direction: close > open (green) or close < open
-        (red). For industry indices where open is synthesized as
-        prev_close, this becomes close > prev_close.
-
-      - Anti-chase: a "fresh entry" (prev_display == 0) is
-        rejected if close has already moved past the outer band.
-        This prevents entering late in a move.
-
-    State machine:
-
-        If core == +1:
-            if green_gate: display = +1
-            elif prev_display == +1: display = +1 (sticky)
-            else: display = 0
-        If core == -1:
-            (symmetric)
-        If core == 0:
-            display = 0 (force exit)
-
-        where green_gate = candle_green AND close > upper_inner
-                           AND (prev_display == 1 OR close < upper_outer)
-              red_gate   = candle_red AND close < lower_inner
-                           AND (prev_display == -1 OR close > lower_outer)
-
-    Returns a pd.Series of int64 with values in {-1, 0, 1}.
-    """
-    n = len(close)
-    if n == 0:
-        return pd.Series([], dtype="int64")
-
-    out = np.zeros(n, dtype=np.int64)
-    prev_display = 0
-
-    for i in range(n):
-        c = close.iloc[i]
-        o = open_.iloc[i]
-        cr = int(core_regime.iloc[i])
-        ui = upper_inner_band.iloc[i]
-        li = lower_inner_band.iloc[i]
-        uo = upper_outer_band.iloc[i]
-        lo = lower_outer_band.iloc[i]
-
-        # NaN handling: if anything we need is NaN, stay at the
-        # current display state.
-        any_nan = (
-            pd.isna(c) or pd.isna(o)
-            or pd.isna(ui) or pd.isna(li)
-            or pd.isna(uo) or pd.isna(lo)
-        )
-
-        if any_nan:
-            out[i] = prev_display
-            continue
-
-        if cr == 0:
-            new_display = 0
-        elif cr == 1:
-            candle_green = c > o
-            is_fresh = (prev_display == 0)
-            anti_chase_ok = (not is_fresh) or (c < uo)
-            green_gate = candle_green and (c > ui) and anti_chase_ok
-            if green_gate:
-                new_display = 1
-            elif prev_display == 1:
-                new_display = 1
-            else:
-                new_display = 0
-        elif cr == -1:
-            candle_red = c < o
-            is_fresh = (prev_display == 0)
-            anti_chase_ok = (not is_fresh) or (c > lo)
-            red_gate = candle_red and (c < li) and anti_chase_ok
-            if red_gate:
-                new_display = -1
-            elif prev_display == -1:
-                new_display = -1
-            else:
-                new_display = 0
-        else:
-            # core_regime not in {-1, 0, 1}? Defensive — shouldn't
-            # happen because compute_core_regime constrains to those.
-            new_display = 0
-
-        out[i] = new_display
-        prev_display = new_display
+        out[i] = int(current)
+        prev_regime = current
+        prev_close = float(c)
+        prev_lower_env = lower_env
+        prev_upper_env = upper_env
 
     return pd.Series(out, index=close.index)

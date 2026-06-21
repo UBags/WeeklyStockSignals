@@ -101,7 +101,6 @@ class TestRunIndicatorStateForIndustry:
         assert latest.longest_ema > 0
         assert latest.atr >= 0
         # Regime must be in valid range.
-        assert latest.core_regime in (-1, 0, 1)
         assert latest.display_regime in (-1, 0, 1)
 
     def test_idempotent(self, db_engine):

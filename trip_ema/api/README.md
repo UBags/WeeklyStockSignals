@@ -1,54 +1,33 @@
-# `trip_ema/api/` — Service lifecycle (priming + cached/stateless boundaries)
+# `trip_ema/api/` — public compute surface
 
-The thin layer that sits between FastAPI route handlers and the engine/
-cache/registry. Owns priming (loading historical bars into engines at
-startup), and provides the two read paths the HTTP layer exposes:
-**cached** (fast, in-memory) and **stateless** (recompute on demand).
+Three entry points the rest of the codebase calls into. This is the
+spec's (a)/(b)/(c) split: one stateless function for ad-hoc compute,
+one cached read for the warm path, and one lifecycle helper for
+startup priming.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `__init__.py` | Marker |
-| `lifecycle.py` | `prime_all_tickers(...)` — walk every active ticker, fetch history, build `TickerEngine` state, populate `SignalCache`. Runs at startup; can be re-invoked via `POST /v1/admin/prime-all` |
-| `cached.py` | Read path against `SignalCache` — fast, single-writer reads |
-| `stateless.py` | Stateless compute path — accepts caller-supplied bars, runs an ephemeral engine, returns the result without touching cache or DB |
-| `responses.py` | Pydantic response models shared between the cached + stateless paths |
+| `__init__.py` | Re-exports `compute_full_terse`, `compute_full_verbose`, `prime_all_tickers`, `TerseResponse`, `VerboseResponse` |
+| `stateless.py` | Function **(a)** — `compute_full(...)` recomputes a TickerEngine from raw bars and returns Terse/Verbose. The ad-hoc / testing entry point — caller provides bars, engine is never cached |
+| `cached.py` | Function **(b)** — read-only fetch from the `SignalCache`. The hot path used by HTTP `GET /v1/signal/...`. ComputeScheduler is the *only writer*; this side never mutates |
+| `lifecycle.py` | Function **(c)** — `prime_all_tickers(...)` is the startup orchestrator. Iterates the configured exchanges, builds a `TickerEngine` per ticker primed with N historical bars, and registers each into the `TickerRegistry` + `SignalCache`. Also exposes `_build_cached_signal_from_engine` for the fundamentals runners |
+| `responses.py` | `TerseResponse` (one-bar latest state) and `VerboseResponse` (per-bar state history up to N bars). Frozen Pydantic v2 models — the public DTO surface |
 
-## How priming works
+## Invariants
+
+- `stateless` is the **only** path that constructs a `TickerEngine`
+  outside startup. The warm path uses cached engines via the registry.
+- `cached` never mutates. It reads whatever entry is in the dict;
+  reads take no lock.
+- `responses.*` types are the only types HTTP routes ever serialize.
+  Internal `BarState` / `ChangeSignal` types stay private.
+
+## Read paths
 
 ```
-prime_all_tickers(registry, cache, bars_repo, config)
-    for ticker in registry.all():
-        bars = bars_repo.fetch_history(ticker, limit=config.cache.max_history_bars)
-        engine = TickerEngine(ticker, ...)
-        engine.prime(bars)                  # one-shot bulk; no events emitted
-        registry.set_engine(ticker, engine)
-        cache.write(ticker, engine.latest_state())
+HTTP route → api.cached → SignalCache → CachedSignal → TerseResponse
+HTTP route → api.stateless → fresh TickerEngine → VerboseResponse
+startup    → api.lifecycle.prime_all_tickers → engines into registry
 ```
-
-Priming is **idempotent** — repeated runs produce the same end state.
-The service refuses to serve requests until priming completes (gates
-the readiness check via the `cache_size > 0` predicate in `/readyz`).
-
-## Why "cached" vs "stateless"
-
-| Path | When | How |
-|---|---|---|
-| Cached (`/v1/signals/{exchange}/{symbol}`) | Operator / GUI reading "what's the latest signal?" | `O(1)` cache lookup — no compute |
-| Stateless (`/v1/compute/*`) | External caller wants to compute against bars they hold (e.g. simulation, what-if) | Build ephemeral engine, ingest caller's bars, return result, discard engine |
-
-Both paths share the response shape via `responses.py`.
-
-## Single-writer invariant
-
-`SignalCache` has exactly one writer: `ComputeScheduler` during normal
-operation, and `prime_all_tickers` during startup / reprime. The cached
-read path here is **read-only** against the cache.
-
-## Tests
-
-- `tests/api/test_cached.py` — cached read path
-- `tests/api/test_stateless.py` — stateless compute path
-- `tests/api/test_lifecycle.py` — priming behavior, idempotency
-- `tests/api/test_end_to_end.py` — full priming → compute → read sequence
