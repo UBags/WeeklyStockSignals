@@ -1,0 +1,165 @@
+--- originals/tests/transports/http/test_fundamentals_routes.py	2026-06-23 17:43:40.905296210 +0000
++++ sandbox/tests/transports/http/test_fundamentals_routes.py	2026-06-23 17:43:18.858898621 +0000
+@@ -1442,90 +1442,6 @@
+     )
+ 
+ 
+-# ---------- GET /signal-events/industries/{name} ---------- #
+-
+-
+-class TestGetIndustrySignalEvents:
+-
+-    def _setup(self, db_engine):
+-        with transaction(db_engine) as conn:
+-            IndustryIndexRepository(conn).upsert(
+-                "IT - Services", sector_name="Technology",
+-                base_date=date(2025, 10, 1),
+-            )
+-            repo = SignalEventRepository(conn)
+-            repo.upsert(_make_signal_row(
+-                "IT - Services", date(2026, 1, 8), "BUY",
+-            ))
+-            repo.upsert(_make_signal_row(
+-                "IT - Services", date(2026, 1, 22), "EXIT_FROM_BUY",
+-                regime_before=1, regime_after=0,
+-            ))
+-            repo.upsert(_make_signal_row(
+-                "IT - Services", date(2026, 2, 5), "SELL",
+-                regime_before=0, regime_after=-1,
+-            ))
+-
+-    def test_returns_all_events_newest_first(self, real_db_client, db_engine):
+-        self._setup(db_engine)
+-        r = real_db_client.get(
+-            "/v1/fundamentals/signal-events/industries/IT - Services",
+-            headers=AUTH_HEADERS,
+-        )
+-        assert r.status_code == 200
+-        rows = r.json()["rows"]
+-        assert len(rows) == 3
+-        dates = [r["trade_date"] for r in rows]
+-        assert dates == ["2026-02-05", "2026-01-22", "2026-01-08"]
+-
+-    def test_kind_filter(self, real_db_client, db_engine):
+-        self._setup(db_engine)
+-        r = real_db_client.get(
+-            "/v1/fundamentals/signal-events/industries/IT - Services?kind=BUY",
+-            headers=AUTH_HEADERS,
+-        )
+-        rows = r.json()["rows"]
+-        assert len(rows) == 1
+-        assert rows[0]["event_kind"] == "BUY"
+-
+-    def test_date_range_filter(self, real_db_client, db_engine):
+-        self._setup(db_engine)
+-        r = real_db_client.get(
+-            "/v1/fundamentals/signal-events/industries/IT - Services"
+-            "?from_date=2026-01-01&to_date=2026-01-31",
+-            headers=AUTH_HEADERS,
+-        )
+-        rows = r.json()["rows"]
+-        # Two events in January.
+-        assert len(rows) == 2
+-
+-    def test_invalid_kind_returns_400(self, real_db_client):
+-        r = real_db_client.get(
+-            "/v1/fundamentals/signal-events/industries/IT - Services"
+-            "?kind=INVALID",
+-            headers=AUTH_HEADERS,
+-        )
+-        assert r.status_code == 400
+-
+-    def test_payload_includes_all_fields(self, real_db_client, db_engine):
+-        self._setup(db_engine)
+-        r = real_db_client.get(
+-            "/v1/fundamentals/signal-events/industries/IT - Services?limit=1",
+-            headers=AUTH_HEADERS,
+-        )
+-        row = r.json()["rows"][0]
+-        for k in ["industry_name", "trade_date", "event_kind",
+-                  "regime_before", "regime_after", "close_at_event",
+-                  "computed_at"]:
+-            assert k in row
+-
+-    def test_requires_auth(self, real_db_client):
+-        r = real_db_client.get(
+-            "/v1/fundamentals/signal-events/industries/IT - Services"
+-        )
+-        assert r.status_code == 401
+-
+-
+ # ---------- GET /signal-events/recent ---------- #
+ 
+ 
+@@ -1586,71 +1502,6 @@
+         assert r.status_code == 400
+ 
+ 
+-# ---------- POST /compute-signals ---------- #
+-
+-
+-class TestComputeSignalsEndpoint:
+-
+-    def test_rejects_no_industry_and_no_all_industries(self, real_db_client):
+-        r = real_db_client.post(
+-            "/v1/fundamentals/compute-signals",
+-            headers=AUTH_HEADERS,
+-        )
+-        assert r.status_code == 400
+-        assert "industry" in r.json()["detail"]
+-
+-    def test_rejects_both(self, real_db_client):
+-        r = real_db_client.post(
+-            "/v1/fundamentals/compute-signals"
+-            "?industry=IT - Services&all_industries=true",
+-            headers=AUTH_HEADERS,
+-        )
+-        assert r.status_code == 400
+-
+-    def test_returns_202_for_industry(
+-        self, real_db_client, db_engine, monkeypatch,
+-    ):
+-        called = []
+-        def fake_runner(engine, name, *, force=False):
+-            called.append((name, force))
+-            return 1
+-        monkeypatch.setattr(
+-            "trip_ema.fundamentals.runners.run_signal_events_for_industry",
+-            fake_runner,
+-        )
+-        r = real_db_client.post(
+-            "/v1/fundamentals/compute-signals"
+-            "?industry=IT - Services&force=true",
+-            headers=AUTH_HEADERS,
+-        )
+-        assert r.status_code == 202
+-        assert called == [("IT - Services", True)]
+-
+-    def test_returns_202_for_all_industries(
+-        self, real_db_client, db_engine, monkeypatch,
+-    ):
+-        called = []
+-        def fake_runner(engine, *, force=False):
+-            called.append(force)
+-            return {"succeeded": [], "skipped": [], "failed": []}
+-        monkeypatch.setattr(
+-            "trip_ema.fundamentals.runners.run_signal_events_for_all_industries",
+-            fake_runner,
+-        )
+-        r = real_db_client.post(
+-            "/v1/fundamentals/compute-signals?all_industries=true",
+-            headers=AUTH_HEADERS,
+-        )
+-        assert r.status_code == 202
+-        assert called == [False]
+-
+-    def test_requires_auth(self, real_db_client):
+-        r = real_db_client.post(
+-            "/v1/fundamentals/compute-signals?all_industries=true"
+-        )
+-        assert r.status_code == 401
+-
+-
+ # ============================================================
+ # Phase 7 — HTTP per-ticker mode tests
+ # ============================================================

@@ -156,7 +156,6 @@ def run_eod_pipeline(
         run_industry_refresh,
         run_index_value_backfill,
         run_shares_refresh,
-        run_signal_events_for_all_industries,
         run_signal_events_for_all_tickers,
     )
     from .benchmark_stats_runners import (
@@ -402,18 +401,6 @@ def run_eod_pipeline(
                 f"compute-indicator-state for {succeeded} industries "
                 f"(skipped {skipped}, failed {failed})")
 
-    def _step_signals_industries():
-        report = run_signal_events_for_all_industries(
-            db_engine, force=force,
-        )
-        succeeded = len(report["succeeded"])
-        failed = len(report["failed"])
-        skipped = len(report["skipped"])
-        status = _status_from_counts(succeeded, failed, skipped)
-        return (status, succeeded, failed, skipped,
-                f"compute-signals for {succeeded} industries "
-                f"(skipped {skipped}, failed {failed})")
-
     def _step_indicator_state_tickers():
         report = run_indicator_state_for_all_tickers(
             db_engine, timeframe, exchange=exchange, force=force,
@@ -469,7 +456,6 @@ def run_eod_pipeline(
         ("compute-index-values", _step_index_values),
         ("compute-indicator-state (industries)",
          _step_indicator_state_industries),
-        ("compute-signals (industries)", _step_signals_industries),
     ])
 
     # Pre-populate the result with PENDING entries so callers can see

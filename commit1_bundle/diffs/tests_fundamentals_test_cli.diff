@@ -1,0 +1,156 @@
+--- originals/tests/fundamentals/test_cli.py	2026-06-23 17:43:40.893296210 +0000
++++ sandbox/tests/fundamentals/test_cli.py	2026-06-23 17:43:18.847568411 +0000
+@@ -1574,153 +1574,6 @@
+ # ============================================================
+ 
+ 
+-class TestCmdComputeSignals:
+-
+-    def test_rejects_no_industry_and_no_all_industries(
+-        self, db_engine, fake_config, patched_engine_factory, capsys,
+-    ):
+-        args = type("A", (), {})()
+-        args.industry = None
+-        args.all_industries = False
+-        args.force = False
+-        from trip_ema.fundamentals.cli import cmd_compute_signals
+-        rc = cmd_compute_signals(args, fake_config)
+-        err = capsys.readouterr().err
+-        assert rc == 2
+-        assert "industry" in err or "all-industries" in err
+-
+-    def test_rejects_both_industry_and_all_industries(
+-        self, db_engine, fake_config, patched_engine_factory, capsys,
+-    ):
+-        args = type("A", (), {})()
+-        args.industry = "IT - Services"
+-        args.all_industries = True
+-        args.force = False
+-        from trip_ema.fundamentals.cli import cmd_compute_signals
+-        rc = cmd_compute_signals(args, fake_config)
+-        err = capsys.readouterr().err
+-        assert rc == 2
+-        assert "mutually exclusive" in err
+-
+-    def test_single_industry_unknown_returns_2(
+-        self, db_engine, fake_config, patched_engine_factory, capsys,
+-    ):
+-        args = type("A", (), {})()
+-        args.industry = "Nonexistent Industry"
+-        args.all_industries = False
+-        args.force = False
+-        from trip_ema.fundamentals.cli import cmd_compute_signals
+-        rc = cmd_compute_signals(args, fake_config)
+-        err = capsys.readouterr().err
+-        assert rc == 2
+-        assert "does not exist" in err
+-
+-    def test_single_industry_success_path(
+-        self, db_engine, fake_config, patched_engine_factory,
+-        monkeypatch, capsys,
+-    ):
+-        def fake_runner(engine, name, *, force=False):
+-            with transaction(engine) as conn:
+-                rid = FundamentalsRunRepository(conn).open(
+-                    phase="index_indicators", exchange="ALL",
+-                )
+-                FundamentalsRunRepository(conn).close(
+-                    rid, status="SUCCESS",
+-                    succeeded=5, failed=0, skipped=0,
+-                )
+-            return rid
+-        monkeypatch.setattr(
+-            "trip_ema.fundamentals.runners.run_signal_events_for_industry",
+-            fake_runner,
+-        )
+-        args = type("A", (), {})()
+-        args.industry = "IT - Services"
+-        args.all_industries = False
+-        args.force = False
+-        from trip_ema.fundamentals.cli import cmd_compute_signals
+-        rc = cmd_compute_signals(args, fake_config)
+-        out = capsys.readouterr().out
+-        assert rc == 0
+-        assert "status=SUCCESS" in out
+-        assert "events_written=5" in out
+-
+-    def test_all_industries_success_path(
+-        self, db_engine, fake_config, patched_engine_factory,
+-        monkeypatch, capsys,
+-    ):
+-        def fake_runner(engine, *, force=False):
+-            return {
+-                "succeeded": [("Industry A", 4), ("Industry B", 3)],
+-                "skipped": [],
+-                "failed": [],
+-            }
+-        monkeypatch.setattr(
+-            "trip_ema.fundamentals.runners.run_signal_events_for_all_industries",
+-            fake_runner,
+-        )
+-        args = type("A", (), {})()
+-        args.industry = None
+-        args.all_industries = True
+-        args.force = False
+-        from trip_ema.fundamentals.cli import cmd_compute_signals
+-        rc = cmd_compute_signals(args, fake_config)
+-        out = capsys.readouterr().out
+-        assert rc == 0
+-        assert "succeeded: 2" in out
+-        assert "Industry A" in out
+-        assert "Industry B" in out
+-
+-    def test_all_industries_with_failures_returns_1(
+-        self, db_engine, fake_config, patched_engine_factory,
+-        monkeypatch,
+-    ):
+-        def fake_runner(engine, *, force=False):
+-            return {
+-                "succeeded": [("Industry Good", 4)],
+-                "skipped": [],
+-                "failed": [("Industry Bad", "error")],
+-            }
+-        monkeypatch.setattr(
+-            "trip_ema.fundamentals.runners.run_signal_events_for_all_industries",
+-            fake_runner,
+-        )
+-        args = type("A", (), {})()
+-        args.industry = None
+-        args.all_industries = True
+-        args.force = False
+-        from trip_ema.fundamentals.cli import cmd_compute_signals
+-        rc = cmd_compute_signals(args, fake_config)
+-        assert rc == 1
+-
+-    def test_force_flag_passes_through(
+-        self, db_engine, fake_config, patched_engine_factory,
+-        monkeypatch,
+-    ):
+-        force_seen = []
+-        def fake_runner(engine, name, *, force=False):
+-            force_seen.append(force)
+-            with transaction(engine) as conn:
+-                rid = FundamentalsRunRepository(conn).open(
+-                    phase="index_indicators", exchange="ALL",
+-                )
+-                FundamentalsRunRepository(conn).close(
+-                    rid, status="SUCCESS",
+-                    succeeded=3, failed=0, skipped=0,
+-                )
+-            return rid
+-        monkeypatch.setattr(
+-            "trip_ema.fundamentals.runners.run_signal_events_for_industry",
+-            fake_runner,
+-        )
+-        args = type("A", (), {})()
+-        args.industry = "IT - Services"
+-        args.all_industries = False
+-        args.force = True
+-        from trip_ema.fundamentals.cli import cmd_compute_signals
+-        cmd_compute_signals(args, fake_config)
+-        assert force_seen == [True]
+-
+-
+ class TestCmdFundamentalsStatusShowsSignalCoverage:
+ 
+     def test_shows_signal_section_when_present(

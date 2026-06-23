@@ -48,7 +48,6 @@ def _patch_all_runners(
     index_build_report=None,
     index_value_status="SUCCESS",
     indicator_industries_report=None,
-    signals_industries_report=None,
     indicator_tickers_report=None,
     signals_tickers_report=None,
 ):
@@ -65,12 +64,6 @@ def _patch_all_runners(
     if indicator_industries_report is None:
         indicator_industries_report = {
             "succeeded": [("IT - Services", 152, 6)],
-            "skipped": [],
-            "failed": [],
-        }
-    if signals_industries_report is None:
-        signals_industries_report = {
-            "succeeded": [("IT - Services", 17)],
             "skipped": [],
             "failed": [],
         }
@@ -188,15 +181,6 @@ def _patch_all_runners(
     monkeypatch.setattr(
         "trip_ema.fundamentals.runners.run_indicator_state_for_all_industries",
         mocks["indicator_industries"],
-    )
-
-    # Phase 6 — signals (industries).
-    mocks["signals_industries"] = MagicMock(
-        return_value=signals_industries_report
-    )
-    monkeypatch.setattr(
-        "trip_ema.fundamentals.runners.run_signal_events_for_all_industries",
-        mocks["signals_industries"],
     )
 
     # Phase 7 — per-ticker indicator + signals.

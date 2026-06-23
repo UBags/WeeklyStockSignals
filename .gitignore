@@ -29,3 +29,6 @@ secrets/*
 !secrets/*.example
 !secrets/README.md
 generated_signals/
+
+# project_to_md.py — generated bundle output
+Code packaged into MDs for LLMs/

@@ -1116,26 +1116,23 @@ def cmd_compute_benchmark_stats(args, config) -> int:
 
 
 def cmd_compute_signals(args, config: Config) -> int:
-    """Compute signal events for industries or tickers.
+    """Compute signal events for tickers.
+
+    Industries are non-tradeable regime indicators and no longer emit
+    signal events (their regimes still appear in indicator_state).
 
     Modes (mutually exclusive):
-      --industry NAME              : one industry
-      --all-industries             : every active industry with indicator_state
       --ticker SYMBOL --exchange X : one ticker (+ --timeframe required)
       --all-tickers --timeframe TF : all tickers on a timeframe
     """
     from .runners import (
-        run_signal_events_for_all_industries,
         run_signal_events_for_all_tickers,
-        run_signal_events_for_industry,
         run_signal_events_for_ticker,
     )
     from ..persistence.tickers_repo import TickersRepository
     from ..domain import TickerRef
 
-    # Normalize args — older callers may not set per-ticker attrs.
-    args.industry = getattr(args, "industry", None)
-    args.all_industries = getattr(args, "all_industries", False)
+    # Normalize args.
     args.ticker = getattr(args, "ticker", None)
     args.all_tickers = getattr(args, "all_tickers", False)
     args.exchange = getattr(args, "exchange", None)
@@ -1143,76 +1140,24 @@ def cmd_compute_signals(args, config: Config) -> int:
     args.force = getattr(args, "force", False)
 
     modes_set = sum([
-        bool(args.industry),
-        bool(args.all_industries),
         bool(args.ticker),
         bool(args.all_tickers),
     ])
     if modes_set == 0:
         print(
-            "error: must pass one of --industry, --all-industries, "
-            "--ticker, or --all-tickers",
+            "error: must pass one of --ticker or --all-tickers",
             file=sys.stderr,
         )
         return 2
     if modes_set > 1:
         print(
-            "error: --industry, --all-industries, --ticker, and "
-            "--all-tickers are mutually exclusive",
+            "error: --ticker and --all-tickers are mutually exclusive",
             file=sys.stderr,
         )
         return 2
 
     db_engine = create_engine_from_config(config)
     try:
-        if args.industry:
-            try:
-                run_id = run_signal_events_for_industry(
-                    db_engine, args.industry, force=args.force,
-                )
-            except ValueError as e:
-                print(f"error: {e}", file=sys.stderr)
-                return 2
-            with db_engine.connect() as conn:
-                r = FundamentalsRunRepository(conn).get(run_id)
-            if r is None:
-                print(f"run_id={run_id} (no row found?)", file=sys.stderr)
-                return 1
-            print(
-                f"compute-signals {args.industry}: "
-                f"run_id={r.run_id} status={r.status} "
-                f"events_written={r.succeeded} skipped={r.skipped}"
-            )
-            return 0 if r.status == "SUCCESS" else 2
-
-        if args.all_industries:
-            report = run_signal_events_for_all_industries(
-                db_engine, force=args.force,
-            )
-            print(f"compute-signals --all-industries:")
-            print(
-                f"  succeeded: {len(report['succeeded'])}, "
-                f"skipped: {len(report['skipped'])}, "
-                f"failed: {len(report['failed'])}"
-            )
-            if report["succeeded"]:
-                print()
-                print("Succeeded:")
-                print(f"  {'INDUSTRY':<48} {'EVENTS':>8}")
-                for name, count in report["succeeded"]:
-                    print(f"  {name[:48]:<48} {count:>8}")
-            if report["skipped"]:
-                print()
-                print("Skipped (run compute-indicator-state first):")
-                for name, reason in report["skipped"]:
-                    print(f"  {name[:48]:<48} {reason}")
-            if report["failed"]:
-                print()
-                print("Failed:")
-                for name, err in report["failed"]:
-                    print(f"  {name[:48]:<48} {err[:60]}")
-            return _exit_code_from_report(report)
-
         if args.ticker:
             if not args.timeframe or not args.exchange:
                 print(
@@ -1308,7 +1253,7 @@ def cmd_compute_signals(args, config: Config) -> int:
 def cmd_run_eod_pipeline(args, config: Config) -> int:
     """Run the full EoD fundamentals pipeline for one exchange.
 
-    Wires together 8 phases (10 with --include-tickers):
+    Wires together 7 phases (9 with --include-tickers):
       1. refresh-industry
       2. refresh-shares
       3. refresh-financials
@@ -1316,9 +1261,8 @@ def cmd_run_eod_pipeline(args, config: Config) -> int:
       5. build-industry-indices
       6. compute-index-values
       7. compute-indicator-state (industries)
-      8. compute-signals (industries)
-      9. compute-indicator-state (tickers)   [opt-in]
-     10. compute-signals (tickers)           [opt-in]
+      8. compute-indicator-state (tickers)   [opt-in]
+      9. compute-signals (tickers)           [opt-in]
 
     Each step's skip-if-recent guard means re-running daily is
     cheap — Phase 1-3 (yfinance) only do real work every 80+ days;
@@ -1780,16 +1724,7 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
     csg = sub.add_parser(
         "compute-signals",
         help="Compute BUY/SELL/EXIT_BUY/EXIT_SELL signal events from "
-             "indicator_state.display_regime transitions, for "
-             "industries or tickers.",
-    )
-    csg.add_argument(
-        "--industry", default=None, metavar="NAME",
-        help="Industry name (one industry).",
-    )
-    csg.add_argument(
-        "--all-industries", action="store_true", dest="all_industries",
-        help="Every active industry that has indicator_state rows.",
+             "indicator_state.display_regime transitions, for tickers.",
     )
     csg.add_argument(
         "--ticker", default=None, metavar="SYMBOL",

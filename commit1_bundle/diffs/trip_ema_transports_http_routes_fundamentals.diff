@@ -1,0 +1,164 @@
+--- originals/trip_ema/transports/http/routes/fundamentals.py	2026-06-23 17:43:40.885296210 +0000
++++ sandbox/trip_ema/transports/http/routes/fundamentals.py	2026-06-23 17:42:55.359146832 +0000
+@@ -1491,25 +1491,21 @@
+ 
+ 
+ def _run_signals_safe(
+-    db_engine: Engine, industry_name: Optional[str],
+-    force: bool, all_industries: bool,
++    db_engine: Engine,
++    force: bool,
+     ticker: Optional[str] = None,
+     all_tickers: bool = False,
+     exchange: Optional[str] = None,
+     timeframe: Optional[str] = None,
+ ) -> None:
+     from ....fundamentals.runners import (
+-        run_signal_events_for_all_industries,
+         run_signal_events_for_all_tickers,
+-        run_signal_events_for_industry,
+         run_signal_events_for_ticker,
+     )
+     from ....persistence.tickers_repo import TickersRepository
+     from ....domain import TickerRef
+     try:
+-        if all_industries:
+-            run_signal_events_for_all_industries(db_engine, force=force)
+-        elif all_tickers:
++        if all_tickers:
+             run_signal_events_for_all_tickers(
+                 db_engine, timeframe, exchange=exchange, force=force,
+             )
+@@ -1524,60 +1520,22 @@
+                 db_engine, t.ticker_id, timeframe, force=force,
+             )
+         else:
+-            run_signal_events_for_industry(
+-                db_engine, industry_name, force=force,
++            logger.error(
++                "Signal events compute called with no mode set "
++                "(ticker=%s all_tickers=%s)",
++                ticker, all_tickers,
+             )
+     except Exception:
+         logger.exception(
+-            "Signal events compute failed for industry=%s "
+-            "all_industries=%s ticker=%s all_tickers=%s",
+-            industry_name, all_industries, ticker, all_tickers,
++            "Signal events compute failed for "
++            "ticker=%s all_tickers=%s",
++            ticker, all_tickers,
+         )
+ 
+ 
+ # ---------- GET endpoints ---------- #
+ 
+ 
+-@router.get("/signal-events/industries/{industry_name:path}",
+-            response_model=SignalEventListPayload)
+-def get_industry_signal_events(
+-    industry_name: str,
+-    kind: Optional[str] = Query(None),
+-    from_date: Optional[date] = Query(None),
+-    to_date: Optional[date] = Query(None),
+-    limit: Optional[int] = Query(None, ge=1, le=5000),
+-    db_engine: Engine = Depends(get_db_engine),
+-) -> SignalEventListPayload:
+-    """Get signal events for one industry, newest-first.
+-
+-    Pass kind=BUY|SELL|EXIT_BUY|EXIT_SELL to filter by event kind.
+-    Pass from_date/to_date to restrict the date range, and limit to
+-    cap the row count.
+-    """
+-    from ....fundamentals import SIGNAL_EVENT_KINDS
+-    if kind is not None and kind not in SIGNAL_EVENT_KINDS:
+-        raise HTTPException(
+-            status_code=status.HTTP_400_BAD_REQUEST,
+-            detail=f"kind must be one of {SIGNAL_EVENT_KINDS}, "
+-                   f"got {kind!r}",
+-        )
+-    with db_engine.connect() as conn:
+-        rows = SignalEventRepository(conn).get_for_industry(
+-            industry_name,
+-            kinds=[kind] if kind else None,
+-            from_date=from_date,
+-            to_date=to_date,
+-            limit=limit,
+-        )
+-    return SignalEventListPayload(
+-        industry_name=industry_name,
+-        from_date=from_date,
+-        to_date=to_date,
+-        kind=kind,
+-        rows=[_signal_event_payload(e) for e in rows],
+-    )
+-
+-
+ @router.get("/signal-events/recent",
+             response_model=SignalEventListPayload)
+ def list_recent_signal_events(
+@@ -1611,8 +1569,6 @@
+ @router.post("/compute-signals",
+              response_model=RefreshAcceptedPayload, status_code=202)
+ def compute_signals_endpoint(
+-    industry: Optional[str] = Query(None),
+-    all_industries: bool = Query(False),
+     ticker: Optional[str] = Query(None),
+     all_tickers: bool = Query(False),
+     exchange: Optional[str] = Query(None),
+@@ -1623,24 +1579,18 @@
+     executor = Depends(get_etl_executor),
+ ) -> RefreshAcceptedPayload:
+     """Fire-and-forget signal events compute. Modes (mutually
+-    exclusive): industry, all_industries, ticker, all_tickers."""
++    exclusive): ticker, all_tickers."""
+     _require_executor(executor)
+-    modes_set = sum([
+-        bool(industry), bool(all_industries),
+-        bool(ticker), bool(all_tickers),
+-    ])
++    modes_set = sum([bool(ticker), bool(all_tickers)])
+     if modes_set == 0:
+         raise HTTPException(
+             status_code=status.HTTP_400_BAD_REQUEST,
+-            detail=(
+-                "Must provide one of: industry=NAME, "
+-                "all_industries=true, ticker=SYMBOL, or all_tickers=true"
+-            ),
++            detail="Must provide one of: ticker=SYMBOL, or all_tickers=true",
+         )
+     if modes_set > 1:
+         raise HTTPException(
+             status_code=status.HTTP_400_BAD_REQUEST,
+-            detail="industry/all_industries/ticker/all_tickers are mutually exclusive",
++            detail="ticker/all_tickers are mutually exclusive",
+         )
+     if ticker and (not exchange or not timeframe):
+         raise HTTPException(
+@@ -1654,14 +1604,12 @@
+         )
+     logger.info(
+         "Admin: compute-signals requested",
+-        extra={"industry": industry, "all_industries": all_industries,
+-               "ticker": ticker, "all_tickers": all_tickers,
++        extra={"ticker": ticker, "all_tickers": all_tickers,
+                "exchange": exchange, "timeframe": timeframe,
+                "force": force},
+     )
+     executor.submit(
+-        _run_signals_safe, db_engine,
+-        industry, force, all_industries,
++        _run_signals_safe, db_engine, force,
+         ticker, all_tickers, exchange, timeframe,
+     )
+     return RefreshAcceptedPayload(
+@@ -1669,8 +1617,7 @@
+         run_id=None,
+         accepted_at=datetime.now(timezone.utc),
+         notes=(
+-            f"Signal events compute (industry={industry!r}, "
+-            f"all_industries={all_industries}, ticker={ticker!r}, "
++            f"Signal events compute (ticker={ticker!r}, "
+             f"all_tickers={all_tickers}, timeframe={timeframe!r}) "
+             f"submitted."
+         ),
