@@ -144,7 +144,7 @@ def recent_signal_events(
                signal_type AS signal, price_at_signal
         FROM signal_events
         WHERE ticker_id = :tid
-        ORDER BY computed_at DESC
+        ORDER BY computed_at DESC, bar_timestamp DESC
         LIMIT :lim
     """), {"tid": ticker_id, "lim": limit})
     return [

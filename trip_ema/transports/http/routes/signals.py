@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/signals", tags=["signals"])
 
 @router.get(
-    "/v1/signals/{exchange}/{symbol}/history",
+    "/{exchange}/{symbol}/history",
     response_model=SignalHistoryPayload,
 )
 def get_signal_history(
