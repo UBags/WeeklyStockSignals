@@ -360,9 +360,9 @@ class SubscriberDistributor:
         logger.info("SubscriberDistributor stopped")
 
     def _loop(self) -> None:
-        from .compute_scheduler import _seconds_until_next_tick
+        from ._wall_clock import seconds_until_next_tick
         while not self._stop_event.is_set():
-            sleep_seconds = _seconds_until_next_tick(
+            sleep_seconds = seconds_until_next_tick(
                 datetime.now(timezone.utc), self._cadence,
             )
             slept = 0.0
