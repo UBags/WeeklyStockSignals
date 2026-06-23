@@ -439,9 +439,18 @@ class ChartWidget(QWidget):
                 current = r
         runs.append((run_start, len(bars), current))
 
+        # Mode-aware alpha: candle charts (MAIN/MINI) have rectangular
+        # bodies competing for visual space, so a subtle 80/255 alpha
+        # reads as a colored band between candles. INDUSTRY charts use
+        # 3px scatter dots leaving most of the canvas empty; the same
+        # 80 alpha disappears into the dark background and the regime
+        # is effectively invisible. Bump to 140 (~55%) for INDUSTRY so
+        # the green/red is clearly perceived without overpowering the
+        # dot+EMA layers.
+        regime_alpha = 140 if self._mode == ChartMode.INDUSTRY else 80
         for x0, x1, regime in runs:
             color = QColor(regime_color(regime))
-            color.setAlpha(80)
+            color.setAlpha(regime_alpha)
             region = pg.LinearRegionItem(
                 values=[x0 - 0.5, x1 - 0.5],
                 brush=pg.mkBrush(color),
