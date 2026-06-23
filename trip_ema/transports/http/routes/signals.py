@@ -44,29 +44,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/signals", tags=["signals"])
 
 @router.get(
-    "/{exchange}/{symbol}/history",
-    response_model=SignalHistoryPayload,
-)
-def get_signal_history(
-    exchange: str, symbol: str,
-    instrument: str = "EQ",
-    years: int = 3,
-    db_engine: Engine = Depends(get_db_engine),
-) -> SignalHistoryPayload:
-    ref = TickerRef(exchange=exchange, symbol=symbol, instrument=instrument)
-    with db_engine.connect() as conn:
-        ticker = TickersRepository(conn).get_by_ref(ref)
-        if ticker is None:
-            raise HTTPException(404, f"ticker not found: {exchange}/{symbol}")
-        return build_signal_history_payload(
-            conn,
-            ticker_id=ticker.ticker_id,
-            ticker_ref=ref,
-            timeframe=Timeframe.WEEKLY,
-            years_back=years,
-        )
-
-@router.get(
     "/industry/{industry_name}/history",
     response_model=SignalHistoryPayload,
 )
@@ -223,6 +200,29 @@ def get_industry_history(
             f"{len(rows)} daily values; +/-0.25% body width."
         ),
     )
+
+@router.get(
+    "/{exchange}/{symbol}/history",
+    response_model=SignalHistoryPayload,
+)
+def get_signal_history(
+    exchange: str, symbol: str,
+    instrument: str = "EQ",
+    years: int = 3,
+    db_engine: Engine = Depends(get_db_engine),
+) -> SignalHistoryPayload:
+    ref = TickerRef(exchange=exchange, symbol=symbol, instrument=instrument)
+    with db_engine.connect() as conn:
+        ticker = TickersRepository(conn).get_by_ref(ref)
+        if ticker is None:
+            raise HTTPException(404, f"ticker not found: {exchange}/{symbol}")
+        return build_signal_history_payload(
+            conn,
+            ticker_id=ticker.ticker_id,
+            ticker_ref=ref,
+            timeframe=Timeframe.WEEKLY,
+            years_back=years,
+        )
 
 @router.get(
     "/{exchange}/{symbol}",
