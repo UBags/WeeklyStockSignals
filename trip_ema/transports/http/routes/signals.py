@@ -97,7 +97,7 @@ def get_industry_history(
             FROM industry_index_value v
             LEFT JOIN indicator_state s
                    ON s.industry_name = v.industry_name
-                  AND s.trade_date = v.trade_date
+                  AND s.trade_date = DATE_TRUNC('week', v.trade_date)::date
             WHERE v.industry_name = :n
               AND v.trade_date >= :since
             ORDER BY v.trade_date ASC
