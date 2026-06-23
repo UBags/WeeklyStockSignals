@@ -2150,7 +2150,10 @@ def run_indicator_state_for_industry(
         compute_indicator_series,
         INDICATOR_DEFAULTS,
     )
-    from datetime import datetime, timezone
+    from ..indicators.aggregation import daily_to_weekly
+    from ..domain import OHLCVBar
+    from datetime import datetime, time, timezone
+    from zoneinfo import ZoneInfo
 
     # Sanity: industry must exist as an index.
     with db_engine.connect() as conn:
@@ -2199,22 +2202,55 @@ def run_indicator_state_for_industry(
         )
     history.reverse()  # oldest-first
 
-    # Build pandas Series from the history.
-    values = pd.Series([h.value for h in history], dtype=float)
-    vol = pd.Series([1.0] * len(history), dtype=float)
-    dates = pd.Series([h.trade_date for h in history])
+    # Phase 1B unification: aggregate IIV daily values to IST-Monday-
+    # anchored weekly bars via the same daily_to_weekly helper used
+    # for stocks. Pseudo-daily bars carry H=L=O=C=value (IIV has no
+    # intra-day OHLC); real H/L drop out of the weekly aggregation
+    # (max/min of daily values per week), so the compute pipeline
+    # runs with synthetic_atr_for_index=False — true-range ATR.
+    # The synthetic_for_index path in indicator_primitives is kept
+    # as dead code for one-line backout (flip False → True and
+    # restore the pseudo-bar conversion to bypass aggregation).
+    _IST = ZoneInfo("Asia/Kolkata")
+    pseudo_daily_bars = [
+        OHLCVBar(
+            timestamp=datetime.combine(h.trade_date, time.min, tzinfo=_IST),
+            open=float(h.value),
+            high=float(h.value),
+            low=float(h.value),
+            close=float(h.value),
+            volume=1.0,
+        )
+        for h in history
+    ]
+    weekly_bars = daily_to_weekly(
+        pseudo_daily_bars,
+        include_partial_last_week=True,
+        tz="Asia/Kolkata",
+    )
 
-    # Compute indicators + regime walk.
+    # Build pandas Series from the weekly bars. trade_date stored in
+    # indicator_state is the IST-Monday of the weekly bar.
+    opens = pd.Series([b.open for b in weekly_bars], dtype=float)
+    highs = pd.Series([b.high for b in weekly_bars], dtype=float)
+    lows = pd.Series([b.low for b in weekly_bars], dtype=float)
+    closes = pd.Series([b.close for b in weekly_bars], dtype=float)
+    vol = pd.Series([1.0] * len(weekly_bars), dtype=float)
+    dates = pd.Series(
+        [b.timestamp.astimezone(_IST).date() for b in weekly_bars]
+    )
+
+    # Compute indicators with real true-range ATR.
     series = compute_indicator_series(
-        values, vol, values, values,
+        closes, vol, highs, lows,
         params=INDICATOR_DEFAULTS,
-        synthetic_atr_for_index=True,
+        synthetic_atr_for_index=False,
     )
     bar_states = compute_bar_states(
-        values, vol, values, values,
+        closes, vol, highs, lows,
         trade_dates=dates, series=series,
         params=INDICATOR_DEFAULTS,
-        # open_ defaults to values.shift(1) — the index synthesis.
+        open_=opens,
     )
 
     # Open the run, upsert all bars, close. Single transaction for
