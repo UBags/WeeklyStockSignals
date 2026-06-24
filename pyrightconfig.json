@@ -1,0 +1,14 @@
+{
+  "include": ["trip_ema"],
+  "exclude": [
+    "trip_ema/gui",
+    "**/__pycache__"
+  ],
+  "ignore": [
+    "trip_ema/persistence/fundamentals_repo.py"
+  ],
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": false,
+  "reportGeneralTypeIssues": "warning",
+  "pythonVersion": "3.12"
+}

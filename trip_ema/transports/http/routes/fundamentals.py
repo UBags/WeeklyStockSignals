@@ -1282,10 +1282,23 @@ def _run_indicator_state_safe(
         if all_industries:
             run_indicator_state_for_all_industries(db_engine, force=force)
         elif all_tickers:
+            if not timeframe:
+                logger.error(
+                    "all_tickers mode requires timeframe; aborting "
+                    "(timeframe=%r)", timeframe,
+                )
+                return
             run_indicator_state_for_all_tickers(
                 db_engine, timeframe, exchange=exchange, force=force,
             )
         elif ticker:
+            if not exchange or not timeframe:
+                logger.error(
+                    "ticker mode requires exchange and timeframe; aborting "
+                    "(exchange=%r timeframe=%r ticker=%r)",
+                    exchange, timeframe, ticker,
+                )
+                return
             ref = TickerRef(exchange, ticker, "EQ")
             with db_engine.connect() as conn:
                 t = TickersRepository(conn).get_by_ref(ref)
@@ -1296,6 +1309,12 @@ def _run_indicator_state_safe(
                 db_engine, t.ticker_id, timeframe, force=force,
             )
         else:
+            if not industry_name:
+                logger.error(
+                    "industry mode requires industry_name; aborting "
+                    "(industry_name=%r)", industry_name,
+                )
+                return
             run_indicator_state_for_industry(
                 db_engine, industry_name, force=force,
             )
@@ -1506,10 +1525,23 @@ def _run_signals_safe(
     from ....domain import TickerRef
     try:
         if all_tickers:
+            if not timeframe:
+                logger.error(
+                    "all_tickers mode requires timeframe; aborting "
+                    "(timeframe=%r)", timeframe,
+                )
+                return
             run_signal_events_for_all_tickers(
                 db_engine, timeframe, exchange=exchange, force=force,
             )
         elif ticker:
+            if not exchange or not timeframe:
+                logger.error(
+                    "ticker mode requires exchange and timeframe; aborting "
+                    "(exchange=%r timeframe=%r ticker=%r)",
+                    exchange, timeframe, ticker,
+                )
+                return
             ref = TickerRef(exchange, ticker, "EQ")
             with db_engine.connect() as conn:
                 t = TickersRepository(conn).get_by_ref(ref)
