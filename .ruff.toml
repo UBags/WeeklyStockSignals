@@ -1,0 +1,6 @@
+[lint]
+select = ["F", "E", "B", "UP", "SIM"]
+ignore = ["E501"]  # line length — Python community accepts >79
+
+[lint.per-file-ignores]
+"tests/*" = ["F401", "F811"]  # tests legitimately need unused imports for fixtures

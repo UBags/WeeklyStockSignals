@@ -53,6 +53,7 @@ Validation (in Config.model_validator below):
 
 from __future__ import annotations
 
+from . import Config
 from ..domain import IndicatorParams, Timeframe
 
 # Imports kept narrow so this module stays a leaf in the import
@@ -69,7 +70,7 @@ SUPPORTED_BACKTEST_TIMEFRAMES: frozenset[str] = frozenset({"1D", "1W"})
 
 
 def resolve_indicator_params(
-    config,  # type: "Config" — string-annotated to avoid circular import
+    config : "Config", # string-annotated to avoid circular import
     exchange: str,
     timeframe: Timeframe,
 ) -> IndicatorParams:

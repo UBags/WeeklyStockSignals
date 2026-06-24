@@ -270,7 +270,7 @@ class ComputeScheduler:
             )
 
         # Stale flagging based on Step 6's skip_reason.
-        if result.skip_reason in ("no_bars", "insufficient_history"):
+        if result.skipped_reason in ("no_bars", "insufficient_history"):
             previously_stale = self._snapshot_was_stale(record.ticker_id)
             self._cache.mark_stale(record.ticker_id, self._timeframe, now)
             if not previously_stale:
