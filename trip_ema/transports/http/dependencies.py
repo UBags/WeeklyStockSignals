@@ -13,7 +13,7 @@ visible at the route signature level.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import Engine
@@ -26,6 +26,8 @@ from ...scheduler import ComputeScheduler, SubscriberDistributor
 # hard dependency on `redis` at import time for code that doesn't use it.
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
+    from concurrent.futures import ThreadPoolExecutor
+
     from ...notifications.redis_queue import RedisQueue
     from ...scheduler import OrchestratorPool
     from ..http.pulse_state import PulseState
@@ -45,10 +47,10 @@ class AppState:
     compute_scheduler: ComputeScheduler
     distributor: Optional[SubscriberDistributor] = None
     redis_queue: "Optional[RedisQueue]" = None
-    metrics_server: "Optional[object]" = None
+    metrics_server: Optional[Any] = None
     """Phase 10: handle to the Prometheus /metrics HTTP server (separate
     port from the main API). None when metrics are disabled via config."""
-    etl_executor: "Optional[object]" = None
+    etl_executor: "Optional[ThreadPoolExecutor]" = None
     """Phase 11 Slice 2: a ThreadPoolExecutor used by the admin ETL
     endpoints to fire long-running runner functions (refresh-listings,
     EoD, backfill, ...) without blocking the HTTP request. None when
