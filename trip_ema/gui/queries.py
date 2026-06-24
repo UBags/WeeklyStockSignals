@@ -9,6 +9,7 @@ they may scan ~2300-row tables.
 """
 
 from __future__ import annotations
+from decimal import Decimal
 
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -20,7 +21,13 @@ from sqlalchemy.engine import Connection
 
 @dataclass(frozen=True, slots=True)
 class TickerRow:
-    """One row in the tickers tab's main table."""
+    """One row in the tickers tab's main table.
+
+    `market_cap` is the latest available daily_market_cap value (INR),
+    populated only by queries that join daily_market_cap (e.g.
+    `top_n_tickers_in_industry_by_mcap`). Other constructors leave it
+    None — the field is informational, never required.
+    """
     ticker_id: int
     exchange: str
     symbol: str
@@ -33,6 +40,7 @@ class TickerRow:
     last_successful_bar_date: Optional[date]
     consecutive_failures: int
     parked: bool
+    market_cap: Optional[Decimal] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,7 +403,8 @@ def top_n_tickers_in_industry_by_mcap(
                t.full_name, t.isin, t.tier, t.is_active, t.delisted_at,
                NULL::date AS last_successful_bar_date,
                0 AS consecutive_failures,
-               FALSE AS parked
+               FALSE AS parked,
+               m.market_cap AS market_cap
         FROM tickers t
         JOIN instrument_industry ii ON ii.ticker_id = t.ticker_id
         JOIN latest_mcap m ON m.ticker_id = t.ticker_id
@@ -415,6 +424,7 @@ def top_n_tickers_in_industry_by_mcap(
             last_successful_bar_date=r.last_successful_bar_date,
             consecutive_failures=r.consecutive_failures,
             parked=r.parked,
+            market_cap=r.market_cap,
         )
         for r in rows
     ]
@@ -583,3 +593,21 @@ def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
         long=_build_snapshot("LONG"),
     )
 
+
+def latest_mcap_for_ticker(
+    conn: Connection, ticker_id: int,
+) -> Optional[Decimal]:
+    """Return the most recent daily_market_cap value for a ticker.
+
+    Used by the Signals tab's Bar detail readout to surface the
+    ticker's current market cap alongside the regime label. Returns
+    None if the ticker has no market_cap rows.
+    """
+    row = conn.execute(text("""
+        SELECT market_cap
+        FROM daily_market_cap
+        WHERE ticker_id = :tid
+        ORDER BY trade_date DESC
+        LIMIT 1
+    """), {"tid": ticker_id}).first()
+    return row.market_cap if row is not None else None

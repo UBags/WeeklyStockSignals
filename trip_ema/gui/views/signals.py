@@ -47,6 +47,8 @@ from ..chart_widget import ChartMode, ChartWidget
 from ..db import GuiDbSession
 from ..http_client import ApiError, TripEmaHttpClient
 from ..queries import ticker_universe_with_recent_signals
+from ..queries import latest_mcap_for_ticker
+from .._format_mcap import format_mcap_cr
 from ..benchmark_rerank_client import fetch_rank_scores
 from ..signals_helpers import (
     format_date_label,
@@ -83,6 +85,10 @@ class SignalsView(QWidget):
     ):
         super().__init__(parent)
         self._db = db
+        # Latest market cap of the currently-loaded ticker.
+        # Populated by load_ticker(); consumed by
+        # _update_bar_detail() to label the Regime line.
+        self._current_mcap = None
         self._http = http
         self._populate_combo_on_init = populate_combo_on_init
 
@@ -476,6 +482,25 @@ class SignalsView(QWidget):
         self._current_exchange = exchange
         self._current_symbol = symbol
         self._current_instrument = instrument
+        # Refresh cached market cap for the Bar-detail readout. Best-effort:
+        # if the lookup fails (DB hiccup, ticker not found), fall through
+        # with mcap=None so the readout omits the label rather than failing.
+        try:
+            with self._db.connect() as conn:
+                tid_row = conn.execute(
+                    text(
+                        "SELECT ticker_id FROM tickers "
+                        "WHERE exchange = :ex AND symbol = :sym "
+                        "AND instrument_type = :inst LIMIT 1"
+                    ),
+                    {"ex": exchange, "sym": symbol, "inst": instrument},
+                ).first()
+                self._current_mcap = (
+                    latest_mcap_for_ticker(conn, tid_row.ticker_id)
+                    if tid_row is not None else None
+                )
+        except Exception:
+            self._current_mcap = None
         # Select in combo if present
         for i in range(self._ticker_combo.count()):
             data = self._ticker_combo.itemData(i)
@@ -551,6 +576,10 @@ class SignalsView(QWidget):
             f"Med EMA: {med}  Long EMA: {long_}<br>"
             f"Longest: {longest}  ATR: {atr}<br>"
             f"Regime: {bar.get('display_bg', '—')} ({warmed})"
+            + (
+                f"  ;  Mkt Cap: {format_mcap_cr(self._current_mcap)}"
+                if self._current_mcap is not None else ""
+            )
         )
 
     def _update_last5_signals(self, payload: dict) -> None:

@@ -145,6 +145,7 @@ class SignalsRepository:
         subscriber_id: int,
         *,
         max_age: timedelta = timedelta(hours=24),
+        max_bar_age: timedelta = timedelta(days=7),
         max_notifications_each: int = 3,
         now: datetime,
     ) -> list[tuple[int, SignalEvent, TickerRef]]:
@@ -164,6 +165,12 @@ class SignalsRepository:
         Returns a list of (event_id, SignalEvent, TickerRef) tuples.
         """
         cutoff = now - max_age
+        # bar_cutoff: events whose underlying bar_timestamp is older
+        # than `max_bar_age` (default 7 days) are filtered out. This
+        # is what prevents the regen scenario from emailing 2000+
+        # stocks: after regen every event has fresh computed_at, so
+        # the original 24h max_age filter alone passes everything.
+        bar_cutoff = now - max_bar_age
 
         # Step 1: subscriber's subscriptions
         sub_rows = list(self._conn.execute(
@@ -210,10 +217,14 @@ class SignalsRepository:
                 signal_type, price_at_signal, computed_at
             FROM signal_events
             WHERE computed_at >= :cutoff
+              AND bar_timestamp >= :bar_cutoff
             ORDER BY ticker_id, timeframe, computed_at DESC
         """)
         latest_subq = (
-            self._conn.execute(latest_per_ticker_sql, {"cutoff": cutoff})
+            self._conn.execute(
+                latest_per_ticker_sql,
+                {"cutoff": cutoff, "bar_cutoff": bar_cutoff},
+            )
             .mappings()
             .all()
         )

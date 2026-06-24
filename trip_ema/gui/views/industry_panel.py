@@ -41,6 +41,7 @@ from sqlalchemy import text
 from ..db import GuiDbSession
 from ..http_client import ApiError, TripEmaHttpClient
 from ..queries import top_n_tickers_in_industry_by_mcap
+from .._format_mcap import format_mcap_cr
 from ..workers import submit
 from ..chart_widget import ChartMode, ChartWidget
 
@@ -319,7 +320,12 @@ class IndustryPanel(QWidget):
                 continue
             row = rows[slot]
             mini = self._mini_charts[slot]
-            mini.set_title(row.symbol)
+            # Title shows symbol + market cap in crores, formatted per the
+            # operator spec. Empty mcap (None) renders as bare symbol.
+            mcap_str = format_mcap_cr(row.market_cap)
+            mini.set_title(
+                f"{row.symbol}  ({mcap_str})" if mcap_str else row.symbol
+            )
             self._fetch_mini_history(
                 slot, row.exchange, row.symbol, row.instrument_type,
                 request_id,
