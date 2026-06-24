@@ -182,7 +182,7 @@ def _build_app_state(config_path: Path) -> AppState:
             return enrich_batch(db_engine, batch)
         transports = {
             "email": _build_email_transport_or_null(
-                config, enrichment_provider=_email_enrichment_provider,
+                config, enrichment_provider=_email_enrichment_provider, db_engine=db_engine,
             ),
             "webhook": WebhookTransport(),
         }
@@ -428,7 +428,7 @@ def _wrap_transports_with_breakers(
     }
 
 
-def _build_email_transport_or_null(config, *, enrichment_provider=None):
+def _build_email_transport_or_null(config, *, enrichment_provider=None, db_engine=None):
     """Build the email transport from `config.transports.brevo`.
 
     Returns NullTransport when `transports.brevo` is None (the
@@ -472,6 +472,7 @@ def _build_email_transport_or_null(config, *, enrichment_provider=None):
         api_url=brevo_cfg.api_url,
         timeout_seconds=brevo_cfg.timeout_seconds,
         enrichment_provider=enrichment_provider,
+        _db_engine=db_engine,
     )
 
 

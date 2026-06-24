@@ -80,8 +80,6 @@ class EmailTransport:
     invokes it to fetch per-ticker enrichment for HTML rendering;
     when None, sends are text-only.
     """
-    # Optional engine for rank-score enrichment; None when not wired.
-    _db_engine = None
 
 
     api_key: str
@@ -96,6 +94,14 @@ class EmailTransport:
     )
     # Injection point for tests bypassing the network.
     poster: Optional[EmailPoster] = field(default=None, repr=False)
+
+    # Optional SQLAlchemy Engine for rank-score enrichment. When wired,
+    # send() uses it to compute composite RS/R² momentum scores so BUY
+    # events are sorted by ranking instead of alphabetically. When None,
+    # send() catches the AttributeError on .connect() and falls back to
+    # alphabetical BUY sort (degraded but functional). Typed Any so this
+    # module doesn't need a sqlalchemy import.
+    _db_engine: Any = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.api_key or not isinstance(self.api_key, str):

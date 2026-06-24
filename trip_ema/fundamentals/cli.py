@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 from sqlalchemy import Engine, text
 
@@ -945,6 +945,12 @@ def cmd_compute_indicator_state(args, config: Config) -> int:
             return _exit_code_from_report(report)
     finally:
         db_engine.dispose()
+    # Unreachable: the mode guards at the top of this function
+    # (modes_set == 0 and modes_set > 1 both return 2) guarantee
+    # exactly one of args.industry / args.all_industries /
+    # args.ticker / args.all_tickers is set, so one of the if
+    # branches above must return. mypy can't see through that.
+    raise AssertionError("cmd_compute_indicator_state: mode guards drifted")
 
 
 def _print_indicator_industry_report(report):
@@ -1245,6 +1251,11 @@ def cmd_compute_signals(args, config: Config) -> int:
             return _exit_code_from_report(report)
     finally:
         db_engine.dispose()
+    # Unreachable: the mode guards at the top of this function
+    # ensure exactly one of args.ticker / args.all_tickers is
+    # set, so one of the if branches above must return. mypy
+    # can't see through that.
+    raise AssertionError("cmd_compute_signals: mode guards drifted")
 
 
 # ---------- run-eod-pipeline (Phase 4C) ---------- #
@@ -1441,7 +1452,7 @@ def cmd_backfill_etf_classification(args, config: Config) -> int:
 # ---------- argparse registration helper ---------- #
 
 
-def register_subparsers(sub, _add_exchange_arg) -> dict[str, callable]:
+def register_subparsers(sub, _add_exchange_arg) -> dict[str, Callable]:
     """Add Phase 1 subcommands to the parent's subparsers. Returns
     the command→handler mapping for the dispatcher in cli.py.
 
