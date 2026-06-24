@@ -27,6 +27,8 @@ from ...scheduler import ComputeScheduler, SubscriberDistributor
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ...notifications.redis_queue import RedisQueue
+    from ...scheduler import OrchestratorPool
+    from ..http.pulse_state import PulseState
 
 
 @dataclass
@@ -53,7 +55,7 @@ class AppState:
     the ETL admin endpoints are disabled (e.g., in tests that don't
     need them)."""
 
-    orchestrator_pool: "Optional[object]" = None
+    orchestrator_pool: "Optional[OrchestratorPool]" = None
     """Phase 14: the OrchestratorPool managing per-market MarketOrchestrators.
     None when the orchestrator is disabled
     (`scheduling.orchestrator.enabled=False`); in that case the
@@ -61,11 +63,11 @@ class AppState:
     ComputeScheduler thread remains in charge. Typed as Optional[object]
     to avoid forward-reference cycles with the scheduler package."""
 
-    pulse_state: "Optional[object]" = None
+    pulse_state: "Optional[PulseState]" = None
     """Phase 14: the in-memory PulseState pub/sub for GUI live updates.
     None when no orchestrator is running — pulse is only meaningful
     when there's an orchestrator producing events.
-    Typed as Optional[object] for the same reason as orchestrator_pool."""
+    Typed via TYPE_CHECKING import for the same reason as orchestrator_pool."""
 
 
 # Module-level singleton — set by app.py's create_app(), read by deps.
