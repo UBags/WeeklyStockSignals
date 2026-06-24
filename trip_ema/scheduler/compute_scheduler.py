@@ -81,7 +81,12 @@ class ComputeRunSummary:
     tickers_examined: int = 0
     tickers_with_new_event: int = 0
     """Tickers where Step 6 emitted a SignalEvent on this pass."""
-    events_fired: list[SignalEvent] = field(default_factory=list)
+    events_fired: list[int] = field(default_factory=list)
+    """event_ids of SignalEvent rows emitted this pass. Refactored
+    from list[SignalEvent] when LiveTickResult became the per-tick
+    return type — LiveTickResult carries only the event_id, not the
+    full SignalEvent. Consumers (admin route, span attribute, log
+    message) only use len() so this is safe."""
     tickers_marked_stale: int = 0
     tickers_recovered_from_gap: int = 0
     errors: list[tuple[str, str]] = field(default_factory=list)
@@ -191,9 +196,43 @@ class ComputeScheduler:
         self._thread = None
         logger.info("ComputeScheduler stopped")
 
-    @property
     def is_alive(self) -> bool:
+        """Whether the daemon compute thread is currently running.
+
+        Method (not property) to match SubscriberDistributor.is_alive and
+        the health route's call-site convention. Internal callers in
+        is_unhealthy() use self.is_alive() — both directions agree.
+        """
         return self._thread is not None and self._thread.is_alive()
+
+    def is_unhealthy(
+        self, now : datetime, stale_after_multiplier: float = 2.0,
+    ) -> str | None:
+        """Return a description of why this scheduler is unhealthy, or
+        None if fine. Same semantics as SubscriberDistributor.is_unhealthy.
+
+        Three checks:
+          1. Never started? Not unhealthy (the operator may have intentionally
+             left it off; healthz reports state rather than judging it).
+          2. Thread died? Unhealthy with that exact string.
+          3. Hasn't completed a run in (cadence * multiplier)? Unhealthy with
+             the gap size and threshold for diagnostics.
+        """
+        if not self._was_started:
+            return None
+        if not self.is_alive():
+            return "ComputeScheduler thread died"
+        stale_threshold = self._cadence * stale_after_multiplier
+        if self.last_run_completed_at is None:
+            return None
+        gap = now - self.last_run_completed_at
+        if gap > stale_threshold:
+            return (
+                f"ComputeScheduler hasn't completed in "
+                f"{gap.total_seconds():.0f}s (threshold: "
+                f"{stale_threshold.total_seconds():.0f}s)"
+            )
+        return None
 
     # ---------- Internals ---------- #
 
@@ -280,9 +319,9 @@ class ComputeScheduler:
                 self._cache.clear_stale(record.ticker_id, self._timeframe)
                 summary.tickers_recovered_from_gap += 1
 
-        if result.signal_event is not None:
+        if result.event_id is not None:
             summary.tickers_with_new_event += 1
-            summary.events_fired.append(result.signal_event)
+            summary.events_fired.append(result.event_id)
 
     def _snapshot_was_stale(self, ticker_id: int) -> bool:
         snap = self._cache.get_snapshot(ticker_id, self._timeframe)

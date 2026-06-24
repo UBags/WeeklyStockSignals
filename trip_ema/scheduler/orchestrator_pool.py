@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Protocol
 
 from .market_orchestrator import MarketOrchestrator
 
@@ -44,9 +44,10 @@ logger = logging.getLogger(__name__)
 # class (which lives in the transports.http package). The pool only
 # needs the two service-level event methods; full PulseState is fine
 # but a thinner duck-typed interface is cleaner here.
-class _PoolPulseHook:
-    """Protocol-like (structural). The pool calls these on lifecycle
-    transitions; PulseState implements them. Tests can pass a Mock."""
+class _PoolPulseHook(Protocol):
+    """The pool calls these on lifecycle transitions; PulseState
+    implements them structurally. Tests can pass a Mock that supplies
+    the two methods."""
     def publish_orchestrator_started(self, exchange: str) -> None: ...
     def publish_orchestrator_stopped(
         self, exchange: str, *, reason: str = "normal",
