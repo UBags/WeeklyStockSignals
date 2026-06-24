@@ -107,6 +107,13 @@ def _db_universe_card(db_engine: Engine) -> HealthCardPayload:
             parked = conn.execute(text("""
                 SELECT COUNT(*) AS n FROM etl_ticker_status WHERE parked = TRUE
             """)).scalar() or 0
+        if row is None:
+            return HealthCardPayload(
+                name="Ticker universe",
+                status="unknown",
+                headline="Could not query ticker registry",
+                detail="The tickers query returned no rows.",
+            )
         active = row.active or 0
         delisted = row.delisted or 0
         if active == 0:
@@ -403,6 +410,13 @@ def _subscribers_card(db_engine: Engine) -> HealthCardPayload:
                     COUNT(*) AS total
                 FROM subscribers
             """)).first()
+        if row is None:
+            return HealthCardPayload(
+                name="Subscribers",
+                status="unknown",
+                headline="Could not query subscribers",
+                detail="The subscribers query returned no rows.",
+            )
         if row.total == 0:
             return HealthCardPayload(
                 name="Subscribers", status="warn",

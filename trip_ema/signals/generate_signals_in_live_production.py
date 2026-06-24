@@ -265,11 +265,17 @@ def generate_live_signal_for_ticker(
     prev_completed_lower_env: Optional[float] = None
     prev_completed_upper_env: Optional[float] = None
     for j in range(len(regimes) - 2, -1, -1):
-        if regimes[j] is not None and bar_inputs_list[j] is not None:
-            prev_completed_regime = regimes[j]
-            prev_completed_close = bar_inputs_list[j].close
-            prev_completed_lower_env = bar_inputs_list[j].lower_envelope
-            prev_completed_upper_env = bar_inputs_list[j].upper_envelope
+        # Bind indexed access to locals so pyright narrows via flow
+        # analysis. Indexed access (regimes[j]) doesn't get narrowed by
+        # 'if regimes[j] is not None' — the index expression is
+        # re-evaluated on each access.
+        regime_j = regimes[j]
+        bar_j = bar_inputs_list[j]
+        if regime_j is not None and bar_j is not None:
+            prev_completed_regime = regime_j
+            prev_completed_close = bar_j.close
+            prev_completed_lower_env = bar_j.lower_envelope
+            prev_completed_upper_env = bar_j.upper_envelope
             break
 
     # ---------- 6. Resolve previous state from signal_events ----------
