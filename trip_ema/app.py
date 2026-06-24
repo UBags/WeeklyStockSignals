@@ -36,6 +36,7 @@ from .cache import SignalCache
 from .config import load_config
 from .domain import Timeframe
 from .notifications import EmailTransport, NullTransport, WebhookTransport
+from .notifications.base import NotificationTransport
 from .persistence import (
     create_engine_from_config,
 )

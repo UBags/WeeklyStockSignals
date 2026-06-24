@@ -36,3 +36,4 @@ Code packaged into MDs for LLMs/
 # Delivery bundles for in-progress refactors — unpacked outside the repo,
 # but guard against accidental `git add -A` capture
 commit*_bundle/
+*.bak.*
