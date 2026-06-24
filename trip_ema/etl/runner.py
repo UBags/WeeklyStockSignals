@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -355,7 +355,7 @@ def _fetch_existing_bars_for_tickers(
             FROM ohlcv_bars
             WHERE ticker_id = ANY(:tids) AND timeframe = :tf
         """
-        params = {"tids": ticker_ids, "tf": timeframe.value}
+        params: dict[str, Any] = {"tids": ticker_ids, "tf": timeframe.value}
         if since is not None:
             query += " AND bar_timestamp >= :since"
             params["since"] = datetime.combine(

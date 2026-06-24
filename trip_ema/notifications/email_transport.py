@@ -43,6 +43,7 @@ from ..domain import NotificationBatch
 from .batcher import render_html, render_text
 from .benchmark_rerank import fetch_rank_scores
 from .enrichment import BatchEnrichment
+from ..persistence.tickers_repo import TickersRepository
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +159,16 @@ class EmailTransport:
             # + industry_benchmark_stats; sub-100ms at full scale.
             try:
                 with self._db_engine.connect() as conn:
-                    ticker_ids = [ev.ticker.ticker_id for ev in batch.events]
+                    # TickerRef carries (exchange, symbol, instrument) but
+                    # no ticker_id; resolve via TickersRepository before
+                    # fetching rank scores. Per-event lookup; for typical
+                    # batch sizes (5-20 events) the latency is sub-100ms.
+                    repo = TickersRepository(conn)
+                    ticker_ids: list[int] = []
+                    for ev in batch.events:
+                        rec = repo.get_by_ref(ev.ticker)
+                        if rec is not None:
+                            ticker_ids.append(rec.ticker_id)
                     rank_scores = fetch_rank_scores(conn, ticker_ids)
             except Exception:
                 logger.exception(

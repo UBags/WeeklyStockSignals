@@ -107,7 +107,7 @@ class TextFormatter(logging.Formatter):
 
 
 def configure_logging(
-    level: str = "INFO",
+    level: int | str = "INFO",
     json_output: bool = False,
 ) -> None:
     """Configure the root logger with a single stderr handler using

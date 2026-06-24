@@ -30,7 +30,10 @@ import signal
 import sys
 from datetime import timedelta
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .transports.http.pulse_state import PulseState
 
 from .cache import SignalCache
 from .config import load_config
@@ -251,7 +254,7 @@ def _build_orchestrator_components(
     db_engine,
     compute_scheduler: ComputeScheduler,
     distributor: SubscriberDistributor,
-):
+) -> tuple[Optional[PulseState], Optional[OrchestratorPool]]:
     """Phase 14: build (PulseState, OrchestratorPool) if enabled in config.
 
     Returns (None, None) when `scheduling.orchestrator.enabled = False` —
