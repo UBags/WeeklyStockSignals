@@ -120,6 +120,7 @@ def create_subscriber(
             "t": body.transport, "a": body.address,
             "c": body.notify_cadence_minutes, "act": body.is_active,
         }).first()
+        assert result is not None, "INSERT ... RETURNING produced no row"
         sub_id = result.subscriber_id
         if body.filters:
             _replace_filters(conn, sub_id, body.filters)

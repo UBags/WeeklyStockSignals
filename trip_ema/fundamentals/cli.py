@@ -917,6 +917,9 @@ def cmd_compute_indicator_state(args, config: Config) -> int:
                 return 2
             with db_engine.connect() as conn:
                 r = FundamentalsRunRepository(conn).get(run_id)
+            assert r is not None, (
+                f"run_id {run_id} just returned by runner not found"
+            )
             print(
                 f"compute-indicator-state ticker={args.ticker} "
                 f"tf={args.timeframe}: run_id={r.run_id} "
@@ -1191,6 +1194,9 @@ def cmd_compute_signals(args, config: Config) -> int:
                 return 2
             with db_engine.connect() as conn:
                 r = FundamentalsRunRepository(conn).get(run_id)
+            assert r is not None, (
+                f"run_id {run_id} just returned by runner not found"
+            )
             print(
                 f"compute-signals ticker={args.ticker} "
                 f"tf={args.timeframe}: run_id={r.run_id} "

@@ -518,6 +518,7 @@ class FundamentalsRunRepository:
             """),
             {"phase": phase, "ex": exchange, "notes": notes},
         ).fetchone()
+        assert row is not None, "INSERT ... RETURNING produced no row"
         return int(row[0])
 
     def update_progress(

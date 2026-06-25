@@ -1265,6 +1265,9 @@ def run_market_cap_backfill(
         # resumed run uses the same range as the original.
         with db_engine.connect() as conn:
             run = FundamentalsRunRepository(conn).get(run_id)
+        assert run is not None, (
+            f"resume run_id {run_id} not found in fundamentals_run"
+        )
         if run.progress_json and "from_date" in run.progress_json:
             from_date = _parse_iso_date(run.progress_json["from_date"])
             to_date = _parse_iso_date(run.progress_json["to_date"])

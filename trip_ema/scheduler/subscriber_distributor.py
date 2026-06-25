@@ -290,6 +290,9 @@ class SubscriberDistributor:
                 },
                 "enqueued_at": now.isoformat(),
             }
+            assert self._queue is not None, (
+                "queue dispatch path called with no queue configured"
+            )
             if self._queue.enqueue(job_id, payload):
                 enqueued += 1
                 M.distributor_jobs_enqueued_total.labels(

@@ -69,6 +69,12 @@ def _check_postgres_version(engine: Engine, min_major: int = 15) -> None:
     """
     with engine.connect() as conn:
         version_str = conn.execute(text("SHOW server_version")).scalar()
+    if version_str is None:
+        logger.warning(
+            "Could not read Postgres version (SHOW server_version "
+            "returned None); skipping version check",
+        )
+        return
     # `version_str` looks like "16.2 (Ubuntu 16.2-1.pgdg22.04+1)" or "14.10".
     # Extract the major-version integer.
     try:
