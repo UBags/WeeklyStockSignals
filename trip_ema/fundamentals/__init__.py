@@ -448,7 +448,7 @@ SIGNAL_EVENT_KINDS = ("BUY", "SELL", "EXIT_FROM_BUY", "EXIT_FROM_SELL")
 
 @dataclass(frozen=True, slots=True)
 class SignalEvent:
-    """One row from signal_event.
+    """One row from signal_events.
 
     Sparse — only bars where a regime transition fired produce
     rows. event_kind tells you which of the four signal types it is:
@@ -457,22 +457,22 @@ class SignalEvent:
       - EXIT_BUY  : left display_regime=+1
       - EXIT_SELL : left display_regime=-1
 
-    Polymorphic series identity (ticker_id+timeframe OR industry_name)
-    matches indicator_state. Exactly one is non-None; the DB CHECK
-    enforces.
+    Always identifies a ticker bar series via (ticker_id, timeframe).
+    Industry-level signal events were removed in A1 demolition;
+    industry-level state still lives in indicator_state but no
+    longer produces signal events.
 
     regime_before and regime_after are the display_regime values
     on the previous bar and this bar respectively. Constrained to
     {-1, 0, +1} at the DB level.
 
-    close_at_event is the close (or index value) on the bar where
-    the event fired. Useful for downstream backtesting without
-    needing a JOIN back to ohlcv_bars or industry_index_value.
+    close_at_event is the close on the bar where the event fired.
+    Useful for downstream backtesting without needing a JOIN back
+    to ohlcv_bars.
     """
-    # --- polymorphic identity ---
-    ticker_id: int | None
-    timeframe: str | None
-    industry_name: str | None
+    # --- series identity ---
+    ticker_id: int
+    timeframe: str
     trade_date: date
 
     # --- event ---

@@ -234,15 +234,11 @@ def cmd_fundamentals_status(args, config: Config) -> int:
             IndicatorStateRepository,
             IndustryIndexRepository,
             IndustryIndexValueRepository,
-            SignalEventRepository,
         )
         with db_engine.connect() as conn:
             indices = IndustryIndexRepository(conn).list_all()
             value_summary = IndustryIndexValueRepository(conn).coverage_summary()
             indicator_summary = IndicatorStateRepository(
-                conn,
-            ).coverage_summary_for_industries()
-            signal_summary = SignalEventRepository(
                 conn,
             ).coverage_summary_for_industries()
         if indices:
@@ -288,28 +284,6 @@ def cmd_fundamentals_status(args, config: Config) -> int:
                 latest_s = str(latest) if latest else "(none)"
                 print(
                     f"  {name[:48]:<48} {latest_s:<12} {rows:>5}"
-                )
-
-        # Signal events section (Phase 6-1). Per-industry event
-        # count and latest event date.
-        if signal_summary:
-            sig_by_name = {
-                name: (rows, earliest, latest)
-                for name, rows, earliest, latest in signal_summary
-            }
-            print()
-            print(
-                f"Signal events coverage ({len(signal_summary)} "
-                f"industries):"
-            )
-            print(
-                f"  {'INDUSTRY':<48} {'LATEST':<12} {'EVENTS':>6}"
-            )
-            for name in sorted(sig_by_name):
-                rows, _earliest, latest = sig_by_name[name]
-                latest_s = str(latest) if latest else "(none)"
-                print(
-                    f"  {name[:48]:<48} {latest_s:<12} {rows:>6}"
                 )
 
         # Recent runs section.

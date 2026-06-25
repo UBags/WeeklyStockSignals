@@ -229,7 +229,6 @@ class TestRunSignalEventsForTicker:
         for e in events:
             assert e.ticker_id == tid
             assert e.timeframe == "1W"
-            assert e.industry_name is None
             assert e.event_kind in ("BUY", "SELL", "EXIT_BUY", "EXIT_SELL")
 
     def test_close_at_event_uses_real_close(self, db_engine):

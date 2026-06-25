@@ -28,9 +28,15 @@ def _state(
     core: int = 0,
 ) -> IndicatorState:
     """Build a minimal IndicatorState row for testing. Only
-    display_regime varies meaningfully across test inputs."""
+    display_regime varies meaningfully across test inputs.
+
+    The `industry` arg is retained for signature parity with the
+    pre-A2 industry-shape state helper but ignored — all states
+    are now built as ticker-shape (ticker_id=42, timeframe='1w').
+    """
+    _ = industry  # backwards-compat parameter, unused
     return IndicatorState(
-        ticker_id=None, timeframe=None, industry_name=industry,
+        ticker_id=42, timeframe="1w", industry_name=None,
         trade_date=td,
         med_ema=100.0, long_ema=100.0, longest_ema=100.0,
         atr=1.0,
@@ -101,7 +107,6 @@ class TestBuyAndExitBuy:
         assert e.trade_date == date(2026, 1, 8)
         assert e.regime_before == 0
         assert e.regime_after == 1
-        assert e.industry_name == "X"
 
     def test_buy_fires_on_minus_one_to_one(self):
         """Direct -1 → +1 with precedence: only BUY fires on bar 2,
@@ -272,17 +277,9 @@ class TestCloseLookup:
 
 
 class TestSeriesIdentityPreserved:
-    """Events should copy the series identity from the input
-    IndicatorState. Industry rows produce industry-keyed events;
-    ticker rows produce ticker-keyed events."""
-
-    def test_industry_identity_preserved(self):
-        states = [_state("IT - Services", date(2026, 1, 1), display=1)]
-        events = compute_signal_events_from_states(states, _close)
-        assert len(events) == 1
-        assert events[0].industry_name == "IT - Services"
-        assert events[0].ticker_id is None
-        assert events[0].timeframe is None
+    """Events should copy the (ticker_id, timeframe) identity
+    from the input IndicatorState. Industry-level signal events
+    were removed in A1/A2; only ticker shape remains."""
 
     def test_ticker_identity_preserved(self):
         ticker_state = IndicatorState(
@@ -316,4 +313,3 @@ class TestSeriesIdentityPreserved:
         events = compute_signal_events_from_states([ticker_state], _close)
         assert events[0].ticker_id == 42
         assert events[0].timeframe == "1w"
-        assert events[0].industry_name is None

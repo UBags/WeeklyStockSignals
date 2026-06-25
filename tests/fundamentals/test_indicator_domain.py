@@ -165,9 +165,8 @@ class TestSignalEventDataclass:
 
     def _make(self, **overrides):
         defaults = {
-            "ticker_id": None,
-            "timeframe": None,
-            "industry_name": "IT - Services",
+            "ticker_id": 1,
+            "timeframe": "1w",
             "trade_date": date(2026, 5, 22),
             "event_kind": "BUY",
             "regime_before": 0,
@@ -178,19 +177,10 @@ class TestSignalEventDataclass:
         defaults.update(overrides)
         return SignalEvent(**defaults)
 
-    def test_can_construct_industry_keyed(self):
-        e = self._make()
-        assert e.industry_name == "IT - Services"
-        assert e.ticker_id is None
-        assert e.event_kind == "BUY"
-
     def test_can_construct_ticker_keyed(self):
-        e = self._make(
-            ticker_id=1, timeframe="1w", industry_name=None,
-        )
-        assert e.ticker_id == 1
+        e = self._make(ticker_id=42, timeframe="1w")
+        assert e.ticker_id == 42
         assert e.timeframe == "1w"
-        assert e.industry_name is None
 
     def test_frozen(self):
         e = self._make()

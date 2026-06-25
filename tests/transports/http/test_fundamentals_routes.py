@@ -1428,78 +1428,8 @@ from trip_ema.fundamentals import SignalEvent
 from trip_ema.persistence.fundamentals_repo import SignalEventRepository
 
 
-def _make_signal_row(
-    industry: str, td: date, kind: str = "BUY",
-    *, regime_before: int = 0, regime_after: int = 1,
-    close: float = 100.0,
-):
-    return SignalEvent(
-        ticker_id=None, timeframe=None, industry_name=industry,
-        trade_date=td, event_kind=kind,
-        regime_before=regime_before, regime_after=regime_after,
-        close_at_event=close,
-        computed_at=datetime.now(UTC),
-    )
-
-
-# ---------- GET /signal-events/recent ---------- #
-
-
-class TestGetRecentSignalEvents:
-
-    def test_returns_recent_events(self, real_db_client, db_engine):
-        # An event today is "recent"; an old one isn't.
-        from datetime import timedelta
-        with transaction(db_engine) as conn:
-            IndustryIndexRepository(conn).upsert(
-                "IT - Services", sector_name="Technology",
-                base_date=date(2025, 10, 1),
-            )
-            repo = SignalEventRepository(conn)
-            repo.upsert(_make_signal_row(
-                "IT - Services", date.today(), "BUY",
-            ))
-            repo.upsert(_make_signal_row(
-                "IT - Services", date.today() - timedelta(days=100),
-                "EXIT_FROM_BUY", regime_before=1, regime_after=0,
-            ))
-        r = real_db_client.get(
-            "/v1/fundamentals/signal-events/recent?days=7",
-            headers=AUTH_HEADERS,
-        )
-        rows = r.json()["rows"]
-        # Only today's BUY is within 7 days.
-        assert len(rows) == 1
-        assert rows[0]["event_kind"] == "BUY"
-
-    def test_kind_filter_on_recent(self, real_db_client, db_engine):
-        with transaction(db_engine) as conn:
-            IndustryIndexRepository(conn).upsert(
-                "IT - Services", sector_name="Technology",
-                base_date=date(2025, 10, 1),
-            )
-            repo = SignalEventRepository(conn)
-            repo.upsert(_make_signal_row(
-                "IT - Services", date.today(), "BUY",
-            ))
-            repo.upsert(_make_signal_row(
-                "IT - Services", date.today(), "SELL",
-                regime_before=0, regime_after=-1,
-            ))
-        r = real_db_client.get(
-            "/v1/fundamentals/signal-events/recent?kind=BUY&days=7",
-            headers=AUTH_HEADERS,
-        )
-        rows = r.json()["rows"]
-        assert len(rows) == 1
-        assert rows[0]["event_kind"] == "BUY"
-
-    def test_invalid_kind_returns_400(self, real_db_client):
-        r = real_db_client.get(
-            "/v1/fundamentals/signal-events/recent?kind=INVALID",
-            headers=AUTH_HEADERS,
-        )
-        assert r.status_code == 400
+# Note: TestGetRecentSignalEvents (industry-shape) removed in A2.
+# Ticker-shape coverage of /signal-events/recent is a follow-up.
 
 
 # ============================================================

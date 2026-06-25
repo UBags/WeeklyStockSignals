@@ -107,7 +107,6 @@ def compute_signal_events_from_states(
             events.append(SignalEvent(
                 ticker_id=state.ticker_id,
                 timeframe=state.timeframe,
-                industry_name=state.industry_name,
                 trade_date=state.trade_date,
                 event_kind="BUY",
                 regime_before=prev_display,
@@ -119,7 +118,6 @@ def compute_signal_events_from_states(
             events.append(SignalEvent(
                 ticker_id=state.ticker_id,
                 timeframe=state.timeframe,
-                industry_name=state.industry_name,
                 trade_date=state.trade_date,
                 event_kind="SELL",
                 regime_before=prev_display,
@@ -131,7 +129,6 @@ def compute_signal_events_from_states(
             events.append(SignalEvent(
                 ticker_id=state.ticker_id,
                 timeframe=state.timeframe,
-                industry_name=state.industry_name,
                 trade_date=state.trade_date,
                 event_kind="EXIT_FROM_BUY",
                 regime_before=prev_display,
@@ -143,7 +140,6 @@ def compute_signal_events_from_states(
             events.append(SignalEvent(
                 ticker_id=state.ticker_id,
                 timeframe=state.timeframe,
-                industry_name=state.industry_name,
                 trade_date=state.trade_date,
                 event_kind="EXIT_FROM_SELL",
                 regime_before=prev_display,

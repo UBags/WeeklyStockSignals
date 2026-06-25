@@ -1569,62 +1569,10 @@ class TestCmdFundamentalsStatusShowsIndicatorCoverage:
         assert "Indicator state coverage" not in out
 
 
-# ============================================================
-# Phase 6-1 CLI tests
-# ============================================================
-
-
-class TestCmdFundamentalsStatusShowsSignalCoverage:
-
-    def test_shows_signal_section_when_present(
-        self, db_engine, fake_config, patched_engine_factory,
-        reliance_ticker, capsys,
-    ):
-        from trip_ema.fundamentals import SignalEvent
-        from trip_ema.persistence.fundamentals_repo import (
-            IndustryIndexRepository,
-            SignalEventRepository,
-        )
-        with transaction(db_engine) as conn:
-            IndustryIndexRepository(conn).upsert(
-                "IT - Services", sector_name="Technology",
-                base_date=date(2025, 10, 1),
-            )
-            SignalEventRepository(conn).upsert(SignalEvent(
-                ticker_id=None, timeframe=None,
-                industry_name="IT - Services",
-                trade_date=date(2026, 5, 22),
-                event_kind="SELL",
-                regime_before=0, regime_after=-1,
-                close_at_event=844.27,
-                computed_at=datetime.now(UTC),
-            ))
-        args = type("A", (), {})()
-        args.exchange = None
-        args.phase = None
-        args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
-        out = capsys.readouterr().out
-        assert rc == 0
-        assert "Signal events coverage" in out
-        assert "IT - Services" in out
-
-    def test_omits_signal_section_when_no_rows(
-        self, db_engine, fake_config, patched_engine_factory,
-        reliance_ticker, capsys,
-    ):
-        with transaction(db_engine) as conn:
-            InstrumentIndustryRepository(conn).upsert(
-                reliance_ticker, sector="Energy", industry="Oil",
-            )
-        args = type("A", (), {})()
-        args.exchange = None
-        args.phase = None
-        args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
-        out = capsys.readouterr().out
-        assert rc == 0
-        assert "Signal events coverage" not in out
+# Note: TestCmdFundamentalsStatusShowsSignalCoverage (Phase 6-1
+# industry-shape signal coverage section) removed in A2 — the
+# "Signal events coverage" print block is gone with the
+# SignalEventRepository.coverage_summary_for_industries method.
 
 
 # ============================================================
