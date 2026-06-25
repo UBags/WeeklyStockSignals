@@ -26,8 +26,11 @@
 #                                              # state)
 #
 # Prereqs:
-#   - ~/.pgpass with `localhost:5432:*:trip_ema_app:<password>`,
-#     OR PGPASSWORD env var.
+#   - DB password resolved in this order:
+#       1. PGPASSWORD env var (if already set in the shell)
+#       2. config.yaml's `database.password_env` env var (auto-
+#          resolved by this script; usually $TRIP_EMA_DB_PASSWORD).
+#       3. ~/.pgpass fallback (legacy).
 #   - trip-ema service running on localhost:8000 (unless --no-service).
 #   - psql and curl on PATH.
 
@@ -39,12 +42,27 @@ SERVICE_PORT=8000
 PG_HOST="localhost"
 PG_USER="trip_ema_app"
 PG_DB="trip_ema"
-HEALTH_URL="http://localhost:${SERVICE_PORT}/healthz"
+HEALTH_URL="http://localhost:${SERVICE_PORT}/readyz"
 # =========================
 
 SKIP_SERVICE=0
 if [[ "${1:-}" == "--no-service" ]]; then
     SKIP_SERVICE=1
+fi
+
+# Resolve the DB password from the same source the service uses.
+# config.yaml has `password_env: TRIP_EMA_DB_PASSWORD`; read that
+# attribute, then export PGPASSWORD from the env var it names if set.
+# Falls through silently to ~/.pgpass / interactive prompt otherwise.
+if [[ -z "${PGPASSWORD:-}" ]]; then
+    PASSWORD_ENV=$(.venv/bin/python -c "
+from trip_ema.config.loader import load_config
+cfg = load_config('config.yaml')
+print(getattr(cfg.database, 'password_env', '') or '')
+" 2>/dev/null)
+    if [[ -n "$PASSWORD_ENV" && -n "${!PASSWORD_ENV:-}" ]]; then
+        export PGPASSWORD="${!PASSWORD_ENV}"
+    fi
 fi
 
 PSQL=(psql -h "$PG_HOST" -U "$PG_USER" -d "$PG_DB" -X -q -A)
@@ -63,10 +81,12 @@ echo "  trip-ema health check  ($(date '+%Y-%m-%d %H:%M:%S %Z'))"
 echo "============================================================="
 echo ""
 if [[ $SKIP_SERVICE -eq 1 ]]; then
-    echo "[1/6] Service /healthz: SKIPPED (--no-service)"
+    echo "[1/6] Service /readyz: SKIPPED (--no-service)"
 else
-    echo "[1/6] Service /healthz"
-    if response=$(curl -fsS --max-time 5 "$HEALTH_URL" 2>&1); then
+    echo "[1/6] Service /readyz"
+    # /readyz returns 200 (ready) or 503 (not_ready with issues).
+    # We want the body either way, so drop -f.
+    if response=$(curl -sS --max-time 5 "$HEALTH_URL" 2>&1); then
         echo "$response" | python3 -m json.tool 2>/dev/null \
             | sed 's/^/  /' \
             || echo "  $response"

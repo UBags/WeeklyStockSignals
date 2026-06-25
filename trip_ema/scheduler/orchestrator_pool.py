@@ -159,6 +159,49 @@ class OrchestratorPool:
 
     # ---- Health surface ----
 
+    def is_alive(self) -> bool:
+        """True iff every orchestrator's loop thread is alive.
+        Returns False on an empty pool (nothing to be alive).
+        Mirrors MarketOrchestrator.is_alive semantics.
+        """
+        with self._lock:
+            orchs = list(self._by_exchange.values())
+        if not orchs:
+            return False
+        return all(o.is_alive() for o in orchs)
+
+    def last_tick_completed_at(self):
+        """Max `last_run_completed_at` across all orchestrators,
+        or None if no orchestrator has completed a tick yet.
+        Returns Optional[datetime]; type unannotated to avoid the
+        forward-ref cycle with market_orchestrator.
+        """
+        with self._lock:
+            orchs = list(self._by_exchange.values())
+        timestamps = [o.last_run_completed_at for o in orchs]
+        timestamps = [t for t in timestamps if t is not None]
+        return max(timestamps) if timestamps else None
+
+    def is_unhealthy(self, now) -> str | None:
+        """Aggregator: return a description string when any orchestrator
+        is unhealthy, else None. Same convention as
+        ComputeScheduler.is_unhealthy / SubscriberDistributor.is_unhealthy:
+        callers append the string to /readyz's issues list when not None.
+
+        `now` is accepted for signature parity but currently unused
+        (MarketOrchestrator.is_unhealthy doesn't take a timestamp).
+        """
+        _ = now
+        with self._lock:
+            orchs = list(self._by_exchange.values())
+        broken = [o.exchange for o in orchs if o.is_unhealthy()]
+        if not broken:
+            return None
+        return (
+            f"OrchestratorPool: {len(broken)} orchestrator(s) unhealthy: "
+            f"{', '.join(sorted(broken))}"
+        )
+
     def any_unhealthy(self) -> bool:
         """True if any orchestrator was started but its thread has died.
         Mirrors `MarketOrchestrator.is_unhealthy()` aggregated. Suitable

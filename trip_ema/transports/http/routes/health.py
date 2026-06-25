@@ -62,7 +62,14 @@ def readyz(
     redis_queue=Depends(get_redis_queue),
     orchestrator_pool=Depends(get_orchestrator_pool),
 ) -> HealthPayload:
-    """Readiness probe. Returns 200 only if the service can do useful work."""
+    """Readiness probe. Returns 200 only if the service can do useful work.
+
+    Phase 14: when the orchestrator pool is enabled, compute runs on
+    each MarketOrchestrator's tick thread rather than on the legacy
+    ComputeScheduler's loop thread. In that mode the legacy
+    compute_scheduler_alive field is reported as None ("disabled, not
+    broken") and the orchestrator_pool_* fields carry the real signal.
+    """
     now = datetime.now(UTC)
     issues: list[str] = []
 
@@ -70,9 +77,29 @@ def readyz(
     if n_snapshots == 0:
         issues.append("Cache empty (never seeded)")
 
-    compute_problem = compute_scheduler.is_unhealthy(now)
-    if compute_problem:
-        issues.append(compute_problem)
+    # Compute health is reported from whichever subsystem actually owns
+    # the compute cadence. When the orchestrator pool is the owner,
+    # check IT for liveness/unhealthy state; the legacy compute_scheduler
+    # instance lives on app state but its loop thread isn't started.
+    orchestrator_mode = orchestrator_pool is not None
+    if orchestrator_mode:
+        pool_problem = orchestrator_pool.is_unhealthy(now)
+        if pool_problem:
+            issues.append(pool_problem)
+        compute_scheduler_alive: bool | None = None
+        compute_last_completed_at = (
+            orchestrator_pool.last_tick_completed_at()
+        )
+        orchestrator_pool_alive: bool | None = orchestrator_pool.is_alive()
+        orchestrator_pool_last_tick_at = compute_last_completed_at
+    else:
+        compute_problem = compute_scheduler.is_unhealthy(now)
+        if compute_problem:
+            issues.append(compute_problem)
+        compute_scheduler_alive = compute_scheduler.is_alive()
+        compute_last_completed_at = compute_scheduler.last_run_completed_at
+        orchestrator_pool_alive = None
+        orchestrator_pool_last_tick_at = None
 
     if distributor is not None:
         dist_problem = distributor.is_unhealthy(now)
@@ -85,12 +112,6 @@ def readyz(
         if not redis_reachable:
             issues.append("Redis configured but unreachable")
 
-    if orchestrator_pool is not None and orchestrator_pool.any_unhealthy():
-        issues.append(
-            "Orchestrator pool: at least one market thread is "
-            "unhealthy. Check /v1/admin/orchestrator/status for details.",
-        )
-
     # Phase 9 A2: stale tickers — informational only.
     stale = cache.all_stale_snapshots()
 
@@ -98,13 +119,15 @@ def readyz(
         status="ready" if not issues else "not_ready",
         registry_size=n_snapshots,   # legacy wire field
         cache_size=n_snapshots,
-        compute_scheduler_alive=compute_scheduler.is_alive(),
+        compute_scheduler_alive=compute_scheduler_alive,
         distributor_alive=distributor.is_alive() if distributor else None,
-        compute_last_completed_at=compute_scheduler.last_run_completed_at,
+        compute_last_completed_at=compute_last_completed_at,
         distributor_last_completed_at=(
             distributor.last_run_completed_at if distributor else None
         ),
         redis_reachable=redis_reachable,
+        orchestrator_pool_alive=orchestrator_pool_alive,
+        orchestrator_pool_last_tick_at=orchestrator_pool_last_tick_at,
         stale_tickers_count=len(stale),
         issues=issues,
     )
