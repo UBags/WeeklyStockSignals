@@ -30,52 +30,69 @@ and never load-bearing (ARCHITECTURE.md invariant 3.12).
 
 from __future__ import annotations
 
-try:
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Always present the real prom_client types to static analysis.
+    # The runtime no-op shims (defined in the else branch below)
+    # satisfy the same call-site shapes — .labels(...).inc(), .set(),
+    # .observe(), .time() — so the runtime contract is preserved
+    # either way. See ARCHITECTURE.md invariant 3.12: observability
+    # is additive and never load-bearing.
     from prometheus_client import (
         CollectorRegistry,
         Counter,
         Gauge,
         Histogram,
     )
-    _PROMETHEUS_AVAILABLE = True
-except ImportError:
-    _PROMETHEUS_AVAILABLE = False
+    _PROMETHEUS_AVAILABLE: bool
+else:
+    try:
+        from prometheus_client import (
+            CollectorRegistry,
+            Counter,
+            Gauge,
+            Histogram,
+        )
+        _PROMETHEUS_AVAILABLE = True
+    except ImportError:
+        _PROMETHEUS_AVAILABLE = False
 
-    class _NoOpMetric:
-        """Stand-in for Counter/Gauge/Histogram when prometheus_client
-        isn't installed. Every method is a no-op; labels(...) returns
-        self so chained calls compile cleanly."""
+        class _NoOpMetric:
+            """Stand-in for Counter/Gauge/Histogram when prometheus_client
+            isn't installed. Every method is a no-op; labels(...) returns
+            self so chained calls compile cleanly."""
 
-        def __init__(self, *args, **kwargs): pass
-        def labels(self, *args, **kwargs): return self
-        def inc(self, *args, **kwargs): pass
-        def dec(self, *args, **kwargs): pass
-        def set(self, *args, **kwargs): pass
-        def observe(self, *args, **kwargs): pass
+            def __init__(self, *args, **kwargs): pass
+            def labels(self, *args, **kwargs): return self
+            def inc(self, *args, **kwargs): pass
+            def dec(self, *args, **kwargs): pass
+            def set(self, *args, **kwargs): pass
+            def observe(self, *args, **kwargs): pass
 
-        class _NoOpTimer:
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-            def __call__(self, fn): return fn
+            class _NoOpTimer:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def __call__(self, fn): return fn
 
-        def time(self): return self._NoOpTimer()
+            def time(self): return self._NoOpTimer()
 
-        @property
-        def _value(self):
-            class _V:
-                @staticmethod
-                def get(): return 0.0
-                @staticmethod
-                def set(v): pass
-            return _V()
+            @property
+            def _value(self):
+                class _V:
+                    @staticmethod
+                    def get(): return 0.0
+                    @staticmethod
+                    def set(v): pass
+                return _V()
 
-    class _NoOpRegistry:
-        """No-op stand-in for CollectorRegistry."""
-        def __init__(self, *a, **kw):
-            self._names_to_collectors = {}
+        class _NoOpRegistry:
+            """No-op stand-in for CollectorRegistry."""
+            def __init__(self, *a, **kw):
+                self._names_to_collectors = {}
 
-    Counter = Gauge = Histogram = _NoOpMetric
-    CollectorRegistry = _NoOpRegistry
+        Counter = Gauge = Histogram = _NoOpMetric
+        CollectorRegistry = _NoOpRegistry
 
 
 # Single shared registry. The metrics_server scrapes this.
@@ -275,11 +292,15 @@ def reset_metrics_for_test() -> None:
     """Test helper — clears all counter/gauge/histogram values without
     unregistering them. Call from a fixture in tests that assert metric
     values."""
+    # Deliberate access to prom_client private attributes — the
+    # supported reset path is to construct a fresh CollectorRegistry,
+    # but tests rely on the global REGISTRY for isolation. The
+    # hasattr guards above keep this no-op-safe under the shim.
     for collector in list(REGISTRY._names_to_collectors.values()):
         if hasattr(collector, "_metrics"):
-            collector._metrics.clear()
-        if hasattr(collector, "_value") and hasattr(collector._value, "set"):
+            collector._metrics.clear()  # pyright: ignore[reportAttributeAccessIssue]
+        if hasattr(collector, "_value") and hasattr(collector._value, "set"):  # pyright: ignore[reportAttributeAccessIssue]
             try:
-                collector._value.set(0)
+                collector._value.set(0)  # pyright: ignore[reportAttributeAccessIssue]
             except Exception:
                 pass
