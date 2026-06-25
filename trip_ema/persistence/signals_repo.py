@@ -11,7 +11,7 @@ remaining notification budget.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Iterable
+from typing import Any, Iterable
 
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -43,7 +43,7 @@ _SIGNAL_TO_STR = {
 _STR_TO_SIGNAL = {v: k for k, v in _SIGNAL_TO_STR.items()}
 
 
-def _row_to_event(row, ticker_ref: TickerRef) -> SignalEvent:
+def _row_to_event(row: Any, ticker_ref: TickerRef) -> SignalEvent:
     return SignalEvent(
         ticker=ticker_ref,
         timeframe=Timeframe(row.timeframe),

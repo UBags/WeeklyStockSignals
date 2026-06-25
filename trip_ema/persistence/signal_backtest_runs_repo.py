@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -39,7 +39,7 @@ class SignalBacktestRun:
     last_run_id: Optional[int]
 
 
-def _row_to_record(row) -> SignalBacktestRun:
+def _row_to_record(row: Any) -> SignalBacktestRun:
     return SignalBacktestRun(
         exchange=row.exchange,
         ticker_id=row.ticker_id,

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
-from typing import Iterator, Literal
+from typing import Any, Iterator, Literal
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import Connection
@@ -65,7 +65,7 @@ def build_db_url_for_role(config: Config, role: Role) -> str:
     )
 
 
-def create_engine_from_config(config: Config, **engine_kwargs) -> Engine:
+def create_engine_from_config(config: Config, **engine_kwargs: Any) -> Engine:
     """Create a SQLAlchemy engine from validated config.
 
     Pool settings come from `config.database.pool_*` fields. Callers can
@@ -90,7 +90,7 @@ def create_engine_from_config(config: Config, **engine_kwargs) -> Engine:
 
 
 def create_engine_for_role(
-    config: Config, role: Role, **engine_kwargs,
+    config: Config, role: Role, **engine_kwargs: Any,
 ) -> Engine:
     """Create an Engine using the configured credentials for `role`.
 

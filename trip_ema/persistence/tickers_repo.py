@@ -11,7 +11,8 @@ controls the transaction boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from datetime import datetime
+from typing import Any, Iterable
 
 from sqlalchemy import insert, select
 from sqlalchemy.engine import Connection
@@ -45,7 +46,7 @@ class TickerRecord:
     tz: str = "UTC"
 
 
-def _row_to_record(row) -> TickerRecord:
+def _row_to_record(row: Any) -> TickerRecord:
     return TickerRecord(
         ticker_id=row.ticker_id,
         ref=TickerRef(
@@ -108,8 +109,8 @@ class TickersRepository:
         *,
         full_name: str | None = None,
         is_active: bool = True,
-        created_at,
-            tz: str = "UTC",
+        created_at: datetime,
+        tz: str = "UTC",
     ) -> int:
         """Insert a new ticker. Returns the assigned ticker_id.
 

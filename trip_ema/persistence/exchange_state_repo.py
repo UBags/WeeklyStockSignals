@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -297,7 +297,7 @@ class ExchangeStateRepository:
 # ---------- helpers ---------- #
 
 
-def _row_to_state(row) -> ExchangeState:
+def _row_to_state(row: Any) -> ExchangeState:
     return ExchangeState(
         exchange=row.exchange,
         initial_load_started_at=row.initial_load_started_at,

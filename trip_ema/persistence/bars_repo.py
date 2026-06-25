@@ -8,6 +8,7 @@ ingest in the scheduler.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import func, insert, select, text
 from sqlalchemy.engine import Connection
@@ -17,7 +18,7 @@ from ..domain import OHLCVBar, Timeframe
 from .tables import ohlcv_bars
 
 
-def _row_to_bar(row) -> OHLCVBar:
+def _row_to_bar(row: Any) -> OHLCVBar:
     return OHLCVBar(
         timestamp=row.bar_timestamp,
         open=row.open,

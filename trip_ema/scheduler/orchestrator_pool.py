@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable, Iterable, Optional, Protocol
+from typing import Any, Callable, Iterable, Optional, Protocol
 
 from .market_orchestrator import MarketOrchestrator
 
@@ -176,7 +176,7 @@ class OrchestratorPool:
 def build_pool_from_configs(
     *,
     market_configs: list,  # list of MarketHoursConfig
-    settings,  # OrchestratorSettings
+    settings: Any,  # OrchestratorSettings
     fetch_fn_factory: Callable[[str], Callable],
     compute_run_once: Callable,
     distribute_run_once: Callable,

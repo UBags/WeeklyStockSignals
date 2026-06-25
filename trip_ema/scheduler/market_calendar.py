@@ -42,7 +42,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +237,7 @@ class TradingCalendar:
             return set()
 
 
-def _coerce_date(v) -> date:
+def _coerce_date(v: Any) -> date:
     """YAML's auto-typing may give us either a `date` object directly
     (most common, since `2026-01-26` in YAML parses as a date) or a
     string that needs parsing. Handle both."""

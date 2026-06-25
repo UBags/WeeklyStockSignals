@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
+from typing import Any, Iterable
 
 from sqlalchemy import func, insert, or_, select, update
 from sqlalchemy.engine import Connection
@@ -38,7 +38,7 @@ class SubscriptionRecord:
     signal_filter: str | None   # None == all signals
 
 
-def _row_to_subscriber(row) -> SubscriberRecord:
+def _row_to_subscriber(row: Any) -> SubscriberRecord:
     return SubscriberRecord(
         subscriber_id=row.subscriber_id,
         transport=row.transport,
@@ -49,7 +49,7 @@ def _row_to_subscriber(row) -> SubscriberRecord:
     )
 
 
-def _row_to_subscription(row) -> SubscriptionRecord:
+def _row_to_subscription(row: Any) -> SubscriptionRecord:
     return SubscriptionRecord(
         subscription_id=row.subscription_id,
         subscriber_id=row.subscriber_id,

@@ -63,7 +63,7 @@ from ..observability.tracing import (
     get_tracer,
     set_span_attribute_if_active,
 )
-from ..persistence.tickers_repo import TickersRepository
+from ..persistence.tickers_repo import TickerRecord, TickersRepository
 from ..signals.generate_signals_in_live_production import (
     LiveTickResult,
     generate_live_signal_for_ticker,
@@ -286,7 +286,7 @@ class ComputeScheduler:
 
     def _process_ticker(
         self,
-        record,
+        record: TickerRecord,
         now: datetime,
         summary: ComputeRunSummary,
     ) -> None:
