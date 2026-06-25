@@ -72,16 +72,11 @@ signal_events = Table(
     "signal_events",
     metadata,
     Column("event_id", BigInteger, primary_key=True),
-    # Migration 0016 made ticker_id and timeframe nullable so industry
-    # rows can omit them. The CHECK constraint enforces that exactly
-    # one of (ticker_id+timeframe) or industry_name is set.
-    Column("ticker_id", Integer, ForeignKey("tickers.ticker_id"), nullable=True),
-    Column("timeframe", String(8), nullable=True),
-    # Industry-level rows (Phase 6-2 unification). FK to industry_index.
-    Column(
-        "industry_name", String(128),
-        ForeignKey("industry_index.industry_name"), nullable=True,
-    ),
+    # Migration 0019 (A3) dropped the industry shape from signal_events:
+    # ticker_id and timeframe are NOT NULL (every event identifies a
+    # ticker bar series); the industry_name column is gone.
+    Column("ticker_id", Integer, ForeignKey("tickers.ticker_id"), nullable=False),
+    Column("timeframe", String(8), nullable=False),
     Column("bar_timestamp", DateTime(timezone=True), nullable=False),
     Column("signal_type", String(16), nullable=False),
     # Regime context added by migration 0016. Nullable for backward

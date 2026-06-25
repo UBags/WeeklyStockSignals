@@ -2554,7 +2554,6 @@ class SignalEventRepository:
                 :rb, :ra, :close, NOW()
             )
             ON CONFLICT (ticker_id, timeframe, bar_timestamp, signal_type)
-            WHERE ticker_id IS NOT NULL
             DO UPDATE SET
                 regime_before = EXCLUDED.regime_before,
                 regime_after = EXCLUDED.regime_after,
