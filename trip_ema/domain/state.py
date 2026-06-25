@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum, IntEnum, StrEnum
+from enum import IntEnum, StrEnum
 
 
 class Timeframe(StrEnum):

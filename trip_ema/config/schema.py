@@ -374,7 +374,7 @@ class MarketHoursConfig(BaseModel):
         try:
             dt_time.fromisoformat(v)
         except ValueError as e:
-            raise ValueError(f"must be HH:MM, got {v!r}: {e}")
+            raise ValueError(f"must be HH:MM, got {v!r}: {e}") from e
         return v
 
     @field_validator("tz")
@@ -386,7 +386,7 @@ class MarketHoursConfig(BaseModel):
         try:
             ZoneInfo(v)
         except ZoneInfoNotFoundError as e:
-            raise ValueError(f"unknown IANA tz {v!r}: {e}")
+            raise ValueError(f"unknown IANA tz {v!r}: {e}") from e
         return v
 
     @model_validator(mode="after")

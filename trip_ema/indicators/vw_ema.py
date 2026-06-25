@@ -250,6 +250,6 @@ def compute_series(
     volumes_list = list(volumes)
     if len(closes_list) != len(volumes_list):
         raise ValueError("closes and volumes must have equal length")
-    for c, v in zip(closes_list, volumes_list):
+    for c, v in zip(closes_list, volumes_list, strict=True):
         out.append(ema.update(c, v))
     return out

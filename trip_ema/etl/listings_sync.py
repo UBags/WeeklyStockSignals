@@ -87,7 +87,7 @@ class ListingsSync:
         mark all equities as delisted because they weren't in the ETF
         list)."""
         incoming_list = list(incoming)
-        incoming_symbols = {l.symbol for l in incoming_list}
+        incoming_symbols = {listing.symbol for listing in incoming_list}
         # Build (isin → existing ticker) and (symbol → existing ticker)
         # maps over the active universe for this exchange.
         existing_by_isin: dict[str, dict] = {}
@@ -116,7 +116,7 @@ class ListingsSync:
 
         # Pass 1: apply each incoming listing
         for listing in incoming_list:
-            handled = self._apply_one(
+            self._apply_one(
                 listing, existing_by_isin, existing_by_symbol, counts,
             )
             # Track processed symbols so we know what NOT to delist.
@@ -128,7 +128,7 @@ class ListingsSync:
         # Symbol-rename targets stay alive (their isin is in incoming
         # even though their old symbol is not).
         if detect_delistings:
-            incoming_isins = {l.isin for l in incoming_list if l.isin}
+            incoming_isins = {listing.isin for listing in incoming_list if listing.isin}
             now = datetime.now(UTC)
             for symbol, existing in existing_by_symbol.items():
                 if symbol in incoming_symbols:

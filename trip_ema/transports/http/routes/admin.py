@@ -269,7 +269,7 @@ def admin_circuit_breakers(
         )
 
     entries: list[CircuitBreakerEntry] = []
-    for name, transport in distributor.transports.items():
+    for _name, transport in distributor.transports.items():
         if not isinstance(transport, CircuitBreakingTransport):
             continue
         snap = transport.snapshot()

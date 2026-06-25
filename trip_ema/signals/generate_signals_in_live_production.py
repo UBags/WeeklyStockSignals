@@ -272,8 +272,6 @@ def generate_live_signal_for_ticker(
         if regime_j is not None and bar_j is not None:
             prev_completed_regime = regime_j
             prev_completed_close = bar_j.close
-            prev_completed_lower_env = bar_j.lower_envelope
-            prev_completed_upper_env = bar_j.upper_envelope
             break
 
     # ---------- 6. Resolve previous state from signal_events ----------

@@ -43,7 +43,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from enum import Enum, StrEnum
+from enum import StrEnum
 
 from ..domain import NotificationBatch
 from ..observability import metrics as M

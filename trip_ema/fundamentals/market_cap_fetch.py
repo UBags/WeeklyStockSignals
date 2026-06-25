@@ -165,7 +165,7 @@ def fetch_historical_mcap_for_ticker(
     # Build a list of (date, shares) pairs in ascending date order
     # so the asof lookup below can walk forward in O(n+m).
     shares_pairs: list[tuple[date, int]] = []
-    for ts, value in zip(shares_series.index, shares_series.values):
+    for ts, value in zip(shares_series.index, shares_series.values, strict=True):
         d = _to_date(ts)
         v = _to_positive_int(value)
         if d is None or v is None:

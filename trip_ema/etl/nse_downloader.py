@@ -76,7 +76,7 @@ class NseDownloader:
         if self._warmed_up:
             return
         logger.info("NSE: warming up session", extra={"url": self._warmup_url})
-        resp = self._session.get(self._warmup_url, timeout=self._timeout)
+        self._session.get(self._warmup_url, timeout=self._timeout)
         # Don't error on warmup status — NSE sometimes returns 200 with
         # a meaningless body. The cookies we want get set regardless.
         # Sleep briefly so we don't look like a bot.

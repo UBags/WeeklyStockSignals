@@ -121,7 +121,7 @@ def fetch_historical_shares(
 
     # Build (date, shares) pairs, filter to range, dedupe by date.
     pairs: dict[date, int] = {}
-    for ts, value in zip(shares_series.index, shares_series.values):
+    for ts, value in zip(shares_series.index, shares_series.values, strict=True):
         d = _to_date(ts)
         v = _to_positive_int(value)
         if d is None or v is None:

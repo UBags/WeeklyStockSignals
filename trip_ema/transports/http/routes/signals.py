@@ -266,7 +266,7 @@ def get_signal(
     except TickerNotPrimedError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e),
-        )
+        ) from e
 
 
 def _finite_or_none(v: float) -> float | None:

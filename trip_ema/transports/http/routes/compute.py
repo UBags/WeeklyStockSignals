@@ -46,7 +46,7 @@ def compute(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(e),
-        )
+        ) from e
 
     if request.verbose:
         result = compute_full_verbose(

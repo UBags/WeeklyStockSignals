@@ -2033,7 +2033,7 @@ def run_industry_index_build(
     indexed: list[tuple[str, date, int]] = []
     failed: list[tuple[str, str]] = []
 
-    for industry, sector, count in qualified:
+    for industry, sector, _count in qualified:
         try:
             # Idempotent upsert. If the index already exists, the
             # base_date and base_value are preserved (we re-write
@@ -2257,7 +2257,6 @@ def run_indicator_state_for_industry(
     # atomicity: either every bar's indicator_state is written, or
     # none of them is (rollback on exception).
     succeeded = 0
-    failed = 0
     skipped = 0
     with transaction(db_engine) as conn:
         run_id = FundamentalsRunRepository(conn).open(
@@ -2529,13 +2528,13 @@ def run_indicator_state_for_ticker(
 
     # Coerce timeframe string to Timeframe enum.
     try:
-        tf_enum = Timeframe(timeframe)
-    except ValueError:
+        Timeframe(timeframe)
+    except ValueError as e:
         raise ValueError(
             f"run_indicator_state_for_ticker: unknown timeframe "
             f"{timeframe!r}; must be one of "
             f"{[t.value for t in Timeframe]}"
-        )
+        ) from e
 
     # Sanity: ticker must exist.
     with db_engine.connect() as conn:
@@ -2710,12 +2709,12 @@ def run_indicator_state_for_all_tickers(
 
     # Validate timeframe up-front.
     try:
-        tf_enum = Timeframe(timeframe)
-    except ValueError:
+        Timeframe(timeframe)
+    except ValueError as e:
         raise ValueError(
             f"unknown timeframe {timeframe!r}; must be one of "
             f"{[t.value for t in Timeframe]}"
-        )
+        ) from e
 
     # Enumerate tickers. Only ACTIVE tickers — retired/delisted
     # ones shouldn't get fresh indicator state.
@@ -2796,12 +2795,12 @@ def run_signal_events_for_ticker(
     from .signal_compute import compute_signal_events_from_states
 
     try:
-        tf_enum = Timeframe(timeframe)
-    except ValueError:
+        Timeframe(timeframe)
+    except ValueError as e:
         raise ValueError(
             f"unknown timeframe {timeframe!r}; must be one of "
             f"{[t.value for t in Timeframe]}"
-        )
+        ) from e
 
     with db_engine.connect() as conn:
         ticker = TickersRepository(conn).get_by_id(ticker_id)

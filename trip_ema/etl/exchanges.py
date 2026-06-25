@@ -92,7 +92,7 @@ def yfinance_symbol(symbol: str, exchange: str) -> str:
         raise UnsupportedExchangeError(
             f"Exchange {exchange!r} is not in the known suffix map. "
             f"Known exchanges: {sorted(_SUFFIX_MAP)}.",
-        )
+        ) from None
     return f"{symbol.upper()}{suffix}"
 
 

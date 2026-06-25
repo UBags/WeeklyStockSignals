@@ -176,7 +176,6 @@ class EmailTransport:
                     "rank-score fetch failed; emails will fall back to "
                     "alphabetical BUY sort"
                 )
-                rank_scores = None
             return render_html(batch, enrichment)
         except Exception:
             logger.exception(

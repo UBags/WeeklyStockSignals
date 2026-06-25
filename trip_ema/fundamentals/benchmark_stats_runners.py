@@ -179,10 +179,6 @@ def run_benchmark_stats_for_ticker(
             stock_dates = [d for d, _ in stock_pairs if d <= as_of_date]
             if not stock_dates:
                 return
-            n_kept = len(stock_aligned) - sum(
-                1 for d, _ in zip([p[0] for p in stock_pairs[-len(stock_aligned):]],
-                                   stock_aligned) if d[0] > as_of_date
-            ) if False else None  # left intentionally simple — see below
             # Simpler: rebuild from pairs with as_of cutoff.
             sp = [(d, c) for d, c in stock_pairs if d <= as_of_date]
             bp = [(d, c) for d, c in bench_pairs if d <= as_of_date]

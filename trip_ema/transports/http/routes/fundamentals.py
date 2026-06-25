@@ -142,7 +142,7 @@ def _validate_exchange_or_400(exchange: str, config: Config) -> None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
-        )
+        ) from e
 
 
 def _run_industry_refresh_safe(

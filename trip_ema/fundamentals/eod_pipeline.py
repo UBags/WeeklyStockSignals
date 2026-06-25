@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
-from enum import Enum, StrEnum
+from enum import StrEnum
 from collections.abc import Callable
 
 from sqlalchemy.engine import Engine

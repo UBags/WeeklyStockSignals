@@ -534,13 +534,17 @@ class FundamentalsRunRepository:
         sets = []
         params: dict[str, object] = {"rid": run_id}
         if succeeded is not None:
-            sets.append("succeeded = :s"); params["s"] = succeeded
+            sets.append("succeeded = :s")
+            params["s"] = succeeded
         if failed is not None:
-            sets.append("failed = :f"); params["f"] = failed
+            sets.append("failed = :f")
+            params["f"] = failed
         if skipped is not None:
-            sets.append("skipped = :sk"); params["sk"] = skipped
+            sets.append("skipped = :sk")
+            params["sk"] = skipped
         if progress_json is not None:
-            sets.append("progress_json = :pj"); params["pj"] = json.dumps(progress_json)
+            sets.append("progress_json = :pj")
+            params["pj"] = json.dumps(progress_json)
         if not sets:
             return
         self._conn.execute(

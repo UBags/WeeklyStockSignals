@@ -272,7 +272,7 @@ class RedisQueue:
         anyway).
         """
         raws = self._r.lrange(self._dlq_key, 0, -1)
-        for idx, raw in enumerate(raws):
+        for _idx, raw in enumerate(raws):
             try:
                 job = json.loads(raw)
             except (json.JSONDecodeError, TypeError):

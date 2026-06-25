@@ -20,11 +20,13 @@ from .stateless import compute_full_terse, compute_full_verbose
 
 __all__ = [
     "InsufficientHistoryError",
+    "PrimeCacheResult",
     "TerseResponse",
     "TickerNotPrimedError",
     "VerboseResponse",
     "compute_full_terse",
     "compute_full_verbose",
+    "prime_cache_from_db",
     "query_cached_terse",
     "query_cached_verbose",
 ]
