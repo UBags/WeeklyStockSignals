@@ -20,7 +20,6 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -36,15 +35,15 @@ class CorporateActionRecord:
     ticker_id: int
     action_type: str
     effective_date: date
-    ratio_numerator: Optional[float]
-    ratio_denominator: Optional[float]
-    amount: Optional[float]
+    ratio_numerator: float | None
+    ratio_denominator: float | None
+    amount: float | None
     source: str
     status: str
     detected_at: datetime
-    reviewed_at: Optional[datetime]
-    reviewed_by: Optional[str]
-    notes: Optional[str]
+    reviewed_at: datetime | None
+    reviewed_by: str | None
+    notes: str | None
 
 
 class CorporateActionsRepository:
@@ -123,12 +122,12 @@ class CorporateActionsRepository:
         action_type: str,
         effective_date: date,
         *,
-        ratio_numerator: Optional[float] = None,
-        ratio_denominator: Optional[float] = None,
-        amount: Optional[float] = None,
+        ratio_numerator: float | None = None,
+        ratio_denominator: float | None = None,
+        amount: float | None = None,
         source: str = "yfinance",
-        raw_payload: Optional[dict] = None,
-    ) -> Optional[int]:
+        raw_payload: dict | None = None,
+    ) -> int | None:
         """Record a real split/bonus/dividend from yfinance's actions
         API. Returns the new action_id, or None if a row for the same
         (ticker_id, action_type, effective_date) already exists."""
@@ -176,7 +175,7 @@ class CorporateActionsRepository:
         )
         return [self._row_to_record(r) for r in result]
 
-    def get(self, action_id: int) -> Optional[CorporateActionRecord]:
+    def get(self, action_id: int) -> CorporateActionRecord | None:
         result = self._conn.execute(
             text("""
                 SELECT action_id, ticker_id, action_type, effective_date,
@@ -194,7 +193,7 @@ class CorporateActionsRepository:
         action_id: int,
         *,
         reviewed_by: str = "cli",
-        notes: Optional[str] = None,
+        notes: str | None = None,
     ) -> bool:
         """Promote pending_review → approved. Returns True if a row
         was actually transitioned (False if action_id doesn't exist
@@ -221,7 +220,7 @@ class CorporateActionsRepository:
         action_id: int,
         *,
         reviewed_by: str = "cli",
-        notes: Optional[str] = None,
+        notes: str | None = None,
     ) -> bool:
         result = self._conn.execute(
             text("""

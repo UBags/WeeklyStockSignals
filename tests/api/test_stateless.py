@@ -13,7 +13,7 @@ as the Step 5 walker tests).
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, UTC
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -44,7 +44,7 @@ def _weekly_bar(
     ts_ist = datetime.combine(monday, time(0, 0), tzinfo=_IST)
     half = hl_spread / 2
     return OHLCVBar(
-        timestamp=ts_ist.astimezone(timezone.utc),
+        timestamp=ts_ist.astimezone(UTC),
         open=close, high=close + half, low=close - half, close=close,
         volume=vol,
     )

@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +87,7 @@ class NseDownloader:
         """Download a CSV (or any other resource) from NSE. Retries
         with exponential backoff on transient failures."""
         self._warmup()
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
         for attempt in range(1, max_retries + 1):
             try:
                 logger.info(

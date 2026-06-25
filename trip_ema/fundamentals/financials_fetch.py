@@ -35,7 +35,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional
 
 from ..etl.exchanges import yfinance_symbol
 
@@ -55,8 +54,8 @@ class QuarterlyFinancialInfo:
     missing values.
     """
     fiscal_quarter: date
-    revenue: Optional[float]
-    ebitda: Optional[float]
+    revenue: float | None
+    ebitda: float | None
     currency: str  # "INR" default for NSE/BSE
 
 
@@ -240,7 +239,7 @@ def _first_matching_row(df, candidates):
     return None
 
 
-def _normalize_quarter_date(col) -> Optional[date]:
+def _normalize_quarter_date(col) -> date | None:
     """Convert a pandas/yfinance column header to a date. yfinance
     uses pandas.Timestamp for these; we want a plain date.
 
@@ -260,7 +259,7 @@ def _normalize_quarter_date(col) -> Optional[date]:
         return None
 
 
-def _coerce_float(v) -> Optional[float]:
+def _coerce_float(v) -> float | None:
     """yfinance returns numbers as numpy floats, sometimes NaN.
     Convert to Python float or None.
 

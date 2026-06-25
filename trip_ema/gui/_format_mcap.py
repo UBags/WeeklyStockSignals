@@ -12,10 +12,9 @@ Used by:
 """
 from __future__ import annotations
 from decimal import Decimal
-from typing import Optional, Union
 
 
-def format_mcap_cr(mcap_inr: Optional[Union[Decimal, float, int]]) -> str:
+def format_mcap_cr(mcap_inr: Decimal | float | int | None) -> str:
     """Render an INR market cap as a short crore-denominated label.
 
     Returns an empty string for None / non-positive inputs so callers

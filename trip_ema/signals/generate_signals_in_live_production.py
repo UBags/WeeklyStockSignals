@@ -54,8 +54,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, UTC
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -64,7 +63,6 @@ from sqlalchemy.engine import Connection
 
 from trip_ema.domain import (
     ChangeSignal,
-    OHLCVBar,
     SignalEvent,
     TickerRef,
     Timeframe,
@@ -105,7 +103,7 @@ class LiveTickResult:
     row via ON CONFLICT DO NOTHING)."""
     signal_kind: ChangeSignal
     """The signal that fired. ChangeSignal.NO_CHANGE if no signal."""
-    event_id: Optional[int]
+    event_id: int | None
     """The event_id of the persisted (or existing) row. None if no
     signal fired."""
     current_regime: Regime
@@ -113,7 +111,7 @@ class LiveTickResult:
     Regime.NEUTRAL if we couldn't compute (warmup, no bars, etc.)."""
     new_state: PositionState
     """The position state after applying this tick's signal."""
-    skipped_reason: Optional[str] = None
+    skipped_reason: str | None = None
     """If we didn't compute (no bars, warmup, etc.), why. None when
     the tick ran to completion regardless of whether a signal fired."""
 
@@ -129,11 +127,11 @@ def generate_live_signal_for_ticker(
     ticker_ref: TickerRef,
     timeframe: Timeframe,
     *,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
     indicator_params: EngineParams = INDICATOR_DEFAULTS,
     history_window_days: int = 730,
     week_anchor_tz: str = "Asia/Kolkata",
-    signal_cache_writer: Optional[SignalCacheWriter] = None,
+    signal_cache_writer: SignalCacheWriter | None = None,
 ) -> LiveTickResult:
     """Run one live tick: compute current regime/signal, persist if needed.
 
@@ -165,7 +163,7 @@ def generate_live_signal_for_ticker(
         )
 
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
     # ---------- 1. Load daily bars ----------
     today = now.astimezone(ZoneInfo(week_anchor_tz)).date()
@@ -205,13 +203,13 @@ def generate_live_signal_for_ticker(
     # walk from the start of the indicator-mature window to "now" to
     # know the current regime. ~100 iterations for a 2-year window —
     # sub-millisecond overhead per ticker.
-    regimes: list[Optional[Regime]] = []
-    bar_inputs_list: list[Optional[BarInputs]] = []
+    regimes: list[Regime | None] = []
+    bar_inputs_list: list[BarInputs | None] = []
 
     prev_regime: Regime = Regime.NEUTRAL
-    prev_close: Optional[float] = None
-    prev_lower_env: Optional[float] = None
-    prev_upper_env: Optional[float] = None
+    prev_close: float | None = None
+    prev_lower_env: float | None = None
+    prev_upper_env: float | None = None
 
     for i in range(len(weekly_bars)):
         med = series.emas.med.iloc[i]
@@ -261,9 +259,9 @@ def generate_live_signal_for_ticker(
     # current one. Normally this is regimes[-2]; if that's None
     # (warmup), keep going. If we never find one, treat as first-bar.
     prev_completed_regime: Regime = Regime.NEUTRAL
-    prev_completed_close: Optional[float] = None
-    prev_completed_lower_env: Optional[float] = None
-    prev_completed_upper_env: Optional[float] = None
+    prev_completed_close: float | None = None
+    prev_completed_lower_env: float | None = None
+    prev_completed_upper_env: float | None = None
     for j in range(len(regimes) - 2, -1, -1):
         # Bind indexed access to locals so pyright narrows via flow
         # analysis. Indexed access (regimes[j]) doesn't get narrowed by

@@ -7,7 +7,7 @@ test_market_cap_domain.py and test_index_domain.py.
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 
 import pytest
 
@@ -80,7 +80,7 @@ class TestIndicatorStateDataclass:
             "long_turn_sell": False,
             "longest_turn_buy": False,
             "longest_turn_sell": False,
-            "computed_at": datetime(2026, 5, 22, 16, 0, tzinfo=timezone.utc),
+            "computed_at": datetime(2026, 5, 22, 16, 0, tzinfo=UTC),
         }
         defaults.update(overrides)
         return IndicatorState(**defaults)
@@ -173,7 +173,7 @@ class TestSignalEventDataclass:
             "regime_before": 0,
             "regime_after": 1,
             "close_at_event": 844.27,
-            "computed_at": datetime(2026, 5, 22, 16, 0, tzinfo=timezone.utc),
+            "computed_at": datetime(2026, 5, 22, 16, 0, tzinfo=UTC),
         }
         defaults.update(overrides)
         return SignalEvent(**defaults)

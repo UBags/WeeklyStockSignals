@@ -28,7 +28,7 @@ from __future__ import annotations
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Iterator
+from collections.abc import Iterator
 
 _correlation_id_var: ContextVar[str | None] = ContextVar(
     "correlation_id", default=None,

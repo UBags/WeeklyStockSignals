@@ -13,7 +13,6 @@ from decimal import Decimal
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -32,16 +31,16 @@ class TickerRow:
     exchange: str
     symbol: str
     instrument_type: str
-    full_name: Optional[str]
-    isin: Optional[str]
+    full_name: str | None
+    isin: str | None
     tier: int
     is_active: bool
-    delisted_at: Optional[datetime]
-    last_successful_bar_date: Optional[date]
+    delisted_at: datetime | None
+    last_successful_bar_date: date | None
     consecutive_failures: int
     parked: bool
-    market_cap: Optional[Decimal] = None
-    industry: Optional[str] = None
+    market_cap: Decimal | None = None
+    industry: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,8 +81,8 @@ def list_tickers(
     *,
     exchange: str = "NSE",
     include_delisted: bool = False,
-    tier_filter: Optional[int] = None,
-    symbol_substr: Optional[str] = None,
+    tier_filter: int | None = None,
+    symbol_substr: str | None = None,
     limit: int = 5000,
 ) -> list[TickerRow]:
     """The main tickers tab query. Left-joins etl_ticker_status so we
@@ -300,17 +299,17 @@ class TickerComboRow:
     exchange: str
     symbol: str
     instrument_type: str
-    full_name: Optional[str]
+    full_name: str | None
     has_recent_signal: bool
-    latest_signal: Optional[str] = None
-    industry: Optional[str] = None
-    market_cap: Optional[Decimal] = None
+    latest_signal: str | None = None
+    industry: str | None = None
+    market_cap: Decimal | None = None
 
 
 def ticker_universe_with_recent_signals(
     conn: Connection,
     *,
-    exchange: Optional[str] = None,
+    exchange: str | None = None,
 ) -> list[TickerComboRow]:
     """Active ticker universe, flagged for recent signal activity.
 
@@ -473,16 +472,16 @@ class BenchmarkWindowSnapshot:
     is missing (sub-threshold history).
     """
     # Industry vs NIFTY
-    industry_alpha: Optional[float]
-    industry_beta: Optional[float]
-    industry_rs_pct: Optional[float]
+    industry_alpha: float | None
+    industry_beta: float | None
+    industry_rs_pct: float | None
     # Stock vs Industry
-    stock_alpha: Optional[float]
-    stock_beta: Optional[float]
-    stock_rs_pct: Optional[float]
-    stock_r2: Optional[float]
+    stock_alpha: float | None
+    stock_beta: float | None
+    stock_rs_pct: float | None
+    stock_r2: float | None
     # Composite for ranking
-    rank_score: Optional[float]
+    rank_score: float | None
 
 @dataclass(frozen=True)
 class IndustryIndicators:
@@ -497,17 +496,17 @@ class IndustryIndicators:
             tri-state semantics as regime so the renderer can reuse
             the bullish/bearish/neutral coloring logic.
     """
-    industry_name: Optional[str]
-    regime: Optional[int]              # -1 / 0 / +1
-    trend: Optional[int]               # -1 / 0 / +1
-    latest_trade_date: Optional[date]
+    industry_name: str | None
+    regime: int | None              # -1 / 0 / +1
+    trend: int | None               # -1 / 0 / +1
+    latest_trade_date: date | None
     # Phase 6-3 (revised): benchmark stats indexed by window. Three
     # snapshots — SHORT (26w), MEDIUM (52w), LONG (156w) — so the
     # Tickers tab can render them in a tabbed view. Any window may be
     # None when no stats row exists yet (sub-threshold history).
-    short: Optional["BenchmarkWindowSnapshot"] = None
-    medium: Optional["BenchmarkWindowSnapshot"] = None
-    long: Optional["BenchmarkWindowSnapshot"] = None
+    short: BenchmarkWindowSnapshot | None = None
+    medium: BenchmarkWindowSnapshot | None = None
+    long: BenchmarkWindowSnapshot | None = None
 
 
 def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
@@ -548,7 +547,7 @@ def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
         if latest.display_regime is not None else None
     )
 
-    trend: Optional[int] = None
+    trend: int | None = None
     if len(state_rows) >= 3:
         delta = float(state_rows[0].med_ema) - float(state_rows[2].med_ema)
         if delta > 0:
@@ -583,7 +582,7 @@ def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
     def _f(value):
         return float(value) if value is not None else None
 
-    def _build_snapshot(window_label: str) -> Optional[BenchmarkWindowSnapshot]:
+    def _build_snapshot(window_label: str) -> BenchmarkWindowSnapshot | None:
         s = stock_by_window.get(window_label)
         i = industry_by_window.get(window_label)
         if s is None and i is None:
@@ -624,7 +623,7 @@ def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
 
 def latest_mcap_for_ticker(
     conn: Connection, ticker_id: int,
-) -> Optional[Decimal]:
+) -> Decimal | None:
     """Return the most recent daily_market_cap value for a ticker.
 
     Used by the Signals tab's Bar detail readout to surface the

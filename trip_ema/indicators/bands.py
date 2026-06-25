@@ -9,7 +9,6 @@ three EMAs (so they hug the ribbon's outer extents, not its center).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import NamedTuple
 
 from ..domain import IndicatorParams

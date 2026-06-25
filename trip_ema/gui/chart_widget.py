@@ -44,7 +44,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QPointF, Signal
@@ -179,14 +178,14 @@ class ChartWidget(QWidget):
         self,
         mode: ChartMode,
         *,
-        title: Optional[str] = None,
-        parent: Optional[QWidget] = None,
+        title: str | None = None,
+        parent: QWidget | None = None,
     ):
         super().__init__(parent)
         self._mode = mode
         self._title = title
 
-        self._last_payload: Optional[dict] = None
+        self._last_payload: dict | None = None
         self._bars_by_index: dict[int, dict] = {}
         self._bar_index_to_dt: list[datetime] = []
 
@@ -299,7 +298,7 @@ class ChartWidget(QWidget):
 
     # ---------- Public API ---------- #
 
-    def render(self, payload: Optional[dict]) -> None:
+    def render(self, payload: dict | None) -> None:
         """Render from a SignalHistoryPayload-shaped dict. None or
         an empty payload clears the chart AND the cached bar lookup
         so latest_bar() correctly returns None afterward."""
@@ -386,7 +385,7 @@ class ChartWidget(QWidget):
         if self._last_payload is not None:
             self.render(self._last_payload)
 
-    def latest_bar(self) -> Optional[dict]:
+    def latest_bar(self) -> dict | None:
         """Return the most recent (rightmost) bar from the rendered
         payload, or None if no payload has been rendered. Used by
         SignalsView to default the bar-detail readout."""

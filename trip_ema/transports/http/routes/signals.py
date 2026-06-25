@@ -16,9 +16,9 @@ returns 404.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, UTC
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Engine, text
 
 from ....api import (
@@ -32,7 +32,6 @@ from ..dependencies import get_cache, get_db_engine
 from .signal_history import build_signal_history_payload
 from ..schemas import (
     HistoricalBarPayload,
-    HistoricalSignalEventPayload,
     SignalHistoryPayload,
     TerseResponsePayload,
     VerboseResponsePayload,
@@ -83,7 +82,7 @@ def get_industry_history(
         # have data (or we may want to return an empty-bars payload
         # so the GUI degrades gracefully instead of showing "fetch
         # failed").
-        since = datetime.now(timezone.utc) - timedelta(days=365 * years)
+        since = datetime.now(UTC) - timedelta(days=365 * years)
         rows = conn.execute(text("""
             SELECT
                 v.trade_date,
@@ -116,7 +115,7 @@ def get_industry_history(
     # directly (no tz on DATE columns); a date d sits in the week
     # starting at the Monday on-or-before d.
     from collections import OrderedDict
-    weeks: "OrderedDict[date, list]" = OrderedDict()
+    weeks: OrderedDict[date, list] = OrderedDict()
     for r in rows:
         d = r.trade_date
         # Monday-of-week. weekday(): Mon=0..Sun=6.
@@ -167,7 +166,7 @@ def get_industry_history(
         # bar_timestamp: encode the Monday as a UTC datetime at 00:00.
         # Same shape as the ticker endpoint's bar_timestamps.
         bar_ts = datetime.combine(
-            week_start, datetime.min.time(), tzinfo=timezone.utc,
+            week_start, datetime.min.time(), tzinfo=UTC,
         )
         bars.append(HistoricalBarPayload(
             bar_timestamp=bar_ts,

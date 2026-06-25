@@ -3,7 +3,7 @@ isolated filesystem state."""
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 from pathlib import Path
 
 import pytest
@@ -22,7 +22,7 @@ def _entry(symbol="RELIANCE", tid=1, reason="3 consecutive failures"):
     return ParkedEntry(
         ticker_symbol=symbol,
         ticker_id=tid,
-        parked_at=datetime(2026, 5, 17, 12, 0, 0, tzinfo=timezone.utc),
+        parked_at=datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC),
         reason=reason,
         last_error="yfinance returned empty DataFrame",
     )
@@ -81,11 +81,11 @@ class TestParkedFileManagement:
         We replace them with spaces on write."""
         entry = ParkedEntry(
             ticker_symbol="MULTI", ticker_id=1,
-            parked_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            parked_at=datetime(2026, 5, 17, tzinfo=UTC),
             reason="test",
             last_error="line1\nline2\nline3",
         )
         path = append_parked(entry, date(2026, 5, 17), tmp_path)
         entries = read_parked(path)
         assert "\n" not in entries[0].last_error
-        assert "line1 line2 line3" == entries[0].last_error
+        assert entries[0].last_error == "line1 line2 line3"

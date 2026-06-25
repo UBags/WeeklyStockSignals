@@ -42,8 +42,7 @@ This module is Qt-free and DB-free so it tests under `gui_pure/`.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import datetime, timedelta, UTC
 
 
 # Approximate days per year — used for CAGR's "years" denominator
@@ -118,15 +117,15 @@ class BacktestSummary:
     total_return_pct: float
     worst_mae_pct: float
     cagr_pct: float
-    first_entry_date: Optional[datetime]
-    last_exit_date: Optional[datetime]
+    first_entry_date: datetime | None
+    last_exit_date: datetime | None
     duration_days: int
 
 
 @dataclass(frozen=True, slots=True)
 class BacktestResult:
     trades: list[Trade]
-    open_trade: Optional[OpenTrade]
+    open_trade: OpenTrade | None
     summary: BacktestSummary
     bars_evaluated: int        # bars iterated past warmup
     bars_skipped_warmup: int
@@ -162,11 +161,11 @@ def run_long_only_backtest(
 
     in_trade = False
     entry_bar_idx = -1
-    entry_date: Optional[datetime] = None
+    entry_date: datetime | None = None
     entry_price = 0.0
     n_shares = 0.0
     min_low_in_trade = float("inf")
-    prev_regime: Optional[str] = None
+    prev_regime: str | None = None
 
     trades: list[Trade] = []
     bars_evaluated = 0
@@ -247,7 +246,7 @@ def run_long_only_backtest(
 
         prev_regime = regime
 
-    open_trade: Optional[OpenTrade] = None
+    open_trade: OpenTrade | None = None
     if in_trade and bars:
         last_bar = bars[-1]
         last_close = last_bar.get("close", entry_price)
@@ -364,8 +363,8 @@ def _compute_summary(
 def filter_bars_to_range(
     bars: list[dict],
     *,
-    years: Optional[int],
-    reference_dt: Optional[datetime] = None,
+    years: int | None,
+    reference_dt: datetime | None = None,
 ) -> list[dict]:
     """Slice bars to those with `bar_timestamp >= reference - years`.
 
@@ -386,7 +385,7 @@ def filter_bars_to_range(
     if years is None:
         return list(bars)
     if reference_dt is None:
-        reference_dt = datetime.now(timezone.utc)
+        reference_dt = datetime.now(UTC)
     cutoff = reference_dt - timedelta(days=_DAYS_PER_YEAR * years)
     out: list[dict] = []
     for bar in bars:

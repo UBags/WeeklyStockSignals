@@ -27,7 +27,6 @@ Refresh:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -52,9 +51,9 @@ class ExchangeStatePanel(QWidget):
     row, parent calls `set_not_yet_active(exchange)`.
     """
 
-    def __init__(self, *, parent: Optional[QWidget] = None):
+    def __init__(self, *, parent: QWidget | None = None):
         super().__init__(parent)
-        self._current_exchange: Optional[str] = None
+        self._current_exchange: str | None = None
         self._build_ui()
 
     # ---------- public ---------- #
@@ -135,7 +134,7 @@ class ExchangeStatePanel(QWidget):
         self._empty_label.setVisible(True)
 
     @property
-    def current_exchange(self) -> Optional[str]:
+    def current_exchange(self) -> str | None:
         return self._current_exchange
 
     # ---------- UI construction ---------- #

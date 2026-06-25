@@ -5,10 +5,9 @@ The HTTP poster is injectable for tests. Production uses requests.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
-from typing import Callable
+from collections.abc import Callable
 
 from ..domain import NotificationBatch
 from .batcher import render_json

@@ -31,12 +31,11 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta, UTC
+from typing import Any
 
 try:
     import psycopg2
@@ -93,7 +92,7 @@ class CheckResult:
 @dataclass
 class Baseline:
     captured_at: datetime
-    ohlcv_max_bar_ts: Optional[datetime]
+    ohlcv_max_bar_ts: datetime | None
     ohlcv_rowcount: int
     indicator_state_ticker_rowcount: int
     indicator_state_industry_rowcount: int
@@ -127,7 +126,7 @@ def scalar(conn, sql: str, params: dict | None = None) -> Any:
         return next(iter(row.values()))
 
 
-def fetch_one(conn, sql: str, params: dict | None = None) -> Optional[dict]:
+def fetch_one(conn, sql: str, params: dict | None = None) -> dict | None:
     with conn.cursor() as cur:
         cur.execute(sql, params or {})
         return cur.fetchone()
@@ -153,7 +152,7 @@ def capture_baseline(conn, log_path: str) -> Baseline:
         "SELECT MAX(bar_timestamp) FROM ohlcv_bars",
     )
     return Baseline(
-        captured_at=datetime.now(timezone.utc),
+        captured_at=datetime.now(UTC),
         ohlcv_max_bar_ts=ohlcv_max,
         ohlcv_rowcount=scalar(conn, "SELECT COUNT(*) FROM ohlcv_bars"),
         indicator_state_ticker_rowcount=scalar(conn,
@@ -188,7 +187,7 @@ def render_baseline(b: Baseline) -> None:
 def trigger_run(service_url: str, exchange: str, admin_token: str) -> dict:
     url = f"{service_url.rstrip('/')}/v1/admin/orchestrator/{exchange}/run-now"
     headers = {"Authorization": f"Bearer {admin_token}"}
-    print(BOLD(f"\n── Triggering pipeline ───────────────────────────────────"))
+    print(BOLD("\n── Triggering pipeline ───────────────────────────────────"))
     print(f"  POST {url}")
     try:
         r = requests.post(url, headers=headers, timeout=10)
@@ -218,12 +217,12 @@ def poll_status(
     the baseline. Returns (completed, reason)."""
     url = f"{service_url.rstrip('/')}/v1/admin/orchestrator/status"
     headers = {"Authorization": f"Bearer {admin_token}"}
-    deadline = datetime.now(timezone.utc) + timedelta(minutes=timeout_minutes)
+    deadline = datetime.now(UTC) + timedelta(minutes=timeout_minutes)
 
     print(BOLD(f"\n── Polling completion (every {poll_interval_s}s, "
                f"timeout {timeout_minutes}m) ─"))
     poll = 0
-    while datetime.now(timezone.utc) < deadline:
+    while datetime.now(UTC) < deadline:
         poll += 1
         # Approach 1: orchestrator status API
         try:
@@ -604,7 +603,7 @@ def main() -> int:
     n_warn = sum(1 for r in results if r.status == "WARN")
     n_fail = sum(1 for r in results if r.status == "FAIL")
     n_skip = sum(1 for r in results if r.status == "SKIP")
-    print(BOLD(f"\n── Summary ──"))
+    print(BOLD("\n── Summary ──"))
     print(f"  {GREEN(str(n_pass)+' pass')}  "
           f"{YELLOW(str(n_warn)+' warn')}  "
           f"{RED(str(n_fail)+' fail')}  "

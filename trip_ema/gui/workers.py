@@ -17,7 +17,8 @@ Both are kept tiny — they're glue, not business logic.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
+from typing import Any
+from collections.abc import Callable
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
@@ -70,8 +71,8 @@ class BackgroundWorker(QRunnable):
 def submit(
     fn: Callable[[], Any],
     *,
-    on_finished: Optional[Callable[[Any], None]] = None,
-    on_failed: Optional[Callable[[str], None]] = None,
+    on_finished: Callable[[Any], None] | None = None,
+    on_failed: Callable[[str], None] | None = None,
 ) -> BackgroundWorker:
     """Build a worker, wire its callbacks, submit to the default pool.
 
@@ -144,7 +145,7 @@ class RefreshScheduler(QObject):
     def __init__(
         self, cadence_seconds: float, *,
         run_on_start: bool = True,
-        parent: Optional[QObject] = None,
+        parent: QObject | None = None,
     ):
         super().__init__(parent)
         self._timer = QTimer(self)

@@ -6,7 +6,7 @@ deterministically and avoid any sleeping.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -19,7 +19,7 @@ from trip_ema.scheduler._wall_clock import (
 
 
 IST = ZoneInfo("Asia/Kolkata")
-UTC = timezone.utc
+UTC = UTC
 
 
 # ---------------------------------------------------------------------------

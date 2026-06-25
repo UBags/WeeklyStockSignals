@@ -11,14 +11,13 @@ remaining notification budget.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Iterable
+from typing import Any
 
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
 from ..domain import (
-    BarState,
     ChangeSignal,
     SignalEvent,
     TickerRef,

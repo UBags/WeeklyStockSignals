@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -82,7 +81,7 @@ class SymbolHistoryRepository:
             for r in result
         ]
 
-    def find_ticker_for_old_symbol(self, old_symbol: str) -> Optional[int]:
+    def find_ticker_for_old_symbol(self, old_symbol: str) -> int | None:
         """If a query comes in for a symbol that's been renamed,
         return the canonical ticker_id. Returns the most recent
         match if the same old_symbol has been used by multiple

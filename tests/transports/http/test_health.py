@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, UTC
 
 import pytest
 from fastapi.testclient import TestClient
@@ -26,7 +26,7 @@ from tests.transports.http.conftest import _build_test_config
 
 def _populate_cache(cache: SignalCache) -> None:
     """Seed the cache with one snapshot so readyz returns 200."""
-    t = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    t = datetime(2026, 5, 18, tzinfo=UTC)
     ind = IndicatorStateSnapshot(
         trade_date=date(2026, 5, 18),
         med_ema=100.0, long_ema=100.0, longest_ema=100.0, atr=2.0,
@@ -123,7 +123,7 @@ def test_readyz_503_when_compute_scheduler_died():
     must return 503 even if cache is populated."""
     scheduler = _StubScheduler(
         alive=False,
-        last_run=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        last_run=datetime(2026, 5, 18, tzinfo=UTC),
         unhealthy_reason="ComputeScheduler thread died",
     )
     client, app = _build_app_with(scheduler)
@@ -139,12 +139,12 @@ def test_readyz_503_when_compute_scheduler_died():
 def test_readyz_503_when_distributor_died():
     scheduler = _StubScheduler(
         alive=True,
-        last_run=datetime.now(timezone.utc),
+        last_run=datetime.now(UTC),
         unhealthy_reason=None,
     )
     distributor = _StubScheduler(
         alive=False,
-        last_run=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        last_run=datetime(2026, 5, 18, tzinfo=UTC),
         unhealthy_reason="SubscriberDistributor thread died",
     )
     client, app = _build_app_with(scheduler, distributor=distributor)
@@ -161,7 +161,7 @@ def test_readyz_503_when_scheduler_wedged():
     """Thread alive but no completion in 2× cadence → unhealthy."""
     scheduler = _StubScheduler(
         alive=True,
-        last_run=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        last_run=datetime(2026, 5, 18, tzinfo=UTC),
         unhealthy_reason="ComputeScheduler hasn't completed in 1800s",
     )
     client, app = _build_app_with(scheduler)

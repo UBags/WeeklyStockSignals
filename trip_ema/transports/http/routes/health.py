@@ -23,7 +23,7 @@ that have cache snapshots).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -63,7 +63,7 @@ def readyz(
     orchestrator_pool=Depends(get_orchestrator_pool),
 ) -> HealthPayload:
     """Readiness probe. Returns 200 only if the service can do useful work."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     issues: list[str] = []
 
     n_snapshots = cache.snapshot_count()

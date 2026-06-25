@@ -33,7 +33,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Iterable, Optional, Protocol
+from typing import Protocol
+from collections.abc import Iterable
 
 
 class _HasRecentFlag(Protocol):

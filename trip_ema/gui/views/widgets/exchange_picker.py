@@ -34,7 +34,6 @@ Design notes:
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QWidget
@@ -90,7 +89,7 @@ class ExchangePicker(QWidget):
         http: TripEmaHttpClient,
         *,
         label_text: str = "Exchange:",
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
         auto_fetch: bool = True,
     ):
         """
@@ -108,7 +107,7 @@ class ExchangePicker(QWidget):
         """
         super().__init__(parent)
         self._http = http
-        self._selected_exchange: Optional[str] = None
+        self._selected_exchange: str | None = None
         self._loaded: bool = False
 
         self.combo = QComboBox()
@@ -132,7 +131,7 @@ class ExchangePicker(QWidget):
 
     # ---------- public API ---------- #
 
-    def current_exchange(self) -> Optional[str]:
+    def current_exchange(self) -> str | None:
         return self._selected_exchange
 
     def is_loaded(self) -> bool:

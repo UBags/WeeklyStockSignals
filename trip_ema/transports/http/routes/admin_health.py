@@ -16,13 +16,12 @@ only and side-effect-free.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, UTC
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import Engine, text
 
 from ....cache import SignalCache
-from ....notifications.circuit_breaker import CircuitBreakingTransport
 from ....scheduler import ComputeScheduler, SubscriberDistributor
 from ..dependencies import (
     get_cache, get_compute_scheduler, get_db_engine, get_distributor,
@@ -86,7 +85,7 @@ def health_snapshot(
     overall = _aggregate_overall_status(cards)
     return HealthSnapshotPayload(
         overall_status=overall, cards=cards,
-        snapshot_taken_at=datetime.now(timezone.utc),
+        snapshot_taken_at=datetime.now(UTC),
     )
 
 
@@ -153,7 +152,7 @@ def _etl_freshness_card(db_engine: Engine) -> HealthCardPayload:
                 headline="No EoD runs recorded",
                 detail="Run trip-ema-etl incremental-eod to seed.",
             )
-        age = datetime.now(timezone.utc) - row.last_finished
+        age = datetime.now(UTC) - row.last_finished
         hours = age.total_seconds() / 3600.0
         if hours > 24 * 7:
             return HealthCardPayload(
@@ -220,7 +219,7 @@ def _compute_scheduler_card(
                     detail="No orchestrator pipeline has completed yet.",
                 )
 
-            age_seconds = (datetime.now(timezone.utc) - latest_finished).total_seconds()
+            age_seconds = (datetime.now(UTC) - latest_finished).total_seconds()
             age_str = (
                 f"{age_seconds / 60:.1f} min ago"
                 if age_seconds < 3600
@@ -274,7 +273,7 @@ def _compute_scheduler_card(
                 headline="Never run",
                 detail="Scheduler hasn't completed a cycle yet.",
             )
-        age_seconds = (datetime.now(timezone.utc) - last).total_seconds()
+        age_seconds = (datetime.now(UTC) - last).total_seconds()
         if age_seconds > 3600:
             return HealthCardPayload(
                 name="Compute scheduler", status="warn",

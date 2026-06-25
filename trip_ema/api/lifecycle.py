@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlalchemy import Engine, text
 
@@ -124,7 +124,7 @@ def prime_cache_from_db(
             conn, ticker_ids=set(indicator_rows.keys()) | set(signal_rows.keys()),
         )
 
-    snapshot_taken_at = datetime.now(timezone.utc)
+    snapshot_taken_at = datetime.now(UTC)
     tickers_seen = set(indicator_rows.keys()) | set(signal_rows.keys())
 
     indicator_only = 0

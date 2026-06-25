@@ -27,7 +27,7 @@ Why these three components and these weights:
 from __future__ import annotations
 
 import logging
-from typing import Sequence
+from collections.abc import Sequence
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection

@@ -25,8 +25,7 @@ read timeouts.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, UTC
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -79,7 +78,7 @@ def _require_executor(executor):
         )
 
 
-def _step_to_payload(step) -> Optional[OrchestratorStepStatusPayload]:
+def _step_to_payload(step) -> OrchestratorStepStatusPayload | None:
     if step is None:
         return None
     return OrchestratorStepStatusPayload(
@@ -194,7 +193,7 @@ def admin_orchestrator_run_now(
     return OrchestratorRunNowAcceptedPayload(
         action="run-now",
         exchanges=[exchange],
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
     )
 
 
@@ -233,5 +232,5 @@ def admin_orchestrator_run_now_all(
     return OrchestratorRunNowAcceptedPayload(
         action="run-now-all",
         exchanges=[o.exchange for o in orchestrators],
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
     )

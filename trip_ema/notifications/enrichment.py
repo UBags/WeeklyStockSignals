@@ -38,7 +38,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import Engine, text
 
@@ -66,9 +65,9 @@ class TickerEnrichment:
     (typically '—' or NEUTRAL coloring).
     """
     ticker_ref: TickerRef
-    sector: Optional[str] = None
-    industry: Optional[str] = None
-    market_cap_rupees: Optional[float] = None
+    sector: str | None = None
+    industry: str | None = None
+    market_cap_rupees: float | None = None
     sector_zone: int = 0          # -1 bearish, 0 neutral, +1 bullish
     sector_direction: int = 0     # -1 down, 0 flat/unknown, +1 up
     recent_signals: tuple[HistoricalSignal, ...] = field(default_factory=tuple)
@@ -83,7 +82,7 @@ class BatchEnrichment:
     """
     by_ticker: dict[tuple[str, str, str], TickerEnrichment]
 
-    def get(self, ref: TickerRef) -> Optional[TickerEnrichment]:
+    def get(self, ref: TickerRef) -> TickerEnrichment | None:
         return self.by_ticker.get((ref.exchange, ref.symbol, ref.instrument))
 
 

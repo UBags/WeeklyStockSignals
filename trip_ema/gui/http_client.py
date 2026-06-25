@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional
 
 import requests
 
@@ -40,7 +39,7 @@ class HttpClientConfig:
     base_url: str
     """Where the trip_ema main service is listening. e.g.
     'http://localhost:8000'."""
-    token: Optional[str]
+    token: str | None
     """Admin bearer token. None disables action buttons in the UI."""
     timeout_seconds: float = 30.0
     """Request timeout. Status reads should finish in <1s; action
@@ -96,7 +95,7 @@ class TripEmaHttpClient:
         )
 
     def backfill(
-        self, *, start_date: date, tier: Optional[int] = None,
+        self, *, start_date: date, tier: int | None = None,
         exchange: str = "NSE",
     ) -> dict:
         params: dict = {
@@ -133,7 +132,7 @@ class TripEmaHttpClient:
     # ---------- ETL status reads (GET) ---------- #
 
     def get_etl_status(
-        self, *, limit: int = 20, exchange: Optional[str] = None,
+        self, *, limit: int = 20, exchange: str | None = None,
     ) -> dict:
         """Phase 14.6c: optional `exchange` scopes the tier_counts
         to one exchange. When omitted, server falls back to
@@ -248,7 +247,7 @@ class TripEmaHttpClient:
     def create_subscriber(
         self, *, transport: str, address: str,
         notify_cadence_minutes: int, is_active: bool = True,
-        filters: Optional[list] = None,
+        filters: list | None = None,
     ) -> dict:
         body = {
             "transport": transport, "address": address,
@@ -261,10 +260,10 @@ class TripEmaHttpClient:
 
     def update_subscriber(
         self, subscriber_id: int,
-        *, transport: Optional[str] = None,
-        address: Optional[str] = None,
-        notify_cadence_minutes: Optional[int] = None,
-        is_active: Optional[bool] = None,
+        *, transport: str | None = None,
+        address: str | None = None,
+        notify_cadence_minutes: int | None = None,
+        is_active: bool | None = None,
     ) -> dict:
         body: dict = {}
         if transport is not None:
@@ -304,7 +303,7 @@ class TripEmaHttpClient:
 
     def list_recent_notifications(
         self, *, limit: int = 100, since_hours: int = 24 * 7,
-        subscriber_id: Optional[int] = None,
+        subscriber_id: int | None = None,
     ) -> dict:
         params: dict = {"limit": limit, "since_hours": since_hours}
         if subscriber_id is not None:
@@ -351,10 +350,10 @@ class TripEmaHttpClient:
 
     # ---------- internal ---------- #
 
-    def _get(self, path: str, *, params: Optional[dict] = None) -> dict:
+    def _get(self, path: str, *, params: dict | None = None) -> dict:
         return self._request("GET", path, params=params)
 
-    def _post(self, path: str, *, params: Optional[dict] = None) -> dict:
+    def _post(self, path: str, *, params: dict | None = None) -> dict:
         return self._request("POST", path, params=params)
 
     def _post_json(self, path: str, *, body) -> dict:
@@ -391,7 +390,7 @@ class TripEmaHttpClient:
 
     def _request(
         self, method: str, path: str,
-        *, params: Optional[dict] = None,
+        *, params: dict | None = None,
     ) -> dict:
         url = f"{self._config.base_url}{path}"
         try:

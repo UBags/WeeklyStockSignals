@@ -11,7 +11,7 @@ equality landmines.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 
 import pytest
 from sqlalchemy import text
@@ -39,7 +39,7 @@ from trip_ema.persistence.tickers_repo import TickersRepository
 
 @pytest.fixture
 def now():
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 @pytest.fixture

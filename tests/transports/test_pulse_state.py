@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,7 +26,7 @@ from trip_ema.scheduler.market_orchestrator import (
 from trip_ema.transports.http.pulse_state import PulseEvent, PulseState
 
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _dummy_summary(exchange: str = "NSE") -> OrchestratorRunSummary:

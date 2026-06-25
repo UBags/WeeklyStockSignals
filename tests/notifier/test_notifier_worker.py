@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import fakeredis
 import pytest
@@ -60,7 +60,7 @@ def queue(redis_client):
 
 @pytest.fixture
 def now():
-    return datetime(2026, 5, 18, 12, tzinfo=timezone.utc)
+    return datetime(2026, 5, 18, 12, tzinfo=UTC)
 
 
 @pytest.fixture

@@ -49,9 +49,9 @@ def _insert_open_run(
     conn,
     *,
     kind: RunKind,
-    exchange: Optional[str],
+    exchange: str | None,
     started_at_offset_hours: float,
-    notes: Optional[str] = None,
+    notes: str | None = None,
 ) -> int:
     """Insert an open (outcome=NULL, finished_at=NULL) etl_runs row
     with `started_at` placed at NOW() - offset_hours. Returns
@@ -84,7 +84,7 @@ def _insert_closed_run(
     conn,
     *,
     kind: RunKind,
-    exchange: Optional[str],
+    exchange: str | None,
     started_at_offset_hours: float,
     outcome: str,
 ) -> int:

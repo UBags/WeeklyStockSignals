@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Callable, Optional
+from collections.abc import Callable
 
-from sqlalchemy import Engine, text
+from sqlalchemy import text
 
 from ..config import Config
-from ..etl.exchanges import UnsupportedExchangeError, validate_exchange
+from ..etl.exchanges import validate_exchange
 from ..persistence import transaction
 from ..persistence.connection import create_engine_from_config
 from ..persistence.fundamentals_repo import (
@@ -1279,8 +1279,7 @@ def cmd_run_eod_pipeline(args, config: Config) -> int:
     cheap — Phase 1-3 (yfinance) only do real work every 80+ days;
     Phase 4-6 only re-do work if their inputs have changed.
     """
-    from datetime import datetime
-    from .eod_pipeline import run_eod_pipeline, StepStatus
+    from .eod_pipeline import run_eod_pipeline
 
     validate_exchange(args.exchange, config)
     db_engine = create_engine_from_config(config)

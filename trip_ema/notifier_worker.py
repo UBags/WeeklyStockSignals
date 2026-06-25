@@ -31,8 +31,8 @@ import logging
 import signal
 import sys
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +40,7 @@ import redis
 import sqlalchemy as sa
 
 from .config import Config, load_config
-from .config.schema import NotifierConfig, RedisConfig
+from .config.schema import RedisConfig
 from .domain import (
     ChangeSignal,
     NotificationBatch,
@@ -57,7 +57,6 @@ from .observability import metrics as M
 from .observability.tracing import (
     add_correlation_id_to_span,
     get_tracer,
-    set_span_attribute_if_active,
 )
 from .persistence import (
     SignalsRepository,
@@ -351,7 +350,7 @@ class NotifierWorker:
         batch = NotificationBatch(
             subscriber_id=subscriber_id,
             events=[signal_event],
-            composed_at=datetime.now(timezone.utc),
+            composed_at=datetime.now(UTC),
         )
         ok = transport.send(address, batch)
         if not ok:
@@ -362,7 +361,7 @@ class NotifierWorker:
             return "failed"
 
         # Write the notification log + bump last_notified_at, atomically.
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with transaction(self._db_engine) as conn:
             subs_repo = SubscribersRepository(conn)
             subs_repo.record_notification(

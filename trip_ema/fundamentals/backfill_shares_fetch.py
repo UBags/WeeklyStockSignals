@@ -36,7 +36,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Optional
 
 from ..etl.exchanges import yfinance_symbol
 
@@ -194,7 +193,7 @@ def _fetch_yfinance_shares_full(yf_symbol: str, start_date: date):
     return getter(start=start_date.isoformat())
 
 
-def _to_date(ts) -> Optional[date]:
+def _to_date(ts) -> date | None:
     """Convert pandas Timestamp / datetime / string → date.
     Returns None on parse failure."""
     if hasattr(ts, "date"):
@@ -210,7 +209,7 @@ def _to_date(ts) -> Optional[date]:
         return None
 
 
-def _to_positive_int(v) -> Optional[int]:
+def _to_positive_int(v) -> int | None:
     """Coerce numpy/pandas number → positive int, else None.
 
     Zero treated as missing (a real ticker with zero shares

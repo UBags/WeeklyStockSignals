@@ -7,7 +7,7 @@ docstring has at least one corresponding test.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, UTC
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -24,7 +24,7 @@ from trip_ema.scheduler.tick_planner import (
 
 
 IST = ZoneInfo("Asia/Kolkata")
-UTC = timezone.utc
+UTC = UTC
 EASTERN = ZoneInfo("America/New_York")
 
 

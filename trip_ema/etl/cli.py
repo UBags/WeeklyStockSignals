@@ -34,7 +34,6 @@ import logging
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Optional
 
 from ..config import Config
 from ..config.loader import load_config
@@ -375,7 +374,7 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------- entrypoint ---------- #
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -437,14 +436,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
 
 
-def _parse_date(s: str) -> Optional[date]:
+def _parse_date(s: str) -> date | None:
     try:
         return date.fromisoformat(s)
     except (TypeError, ValueError):
         return None
 
 
-def _parse_tier_filter(value: str) -> Optional[set[Tier]]:
+def _parse_tier_filter(value: str) -> set[Tier] | None:
     if value == "all":
         return None
     return {Tier(int(value))}

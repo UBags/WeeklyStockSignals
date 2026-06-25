@@ -29,7 +29,7 @@ tests here, query tests via a real DB elsewhere.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 
 import pytest
 from PySide6.QtCore import Qt
@@ -226,7 +226,7 @@ class TestForegroundBackgroundInteraction:
     def test_delisted_ticker_with_fresh_exit_signal_has_gray_text_on_blue_bg(self, qtbot):
         m = TickerTableModel()
         m.set_rows(
-            [_ticker(1, "X", delisted_at=datetime(2025, 1, 1, tzinfo=timezone.utc))],
+            [_ticker(1, "X", delisted_at=datetime(2025, 1, 1, tzinfo=UTC))],
             last_signals={1: "EXIT_FROM_BUY"},
         )
         fg = m.data(m.index(0, 0), Qt.ForegroundRole)
@@ -472,21 +472,21 @@ class TestRecentEventsFormat:
         # static method, this test should switch to calling it.
         from zoneinfo import ZoneInfo
         ist = ZoneInfo("Asia/Kolkata")
-        shared_bar = datetime(2026, 6, 15, 0, 0, tzinfo=timezone.utc)
+        shared_bar = datetime(2026, 6, 15, 0, 0, tzinfo=UTC)
         events = [
             SignalEventRow(
                 event_id=1, bar_timestamp=shared_bar,
-                computed_at=datetime(2026, 6, 17, 4, 0, tzinfo=timezone.utc),  # 09:30 IST
+                computed_at=datetime(2026, 6, 17, 4, 0, tzinfo=UTC),  # 09:30 IST
                 timeframe="1W", signal="BUY", price_at_signal=1839.40,
             ),
             SignalEventRow(
                 event_id=2, bar_timestamp=shared_bar,
-                computed_at=datetime(2026, 6, 16, 7, 10, tzinfo=timezone.utc),  # 12:40 IST
+                computed_at=datetime(2026, 6, 16, 7, 10, tzinfo=UTC),  # 12:40 IST
                 timeframe="1W", signal="EXIT_FROM_BUY", price_at_signal=1814.70,
             ),
             SignalEventRow(
                 event_id=3, bar_timestamp=shared_bar,
-                computed_at=datetime(2026, 6, 16, 4, 0, tzinfo=timezone.utc),   # 09:30 IST
+                computed_at=datetime(2026, 6, 16, 4, 0, tzinfo=UTC),   # 09:30 IST
                 timeframe="1W", signal="BUY", price_at_signal=1833.50,
             ),
         ]

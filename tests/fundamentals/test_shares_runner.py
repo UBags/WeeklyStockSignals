@@ -7,7 +7,7 @@ retry that the unit tests for the fetcher can't see.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, UTC
 from unittest.mock import MagicMock
 
 import pytest
@@ -34,7 +34,7 @@ from trip_ema.persistence.tickers_repo import TickersRepository
 
 @pytest.fixture
 def now():
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 @pytest.fixture
@@ -94,7 +94,7 @@ class TestSharesHappyPath:
         assert r.failed == 0
         assert row.shares_outstanding == 3_600_000_000
         assert row.shares_source == "YFINANCE"
-        assert row.as_of_date == datetime.now(timezone.utc).date()
+        assert row.as_of_date == datetime.now(UTC).date()
 
     def test_implied_source_recorded_distinctly(self, db_engine, nse_tickers):
         """When the fetcher returns YFINANCE_IMPLIED, that provenance
@@ -196,7 +196,7 @@ class TestTimeSeriesShape:
             db_engine, "NSE",
             request_delay_s=0, fetch_fn=fetcher,
         )
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
         with db_engine.connect() as conn:
             row = InstrumentSharesRepository(conn).get_latest(
                 nse_tickers["RELIANCE"],

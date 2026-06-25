@@ -13,7 +13,7 @@ Coverage:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 from unittest.mock import MagicMock
 
 import pytest
@@ -101,7 +101,7 @@ class TestTickerTableModel:
     def test_delisted_ticker_renders_gray(self, qtbot):
         model = TickerTableModel()
         model.set_rows([
-            _ticker(delisted_at=datetime(2025, 1, 1, tzinfo=timezone.utc)),
+            _ticker(delisted_at=datetime(2025, 1, 1, tzinfo=UTC)),
         ])
         idx = model.index(0, COL_SYMBOL)
         brush = model.data(idx, Qt.ForegroundRole)

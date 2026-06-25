@@ -259,17 +259,15 @@ class TestFailures:
         with patch(
             "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
             return_value=(empty, "INR"),
-        ):
-            with pytest.raises(FinancialsFetchPermanent, match="no quarterly"):
-                fetch_quarterly_financials("X", "NSE")
+        ), pytest.raises(FinancialsFetchPermanent, match="no quarterly"):
+            fetch_quarterly_financials("X", "NSE")
 
     def test_none_dataframe_raises_permanent(self):
         with patch(
             "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
             return_value=(None, "INR"),
-        ):
-            with pytest.raises(FinancialsFetchPermanent):
-                fetch_quarterly_financials("X", "NSE")
+        ), pytest.raises(FinancialsFetchPermanent):
+            fetch_quarterly_financials("X", "NSE")
 
     def test_all_quarters_empty_raises_permanent(self):
         """DataFrame exists but every quarter has NaN for both rev
@@ -284,9 +282,8 @@ class TestFailures:
         with patch(
             "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
             return_value=(df, "INR"),
-        ):
-            with pytest.raises(FinancialsFetchPermanent, match="no quarters"):
-                fetch_quarterly_financials("X", "NSE")
+        ), pytest.raises(FinancialsFetchPermanent, match="no quarters"):
+            fetch_quarterly_financials("X", "NSE")
 
     def test_rate_limit_classification(self):
         def boom(_):
@@ -294,9 +291,8 @@ class TestFailures:
         with patch(
             "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
             side_effect=boom,
-        ):
-            with pytest.raises(FinancialsFetchRateLimited):
-                fetch_quarterly_financials("X", "NSE")
+        ), pytest.raises(FinancialsFetchRateLimited):
+            fetch_quarterly_financials("X", "NSE")
 
     def test_timeout_classified_as_transient(self):
         def boom(_):
@@ -304,9 +300,8 @@ class TestFailures:
         with patch(
             "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
             side_effect=boom,
-        ):
-            with pytest.raises(FinancialsFetchTransient):
-                fetch_quarterly_financials("X", "NSE")
+        ), pytest.raises(FinancialsFetchTransient):
+            fetch_quarterly_financials("X", "NSE")
 
     def test_404_classified_as_permanent(self):
         def boom(_):
@@ -314,9 +309,8 @@ class TestFailures:
         with patch(
             "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
             side_effect=boom,
-        ):
-            with pytest.raises(FinancialsFetchPermanent):
-                fetch_quarterly_financials("X", "NSE")
+        ), pytest.raises(FinancialsFetchPermanent):
+            fetch_quarterly_financials("X", "NSE")
 
 
 # ---------- exception hierarchy ---------- #

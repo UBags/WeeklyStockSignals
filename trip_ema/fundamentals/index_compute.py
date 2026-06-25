@@ -57,7 +57,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional
 
 from sqlalchemy import Engine, text
 
@@ -119,7 +118,7 @@ def select_top_n_constituents(
     rebalance_date: date,
     *,
     n: int = 10,
-    exchange: Optional[str] = None,
+    exchange: str | None = None,
 ) -> list[SelectedConstituent]:
     """Pick the top-N tickers by market cap for `industry_name` on
     `rebalance_date`.
@@ -226,7 +225,7 @@ def compute_index_value_for_date(
     db_engine: Engine,
     industry_name: str,
     trade_date: date,
-) -> Optional[ComputedValue]:
+) -> ComputedValue | None:
     """Compute the modified-Laspeyres index value for one day.
 
     Returns None if:

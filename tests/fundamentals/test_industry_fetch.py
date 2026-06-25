@@ -140,9 +140,8 @@ def test_empty_info_dict_raises_permanent():
     with patch(
         "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
         return_value={},
-    ):
-        with pytest.raises(IndustryFetchPermanent, match="empty info"):
-            fetch_industry("DELISTED", "NSE")
+    ), pytest.raises(IndustryFetchPermanent, match="empty info"):
+        fetch_industry("DELISTED", "NSE")
 
 
 def test_info_dict_with_no_identifying_fields_raises_permanent():
@@ -151,9 +150,8 @@ def test_info_dict_with_no_identifying_fields_raises_permanent():
     with patch(
         "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
         return_value={"random_field": "value"},
-    ):
-        with pytest.raises(IndustryFetchPermanent):
-            fetch_industry("WHATEVER", "NSE")
+    ), pytest.raises(IndustryFetchPermanent):
+        fetch_industry("WHATEVER", "NSE")
 
 
 def test_rate_limit_classification():
@@ -165,9 +163,8 @@ def test_rate_limit_classification():
     with patch(
         "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
         side_effect=raise_rate_limit,
-    ):
-        with pytest.raises(IndustryFetchRateLimited):
-            fetch_industry("X", "NSE")
+    ), pytest.raises(IndustryFetchRateLimited):
+        fetch_industry("X", "NSE")
 
 
 def test_timeout_classified_as_transient():
@@ -177,9 +174,8 @@ def test_timeout_classified_as_transient():
     with patch(
         "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
         side_effect=raise_timeout,
-    ):
-        with pytest.raises(IndustryFetchTransient):
-            fetch_industry("X", "NSE")
+    ), pytest.raises(IndustryFetchTransient):
+        fetch_industry("X", "NSE")
 
 
 def test_404_classified_as_permanent():
@@ -189,9 +185,8 @@ def test_404_classified_as_permanent():
     with patch(
         "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
         side_effect=raise_404,
-    ):
-        with pytest.raises(IndustryFetchPermanent):
-            fetch_industry("X", "NSE")
+    ), pytest.raises(IndustryFetchPermanent):
+        fetch_industry("X", "NSE")
 
 
 def test_unknown_error_classified_as_transient():
@@ -204,9 +199,8 @@ def test_unknown_error_classified_as_transient():
     with patch(
         "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
         side_effect=raise_weird,
-    ):
-        with pytest.raises(IndustryFetchTransient):
-            fetch_industry("X", "NSE")
+    ), pytest.raises(IndustryFetchTransient):
+        fetch_industry("X", "NSE")
 
 
 # ---------- exception hierarchy contract ---------- #

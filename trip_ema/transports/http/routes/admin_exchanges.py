@@ -19,7 +19,7 @@ Cheap — pure config read, no DB.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from fastapi import APIRouter, Depends
 
@@ -53,5 +53,5 @@ def admin_exchanges_list(
     return ExchangeListPayload(
         exchanges=exchanges,
         total=len(exchanges),
-        snapshot_taken_at=datetime.now(timezone.utc),
+        snapshot_taken_at=datetime.now(UTC),
     )

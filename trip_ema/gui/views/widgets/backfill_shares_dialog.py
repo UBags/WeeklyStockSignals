@@ -12,7 +12,6 @@ already knows.
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Optional
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
@@ -35,7 +34,7 @@ class BackfillSharesDialog(QDialog):
         self,
         *,
         exchange: str,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f"Backfill historical shares — {exchange}")

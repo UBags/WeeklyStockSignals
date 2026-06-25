@@ -63,8 +63,9 @@ from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
 )
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional, Protocol
+from datetime import datetime, timedelta, UTC
+from typing import Any, Protocol
+from collections.abc import Callable
 
 from ..observability import correlation_id, new_correlation_id
 from .market_calendar import TradingCalendar
@@ -86,10 +87,10 @@ logger = logging.getLogger(__name__)
 class OrchestratorStepResult:
     """One pipeline step's outcome. The summary holds three of these."""
     succeeded: bool = False
-    skipped_reason: Optional[str] = None
+    skipped_reason: str | None = None
     """If set, the step was not even attempted (e.g. non-trading day for
     fetch). Distinguishable from a failure: skipped is NOT an error."""
-    error_message: Optional[str] = None
+    error_message: str | None = None
     """Set on exception. Mutually exclusive with skipped_reason."""
     duration_seconds: float = 0.0
     detail: Any = None
@@ -108,7 +109,7 @@ class OrchestratorRunSummary:
     and tests."""
     exchange: str
     started_at: datetime
-    finished_at: Optional[datetime] = None
+    finished_at: datetime | None = None
     correlation_id: str = ""
 
     fetch: OrchestratorStepResult = field(default_factory=OrchestratorStepResult)
@@ -203,10 +204,10 @@ class MarketOrchestrator:
         fetch_fn: FetchFn,
         compute_run_once: ComputeRunOnceFn,
         distribute_run_once: DistributeRunOnceFn,
-        pulse: Optional[PulsePublisher] = None,
+        pulse: PulsePublisher | None = None,
         # Clock injection for deterministic tests. Production passes
         # nothing; the default reads the real wall clock.
-        now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
         sleep_fn: Callable[[float], None] = time_module.sleep,
     ):
         self._market = market
@@ -225,7 +226,7 @@ class MarketOrchestrator:
         self._run_lock = threading.Lock()
 
         # Loop thread management.
-        self._loop_thread: Optional[threading.Thread] = None
+        self._loop_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._was_started = False
 
@@ -245,13 +246,13 @@ class MarketOrchestrator:
             thread_name_prefix=f"orch-{market.exchange}-retry",
         )
         # Track the in-flight retry so stop() can cancel it cleanly.
-        self._pending_retry: Optional[Future] = None
+        self._pending_retry: Future | None = None
         self._pending_retry_lock = threading.Lock()
 
         # Public-readable state. Updated under _run_lock; readers should
         # treat as best-effort snapshots, not strongly consistent.
-        self.last_run_summary: Optional[OrchestratorRunSummary] = None
-        self.last_run_completed_at: Optional[datetime] = None
+        self.last_run_summary: OrchestratorRunSummary | None = None
+        self.last_run_completed_at: datetime | None = None
 
     # ---- Public lifecycle ----
 

@@ -142,4 +142,4 @@ def test_exit_buy_and_exit_sell_share_a_rank():
 
 
 def test_unsignalled_rank_is_strictly_greater_than_signalled_ranks():
-    assert UNSIGNALLED_RANK > max(SIGNAL_GROUP_RANK.values())
+    assert max(SIGNAL_GROUP_RANK.values()) < UNSIGNALLED_RANK

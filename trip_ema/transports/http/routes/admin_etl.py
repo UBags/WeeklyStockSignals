@@ -31,7 +31,7 @@ configured) before submitting to the executor; on failure, returns
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Engine, text
@@ -119,7 +119,7 @@ def admin_etl_refresh_listings(
     executor.submit(_run_refresh_listings_safe, db_engine, config, exchange)
     return EtlActionAcceptedPayload(
         action="refresh-listings", run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Listings refresh ({exchange}) submitted; "
             f"check /etl/status for progress."
@@ -147,7 +147,7 @@ def admin_etl_run_eod(
     executor.submit(_run_eod_safe, db_engine, config, exchange, lookback_days)
     return EtlActionAcceptedPayload(
         action="run-eod", run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"EoD run ({exchange}) submitted with "
             f"lookback_days={lookback_days}."
@@ -174,7 +174,7 @@ def admin_etl_run_intraday(
     executor.submit(_run_intraday_safe, db_engine, config, exchange)
     return EtlActionAcceptedPayload(
         action="run-intraday", run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Intraday run ({exchange}) submitted "
             f"(will be no-op on non-trading days)."
@@ -201,7 +201,7 @@ def admin_etl_recompute_tiers(
     executor.submit(_recompute_tiers_safe, db_engine, config, exchange)
     return EtlActionAcceptedPayload(
         action="recompute-tiers", run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=f"Tier recomputation ({exchange}) submitted.",
     )
 
@@ -222,7 +222,7 @@ def admin_etl_unpark_all(
     count = unpark_all(db_engine, config, exchange=exchange)
     return EtlActionAcceptedPayload(
         action="unpark-all", run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Unparked {count} {exchange} tickers. "
             f"They will retry on next EoD run."
@@ -258,7 +258,7 @@ def admin_etl_backfill(
     )
     return EtlActionAcceptedPayload(
         action="backfill", run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Backfill ({exchange}) submitted from {start_date.isoformat()}"
             + (f" (tier {tier} only)" if tier else " (all tiers)")
@@ -318,7 +318,7 @@ def admin_etl_backfill_shares(
     )
     return EtlActionAcceptedPayload(
         action="backfill-shares", run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Shares backfill ({exchange}) submitted from "
             f"{start_date.isoformat()}. Long-running; ~90 minutes. "
@@ -391,7 +391,7 @@ def admin_etl_status(
         ],
         parked_count=parked_count,
         tier_counts=tier_counts,
-        snapshot_taken_at=datetime.now(timezone.utc),
+        snapshot_taken_at=datetime.now(UTC),
     )
 
 
@@ -422,7 +422,7 @@ def admin_etl_parked(
             ))
     return EtlParkedListPayload(
         parked=parked_rows, total=len(parked_rows),
-        snapshot_taken_at=datetime.now(timezone.utc),
+        snapshot_taken_at=datetime.now(UTC),
     )
 
 

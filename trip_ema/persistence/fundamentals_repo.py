@@ -15,8 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timezone
-from typing import Iterable, Optional
+from datetime import date
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -49,7 +48,7 @@ class InstrumentIndustryRepository:
 
     # ----- reads ----- #
 
-    def get(self, ticker_id: int) -> Optional[IndustryClassification]:
+    def get(self, ticker_id: int) -> IndustryClassification | None:
         row = self._conn.execute(
             text("""
                 SELECT ticker_id, sector, industry,
@@ -88,7 +87,7 @@ class InstrumentIndustryRepository:
         self,
         ticker_id: int,
         *,
-        etf_long_name: Optional[str],
+        etf_long_name: str | None,
     ) -> bool:
         """Classify a ticker as an ETF.
 
@@ -192,8 +191,8 @@ class InstrumentIndustryRepository:
         self,
         ticker_id: int,
         *,
-        sector: Optional[str],
-        industry: Optional[str],
+        sector: str | None,
+        industry: str | None,
         classification_source: str = "YFINANCE",
     ) -> None:
         """Unconditional upsert. Use `upsert_unless_overridden` in
@@ -224,8 +223,8 @@ class InstrumentIndustryRepository:
         self,
         ticker_id: int,
         *,
-        sector: Optional[str],
-        industry: Optional[str],
+        sector: str | None,
+        industry: str | None,
         classification_source: str = "YFINANCE",
     ) -> bool:
         """Upsert with an override-table guard. Returns True if the
@@ -293,7 +292,7 @@ class IndustryOverrideRepository:
     def __init__(self, conn: Connection):
         self._conn = conn
 
-    def get(self, ticker_id: int) -> Optional[IndustryOverride]:
+    def get(self, ticker_id: int) -> IndustryOverride | None:
         row = self._conn.execute(
             text("""
                 SELECT ticker_id, sector, industry, note, set_by, set_at
@@ -320,8 +319,8 @@ class IndustryOverrideRepository:
         *,
         sector: str,
         industry: str,
-        note: Optional[str] = None,
-        set_by: Optional[str] = None,
+        note: str | None = None,
+        set_by: str | None = None,
     ) -> None:
         """Set the operator override AND immediately apply it to
         instrument_industry (so the next read sees the new value
@@ -383,7 +382,7 @@ class FundamentalsRunRepository:
 
     # ----- reads ----- #
 
-    def get(self, run_id: int) -> Optional[FundamentalsRun]:
+    def get(self, run_id: int) -> FundamentalsRun | None:
         row = self._conn.execute(
             text("""
                 SELECT run_id, phase, exchange, started_at, completed_at,
@@ -400,8 +399,8 @@ class FundamentalsRunRepository:
     def list_recent(
         self,
         *,
-        phase: Optional[str] = None,
-        exchange: Optional[str] = None,
+        phase: str | None = None,
+        exchange: str | None = None,
         limit: int = 20,
     ) -> list[FundamentalsRun]:
         clauses = []
@@ -427,8 +426,8 @@ class FundamentalsRunRepository:
         return [_run_from_row(r) for r in rows]
 
     def last_success(
-        self, *, phase: str, exchange: Optional[str],
-    ) -> Optional[FundamentalsRun]:
+        self, *, phase: str, exchange: str | None,
+    ) -> FundamentalsRun | None:
         """The most recent SUCCESS row for (phase, exchange).
 
         Used by the quarterly scheduler to decide whether to skip
@@ -462,8 +461,8 @@ class FundamentalsRunRepository:
         return _run_from_row(row) if row else None
 
     def last_completed(
-        self, *, phase: str, exchange: Optional[str],
-    ) -> Optional[FundamentalsRun]:
+        self, *, phase: str, exchange: str | None,
+    ) -> FundamentalsRun | None:
         """The most recent row for (phase, exchange) that finished
         with a non-failure status — SUCCESS or PARTIAL.
 
@@ -504,7 +503,7 @@ class FundamentalsRunRepository:
     # ----- writes ----- #
 
     def open(
-        self, *, phase: str, exchange: Optional[str] = None, notes: Optional[str] = None,
+        self, *, phase: str, exchange: str | None = None, notes: str | None = None,
     ) -> int:
         """Insert a new RUNNING row. Returns run_id."""
         if phase not in RUN_PHASES:
@@ -525,10 +524,10 @@ class FundamentalsRunRepository:
         self,
         run_id: int,
         *,
-        succeeded: Optional[int] = None,
-        failed: Optional[int] = None,
-        skipped: Optional[int] = None,
-        progress_json: Optional[dict] = None,
+        succeeded: int | None = None,
+        failed: int | None = None,
+        skipped: int | None = None,
+        progress_json: dict | None = None,
     ) -> None:
         """Partial update — None means "don't touch". Used by the
         runner to checkpoint every 50 tickers."""
@@ -557,7 +556,7 @@ class FundamentalsRunRepository:
         succeeded: int,
         failed: int,
         skipped: int,
-        notes: Optional[str] = None,
+        notes: str | None = None,
     ) -> None:
         if status not in RUN_STATUSES:
             raise ValueError(f"status must be one of {RUN_STATUSES}, got {status!r}")
@@ -626,7 +625,6 @@ class InstrumentSharesRepository:
 
     def get_latest(self, ticker_id: int):
         """The most-recent snapshot for this ticker. None if no rows."""
-        from ..fundamentals import SharesOutstanding  # local to avoid cycle
         row = self._conn.execute(
             text("""
                 SELECT ticker_id, as_of_date, shares_outstanding,
@@ -642,7 +640,7 @@ class InstrumentSharesRepository:
             return None
         return _shares_from_row(row)
 
-    def get_as_of(self, ticker_id: int, as_of: "date"):
+    def get_as_of(self, ticker_id: int, as_of: date):
         """The latest snapshot at-or-before `as_of`. Used by Phase 4
         to find shares-outstanding for a historical trade date."""
         row = self._conn.execute(
@@ -658,7 +656,7 @@ class InstrumentSharesRepository:
         ).fetchone()
         return _shares_from_row(row) if row else None
 
-    def get_at(self, ticker_id: int, as_of: "date"):
+    def get_at(self, ticker_id: int, as_of: date):
         """The exact snapshot at `as_of` if one exists, else None.
         Used by the runner to test "have we already written today's
         row?" before re-fetching."""
@@ -836,7 +834,7 @@ class QuarterlyFinancialsRepository:
 
     # ----- reads ----- #
 
-    def get_latest(self, ticker_id: int, fiscal_quarter: "date"):
+    def get_latest(self, ticker_id: int, fiscal_quarter: date):
         """The most-recent snapshot for (ticker, quarter). None if
         the runner never recorded anything for this pair."""
         row = self._conn.execute(
@@ -875,7 +873,7 @@ class QuarterlyFinancialsRepository:
         )
         return [_qfinancial_from_row(r) for r in rows]
 
-    def get_history(self, ticker_id: int, fiscal_quarter: "date") -> list:
+    def get_history(self, ticker_id: int, fiscal_quarter: date) -> list:
         """All snapshots for one (ticker, quarter) pair, newest first.
 
         Used for restatement detection: if length > 1, the number
@@ -896,7 +894,7 @@ class QuarterlyFinancialsRepository:
         return [_qfinancial_from_row(r) for r in rows]
 
     def list_latest_for_exchange(
-        self, exchange: str, *, fiscal_quarter: Optional["date"] = None,
+        self, exchange: str, *, fiscal_quarter: date | None = None,
     ) -> list:
         """Latest snapshot per (ticker, quarter) for active tickers
         on `exchange`. If `fiscal_quarter` is given, scopes to that
@@ -971,9 +969,9 @@ class QuarterlyFinancialsRepository:
         self,
         ticker_id: int,
         *,
-        fiscal_quarter: "date",
-        revenue: Optional[float],
-        ebitda: Optional[float],
+        fiscal_quarter: date,
+        revenue: float | None,
+        ebitda: float | None,
         currency: str = "INR",
         source: str = "YFINANCE",
     ) -> None:
@@ -1077,7 +1075,7 @@ class DailyMarketCapRepository:
         ).fetchone()
         return _mcap_from_row(row) if row else None
 
-    def get_at(self, ticker_id: int, trade_date: "date"):
+    def get_at(self, ticker_id: int, trade_date: date):
         """The row for an exact (ticker, date) pair, or None.
 
         Used by the runner to skip-if-already-computed (re-running
@@ -1095,8 +1093,8 @@ class DailyMarketCapRepository:
         return _mcap_from_row(row) if row else None
 
     def list_for_date(
-        self, trade_date: "date", *, exchange: Optional[str] = None,
-        limit: Optional[int] = None,
+        self, trade_date: date, *, exchange: str | None = None,
+        limit: int | None = None,
     ) -> list:
         """All market cap rows for a specific trade_date, ordered
         by market_cap DESC. Optionally scoped to a single exchange
@@ -1155,8 +1153,8 @@ class DailyMarketCapRepository:
         return [_mcap_from_row(r) for r in rows]
 
     def coverage_counts_by_date(
-        self, *, exchange: Optional[str] = None,
-    ) -> list[tuple["date", int, int, int]]:
+        self, *, exchange: str | None = None,
+    ) -> list[tuple[date, int, int, int]]:
         """For each trade_date that has mcap rows, return
         (date, total, computed, hist_mcap) — where:
           total       = total mcap rows on that date
@@ -1201,9 +1199,9 @@ class DailyMarketCapRepository:
         self,
         ticker_id: int,
         *,
-        trade_date: "date",
+        trade_date: date,
         close_price: float,
-        shares_used: Optional[int],
+        shares_used: int | None,
         market_cap: float,
         source: str,
     ) -> None:
@@ -1253,7 +1251,7 @@ class DailyMarketCapRepository:
              "su": shares_used, "mc": market_cap, "src": source},
         )
 
-    def delete_for_date(self, trade_date: "date") -> int:
+    def delete_for_date(self, trade_date: date) -> int:
         """Remove all mcap rows for one trade_date. Used by tests
         and by the runner's "wipe and rebuild this date" admin
         path. Returns count deleted."""
@@ -1344,12 +1342,12 @@ class IndustryIndexRepository:
     def upsert(
         self, industry_name: str, *,
         sector_name: str,
-        base_date: "date",
+        base_date: date,
         base_value: float = 1000.0,
         methodology: str = "MODIFIED_LASPEYRES",
         rebalance_schedule: str = "SEMIANNUAL_APR_OCT",
         min_constituents: int = 10,
-        notes: Optional[str] = None,
+        notes: str | None = None,
     ) -> None:
         """Insert or update an index. Idempotent on industry_name.
 
@@ -1481,7 +1479,7 @@ class IndustryIndexConstituentRepository:
         """), {"n": industry_name})
         return [_constituent_from_row(r) for r in rows]
 
-    def list_as_of(self, industry_name: str, trade_date: "date") -> list:
+    def list_as_of(self, industry_name: str, trade_date: date) -> list:
         """Constituents whose effective period contains trade_date.
         Used by the compute layer to figure out who was in the
         index on a given day.
@@ -1516,7 +1514,7 @@ class IndustryIndexConstituentRepository:
         """), {"n": industry_name, "tid": ticker_id})
         return [_constituent_from_row(r) for r in rows]
 
-    def list_rebalances(self, industry_name: str) -> list["date"]:
+    def list_rebalances(self, industry_name: str) -> list[date]:
         """All distinct rebalance dates for this index, newest
         first. Used for audit and for the value-computation logic
         that needs to know which rebalance applies to date D."""
@@ -1533,7 +1531,7 @@ class IndustryIndexConstituentRepository:
     def insert_constituent(
         self, industry_name: str, *,
         ticker_id: int,
-        rebalance_date: "date",
+        rebalance_date: date,
         weight_at_rebalance: float,
         market_cap_at_rebalance: float,
         close_at_rebalance: float,
@@ -1570,7 +1568,7 @@ class IndustryIndexConstituentRepository:
 
     def close_period(
         self, industry_name: str, ticker_id: int,
-        effective_to: "date", removed_reason: str,
+        effective_to: date, removed_reason: str,
     ) -> bool:
         """Close the currently-open effective period (the row with
         effective_to IS NULL) for this (industry, ticker). Returns
@@ -1627,7 +1625,7 @@ class IndustryIndexValueRepository:
 
     # ----- reads ----- #
 
-    def get_at(self, industry_name: str, trade_date: "date"):
+    def get_at(self, industry_name: str, trade_date: date):
         row = self._conn.execute(text("""
             SELECT industry_name, trade_date, value,
                    constituents_used, constituents_missing,
@@ -1651,9 +1649,9 @@ class IndustryIndexValueRepository:
 
     def get_history(
         self, industry_name: str, *,
-        from_date: Optional["date"] = None,
-        to_date: Optional["date"] = None,
-        limit: Optional[int] = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        limit: int | None = None,
     ) -> list:
         """Time-series history for one index. Optional date-range
         filter; defaults to all history newest-first.
@@ -1683,7 +1681,7 @@ class IndustryIndexValueRepository:
         rows = self._conn.execute(text(sql), params)
         return [_value_from_row(r) for r in rows]
 
-    def list_for_date(self, trade_date: "date") -> list:
+    def list_for_date(self, trade_date: date) -> list:
         """All industries' index values on a specific date.
         Sorted alphabetically — at this layer we don't impose a
         ranking. Cross-industry "show me today's sector movers"
@@ -1699,7 +1697,7 @@ class IndustryIndexValueRepository:
         """), {"td": trade_date})
         return [_value_from_row(r) for r in rows]
 
-    def coverage_summary(self) -> list[tuple[str, int, "date", "date"]]:
+    def coverage_summary(self) -> list[tuple[str, int, date, date]]:
         """Per-index (industry_name, num_value_rows, earliest_date,
         latest_date). Used by fundamentals-status to show coverage
         at a glance after the value computation runs."""
@@ -1722,12 +1720,12 @@ class IndustryIndexValueRepository:
 
     def upsert_value(
         self, industry_name: str, *,
-        trade_date: "date",
+        trade_date: date,
         value: float,
         constituents_used: int,
         constituents_missing: int,
         renormalized: bool,
-        effective_rebalance_date: "date",
+        effective_rebalance_date: date,
     ) -> None:
         """Idempotent on (industry_name, trade_date). Re-running
         the compute for a date overwrites — useful when constituents
@@ -1805,7 +1803,7 @@ class IndicatorStateRepository:
     # ----- reads ----- #
 
     def get_at_for_ticker(
-        self, ticker_id: int, timeframe: str, trade_date: "date",
+        self, ticker_id: int, timeframe: str, trade_date: date,
     ):
         row = self._conn.execute(text("""
             SELECT * FROM indicator_state
@@ -1816,7 +1814,7 @@ class IndicatorStateRepository:
         return _indicator_from_row(row) if row else None
 
     def get_at_for_industry(
-        self, industry_name: str, trade_date: "date",
+        self, industry_name: str, trade_date: date,
     ):
         row = self._conn.execute(text("""
             SELECT * FROM indicator_state
@@ -1845,9 +1843,9 @@ class IndicatorStateRepository:
 
     def get_history_for_ticker(
         self, ticker_id: int, timeframe: str, *,
-        from_date: Optional["date"] = None,
-        to_date: Optional["date"] = None,
-        limit: Optional[int] = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        limit: int | None = None,
     ) -> list:
         """Time series for one ticker, newest first."""
         conditions = ["ticker_id = :tid", "timeframe = :tf"]
@@ -1871,9 +1869,9 @@ class IndicatorStateRepository:
 
     def get_history_for_industry(
         self, industry_name: str, *,
-        from_date: Optional["date"] = None,
-        to_date: Optional["date"] = None,
-        limit: Optional[int] = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        limit: int | None = None,
     ) -> list:
         """Time series for one industry index, newest first."""
         conditions = ["industry_name = :n"]
@@ -1896,9 +1894,9 @@ class IndicatorStateRepository:
         return [_indicator_from_row(r) for r in rows]
 
     def list_for_date(
-        self, trade_date: "date", *,
-        series_kind: Optional[str] = None,  # 'TICKER' | 'INDUSTRY' | None
-        display_regime: Optional[int] = None,
+        self, trade_date: date, *,
+        series_kind: str | None = None,  # 'TICKER' | 'INDUSTRY' | None
+        display_regime: int | None = None,
     ) -> list:
         """Cross-series snapshot on a single date, optionally filtered
         by series kind and/or regime. Used by Phase 6+ "what fired
@@ -1964,7 +1962,7 @@ class IndicatorStateRepository:
 
     def coverage_summary_for_industries(
         self,
-    ) -> list[tuple[str, int, "date", "date"]]:
+    ) -> list[tuple[str, int, date, date]]:
         """Per-industry (name, row_count, earliest, latest). Used
         by fundamentals-status (extended in Phase 5-4)."""
         rows = self._conn.execute(text("""
@@ -1981,8 +1979,8 @@ class IndicatorStateRepository:
         ]
 
     def coverage_summary_for_tickers(
-        self, *, timeframe: Optional[str] = None,
-    ) -> list[tuple[int, str, int, "date", "date"]]:
+        self, *, timeframe: str | None = None,
+    ) -> list[tuple[int, str, int, date, date]]:
         """Per-ticker (ticker_id, timeframe, row_count, earliest,
         latest). Filterable by timeframe."""
         if timeframe is None:
@@ -2388,10 +2386,10 @@ class SignalEventRepository:
 
     def get_for_industry(
         self, industry_name: str, *,
-        kinds: Optional[list[str]] = None,
-        from_date: Optional["date"] = None,
-        to_date: Optional["date"] = None,
-        limit: Optional[int] = None,
+        kinds: list[str] | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        limit: int | None = None,
     ) -> list:
         """All events for one industry, newest-first. Optional
         filters on event kinds and date range."""
@@ -2429,10 +2427,10 @@ class SignalEventRepository:
 
     def get_for_ticker(
         self, ticker_id: int, timeframe: str, *,
-        kinds: Optional[list[str]] = None,
-        from_date: Optional["date"] = None,
-        to_date: Optional["date"] = None,
-        limit: Optional[int] = None,
+        kinds: list[str] | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        limit: int | None = None,
     ) -> list:
         """All events for one ticker series. Same shape as
         get_for_industry."""
@@ -2469,10 +2467,10 @@ class SignalEventRepository:
         return [_signal_event_from_row(r) for r in rows]
 
     def list_for_date_range(
-        self, from_date: "date", to_date: "date", *,
-        kind: Optional[str] = None,
-        series_kind: Optional[str] = None,  # 'TICKER' | 'INDUSTRY' | None
-        limit: Optional[int] = None,
+        self, from_date: date, to_date: date, *,
+        kind: str | None = None,
+        series_kind: str | None = None,  # 'TICKER' | 'INDUSTRY' | None
+        limit: int | None = None,
     ) -> list:
         """Cross-series scanner. 'show me all BUY events between
         date X and Y' across all industries (or tickers, or both).
@@ -2512,7 +2510,7 @@ class SignalEventRepository:
 
     def list_recent(
         self, *,
-        kind: Optional[str] = None,
+        kind: str | None = None,
         days: int = 7,
         limit: int = 100,
     ) -> list:
@@ -2562,7 +2560,7 @@ class SignalEventRepository:
 
     def coverage_summary_for_industries(
         self,
-    ) -> list[tuple[str, int, "date", "date"]]:
+    ) -> list[tuple[str, int, date, date]]:
         """Per-industry (name, total_event_count, earliest, latest).
         Used by fundamentals-status."""
         rows = self._conn.execute(text("""

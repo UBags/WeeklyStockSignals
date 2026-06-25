@@ -70,7 +70,7 @@ SUPPORTED_BACKTEST_TIMEFRAMES: frozenset[str] = frozenset({"1D", "1W"})
 
 
 def resolve_indicator_params(
-    config : "Config", # string-annotated to avoid circular import
+    config : Config, # string-annotated to avoid circular import
     exchange: str,
     timeframe: Timeframe,
 ) -> IndicatorParams:

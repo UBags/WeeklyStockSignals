@@ -9,7 +9,6 @@ keep them separate.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,8 +27,8 @@ class OrchestratorStepStatusPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     succeeded: bool
-    skipped_reason: Optional[str] = None
-    error_message: Optional[str] = None
+    skipped_reason: str | None = None
+    error_message: str | None = None
     duration_seconds: float
 
 
@@ -40,14 +39,14 @@ class OrchestratorMarketStatusPayload(BaseModel):
     exchange: str
     is_alive: bool
     is_unhealthy: bool
-    last_run_started_at: Optional[datetime] = None
-    last_run_finished_at: Optional[datetime] = None
-    last_run_correlation_id: Optional[str] = None
+    last_run_started_at: datetime | None = None
+    last_run_finished_at: datetime | None = None
+    last_run_correlation_id: str | None = None
     last_run_was_retry: bool = False
     last_run_retry_scheduled: bool = False
-    fetch: Optional[OrchestratorStepStatusPayload] = None
-    compute: Optional[OrchestratorStepStatusPayload] = None
-    distribute: Optional[OrchestratorStepStatusPayload] = None
+    fetch: OrchestratorStepStatusPayload | None = None
+    compute: OrchestratorStepStatusPayload | None = None
+    distribute: OrchestratorStepStatusPayload | None = None
 
 
 class OrchestratorStatusPayload(BaseModel):
@@ -98,14 +97,14 @@ class PulseEventPayload(BaseModel):
 
     event_type: str
     timestamp: datetime
-    exchange: Optional[str] = None
-    correlation_id: Optional[str] = None
+    exchange: str | None = None
+    correlation_id: str | None = None
     is_retry: bool = False
     retry_scheduled: bool = False
-    fetch: Optional[OrchestratorStepStatusPayload] = None
-    compute: Optional[OrchestratorStepStatusPayload] = None
-    distribute: Optional[OrchestratorStepStatusPayload] = None
-    details: Optional[dict] = None
+    fetch: OrchestratorStepStatusPayload | None = None
+    compute: OrchestratorStepStatusPayload | None = None
+    distribute: OrchestratorStepStatusPayload | None = None
+    details: dict | None = None
 
 
 class PulseSnapshotPayload(BaseModel):

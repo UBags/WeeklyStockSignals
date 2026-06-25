@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 from ..etl.exchanges import yfinance_symbol
 
@@ -53,9 +52,9 @@ class IndustryInfo:
     returns 'EQUITY' for stocks, 'ETF' for ETFs, etc.) — useful for
     flagging mis-classified rows.
     """
-    sector: Optional[str]
-    industry: Optional[str]
-    quote_type: Optional[str] = None
+    sector: str | None
+    industry: str | None
+    quote_type: str | None = None
 
 
 # ---------- Typed exceptions ---------- #
@@ -163,7 +162,7 @@ def _fetch_yfinance_info(yf_symbol: str) -> dict:
     return ticker.info or {}
 
 
-def _clean_string(v) -> Optional[str]:
+def _clean_string(v) -> str | None:
     """yfinance sometimes returns empty strings, the literal string
     'None', or whitespace. Normalize all of those to None."""
     if v is None:

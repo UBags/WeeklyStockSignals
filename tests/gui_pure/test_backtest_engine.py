@@ -11,7 +11,7 @@ history endpoint, but we only populate the fields the engine reads:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -27,7 +27,7 @@ from trip_ema.gui.backtest_engine import (
 # ---------- bar fixture helpers ---------- #
 
 
-_T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+_T0 = datetime(2024, 1, 1, tzinfo=UTC)
 
 
 def _bar(
@@ -378,7 +378,7 @@ class TestFilterBarsToRange:
         # Reference = 2026-06-18; cutoff for 2y = ~2024-06-18.
         # Build bars from 2024-01-01 + N weeks.
         bars = [_bar(i) for i in range(150)]   # 150 weeks ≈ 2.9 years
-        ref = datetime(2026, 12, 31, tzinfo=timezone.utc)
+        ref = datetime(2026, 12, 31, tzinfo=UTC)
         out = filter_bars_to_range(bars, years=2, reference_dt=ref)
         # cutoff ≈ 2024-12-31; bars start 2024-01-01.
         # Bars 0..51 are < cutoff, bars 52+ are >=. Allow ±1 for rounding.
@@ -393,7 +393,7 @@ class TestFilterBarsToRange:
             "display_bg": "NEUTRAL", "is_warmed_up": True,
             "med_ema": 100, "long_ema": 100, "longest_ema": 100,
         }
-        ref = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        ref = datetime(2026, 6, 1, tzinfo=UTC)
         out = filter_bars_to_range([bar_naive], years=2, reference_dt=ref)
         # bar is 1 year ago → within 2y window
         assert len(out) == 1

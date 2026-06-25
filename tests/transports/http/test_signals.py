@@ -19,7 +19,7 @@ the latest single bar's BarState rather than a window.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 
 from trip_ema.cache.signal_cache import (
     CachedSnapshot,
@@ -37,7 +37,7 @@ def _seed_cache(
     last_change: ChangeSignal = ChangeSignal.BUY,
     close: float = 24856.20,
 ) -> None:
-    t = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    t = datetime(2026, 5, 18, tzinfo=UTC)
     ind = IndicatorStateSnapshot(
         trade_date=date(2026, 5, 18),
         med_ema=24800.0, long_ema=24700.0, longest_ema=24500.0,

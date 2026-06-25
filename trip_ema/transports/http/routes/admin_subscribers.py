@@ -19,8 +19,7 @@ Auth: bearer token via require_admin_token (same as ETL admin).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, UTC
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import Engine, text
@@ -256,7 +255,7 @@ def test_notification(
                 detail=f"Subscriber {subscriber_id} not found",
             )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     transport_name = row.transport
     address = row.address
 

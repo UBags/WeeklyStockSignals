@@ -22,14 +22,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMenuBar, QStackedWidget, QStatusBar,
-    QVBoxLayout, QWidget,
+    QHBoxLayout, QListWidget, QListWidgetItem,
+    QMainWindow, QStackedWidget, QStatusBar,
+    QWidget,
 )
 
 from .db import GuiDbSession
@@ -67,8 +66,8 @@ class MainWindow(QMainWindow):
         db: GuiDbSession,
         http: TripEmaHttpClient,
         *,
-        parent: Optional[QWidget] = None,
-        config_path: Optional[Path] = None,
+        parent: QWidget | None = None,
+        config_path: Path | None = None,
         populate_signals_combo: bool = True,
         populate_subscribers_lookup: bool = True,
         start_refresh_on_init: bool = True,

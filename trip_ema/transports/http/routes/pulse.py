@@ -19,10 +19,8 @@ and Python `httpx` clients parse this without further framing.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from datetime import datetime
-from typing import AsyncIterator, Optional
+from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -45,7 +43,7 @@ router = APIRouter(prefix="/v1", tags=["pulse"])
 # ---------------------------------------------------------------------------
 
 
-def _step_to_payload(step) -> Optional[OrchestratorStepStatusPayload]:
+def _step_to_payload(step) -> OrchestratorStepStatusPayload | None:
     """Build a step payload from an OrchestratorStepResult, or None
     if the step never ran (concurrent-skipped case)."""
     if step is None:
@@ -169,7 +167,7 @@ async def _event_stream(
         for event in subscription.backfill:
             payload = _event_to_payload(event)
             data = payload.model_dump_json()
-            yield f"event: {event.event_type}\ndata: {data}\n\n".encode("utf-8")
+            yield f"event: {event.event_type}\ndata: {data}\n\n".encode()
 
         # Now enter the live-events loop. We interleave with periodic
         # heartbeats via asyncio.wait + timeout.
@@ -202,7 +200,7 @@ async def _event_stream(
 
             payload = _event_to_payload(event)
             data = payload.model_dump_json()
-            yield f"event: {event.event_type}\ndata: {data}\n\n".encode("utf-8")
+            yield f"event: {event.event_type}\ndata: {data}\n\n".encode()
     finally:
         # Unregister the subscriber so the queue is removed from
         # PulseState's subscriber set. Best-effort cleanup.

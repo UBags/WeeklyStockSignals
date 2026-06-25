@@ -35,8 +35,7 @@ the live path (Step 6) or the backfill walker (Step 5).
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, UTC
 
 import pandas as pd
 
@@ -89,7 +88,7 @@ def compute_full_verbose(
             ticker=ticker, timeframe=timeframe,
             bars=(),
             latest_change=ChangeSignal.NO_CHANGE,
-            computed_at=datetime.now(timezone.utc),
+            computed_at=datetime.now(UTC),
         )
     change = _classify_regime_transition(states)
     retained = states[-state_history_retain:] if state_history_retain < len(states) else states
@@ -98,7 +97,7 @@ def compute_full_verbose(
         timeframe=timeframe,
         bars=tuple(retained),
         latest_change=change,
-        computed_at=datetime.now(timezone.utc),
+        computed_at=datetime.now(UTC),
     )
 
 
@@ -124,7 +123,7 @@ def compute_full_terse(
             latest_bar_timestamp=latest_bar.timestamp,
             latest_change=ChangeSignal.NO_CHANGE,
             latest_price=latest_bar.close,
-            computed_at=datetime.now(timezone.utc),
+            computed_at=datetime.now(UTC),
         )
     change = _classify_regime_transition(states)
     latest = states[-1]
@@ -134,7 +133,7 @@ def compute_full_terse(
         latest_bar_timestamp=latest.timestamp,
         latest_change=change,
         latest_price=latest_bar.close,
-        computed_at=datetime.now(timezone.utc),
+        computed_at=datetime.now(UTC),
     )
 
 
@@ -148,7 +147,7 @@ def _walk_bars(
     *,
     params: IndicatorParams,
     timeframe: Timeframe,
-) -> tuple[list[BarState], list[Optional[Regime]]]:
+) -> tuple[list[BarState], list[Regime | None]]:
     """Walk the supplied bars with `compute_regime` and return one
     `BarState` per bar.
 
@@ -170,12 +169,12 @@ def _walk_bars(
     series = compute_indicator_series(closes, volumes, highs, lows, params=engine_params)
 
     states: list[BarState] = []
-    trajectory: list[Optional[Regime]] = []
+    trajectory: list[Regime | None] = []
 
     prev_regime: Regime = Regime.NEUTRAL
-    prev_close: Optional[float] = None
-    prev_lower_env: Optional[float] = None
-    prev_upper_env: Optional[float] = None
+    prev_close: float | None = None
+    prev_lower_env: float | None = None
+    prev_upper_env: float | None = None
 
     for i, bar in enumerate(bars):
         med = series.emas.med.iloc[i]

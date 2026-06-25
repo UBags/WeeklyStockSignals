@@ -258,13 +258,12 @@ class TestFailures:
         with patch(
             "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
             return_value=(empty_prices, shares),
-        ):
-            with pytest.raises(HistoricalMcapFetchPermanent, match="no price history"):
-                fetch_historical_mcap_for_ticker(
-                    "X", "NSE",
-                    from_date=date(2025, 1, 1),
-                    to_date=date(2025, 12, 31),
-                )
+        ), pytest.raises(HistoricalMcapFetchPermanent, match="no price history"):
+            fetch_historical_mcap_for_ticker(
+                "X", "NSE",
+                from_date=date(2025, 1, 1),
+                to_date=date(2025, 12, 31),
+            )
 
     def test_empty_shares_series_raises_permanent(self):
         prices = _prices_df({"2025-06-01": 100.0})
@@ -272,13 +271,12 @@ class TestFailures:
         with patch(
             "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
             return_value=(prices, empty_shares),
-        ):
-            with pytest.raises(HistoricalMcapFetchPermanent, match="get_shares_full"):
-                fetch_historical_mcap_for_ticker(
-                    "X", "NSE",
-                    from_date=date(2025, 1, 1),
-                    to_date=date(2025, 12, 31),
-                )
+        ), pytest.raises(HistoricalMcapFetchPermanent, match="get_shares_full"):
+            fetch_historical_mcap_for_ticker(
+                "X", "NSE",
+                from_date=date(2025, 1, 1),
+                to_date=date(2025, 12, 31),
+            )
 
     def test_no_overlap_raises_permanent(self):
         """Prices and shares are both present but no price date
@@ -288,13 +286,12 @@ class TestFailures:
         with patch(
             "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
             return_value=(prices, shares),
-        ):
-            with pytest.raises(HistoricalMcapFetchPermanent, match="no trade dates"):
-                fetch_historical_mcap_for_ticker(
-                    "X", "NSE",
-                    from_date=date(2025, 1, 1),
-                    to_date=date(2025, 12, 31),
-                )
+        ), pytest.raises(HistoricalMcapFetchPermanent, match="no trade dates"):
+            fetch_historical_mcap_for_ticker(
+                "X", "NSE",
+                from_date=date(2025, 1, 1),
+                to_date=date(2025, 12, 31),
+            )
 
     def test_rate_limit_classified(self):
         def boom(yf_sym, *, period):
@@ -302,13 +299,12 @@ class TestFailures:
         with patch(
             "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
             side_effect=boom,
-        ):
-            with pytest.raises(HistoricalMcapFetchRateLimited):
-                fetch_historical_mcap_for_ticker(
-                    "X", "NSE",
-                    from_date=date(2025, 1, 1),
-                    to_date=date(2025, 12, 31),
-                )
+        ), pytest.raises(HistoricalMcapFetchRateLimited):
+            fetch_historical_mcap_for_ticker(
+                "X", "NSE",
+                from_date=date(2025, 1, 1),
+                to_date=date(2025, 12, 31),
+            )
 
     def test_timeout_classified_as_transient(self):
         def boom(yf_sym, *, period):
@@ -316,13 +312,12 @@ class TestFailures:
         with patch(
             "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
             side_effect=boom,
-        ):
-            with pytest.raises(HistoricalMcapFetchTransient):
-                fetch_historical_mcap_for_ticker(
-                    "X", "NSE",
-                    from_date=date(2025, 1, 1),
-                    to_date=date(2025, 12, 31),
-                )
+        ), pytest.raises(HistoricalMcapFetchTransient):
+            fetch_historical_mcap_for_ticker(
+                "X", "NSE",
+                from_date=date(2025, 1, 1),
+                to_date=date(2025, 12, 31),
+            )
 
     def test_404_classified_as_permanent(self):
         def boom(yf_sym, *, period):
@@ -330,13 +325,12 @@ class TestFailures:
         with patch(
             "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
             side_effect=boom,
-        ):
-            with pytest.raises(HistoricalMcapFetchPermanent):
-                fetch_historical_mcap_for_ticker(
-                    "X", "NSE",
-                    from_date=date(2025, 1, 1),
-                    to_date=date(2025, 12, 31),
-                )
+        ), pytest.raises(HistoricalMcapFetchPermanent):
+            fetch_historical_mcap_for_ticker(
+                "X", "NSE",
+                from_date=date(2025, 1, 1),
+                to_date=date(2025, 12, 31),
+            )
 
 
 # ---------- exception hierarchy ---------- #

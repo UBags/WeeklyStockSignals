@@ -42,9 +42,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from enum import Enum
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from sqlalchemy.engine import Engine
 
@@ -68,16 +68,16 @@ class StepResult:
     """Outcome record for one pipeline step."""
     name: str
     status: StepStatus = StepStatus.PENDING
-    started_at: Optional[datetime] = None
-    finished_at: Optional[datetime] = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
     succeeded: int = 0
     failed: int = 0
     skipped: int = 0
     notes: str = ""
-    error: Optional[str] = None
+    error: str | None = None
 
     @property
-    def duration_seconds(self) -> Optional[float]:
+    def duration_seconds(self) -> float | None:
         if self.started_at is None or self.finished_at is None:
             return None
         return (self.finished_at - self.started_at).total_seconds()
@@ -88,10 +88,10 @@ class PipelineResult:
     """Outcome of a full EoD pipeline run."""
     exchange: str
     started_at: datetime
-    finished_at: Optional[datetime] = None
+    finished_at: datetime | None = None
     steps: list[StepResult] = field(default_factory=list)
     include_tickers: bool = False
-    timeframe: Optional[str] = None  # for per-ticker steps
+    timeframe: str | None = None  # for per-ticker steps
 
     @property
     def overall_status(self) -> str:
@@ -110,7 +110,7 @@ class PipelineResult:
         return "SUCCESS"
 
     @property
-    def duration_seconds(self) -> Optional[float]:
+    def duration_seconds(self) -> float | None:
         if self.finished_at is None:
             return None
         return (self.finished_at - self.started_at).total_seconds()
@@ -123,7 +123,7 @@ def run_eod_pipeline(
     include_tickers: bool = True,
     timeframe: str = "1W",
     force: bool = False,
-    progress_callback: Optional[Callable[[StepResult], None]] = None,
+    progress_callback: Callable[[StepResult], None] | None = None,
 ) -> PipelineResult:
     """Run the full EoD fundamentals pipeline for one exchange.
 
@@ -165,7 +165,7 @@ def run_eod_pipeline(
 
     result = PipelineResult(
         exchange=exchange,
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
         include_tickers=include_tickers,
         timeframe=timeframe if include_tickers else None,
     )
@@ -473,7 +473,7 @@ def run_eod_pipeline(
                 progress_callback(step_result)
             continue
         step_result.status = StepStatus.RUNNING
-        step_result.started_at = datetime.now(timezone.utc)
+        step_result.started_at = datetime.now(UTC)
         logger.info("EoD pipeline: running step %r", name)
         try:
             status, succeeded, failed, skipped, notes = step_fn()
@@ -496,11 +496,11 @@ def run_eod_pipeline(
             step_result.error = str(e)
             aborted = True
         finally:
-            step_result.finished_at = datetime.now(timezone.utc)
+            step_result.finished_at = datetime.now(UTC)
             if progress_callback:
                 progress_callback(step_result)
 
-    result.finished_at = datetime.now(timezone.utc)
+    result.finished_at = datetime.now(UTC)
     logger.info(
         "EoD pipeline finished: exchange=%s status=%s duration=%.1fs",
         exchange, result.overall_status,

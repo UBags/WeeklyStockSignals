@@ -132,7 +132,7 @@ def known_exchanges() -> frozenset[str]:
     return frozenset(_SUFFIX_MAP.keys())
 
 
-def configured_exchanges(config: "Config") -> frozenset[str]:
+def configured_exchanges(config: Config) -> frozenset[str]:
     """The exchanges the operator has configured under `market_hours:`
     in config.yaml. Dynamic — reflects the current config."""
     if not hasattr(config, "market_hours") or not config.market_hours:
@@ -140,7 +140,7 @@ def configured_exchanges(config: "Config") -> frozenset[str]:
     return frozenset(mh.exchange for mh in config.market_hours)
 
 
-def validate_exchange(exchange: str, config: "Config") -> None:
+def validate_exchange(exchange: str, config: Config) -> None:
     """Two-step validation for every ETL operation:
 
       1. `exchange` must be in the codebase's KNOWN_EXCHANGES

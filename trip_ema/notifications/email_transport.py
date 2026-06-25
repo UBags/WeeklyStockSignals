@@ -35,7 +35,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
+from collections.abc import Callable
 
 import requests
 
@@ -90,11 +91,11 @@ class EmailTransport:
     api_url: str = _DEFAULT_BREVO_ENDPOINT
     timeout_seconds: float = 30.0
     # Injection point for the enrichment lookup. None = text-only sends.
-    enrichment_provider: Optional[EnrichmentProvider] = field(
+    enrichment_provider: EnrichmentProvider | None = field(
         default=None, repr=False,
     )
     # Injection point for tests bypassing the network.
-    poster: Optional[EmailPoster] = field(default=None, repr=False)
+    poster: EmailPoster | None = field(default=None, repr=False)
 
     # Optional SQLAlchemy Engine for rank-score enrichment. When wired,
     # send() uses it to compute composite RS/R² momentum scores so BUY
@@ -139,7 +140,7 @@ class EmailTransport:
             logger.exception("Email delivery failed for %s", address)
             return False
 
-    def _render_html_or_none(self, batch: NotificationBatch) -> Optional[str]:
+    def _render_html_or_none(self, batch: NotificationBatch) -> str | None:
         """Run the enrichment provider + HTML renderer. Returns the HTML
         body, or None if enrichment isn't wired or the enrichment lookup
         raises (in which case we degrade to text-only for this send).
@@ -189,7 +190,7 @@ class EmailTransport:
         *,
         address: str,
         text_body: str,
-        html_body: Optional[str],
+        html_body: str | None,
     ) -> dict[str, Any]:
         """Shape the Brevo `/v3/smtp/email` request body.
 

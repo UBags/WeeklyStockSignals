@@ -39,10 +39,10 @@ that's out of scope for this slice.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +58,10 @@ class TradingCalendarConfig:
     exchange: str
     weekdays: frozenset[int]
     """ISO weekdays open (1=Mon..7=Sun). Pre-validated upstream."""
-    holidays_country: Optional[str] = None
+    holidays_country: str | None = None
     """python-holidays country code, e.g. 'IN', 'US'. None disables
     algorithmic holiday lookup."""
-    holidays_override_file: Optional[Path] = None
+    holidays_override_file: Path | None = None
     """YAML file with manual overrides; see module docstring."""
 
 

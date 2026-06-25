@@ -15,9 +15,8 @@ The runner uses this to:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time
+from datetime import date
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +53,7 @@ class NseTradingCalendar:
 
     def __init__(
         self,
-        override_path: Optional[Path] = None,
+        override_path: Path | None = None,
     ):
         self._override_path = override_path
         self._holiday_cache: dict[int, set[date]] = {}

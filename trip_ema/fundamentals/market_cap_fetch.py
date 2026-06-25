@@ -46,8 +46,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, timedelta
-from typing import Optional
+from datetime import date
 
 from ..etl.exchanges import yfinance_symbol
 
@@ -197,7 +196,7 @@ def fetch_historical_mcap_for_ticker(
 
     points: list[HistoricalMcapPoint] = []
     cursor = 0  # index into shares_pairs
-    asof_shares: Optional[int] = None
+    asof_shares: int | None = None
     for trade_date, close_price in price_pairs:
         # Advance the cursor while the next shares-pair's date is
         # still <= trade_date.
@@ -285,7 +284,7 @@ def _is_empty(df) -> bool:
     return getattr(df, "empty", True)
 
 
-def _to_date(ts) -> Optional[date]:
+def _to_date(ts) -> date | None:
     """Convert a pandas Timestamp / datetime / string to date.
     Returns None if conversion fails."""
     if hasattr(ts, "date"):
@@ -302,7 +301,7 @@ def _to_date(ts) -> Optional[date]:
         return None
 
 
-def _to_positive_int(v) -> Optional[int]:
+def _to_positive_int(v) -> int | None:
     """Coerce a numpy/pandas number to positive int.
 
     Returns None for NaN, None, zero, negative, or unparseable.
@@ -321,7 +320,7 @@ def _to_positive_int(v) -> Optional[int]:
     return int(f)
 
 
-def _coerce_positive_float(v) -> Optional[float]:
+def _coerce_positive_float(v) -> float | None:
     """Coerce to positive float. None for NaN, zero, negative."""
     if v is None:
         return None

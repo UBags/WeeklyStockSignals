@@ -10,7 +10,7 @@ Pattern matches the existing admin_etl route tests:
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from unittest.mock import MagicMock
 
 import pytest
@@ -46,7 +46,7 @@ def reliance_ticker(db_engine):
     ref = TickerRef("NSE", "RELIANCE", "EQ")
     with transaction(db_engine) as conn:
         return TickersRepository(conn).insert(
-            ref, created_at=datetime.now(timezone.utc),
+            ref, created_at=datetime.now(UTC),
         )
 
 
@@ -309,7 +309,7 @@ def test_endpoints_reject_bad_token(real_db_client):
 # ============================================================
 
 
-from datetime import date
+from datetime import date, UTC
 from trip_ema.persistence.fundamentals_repo import InstrumentSharesRepository
 
 
@@ -1232,7 +1232,7 @@ def _make_indicator_row(industry_name: str, trade_date: date,
         med_turn_buy=False, med_turn_sell=False,
         long_turn_buy=False, long_turn_sell=False,
         longest_turn_buy=False, longest_turn_sell=False,
-        computed_at=datetime.now(timezone.utc),
+        computed_at=datetime.now(UTC),
     )
 
 
@@ -1438,7 +1438,7 @@ def _make_signal_row(
         trade_date=td, event_kind=kind,
         regime_before=regime_before, regime_after=regime_after,
         close_at_event=close,
-        computed_at=datetime.now(timezone.utc),
+        computed_at=datetime.now(UTC),
     )
 
 
@@ -1597,7 +1597,7 @@ class TestRunEodPipelineEndpoint:
             PipelineResult,
         )
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         called = []
         def fake_pipeline(engine, exchange, **kw):
@@ -1628,7 +1628,7 @@ class TestRunEodPipelineEndpoint:
     ):
         from trip_ema.fundamentals.eod_pipeline import PipelineResult
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         called = []
         def fake_pipeline(engine, exchange, **kw):
             called.append(kw)

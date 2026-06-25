@@ -26,7 +26,6 @@ from __future__ import annotations
 import csv
 import io
 from datetime import date, datetime
-from typing import Iterator
 
 from .types import InstrumentType, NseListing
 

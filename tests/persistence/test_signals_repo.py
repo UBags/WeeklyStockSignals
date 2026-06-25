@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -26,7 +26,7 @@ from trip_ema.persistence import (
 def now():
     # Use the actual current time so the notification_log partitions
     # created by migration 004 cover any timestamps we write.
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 @pytest.fixture
@@ -77,9 +77,8 @@ def test_insert_no_change_event_raises(db_engine, ticker_ids, now):
         price_at_signal=100.0,
         computed_at=now,
     )
-    with pytest.raises(ValueError):
-        with transaction(db_engine) as conn:
-            SignalsRepository(conn).insert_event(ticker_ids["NIFTY"], event)
+    with pytest.raises(ValueError), transaction(db_engine) as conn:
+        SignalsRepository(conn).insert_event(ticker_ids["NIFTY"], event)
 
 
 def test_recent_events_for_ticker(db_engine, ticker_ids, now):

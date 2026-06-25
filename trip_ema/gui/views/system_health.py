@@ -23,9 +23,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
@@ -33,7 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..db import GuiDbSession
-from ..http_client import ApiError, TripEmaHttpClient
+from ..http_client import TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
 
 logger = logging.getLogger(__name__)
@@ -147,7 +145,7 @@ class SystemHealthView(QWidget):
         db: GuiDbSession,
         http: TripEmaHttpClient,
         *,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
         start_refresh_on_init: bool = True,
     ):
         super().__init__(parent)

@@ -289,52 +289,49 @@ class TestCheckConstraints:
         through < from at the DB level."""
         with db_engine.begin() as conn:
             ticker_id = _insert_ticker(conn)
-        with pytest.raises(IntegrityError):
-            with db_engine.begin() as conn:
-                conn.execute(text("""
+        with pytest.raises(IntegrityError), db_engine.begin() as conn:
+            conn.execute(text("""
                     INSERT INTO signal_backtest_runs
                         (exchange, ticker_id, timeframe,
                          computed_from_date, computed_through_date)
                     VALUES (:ex, :tid, '1W', :from_, :thru)
                 """), {
-                    "ex": "NSE", "tid": ticker_id,
-                    "from_": date(2024, 12, 31),
-                    "thru": date(2020, 1, 1),
-                })
+                "ex": "NSE", "tid": ticker_id,
+                "from_": date(2024, 12, 31),
+                "thru": date(2020, 1, 1),
+            })
 
     def test_timeframe_must_be_1d_or_1w(self, db_engine):
         """The check constraint `signal_backtest_runs_timeframe_chk`
         rejects timeframes other than '1D' / '1W'."""
         with db_engine.begin() as conn:
             ticker_id = _insert_ticker(conn)
-        with pytest.raises(IntegrityError):
-            with db_engine.begin() as conn:
-                conn.execute(text("""
+        with pytest.raises(IntegrityError), db_engine.begin() as conn:
+            conn.execute(text("""
                     INSERT INTO signal_backtest_runs
                         (exchange, ticker_id, timeframe,
                          computed_from_date, computed_through_date)
                     VALUES (:ex, :tid, '1h', :from_, :thru)
                 """), {
-                    "ex": "NSE", "tid": ticker_id,
-                    "from_": date(2024, 1, 1),
-                    "thru": date(2024, 12, 31),
-                })
+                "ex": "NSE", "tid": ticker_id,
+                "from_": date(2024, 1, 1),
+                "thru": date(2024, 12, 31),
+            })
 
     def test_ticker_id_must_reference_real_ticker(self, db_engine):
         """The FOREIGN KEY on ticker_id rejects orphan rows. ON DELETE
         CASCADE would handle cleanup if the ticker were later deleted,
         but you can't insert one that doesn't exist."""
-        with pytest.raises(IntegrityError):
-            with db_engine.begin() as conn:
-                conn.execute(text("""
+        with pytest.raises(IntegrityError), db_engine.begin() as conn:
+            conn.execute(text("""
                     INSERT INTO signal_backtest_runs
                         (exchange, ticker_id, timeframe,
                          computed_from_date, computed_through_date)
                     VALUES ('NSE', 999999, '1W', :from_, :thru)
                 """), {
-                    "from_": date(2024, 1, 1),
-                    "thru": date(2024, 12, 31),
-                })
+                "from_": date(2024, 1, 1),
+                "thru": date(2024, 12, 31),
+            })
 
 
 # ---------- etl_runs.exchange column smoke test ---------- #

@@ -30,16 +30,15 @@ the grid populates progressively rather than blocking until all
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QGridLayout, QLabel, QSplitter, QVBoxLayout, QWidget,
+    QGridLayout, QSplitter, QVBoxLayout, QWidget,
 )
 from sqlalchemy import text
 
 from ..db import GuiDbSession
-from ..http_client import ApiError, TripEmaHttpClient
+from ..http_client import TripEmaHttpClient
 from ..queries import top_n_tickers_in_industry_by_mcap
 from .._format_mcap import format_mcap_cr
 from ..workers import submit
@@ -73,7 +72,7 @@ class IndustryPanel(QWidget):
         self,
         db: GuiDbSession,
         http: TripEmaHttpClient,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
     ):
         super().__init__(parent)
         self._db = db
@@ -194,7 +193,7 @@ class IndustryPanel(QWidget):
     # ---------- Industry resolution ---------- #
 
     def _on_industry_resolved(
-        self, industry_name: Optional[str], request_id: int,
+        self, industry_name: str | None, request_id: int,
     ) -> None:
         if request_id != self._current_request_id:
             return  # stale — a newer ticker has been selected

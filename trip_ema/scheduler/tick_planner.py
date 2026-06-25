@@ -84,9 +84,8 @@ Tests can fix `now` to any value and verify the result deterministically.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
-from typing import Optional
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, UTC
 from zoneinfo import ZoneInfo
 
 from .market_calendar import TradingCalendar
@@ -132,7 +131,7 @@ class MarketTickConfig:
     pre_close_offset: timedelta
     intraday_cadence: timedelta
     # Phase 16a addition. None means "use legacy hourly cadence".
-    tick_schedule: Optional[tuple[ResolvedTickEntry, ...]] = None
+    tick_schedule: tuple[ResolvedTickEntry, ...] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +143,7 @@ def compute_tick_times_for_day(
     d: date,
     market: MarketTickConfig,
     *,
-    close_override: Optional[time] = None,
+    close_override: time | None = None,
 ) -> list[datetime]:
     """Return the UTC instants at which `market` should fire on `d`.
 
@@ -235,7 +234,7 @@ def _compute_from_tick_schedule(
     d: date,
     market: MarketTickConfig,
     *,
-    close_override: Optional[time],
+    close_override: time | None,
 ) -> list[datetime]:
     """Resolve a configured tick_schedule into UTC instants for `d`.
 
@@ -299,7 +298,7 @@ def _compute_from_tick_schedule(
     # legacy path handles it — one fire per instant). Sort ascending
     # for the orchestrator's consumption.
     utc_instants = sorted(
-        {inst.astimezone(timezone.utc) for inst in by_name.values()}
+        {inst.astimezone(UTC) for inst in by_name.values()}
     )
     return utc_instants
 
@@ -408,4 +407,4 @@ def _compute_legacy(d: date, market: MarketTickConfig) -> list[datetime]:
             ticks.append(pre_close)
 
     # Convert all to UTC for the orchestrator's wall-clock loop.
-    return [t.astimezone(timezone.utc) for t in ticks]
+    return [t.astimezone(UTC) for t in ticks]

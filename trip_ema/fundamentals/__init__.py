@@ -76,12 +76,12 @@ class IndustryClassification:
     Nifty IT'), classification_source = 'INSTRUMENT_TYPE'.
     """
     ticker_id: int
-    sector: Optional[str]
-    industry: Optional[str]
+    sector: str | None
+    industry: str | None
     classification_source: str
     fetched_at: datetime
     updated_at: datetime
-    etf_long_name: Optional[str] = None
+    etf_long_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,8 +96,8 @@ class IndustryOverride:
     ticker_id: int
     sector: str
     industry: str
-    note: Optional[str]
-    set_by: Optional[str]
+    note: str | None
+    set_by: str | None
     set_at: datetime
 
 
@@ -111,15 +111,15 @@ class FundamentalsRun:
     """
     run_id: int
     phase: str
-    exchange: Optional[str]
+    exchange: str | None
     started_at: datetime
-    completed_at: Optional[datetime]
+    completed_at: datetime | None
     status: str
     succeeded: int
     failed: int
     skipped: int
-    progress_json: Optional[dict]
-    notes: Optional[str]
+    progress_json: dict | None
+    notes: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,11 +145,11 @@ class SharesOutstanding:
     """
     ticker_id: int
     as_of_date: date
-    shares_outstanding: Optional[int]
-    free_float_factor: Optional[float]
+    shares_outstanding: int | None
+    free_float_factor: float | None
     shares_source: str
     fetched_at: datetime
-    xbrl_url: Optional[str] = None
+    xbrl_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,8 +181,8 @@ class QuarterlyFinancial:
     ticker_id: int
     fiscal_quarter: date
     fetched_at: datetime
-    revenue: Optional[float]
-    ebitda: Optional[float]
+    revenue: float | None
+    ebitda: float | None
     currency: str
     source: str
 
@@ -215,7 +215,7 @@ class DailyMarketCap:
     ticker_id: int
     trade_date: date
     close_price: float
-    shares_used: Optional[int]
+    shares_used: int | None
     market_cap: float
     source: str
     computed_at: datetime
@@ -267,7 +267,7 @@ class IndustryIndex:
     rebalance_schedule: str
     min_constituents: int
     status: str
-    notes: Optional[str] = None
+    notes: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,11 +292,11 @@ class IndustryIndexConstituent:
     ticker_id: int
     rebalance_date: date
     effective_from: date
-    effective_to: Optional[date]
+    effective_to: date | None
     weight_at_rebalance: float
     market_cap_at_rebalance: float
     close_at_rebalance: float
-    removed_reason: Optional[str] = None
+    removed_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,9 +379,9 @@ class IndicatorState:
       "higher valleys / lower tops" pattern detection per EMA.
     """
     # --- polymorphic identity ---
-    ticker_id: Optional[int]
-    timeframe: Optional[str]
-    industry_name: Optional[str]
+    ticker_id: int | None
+    timeframe: str | None
+    industry_name: str | None
     trade_date: date
 
     # --- EMAs ---
@@ -406,20 +406,20 @@ class IndicatorState:
     pierces_lower_mid: bool
 
     # --- per-EMA distances ---
-    dist_to_med_in_hl_units: Optional[float]
-    dist_to_long_in_hl_units: Optional[float]
-    dist_to_longest_in_hl_units: Optional[float]
-    mean_dist_to_med_in_hl_units: Optional[float]
-    mean_dist_to_long_in_hl_units: Optional[float]
-    mean_dist_to_longest_in_hl_units: Optional[float]
+    dist_to_med_in_hl_units: float | None
+    dist_to_long_in_hl_units: float | None
+    dist_to_longest_in_hl_units: float | None
+    mean_dist_to_med_in_hl_units: float | None
+    mean_dist_to_long_in_hl_units: float | None
+    mean_dist_to_longest_in_hl_units: float | None
 
     # --- bars-since + pct-change-since per EMA ---
-    bars_since_med_turn: Optional[int]
-    bars_since_long_turn: Optional[int]
-    bars_since_longest_turn: Optional[int]
-    pct_change_since_med_turn: Optional[float]
-    pct_change_since_long_turn: Optional[float]
-    pct_change_since_longest_turn: Optional[float]
+    bars_since_med_turn: int | None
+    bars_since_long_turn: int | None
+    bars_since_longest_turn: int | None
+    pct_change_since_med_turn: float | None
+    pct_change_since_long_turn: float | None
+    pct_change_since_longest_turn: float | None
 
     # --- pattern labels ---
     med_pattern_label: str
@@ -471,9 +471,9 @@ class SignalEvent:
     needing a JOIN back to ohlcv_bars or industry_index_value.
     """
     # --- polymorphic identity ---
-    ticker_id: Optional[int]
-    timeframe: Optional[str]
-    industry_name: Optional[str]
+    ticker_id: int | None
+    timeframe: str | None
+    industry_name: str | None
     trade_date: date
 
     # --- event ---
@@ -525,12 +525,12 @@ class StockBenchmarkStats:
     window_label: str                 # one of WINDOW_LABELS
     as_of_date: date
     n_weeks: int
-    beta: Optional[float]
-    alpha_annual: Optional[float]
-    r_squared: Optional[float]
-    sigma_annual: Optional[float]
-    rs_pct: Optional[float]
-    info_ratio: Optional[float]
+    beta: float | None
+    alpha_annual: float | None
+    r_squared: float | None
+    sigma_annual: float | None
+    rs_pct: float | None
+    info_ratio: float | None
     computed_at: datetime
 
 
@@ -548,11 +548,11 @@ class IndustryBenchmarkStats:
     window_label: str
     as_of_date: date
     n_weeks: int
-    beta: Optional[float]
-    alpha_annual: Optional[float]
-    r_squared: Optional[float]
-    sigma_annual: Optional[float]
-    rs_pct: Optional[float]
-    info_ratio: Optional[float]
+    beta: float | None
+    alpha_annual: float | None
+    r_squared: float | None
+    sigma_annual: float | None
+    rs_pct: float | None
+    info_ratio: float | None
     computed_at: datetime
 

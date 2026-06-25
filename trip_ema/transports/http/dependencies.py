@@ -13,7 +13,7 @@ visible at the route signature level.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import Engine
@@ -45,19 +45,19 @@ class AppState:
     db_engine: Engine
     cache: SignalCache
     compute_scheduler: ComputeScheduler
-    distributor: Optional[SubscriberDistributor] = None
-    redis_queue: "Optional[RedisQueue]" = None
-    metrics_server: Optional[Any] = None
+    distributor: SubscriberDistributor | None = None
+    redis_queue: RedisQueue | None = None
+    metrics_server: Any | None = None
     """Phase 10: handle to the Prometheus /metrics HTTP server (separate
     port from the main API). None when metrics are disabled via config."""
-    etl_executor: "Optional[ThreadPoolExecutor]" = None
+    etl_executor: ThreadPoolExecutor | None = None
     """Phase 11 Slice 2: a ThreadPoolExecutor used by the admin ETL
     endpoints to fire long-running runner functions (refresh-listings,
     EoD, backfill, ...) without blocking the HTTP request. None when
     the ETL admin endpoints are disabled (e.g., in tests that don't
     need them)."""
 
-    orchestrator_pool: "Optional[OrchestratorPool]" = None
+    orchestrator_pool: OrchestratorPool | None = None
     """Phase 14: the OrchestratorPool managing per-market MarketOrchestrators.
     None when the orchestrator is disabled
     (`scheduling.orchestrator.enabled=False`); in that case the
@@ -65,7 +65,7 @@ class AppState:
     ComputeScheduler thread remains in charge. Typed as Optional[object]
     to avoid forward-reference cycles with the scheduler package."""
 
-    pulse_state: "Optional[PulseState]" = None
+    pulse_state: PulseState | None = None
     """Phase 14: the in-memory PulseState pub/sub for GUI live updates.
     None when no orchestrator is running — pulse is only meaningful
     when there's an orchestrator producing events.

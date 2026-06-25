@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
+from collections.abc import Iterator
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import Connection

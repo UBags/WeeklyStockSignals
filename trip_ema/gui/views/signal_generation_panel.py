@@ -16,16 +16,15 @@ Compact layout (all controls on one row, metadata on a second):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QMessageBox, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
-from ..http_client import ApiError, TripEmaHttpClient
+from ..http_client import TripEmaHttpClient
 from ..workers import submit
 from .widgets.exchange_picker import ExchangePicker
 
@@ -37,7 +36,7 @@ _POST_POST_REFRESH_DELAY_MS = 5_000
 _MAX_METADATA_ROWS = 20
 
 
-def _format_size(n_bytes: Optional[int]) -> str:
+def _format_size(n_bytes: int | None) -> str:
     if n_bytes is None:
         return "\u2014"
     if n_bytes < 1024:
@@ -49,7 +48,7 @@ def _format_size(n_bytes: Optional[int]) -> str:
     return f"{n_bytes / (1024 ** 3):.2f} GB"
 
 
-def _format_mtime(mtime_iso: Optional[str]) -> str:
+def _format_mtime(mtime_iso: str | None) -> str:
     if not mtime_iso:
         return "\u2014"
     try:
@@ -77,7 +76,7 @@ class SignalGenerationPanel(QGroupBox):
         self,
         http: TripEmaHttpClient,
         *,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
         start_polling_on_init: bool = True,
     ):
         super().__init__("Generate backtest signal history", parent)

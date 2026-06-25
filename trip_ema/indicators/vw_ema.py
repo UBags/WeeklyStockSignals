@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Iterable
+from collections.abc import Iterable
 
 
 def _ema_alpha(length: int) -> float:

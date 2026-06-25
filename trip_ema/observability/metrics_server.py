@@ -24,7 +24,6 @@ in `AppState`. The graceful-shutdown callback (item #8) then calls
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from .metrics import REGISTRY
 
@@ -60,7 +59,7 @@ class MetricsServer:
             logger.exception("Error joining metrics server thread")
 
 
-def start_metrics_server(port: Optional[int]) -> Optional[MetricsServer]:
+def start_metrics_server(port: int | None) -> MetricsServer | None:
     """Start a Prometheus /metrics server on `port` (separate from
     the main API). Return a MetricsServer handle, or None if port is
     None (metrics disabled) or prometheus_client is not installed.

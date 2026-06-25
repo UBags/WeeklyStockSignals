@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 from ..etl.exchanges import yfinance_symbol
 
@@ -174,7 +173,7 @@ def _fetch_yfinance_info(yf_symbol: str) -> dict:
     return ticker.info or {}
 
 
-def _as_positive_int(v) -> Optional[int]:
+def _as_positive_int(v) -> int | None:
     """yfinance returns numbers as int OR float OR sometimes the
     string 'None' for unset fields. Normalize to positive int or None.
 

@@ -18,7 +18,7 @@ assert against the cache snapshot count instead.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterator
+from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient

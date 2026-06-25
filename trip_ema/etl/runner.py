@@ -35,9 +35,9 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, UTC
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -88,7 +88,7 @@ def refresh_listings(
     config: Config,
     *,
     exchange: str,
-    downloader: Optional[NseDownloader] = None,
+    downloader: NseDownloader | None = None,
 ) -> RefreshListingsResult:
     """Pull the listings CSVs for `exchange` and sync the tickers table.
 
@@ -183,7 +183,7 @@ def refresh_listings(
             # exchange_state row, by transactional guarantee.
             ExchangeStateRepository(conn).record_listings_sync(
                 exchange,
-                run_at=datetime.now(timezone.utc),
+                run_at=datetime.now(UTC),
                 run_id=run_id,
             )
 
@@ -281,7 +281,7 @@ def recompute_tiers(
         )
         # Phase 14.6b: state write in the same transaction as close_run.
         ExchangeStateRepository(conn).record_tier_recompute(
-            exchange, run_at=datetime.now(timezone.utc),
+            exchange, run_at=datetime.now(UTC),
         )
         M.etl_runs_total.labels(
             kind=RunKind.TIER_RECOMPUTE.value,
@@ -309,7 +309,7 @@ def _select_tickers(
     config: Config,
     *,
     exchange: str,
-    tier_filter: Optional[set[Tier]] = None,
+    tier_filter: set[Tier] | None = None,
 ) -> list[_TickerInfo]:
     """Active, non-delisted tickers for `exchange`, ordered by
     (tier ASC, symbol ASC). Tier 1 first so partial-run aborts lose
@@ -342,7 +342,7 @@ def _fetch_existing_bars_for_tickers(
     ticker_ids: list[int],
     timeframe: Timeframe,
     *,
-    since: Optional[date] = None,
+    since: date | None = None,
 ) -> dict[int, list[_StoredBar]]:
     """For reconciliation. since=None pulls all history — only use when
     you really want it (backfill divergence detection on first run)."""
@@ -359,7 +359,7 @@ def _fetch_existing_bars_for_tickers(
         if since is not None:
             query += " AND bar_timestamp >= :since"
             params["since"] = datetime.combine(
-                since, datetime.min.time(), tzinfo=timezone.utc,
+                since, datetime.min.time(), tzinfo=UTC,
             )
         rows = conn.execute(text(query), params)
 
@@ -379,7 +379,7 @@ def run_eod(
     config: Config,
     *,
     exchange: str,
-    source: Optional[YFinanceSource] = None,
+    source: YFinanceSource | None = None,
     days_lookback: int = 7,
 ) -> int:
     """Daily end-of-day pass: every active ticker for `exchange`.
@@ -412,7 +412,7 @@ def run_intraday(
     config: Config,
     *,
     exchange: str,
-    source: Optional[YFinanceSource] = None,
+    source: YFinanceSource | None = None,
 ) -> int:
     """Hourly Tier-1-only pass for `exchange` during market hours.
 
@@ -462,8 +462,8 @@ def run_backfill(
     *,
     exchange: str,
     start_date: date,
-    source: Optional[YFinanceSource] = None,
-    tier_filter: Optional[set[Tier]] = None,
+    source: YFinanceSource | None = None,
+    tier_filter: set[Tier] | None = None,
 ) -> int:
     """Historical backfill from `start_date` to today for `exchange`.
 
@@ -491,10 +491,10 @@ def _run_fetch_pass(
     *,
     exchange: str,
     kind: RunKind,
-    tier_filter: Optional[set[Tier]],
+    tier_filter: set[Tier] | None,
     timeframe: Timeframe,
-    source: Optional[YFinanceSource],
-    start_date: Optional[date] = None,
+    source: YFinanceSource | None,
+    start_date: date | None = None,
     days_lookback: int = 7,
     intraday: bool = False,
 ) -> int:
@@ -565,7 +565,7 @@ def _run_fetch_pass(
             # open_run so a crash between them is impossible.
             if kind is RunKind.BACKFILL:
                 ExchangeStateRepository(conn).record_backfill_started(
-                    exchange, started_at=datetime.now(timezone.utc),
+                    exchange, started_at=datetime.now(UTC),
                 )
 
         t_start = time.monotonic()
@@ -779,7 +779,7 @@ def _process_one_batch(
             for w in plan.writes:
                 ts_utc = datetime.combine(
                     w.trading_date, datetime.min.time(),
-                    tzinfo=timezone.utc,
+                    tzinfo=UTC,
                 )
                 bars_repo.upsert_bar(
                     ticker.ticker_id,
@@ -871,7 +871,7 @@ def _handle_ticker_failure(
             ParkedEntry(
                 ticker_symbol=ticker.symbol,
                 ticker_id=ticker.ticker_id,
-                parked_at=datetime.now(timezone.utc),
+                parked_at=datetime.now(UTC),
                 reason=f"{config.etl.park_failure_threshold} consecutive failures",
                 last_error=error_message,
             ),
@@ -938,7 +938,7 @@ def _record_exchange_state_after_pass(
     exchange: str,
     outcome: RunOutcome,
     run_id: int,
-    data_date: Optional[date],
+    data_date: date | None,
 ) -> None:
     """Phase 14.6b dispatch: pick the right ExchangeStateRepository
     write for each RunKind. Called from inside the same transaction
@@ -956,7 +956,7 @@ def _record_exchange_state_after_pass(
     initial_load_completed_at on a clean success.
     """
     repo = ExchangeStateRepository(conn)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     if kind is RunKind.EOD:
         repo.record_eod(
@@ -998,7 +998,7 @@ def _record_exchange_state_after_pass(
 def _today_in_ist() -> date:
     """Today's date in NSE local time."""
     from datetime import timedelta
-    return (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date()
+    return (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
 
 
 def _timedelta_days(n: int):

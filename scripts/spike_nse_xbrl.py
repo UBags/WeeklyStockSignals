@@ -43,7 +43,6 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 from urllib.parse import quote
 
 try:
@@ -105,16 +104,16 @@ class SpikeResult:
     promoter_structure: str
     # Each phase records its outcome separately so we can see WHICH
     # step broke if anything did.
-    session_ok: Optional[bool] = None
-    api_status: Optional[int] = None
-    api_payload_shape: Optional[str] = None   # short description
-    latest_filing_date: Optional[str] = None
-    xbrl_url: Optional[str] = None
-    xbrl_status: Optional[int] = None
-    xbrl_bytes: Optional[int] = None
-    concept_uri_found: Optional[str] = None   # which concept URI matched
-    shares_outstanding: Optional[int] = None
-    error: Optional[str] = None
+    session_ok: bool | None = None
+    api_status: int | None = None
+    api_payload_shape: str | None = None   # short description
+    latest_filing_date: str | None = None
+    xbrl_url: str | None = None
+    xbrl_status: int | None = None
+    xbrl_bytes: int | None = None
+    concept_uri_found: str | None = None   # which concept URI matched
+    shares_outstanding: int | None = None
+    error: str | None = None
     notes: list[str] = None
 
     def __post_init__(self):
@@ -122,7 +121,7 @@ class SpikeResult:
             self.notes = []
 
 
-def bootstrap_session() -> Optional[requests.Session]:
+def bootstrap_session() -> requests.Session | None:
     """Hit NSE's homepage to acquire the anti-bot cookies. Without this,
     every subsequent API call returns 401 or 403."""
     s = requests.Session()
@@ -136,7 +135,7 @@ def bootstrap_session() -> Optional[requests.Session]:
             print(f"  WARN: homepage returned {r.status_code}", file=sys.stderr)
             return None
         if not s.cookies:
-            print(f"  WARN: no cookies set after homepage", file=sys.stderr)
+            print("  WARN: no cookies set after homepage", file=sys.stderr)
             return None
         # Some operators report needing a second hit for the cookies
         # to "settle" — try a market-status call which is cheaper than
@@ -168,7 +167,7 @@ def fetch_shareholding_index(s: requests.Session, symbol: str) -> tuple[int, dic
         return -1, f"exception: {type(e).__name__}: {e}"
 
 
-def find_latest_xbrl_url(payload: dict) -> tuple[Optional[str], Optional[str], str]:
+def find_latest_xbrl_url(payload: dict) -> tuple[str | None, str | None, str]:
     """Walk the JSON payload looking for the latest filing's XBRL link.
     Returns (filing_date, xbrl_url, shape_description). The shape
     description is a short string for the report so we can see if
@@ -211,7 +210,7 @@ def find_latest_xbrl_url(payload: dict) -> tuple[Optional[str], Optional[str], s
                 return str(v)
         return ""
 
-    def row_xbrl(r: dict) -> Optional[str]:
+    def row_xbrl(r: dict) -> str | None:
         for k in ("xbrl", "xbrlLink", "xbrlUrl", "xbrl_url", "fileXbrl"):
             v = r.get(k)
             if v and isinstance(v, str) and v.startswith("http"):
@@ -252,7 +251,7 @@ CONCEPT_CANDIDATES = (
 )
 
 
-def parse_shares_outstanding(xbrl_bytes: bytes) -> tuple[Optional[int], Optional[str], list[str]]:
+def parse_shares_outstanding(xbrl_bytes: bytes) -> tuple[int | None, str | None, list[str]]:
     """Find the shares-outstanding number in the XBRL. Returns
     (shares, matching_concept_uri, notes). Notes captures useful
     observations about the file's structure even if parsing failed."""
@@ -381,7 +380,7 @@ def main() -> int:
             print(f"  {n}")
         if shares is None:
             r.error = "Could not extract shares-outstanding from XBRL"
-            print(f"  [PARTIAL] file fetched but parse failed")
+            print("  [PARTIAL] file fetched but parse failed")
         else:
             print(f"  [OK] shares_outstanding = {shares:,} via concept {concept!r}")
 

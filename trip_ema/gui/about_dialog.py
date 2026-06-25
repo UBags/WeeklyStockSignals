@@ -7,16 +7,14 @@ Shows the trip_ema version, Python/Qt versions, and a short blurb.
 from __future__ import annotations
 
 import sys
-from typing import Optional
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QWidget,
 )
 
 
-def show_about_dialog(parent: Optional[QWidget] = None) -> None:
+def show_about_dialog(parent: QWidget | None = None) -> None:
     """Construct and exec_() the dialog. Called from a menu action."""
     dlg = AboutDialog(parent)
     dlg.exec()
@@ -24,7 +22,7 @@ def show_about_dialog(parent: Optional[QWidget] = None) -> None:
 
 class AboutDialog(QDialog):
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("About trip_ema")
         self.setModal(True)

@@ -14,7 +14,7 @@ schema again, this fails immediately.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -34,7 +34,7 @@ from trip_ema.persistence import (
 
 @pytest.fixture
 def now():
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 @pytest.fixture

@@ -20,7 +20,7 @@ sleeping in tests.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from unittest.mock import MagicMock
 
 import pytest
@@ -70,12 +70,12 @@ def _make_batch() -> NotificationBatch:
         events=[SignalEvent(
             ticker=TickerRef("NSE", "NIFTY", "INDEX"),
             timeframe=Timeframe.WEEKLY,
-            bar_timestamp=datetime(2026, 5, 4, tzinfo=timezone.utc),
+            bar_timestamp=datetime(2026, 5, 4, tzinfo=UTC),
             signal=ChangeSignal.BUY,
             price_at_signal=22000.0,
-            computed_at=datetime(2026, 5, 4, tzinfo=timezone.utc),
+            computed_at=datetime(2026, 5, 4, tzinfo=UTC),
         )],
-        composed_at=datetime(2026, 5, 4, tzinfo=timezone.utc),
+        composed_at=datetime(2026, 5, 4, tzinfo=UTC),
     )
 
 

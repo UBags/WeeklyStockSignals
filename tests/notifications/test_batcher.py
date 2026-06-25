@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 from trip_ema.domain import (
     ChangeSignal,
@@ -25,7 +25,7 @@ def _event(
     signal: ChangeSignal = ChangeSignal.BUY,
     price: float = 24856.20,
 ) -> SignalEvent:
-    t = datetime(2026, 5, 18, 4, 30, tzinfo=timezone.utc)
+    t = datetime(2026, 5, 18, 4, 30, tzinfo=UTC)
     return SignalEvent(
         ticker=NIFTY,
         timeframe=Timeframe.WEEKLY,
@@ -39,7 +39,7 @@ def _event(
 def _batch(events: list[SignalEvent]) -> NotificationBatch:
     return NotificationBatch(
         subscriber_id=1, events=events,
-        composed_at=datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc),
+        composed_at=datetime(2026, 5, 18, 5, 0, tzinfo=UTC),
     )
 
 

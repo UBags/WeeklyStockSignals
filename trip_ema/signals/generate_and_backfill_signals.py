@@ -52,7 +52,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -71,7 +70,7 @@ from trip_ema.fundamentals.indicator_primitives import (
     EngineParams,
     compute_indicator_series,
 )
-from trip_ema.indicators.aggregation import _monday_of, daily_to_weekly
+from trip_ema.indicators.aggregation import _monday_of
 from trip_ema.regime import BarInputs, Regime, compute_regime
 from trip_ema.signals.generate_signals import (
     PositionState,
@@ -178,24 +177,24 @@ def walk_and_generate_events(
 
     # State threaded across days.
     prev_completed_regime: Regime = Regime.NEUTRAL
-    prev_completed_close: Optional[float] = None
-    prev_completed_lower_env: Optional[float] = None
-    prev_completed_upper_env: Optional[float] = None
+    prev_completed_close: float | None = None
+    prev_completed_lower_env: float | None = None
+    prev_completed_upper_env: float | None = None
     prev_state: PositionState = PositionState.FLAT
 
     # End-of-yesterday snapshots (used to populate prev_completed_* on
     # week transitions).
-    yesterday_week_start: Optional[datetime] = None
-    yesterday_regime: Optional[Regime] = None
-    yesterday_bar_inputs: Optional[BarInputs] = None
+    yesterday_week_start: datetime | None = None
+    yesterday_regime: Regime | None = None
+    yesterday_bar_inputs: BarInputs | None = None
 
     # Incremental weekly aggregation state.
     completed_weeks: list[OHLCVBar] = []
-    cur_week_start: Optional[datetime] = None
-    cur_open: Optional[float] = None
+    cur_week_start: datetime | None = None
+    cur_open: float | None = None
     cur_high: float = float("-inf")
     cur_low: float = float("inf")
-    cur_close: Optional[float] = None
+    cur_close: float | None = None
     cur_volume: float = 0.0
 
     days_walked = 0

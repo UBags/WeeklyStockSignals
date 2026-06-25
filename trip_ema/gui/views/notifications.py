@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt,
@@ -25,12 +25,12 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QPushButton, QSpinBox, QTableView, QVBoxLayout, QWidget,
+    QPushButton, QSpinBox, QTableView, QVBoxLayout, QWidget,
 )
 
 from ..csv_export import export_rows_to_csv, timestamped_filename
 from ..db import GuiDbSession
-from ..http_client import ApiError, TripEmaHttpClient
+from ..http_client import TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ class NotificationLogModel(QAbstractTableModel):
         self._rows = rows
         self.endResetModel()
 
-    def row_at(self, source_row: int) -> Optional[dict]:
+    def row_at(self, source_row: int) -> dict | None:
         if 0 <= source_row < len(self._rows):
             return self._rows[source_row]
         return None
@@ -137,7 +137,7 @@ class NotificationLogView(QWidget):
         db: GuiDbSession,
         http: TripEmaHttpClient,
         *,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
         start_refresh_on_init: bool = True,
     ):
         super().__init__(parent)

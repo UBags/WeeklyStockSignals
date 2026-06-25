@@ -24,14 +24,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Iterable, Optional
+from datetime import datetime, UTC
+from collections.abc import Iterable
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from .symbol_history_repo import SymbolHistoryRepository
-from .types import InstrumentType, NseListing
+from .types import NseListing
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class ListingsSync:
         conn: Connection,
         exchange: str = "NSE",
         *,
-        history_repo: Optional[SymbolHistoryRepository] = None,
+        history_repo: SymbolHistoryRepository | None = None,
     ):
         self._conn = conn
         self._exchange = exchange
@@ -129,7 +129,7 @@ class ListingsSync:
         # even though their old symbol is not).
         if detect_delistings:
             incoming_isins = {l.isin for l in incoming_list if l.isin}
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             for symbol, existing in existing_by_symbol.items():
                 if symbol in incoming_symbols:
                     continue

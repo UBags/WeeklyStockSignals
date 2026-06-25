@@ -44,7 +44,6 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, replace
 from datetime import date, datetime
-from typing import Optional
 
 from ..domain import (
     ChangeSignal,
@@ -127,14 +126,14 @@ class CachedSnapshot:
     ticker_ref: TickerRef
     """Mirrored for read-endpoint convenience — saves a tickers lookup."""
     timeframe: Timeframe
-    latest_indicator_state: Optional[IndicatorStateSnapshot]
-    latest_signal_event: Optional[SignalEventSnapshot]
+    latest_indicator_state: IndicatorStateSnapshot | None
+    latest_signal_event: SignalEventSnapshot | None
     snapshot_taken_at: datetime
     """When this cache entry was last refreshed end-to-end (i.e.
     via lifecycle prime or a `put_snapshot`). The component
     `computed_at` fields tell you when each component was produced
     by its respective writer."""
-    stale_since: Optional[datetime] = None
+    stale_since: datetime | None = None
     """When the compute scheduler last observed a data gap on this
     ticker. None means no gap. Set by `mark_stale`, cleared by
     `clear_stale`."""
@@ -166,7 +165,7 @@ class SignalCache:
 
     def get_snapshot(
         self, ticker_id: int, timeframe: Timeframe,
-    ) -> Optional[CachedSnapshot]:
+    ) -> CachedSnapshot | None:
         """O(1) lookup by ticker_id. Returns the immutable snapshot
         or None if not seeded yet."""
         return self._snapshots.get((ticker_id, timeframe))

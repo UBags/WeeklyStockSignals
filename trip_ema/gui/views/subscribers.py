@@ -41,22 +41,21 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
 
 from PySide6.QtCore import (
-    QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, Signal,
+    QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt,
 )
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFormLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QSpinBox, QTableView, QVBoxLayout, QWidget,
+    QLineEdit, QListWidget, QMessageBox,
+    QPushButton, QTableView, QVBoxLayout, QWidget,
 )
 
 from ..csv_export import export_rows_to_csv, timestamped_filename
 from ..db import GuiDbSession
-from ..http_client import ApiError, TripEmaHttpClient
+from ..http_client import TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
 
 logger = logging.getLogger(__name__)
@@ -121,7 +120,7 @@ class SubscriberTableModel(QAbstractTableModel):
         self._rows = rows
         self.endResetModel()
 
-    def row_at(self, source_row: int) -> Optional[dict]:
+    def row_at(self, source_row: int) -> dict | None:
         if 0 <= source_row < len(self._rows):
             return self._rows[source_row]
         return None
@@ -193,7 +192,7 @@ class SubscribersView(QWidget):
         db: GuiDbSession,
         http: TripEmaHttpClient,
         *,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
         start_refresh_on_init: bool = True,
         populate_ticker_lookup_on_init: bool = True,
     ):
@@ -209,7 +208,7 @@ class SubscribersView(QWidget):
         self._proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
 
         # In-progress form state — separate from server state until Save.
-        self._editing_subscriber_id: Optional[int] = None
+        self._editing_subscriber_id: int | None = None
         """None when adding a NEW subscriber; otherwise the id being edited."""
         self._form_filters: list[dict] = []
         """Local draft of the filter list. Each dict is a

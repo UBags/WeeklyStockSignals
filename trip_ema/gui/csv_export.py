@@ -15,7 +15,7 @@ import csv
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from collections.abc import Callable, Iterable
 
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
 
@@ -28,8 +28,8 @@ def export_rows_to_csv(
     default_filename: str,
     columns: list[str],
     rows: Iterable[list],
-    success_callback: Optional[Callable] = None,
-) -> Optional[Path]:
+    success_callback: Callable | None = None,
+) -> Path | None:
     """Prompt for a save path and write rows.
 
     Args:

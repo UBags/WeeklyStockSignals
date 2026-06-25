@@ -22,7 +22,7 @@ Strategy:
 from __future__ import annotations
 
 import time
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone, UTC
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
@@ -42,7 +42,7 @@ from trip_ema.scheduler.tick_planner import MarketTickConfig
 
 
 IST = ZoneInfo("Asia/Kolkata")
-UTC = timezone.utc
+UTC = UTC
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +322,7 @@ class TestStepIsolation:
 
     def test_distribute_failure_does_not_corrupt_summary(self):
         def failing_distribute():
-            raise IOError("smtp unreachable")
+            raise OSError("smtp unreachable")
 
         orch = _build(
             now=NOW_MID_SESSION,

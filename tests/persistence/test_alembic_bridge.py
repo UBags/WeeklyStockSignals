@@ -157,9 +157,8 @@ class TestStampBaselineIfNeeded:
         assert result is False
         # alembic_version should NOT have been created
         from sqlalchemy.exc import ProgrammingError
-        with db_engine.connect() as conn:
-            with pytest.raises(ProgrammingError):
-                conn.execute(text("SELECT 1 FROM alembic_version"))
+        with db_engine.connect() as conn, pytest.raises(ProgrammingError):
+            conn.execute(text("SELECT 1 FROM alembic_version"))
 
     def test_no_stamp_when_alembic_already_populated(self, db_engine):
         """If alembic_version already has a row, don't touch it."""

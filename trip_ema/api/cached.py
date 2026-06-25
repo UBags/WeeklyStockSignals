@@ -32,13 +32,11 @@ from path params via `TickersRepository.get_by_ref` before calling.
 
 from __future__ import annotations
 
-import math
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from ..cache.signal_cache import (
     CachedSnapshot,
     IndicatorStateSnapshot,
-    SignalEventSnapshot,
     SignalCache,
 )
 from ..domain import BarState, ChangeSignal, CoreRegime, Timeframe
@@ -141,10 +139,10 @@ def _terse_from_snapshot(snap: CachedSnapshot) -> TerseResponse:
         latest_bar_timestamp = ev.bar_timestamp
     elif ind is not None:
         latest_bar_timestamp = datetime.combine(
-            ind.trade_date, datetime.min.time(), tzinfo=timezone.utc,
+            ind.trade_date, datetime.min.time(), tzinfo=UTC,
         )
     else:
-        latest_bar_timestamp = datetime.fromtimestamp(0, tz=timezone.utc)
+        latest_bar_timestamp = datetime.fromtimestamp(0, tz=UTC)
 
     return TerseResponse(
         ticker=snap.ticker_ref,
@@ -174,7 +172,7 @@ def _bar_state_from_indicator(
     wire boundary.
     """
     bar_ts = datetime.combine(
-        ind.trade_date, datetime.min.time(), tzinfo=timezone.utc,
+        ind.trade_date, datetime.min.time(), tzinfo=UTC,
     )
     regime = CoreRegime(ind.display_regime)
     return BarState(

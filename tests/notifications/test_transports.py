@@ -6,7 +6,7 @@ verify behavior without making network calls.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 from trip_ema.domain import (
     ChangeSignal,
@@ -22,7 +22,7 @@ NIFTY = TickerRef("NSE", "NIFTY", "INDEX")
 
 
 def _batch(n_events: int = 1) -> NotificationBatch:
-    t = datetime(2026, 5, 18, 4, 30, tzinfo=timezone.utc)
+    t = datetime(2026, 5, 18, 4, 30, tzinfo=UTC)
     events = [
         SignalEvent(
             ticker=NIFTY, timeframe=Timeframe.WEEKLY,

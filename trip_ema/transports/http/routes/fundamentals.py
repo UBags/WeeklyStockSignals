@@ -25,8 +25,7 @@ to keep yfinance + DB from getting overwhelmed.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
-from typing import Optional
+from datetime import date, datetime, UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -63,8 +62,8 @@ router = APIRouter(
 
 class IndustryRowPayload(BaseModel):
     ticker_id: int
-    sector: Optional[str] = None
-    industry: Optional[str] = None
+    sector: str | None = None
+    industry: str | None = None
     classification_source: str
     fetched_at: datetime
     updated_at: datetime
@@ -89,9 +88,9 @@ class CoveragePayload(BaseModel):
 class RunRowPayload(BaseModel):
     run_id: int
     phase: str
-    exchange: Optional[str] = None
+    exchange: str | None = None
     started_at: datetime
-    completed_at: Optional[datetime] = None
+    completed_at: datetime | None = None
     status: str
     succeeded: int
     failed: int
@@ -104,7 +103,7 @@ class RunListPayload(BaseModel):
 
 class RefreshAcceptedPayload(BaseModel):
     action: str
-    run_id: Optional[int] = None
+    run_id: int | None = None
     accepted_at: datetime
     notes: str
 
@@ -113,8 +112,8 @@ class OverrideRequestPayload(BaseModel):
     ticker_id: int
     sector: str = "Unclassified"
     industry: str = Field(..., min_length=1, max_length=128)
-    note: Optional[str] = None
-    set_by: Optional[str] = None
+    note: str | None = None
+    set_by: str | None = None
 
 
 class OverrideAckPayload(BaseModel):
@@ -229,8 +228,8 @@ def get_coverage(
 
 @router.get("/runs", response_model=RunListPayload)
 def list_runs(
-    phase: Optional[str] = Query(None),
-    exchange: Optional[str] = Query(None, min_length=2, max_length=10),
+    phase: str | None = Query(None),
+    exchange: str | None = Query(None, min_length=2, max_length=10),
     limit: int = Query(20, ge=1, le=100),
     db_engine: Engine = Depends(get_db_engine),
 ) -> RunListPayload:
@@ -278,7 +277,7 @@ def refresh_industry(
     return RefreshAcceptedPayload(
         action="refresh-industry",
         run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Industry refresh ({exchange}, force={force}) submitted; "
             f"check /v1/fundamentals/runs for progress."
@@ -337,12 +336,12 @@ from ....persistence.fundamentals_repo import InstrumentSharesRepository
 
 class SharesRowPayload(BaseModel):
     ticker_id: int
-    as_of_date: "date"
-    shares_outstanding: Optional[int] = None
-    free_float_factor: Optional[float] = None
+    as_of_date: date
+    shares_outstanding: int | None = None
+    free_float_factor: float | None = None
     shares_source: str
     fetched_at: datetime
-    xbrl_url: Optional[str] = None
+    xbrl_url: str | None = None
 
 
 class SharesListPayload(BaseModel):
@@ -473,7 +472,7 @@ def refresh_shares(
     return RefreshAcceptedPayload(
         action="refresh-shares",
         run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Shares refresh ({exchange}, force={force}) submitted; "
             f"check /v1/fundamentals/runs for progress."
@@ -491,10 +490,10 @@ from ....persistence.fundamentals_repo import QuarterlyFinancialsRepository
 
 class FinancialRowPayload(BaseModel):
     ticker_id: int
-    fiscal_quarter: "date"
+    fiscal_quarter: date
     fetched_at: datetime
-    revenue: Optional[float] = None
-    ebitda: Optional[float] = None
+    revenue: float | None = None
+    ebitda: float | None = None
     currency: str
     source: str
 
@@ -506,7 +505,7 @@ class FinancialListPayload(BaseModel):
 
 class FinancialHistoryPayload(BaseModel):
     ticker_id: int
-    fiscal_quarter: "date"
+    fiscal_quarter: date
     rows: list[FinancialRowPayload]  # newest fetched_at first
 
 
@@ -589,7 +588,7 @@ def get_latest_n_quarters(
             response_model=FinancialHistoryPayload)
 def get_quarter_history(
     ticker_id: int,
-    fiscal_quarter: "date",
+    fiscal_quarter: date,
     db_engine: Engine = Depends(get_db_engine),
 ) -> FinancialHistoryPayload:
     """All snapshots for one (ticker, quarter) pair — used for
@@ -626,7 +625,7 @@ def refresh_financials(
     return RefreshAcceptedPayload(
         action="refresh-financials",
         run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Financials refresh ({exchange}, force={force}) submitted; "
             f"check /v1/fundamentals/runs for progress."
@@ -646,7 +645,7 @@ class MarketCapRowPayload(BaseModel):
     ticker_id: int
     trade_date: date
     close_price: float
-    shares_used: Optional[int] = None
+    shares_used: int | None = None
     market_cap: float
     source: str
     computed_at: datetime
@@ -654,7 +653,7 @@ class MarketCapRowPayload(BaseModel):
 
 class MarketCapListPayload(BaseModel):
     trade_date: date
-    exchange: Optional[str] = None
+    exchange: str | None = None
     rows: list[MarketCapRowPayload]
 
 
@@ -696,7 +695,7 @@ def _run_mcap_backfill_safe(
 @router.get("/market-cap", response_model=MarketCapListPayload)
 def list_market_cap(
     trade_date: date = Query(...),
-    exchange: Optional[str] = Query(None, min_length=2, max_length=10),
+    exchange: str | None = Query(None, min_length=2, max_length=10),
     limit: int = Query(100, ge=1, le=5000),
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
@@ -742,8 +741,8 @@ def get_market_cap_history(
              response_model=RefreshAcceptedPayload, status_code=202)
 def compute_market_cap_endpoint(
     exchange: str = Query(..., min_length=2, max_length=10),
-    backfill_from: Optional[date] = Query(None),
-    backfill_to: Optional[date] = Query(None),
+    backfill_from: date | None = Query(None),
+    backfill_to: date | None = Query(None),
     force: bool = Query(False),
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
@@ -788,7 +787,7 @@ def compute_market_cap_endpoint(
     return RefreshAcceptedPayload(
         action="compute-market-cap",
         run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Market cap backfill ({exchange}, {backfill_from}→"
             f"{backfill_to}, force={force}) submitted; check "
@@ -821,7 +820,7 @@ class IndustryIndexPayload(BaseModel):
     rebalance_schedule: str
     min_constituents: int
     status: str
-    notes: Optional[str] = None
+    notes: str | None = None
 
 
 class IndustryIndexListPayload(BaseModel):
@@ -833,16 +832,16 @@ class IndustryIndexConstituentPayload(BaseModel):
     ticker_id: int
     rebalance_date: date
     effective_from: date
-    effective_to: Optional[date] = None
+    effective_to: date | None = None
     weight_at_rebalance: float
     market_cap_at_rebalance: float
     close_at_rebalance: float
-    removed_reason: Optional[str] = None
+    removed_reason: str | None = None
 
 
 class IndustryIndexConstituentListPayload(BaseModel):
     industry_name: str
-    as_of: Optional[date] = None
+    as_of: date | None = None
     rows: list[IndustryIndexConstituentPayload]
 
 
@@ -859,8 +858,8 @@ class IndustryIndexValuePayload(BaseModel):
 
 class IndustryIndexValueListPayload(BaseModel):
     industry_name: str
-    from_date: Optional[date] = None
-    to_date: Optional[date] = None
+    from_date: date | None = None
+    to_date: date | None = None
     rows: list[IndustryIndexValuePayload]
 
 
@@ -928,7 +927,7 @@ def _run_industry_index_build_safe(
 
 def _run_index_value_backfill_safe(
     db_engine: Engine, industry_name: str,
-    from_date_param: Optional[date], to_date_param: Optional[date],
+    from_date_param: date | None, to_date_param: date | None,
     force: bool, all_active: bool,
 ) -> None:
     """Runs either one industry or all active industries."""
@@ -988,7 +987,7 @@ def list_industry_indices(
             response_model=IndustryIndexConstituentListPayload)
 def get_industry_index_constituents(
     industry_name: str,
-    as_of: Optional[date] = Query(None),
+    as_of: date | None = Query(None),
     db_engine: Engine = Depends(get_db_engine),
 ) -> IndustryIndexConstituentListPayload:
     """List constituents of an index. Without as_of, returns the
@@ -1012,9 +1011,9 @@ def get_industry_index_constituents(
             response_model=IndustryIndexValueListPayload)
 def get_industry_index_values(
     industry_name: str,
-    from_date: Optional[date] = Query(None),
-    to_date: Optional[date] = Query(None),
-    limit: Optional[int] = Query(None, ge=1, le=5000),
+    from_date: date | None = Query(None),
+    to_date: date | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=5000),
     db_engine: Engine = Depends(get_db_engine),
 ) -> IndustryIndexValueListPayload:
     """Get the daily value time series for an index. Returns
@@ -1092,7 +1091,7 @@ def build_industry_indices_endpoint(
     return RefreshAcceptedPayload(
         action="build-industry-indices",
         run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Industry index build ({exchange}, "
             f"min_constituents={min_constituents}) submitted."
@@ -1103,10 +1102,10 @@ def build_industry_indices_endpoint(
 @router.post("/compute-index-values",
              response_model=RefreshAcceptedPayload, status_code=202)
 def compute_index_values_endpoint(
-    industry: Optional[str] = Query(None),
+    industry: str | None = Query(None),
     all_active: bool = Query(False),
-    from_date: Optional[date] = Query(None),
-    to_date: Optional[date] = Query(None),
+    from_date: date | None = Query(None),
+    to_date: date | None = Query(None),
     force: bool = Query(False),
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
@@ -1143,7 +1142,7 @@ def compute_index_values_endpoint(
     return RefreshAcceptedPayload(
         action="compute-index-values",
         run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Index value backfill (industry={industry!r}, "
             f"all_active={all_active}) submitted."
@@ -1164,9 +1163,9 @@ from ....persistence.fundamentals_repo import IndicatorStateRepository
 
 class IndicatorStatePayload(BaseModel):
     """One indicator_state row, polymorphic on series identity."""
-    ticker_id: Optional[int] = None
-    timeframe: Optional[str] = None
-    industry_name: Optional[str] = None
+    ticker_id: int | None = None
+    timeframe: str | None = None
+    industry_name: str | None = None
     trade_date: date
     med_ema: float
     long_ema: float
@@ -1181,18 +1180,18 @@ class IndicatorStatePayload(BaseModel):
     display_regime: int
     pierces_upper_mid: bool
     pierces_lower_mid: bool
-    dist_to_med_in_hl_units: Optional[float] = None
-    dist_to_long_in_hl_units: Optional[float] = None
-    dist_to_longest_in_hl_units: Optional[float] = None
-    mean_dist_to_med_in_hl_units: Optional[float] = None
-    mean_dist_to_long_in_hl_units: Optional[float] = None
-    mean_dist_to_longest_in_hl_units: Optional[float] = None
-    bars_since_med_turn: Optional[int] = None
-    bars_since_long_turn: Optional[int] = None
-    bars_since_longest_turn: Optional[int] = None
-    pct_change_since_med_turn: Optional[float] = None
-    pct_change_since_long_turn: Optional[float] = None
-    pct_change_since_longest_turn: Optional[float] = None
+    dist_to_med_in_hl_units: float | None = None
+    dist_to_long_in_hl_units: float | None = None
+    dist_to_longest_in_hl_units: float | None = None
+    mean_dist_to_med_in_hl_units: float | None = None
+    mean_dist_to_long_in_hl_units: float | None = None
+    mean_dist_to_longest_in_hl_units: float | None = None
+    bars_since_med_turn: int | None = None
+    bars_since_long_turn: int | None = None
+    bars_since_longest_turn: int | None = None
+    pct_change_since_med_turn: float | None = None
+    pct_change_since_long_turn: float | None = None
+    pct_change_since_longest_turn: float | None = None
     med_pattern_label: str
     long_pattern_label: str
     longest_pattern_label: str
@@ -1206,10 +1205,10 @@ class IndicatorStatePayload(BaseModel):
 
 
 class IndicatorStateListPayload(BaseModel):
-    industry_name: Optional[str] = None
-    ticker_id: Optional[int] = None
-    from_date: Optional[date] = None
-    to_date: Optional[date] = None
+    industry_name: str | None = None
+    ticker_id: int | None = None
+    from_date: date | None = None
+    to_date: date | None = None
     rows: list[IndicatorStatePayload]
 
 
@@ -1261,12 +1260,12 @@ def _indicator_state_payload(s) -> IndicatorStatePayload:
 
 
 def _run_indicator_state_safe(
-    db_engine: Engine, industry_name: Optional[str],
+    db_engine: Engine, industry_name: str | None,
     force: bool, all_industries: bool,
-    ticker: Optional[str] = None,
+    ticker: str | None = None,
     all_tickers: bool = False,
-    exchange: Optional[str] = None,
-    timeframe: Optional[str] = None,
+    exchange: str | None = None,
+    timeframe: str | None = None,
 ) -> None:
     """Runs the indicator-state compute corresponding to the mode
     requested. Catches exceptions so the executor doesn't die."""
@@ -1333,9 +1332,9 @@ def _run_indicator_state_safe(
             response_model=IndicatorStateListPayload)
 def get_industry_indicator_state(
     industry_name: str,
-    from_date: Optional[date] = Query(None),
-    to_date: Optional[date] = Query(None),
-    limit: Optional[int] = Query(None, ge=1, le=5000),
+    from_date: date | None = Query(None),
+    to_date: date | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=5000),
     db_engine: Engine = Depends(get_db_engine),
 ) -> IndicatorStateListPayload:
     """Get the indicator_state time series for one industry index.
@@ -1362,9 +1361,9 @@ def get_industry_indicator_state(
 def get_ticker_indicator_state(
     ticker_id: int,
     timeframe: str = Query(..., min_length=1, max_length=8),
-    from_date: Optional[date] = Query(None),
-    to_date: Optional[date] = Query(None),
-    limit: Optional[int] = Query(None, ge=1, le=5000),
+    from_date: date | None = Query(None),
+    to_date: date | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=5000),
     db_engine: Engine = Depends(get_db_engine),
 ) -> IndicatorStateListPayload:
     """Get the indicator_state time series for one ticker bar series.
@@ -1393,12 +1392,12 @@ def get_ticker_indicator_state(
 @router.post("/compute-indicator-state",
              response_model=RefreshAcceptedPayload, status_code=202)
 def compute_indicator_state_endpoint(
-    industry: Optional[str] = Query(None),
+    industry: str | None = Query(None),
     all_industries: bool = Query(False),
-    ticker: Optional[str] = Query(None),
+    ticker: str | None = Query(None),
     all_tickers: bool = Query(False),
-    exchange: Optional[str] = Query(None),
-    timeframe: Optional[str] = Query(None),
+    exchange: str | None = Query(None),
+    timeframe: str | None = Query(None),
     force: bool = Query(False),
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
@@ -1449,7 +1448,7 @@ def compute_indicator_state_endpoint(
     return RefreshAcceptedPayload(
         action="compute-indicator-state",
         run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Indicator state compute (industry={industry!r}, "
             f"all_industries={all_industries}, ticker={ticker!r}, "
@@ -1472,9 +1471,9 @@ from ....persistence.fundamentals_repo import SignalEventRepository
 
 class SignalEventPayload(BaseModel):
     """One signal_event row."""
-    ticker_id: Optional[int] = None
-    timeframe: Optional[str] = None
-    industry_name: Optional[str] = None
+    ticker_id: int | None = None
+    timeframe: str | None = None
+    industry_name: str | None = None
     trade_date: date
     event_kind: str
     regime_before: int
@@ -1484,11 +1483,11 @@ class SignalEventPayload(BaseModel):
 
 
 class SignalEventListPayload(BaseModel):
-    industry_name: Optional[str] = None
-    ticker_id: Optional[int] = None
-    from_date: Optional[date] = None
-    to_date: Optional[date] = None
-    kind: Optional[str] = None
+    industry_name: str | None = None
+    ticker_id: int | None = None
+    from_date: date | None = None
+    to_date: date | None = None
+    kind: str | None = None
     rows: list[SignalEventPayload]
 
 
@@ -1512,10 +1511,10 @@ def _signal_event_payload(e) -> SignalEventPayload:
 def _run_signals_safe(
     db_engine: Engine,
     force: bool,
-    ticker: Optional[str] = None,
+    ticker: str | None = None,
     all_tickers: bool = False,
-    exchange: Optional[str] = None,
-    timeframe: Optional[str] = None,
+    exchange: str | None = None,
+    timeframe: str | None = None,
 ) -> None:
     from ....fundamentals.runners import (
         run_signal_events_for_all_tickers,
@@ -1571,7 +1570,7 @@ def _run_signals_safe(
 @router.get("/signal-events/recent",
             response_model=SignalEventListPayload)
 def list_recent_signal_events(
-    kind: Optional[str] = Query(None),
+    kind: str | None = Query(None),
     days: int = Query(7, ge=1, le=365),
     limit: int = Query(100, ge=1, le=5000),
     db_engine: Engine = Depends(get_db_engine),
@@ -1601,10 +1600,10 @@ def list_recent_signal_events(
 @router.post("/compute-signals",
              response_model=RefreshAcceptedPayload, status_code=202)
 def compute_signals_endpoint(
-    ticker: Optional[str] = Query(None),
+    ticker: str | None = Query(None),
     all_tickers: bool = Query(False),
-    exchange: Optional[str] = Query(None),
-    timeframe: Optional[str] = Query(None),
+    exchange: str | None = Query(None),
+    timeframe: str | None = Query(None),
     force: bool = Query(False),
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
@@ -1647,7 +1646,7 @@ def compute_signals_endpoint(
     return RefreshAcceptedPayload(
         action="compute-signals",
         run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"Signal events compute (ticker={ticker!r}, "
             f"all_tickers={all_tickers}, timeframe={timeframe!r}) "
@@ -1713,7 +1712,7 @@ def run_eod_pipeline_endpoint(
     return RefreshAcceptedPayload(
         action="run-eod-pipeline",
         run_id=None,
-        accepted_at=datetime.now(timezone.utc),
+        accepted_at=datetime.now(UTC),
         notes=(
             f"EoD pipeline (exchange={exchange}, "
             f"include_tickers={include_tickers}, "

@@ -11,7 +11,7 @@ everything correctly.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -447,7 +447,7 @@ class TestPipelineResultStruct:
 
     def test_step_result_duration_populated_after_run(self):
         sr = StepResult(name="x")
-        sr.started_at = datetime.now(timezone.utc)
+        sr.started_at = datetime.now(UTC)
         sr.finished_at = sr.started_at
         assert sr.duration_seconds == 0
 
@@ -455,8 +455,8 @@ class TestPipelineResultStruct:
         from datetime import datetime, timezone
         pr = PipelineResult(
             exchange="NSE",
-            started_at=datetime.now(timezone.utc),
-            finished_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
             steps=[
                 StepResult(name="a", status=StepStatus.SUCCESS),
                 StepResult(name="b", status=StepStatus.SUCCESS),
@@ -472,8 +472,8 @@ class TestPipelineResultStruct:
         from datetime import datetime, timezone
         pr = PipelineResult(
             exchange="NSE",
-            started_at=datetime.now(timezone.utc),
-            finished_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
             steps=[
                 StepResult(
                     name="a", status=StepStatus.SUCCESS,

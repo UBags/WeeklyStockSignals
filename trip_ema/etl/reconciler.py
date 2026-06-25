@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Optional
 
 from .types import RawBar
 
@@ -63,7 +62,7 @@ class DivergenceFlag:
     trading_date: date
     stored_close: float
     new_close: float
-    stored_adj_close: Optional[float]
+    stored_adj_close: float | None
     new_adj_close: float
     delta_pct: float
     """(new_close - stored_close) / stored_close, signed."""
@@ -86,7 +85,7 @@ class _StoredBar:
     high: float
     low: float
     close: float
-    adj_close: Optional[float]
+    adj_close: float | None
     volume: float
 
 

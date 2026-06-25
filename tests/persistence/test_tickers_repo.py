@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 import pytest
 
@@ -12,7 +12,7 @@ from trip_ema.persistence import TickersRepository, transaction
 
 @pytest.fixture
 def now():
-    return datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    return datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
 
 
 def test_insert_returns_ticker_id(db_engine, now):

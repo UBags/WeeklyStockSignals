@@ -160,9 +160,8 @@ def test_empty_info_dict_raises_permanent():
     with patch(
         "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
         return_value={},
-    ):
-        with pytest.raises(SharesFetchPermanent, match="empty info"):
-            fetch_shares("DELISTED", "NSE")
+    ), pytest.raises(SharesFetchPermanent, match="empty info"):
+        fetch_shares("DELISTED", "NSE")
 
 
 def test_neither_field_populated_raises_permanent():
@@ -177,9 +176,8 @@ def test_neither_field_populated_raises_permanent():
     with patch(
         "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
         return_value=mock_info,
-    ):
-        with pytest.raises(SharesFetchPermanent, match="neither"):
-            fetch_shares("X", "NSE")
+    ), pytest.raises(SharesFetchPermanent, match="neither"):
+        fetch_shares("X", "NSE")
 
 
 def test_both_fields_zero_raises_permanent():
@@ -194,9 +192,8 @@ def test_both_fields_zero_raises_permanent():
     with patch(
         "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
         return_value=mock_info,
-    ):
-        with pytest.raises(SharesFetchPermanent):
-            fetch_shares("X", "NSE")
+    ), pytest.raises(SharesFetchPermanent):
+        fetch_shares("X", "NSE")
 
 
 def test_rate_limit_classification():
@@ -208,9 +205,8 @@ def test_rate_limit_classification():
     with patch(
         "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
         side_effect=raise_rate_limit,
-    ):
-        with pytest.raises(SharesFetchRateLimited):
-            fetch_shares("X", "NSE")
+    ), pytest.raises(SharesFetchRateLimited):
+        fetch_shares("X", "NSE")
 
 
 def test_timeout_classified_as_transient():
@@ -220,9 +216,8 @@ def test_timeout_classified_as_transient():
     with patch(
         "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
         side_effect=raise_timeout,
-    ):
-        with pytest.raises(SharesFetchTransient):
-            fetch_shares("X", "NSE")
+    ), pytest.raises(SharesFetchTransient):
+        fetch_shares("X", "NSE")
 
 
 def test_404_classified_as_permanent():
@@ -232,9 +227,8 @@ def test_404_classified_as_permanent():
     with patch(
         "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
         side_effect=raise_404,
-    ):
-        with pytest.raises(SharesFetchPermanent):
-            fetch_shares("X", "NSE")
+    ), pytest.raises(SharesFetchPermanent):
+        fetch_shares("X", "NSE")
 
 
 def test_unknown_error_classified_as_transient():
@@ -246,9 +240,8 @@ def test_unknown_error_classified_as_transient():
     with patch(
         "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
         side_effect=raise_weird,
-    ):
-        with pytest.raises(SharesFetchTransient):
-            fetch_shares("X", "NSE")
+    ), pytest.raises(SharesFetchTransient):
+        fetch_shares("X", "NSE")
 
 
 # ---------- exception hierarchy ---------- #

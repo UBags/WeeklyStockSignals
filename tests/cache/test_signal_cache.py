@@ -9,7 +9,7 @@ will drive.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 
 import pytest
 
@@ -38,17 +38,17 @@ def _ind(trade_date: date, regime: int = 1) -> IndicatorStateSnapshot:
         upper_mid_band=103.0,   lower_mid_band=97.0,
         upper_outer_band=106.75, lower_outer_band=93.25,
         display_regime=regime,
-        computed_at=datetime(2025, 6, 13, 18, 0, tzinfo=timezone.utc),
+        computed_at=datetime(2025, 6, 13, 18, 0, tzinfo=UTC),
     )
 
 
 def _ev(signal: ChangeSignal, *, price: float = 100.0) -> SignalEventSnapshot:
     return SignalEventSnapshot(
         event_id=42,
-        bar_timestamp=datetime(2025, 6, 9, tzinfo=timezone.utc),
+        bar_timestamp=datetime(2025, 6, 9, tzinfo=UTC),
         signal=signal,
         price_at_signal=price,
-        computed_at=datetime(2025, 6, 13, 18, 0, tzinfo=timezone.utc),
+        computed_at=datetime(2025, 6, 13, 18, 0, tzinfo=UTC),
     )
 
 
@@ -65,7 +65,7 @@ def _snap(
         timeframe=timeframe,
         latest_indicator_state=ind,
         latest_signal_event=ev,
-        snapshot_taken_at=datetime(2025, 6, 20, 12, 0, tzinfo=timezone.utc),
+        snapshot_taken_at=datetime(2025, 6, 20, 12, 0, tzinfo=UTC),
         stale_since=stale_since,
     )
 
@@ -142,10 +142,10 @@ class TestUpdateSignalEvent:
         return SignalEvent(
             ticker=_TICKER,
             timeframe=Timeframe.WEEKLY,
-            bar_timestamp=datetime(2025, 6, 9, tzinfo=timezone.utc),
+            bar_timestamp=datetime(2025, 6, 9, tzinfo=UTC),
             signal=signal,
             price_at_signal=99.5,
-            computed_at=datetime(2025, 6, 13, 18, 0, tzinfo=timezone.utc),
+            computed_at=datetime(2025, 6, 13, 18, 0, tzinfo=UTC),
         )
 
     def test_first_event_creates_snapshot_with_no_indicator(self):
@@ -189,11 +189,11 @@ class TestUpdateSignalEvent:
         cache.put_snapshot(_snap(
             ind=_ind(date(2025, 6, 9)),
             ev=_ev(ChangeSignal.BUY),
-            stale_since=datetime(2025, 6, 14, tzinfo=timezone.utc),
+            stale_since=datetime(2025, 6, 14, tzinfo=UTC),
         ))
         cache.update_signal_event(1806, Timeframe.WEEKLY, self._live_event())
         snap = cache.get_snapshot(1806, Timeframe.WEEKLY)
-        assert snap.stale_since == datetime(2025, 6, 14, tzinfo=timezone.utc)
+        assert snap.stale_since == datetime(2025, 6, 14, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -217,9 +217,9 @@ class TestUpdateIndicatorState:
         cache = SignalCache()
         cache.update_signal_event(1806, Timeframe.WEEKLY, SignalEvent(
             ticker=_TICKER, timeframe=Timeframe.WEEKLY,
-            bar_timestamp=datetime(2025, 6, 9, tzinfo=timezone.utc),
+            bar_timestamp=datetime(2025, 6, 9, tzinfo=UTC),
             signal=ChangeSignal.BUY, price_at_signal=99.5,
-            computed_at=datetime(2025, 6, 13, tzinfo=timezone.utc),
+            computed_at=datetime(2025, 6, 13, tzinfo=UTC),
         ))
         cache.update_indicator_state(
             1806, _TICKER, Timeframe.WEEKLY, _ind(date(2025, 6, 9)),
@@ -236,8 +236,8 @@ class TestUpdateIndicatorState:
 
 class TestStaleMachinery:
 
-    _WHEN = datetime(2025, 6, 14, 12, 0, tzinfo=timezone.utc)
-    _LATER = datetime(2025, 6, 15, 12, 0, tzinfo=timezone.utc)
+    _WHEN = datetime(2025, 6, 14, 12, 0, tzinfo=UTC)
+    _LATER = datetime(2025, 6, 15, 12, 0, tzinfo=UTC)
 
     def test_mark_stale_sets_field(self):
         cache = SignalCache()

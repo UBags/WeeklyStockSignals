@@ -24,7 +24,7 @@ hourly intraday) is small enough not to warrant the complication.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from collections.abc import Iterable
 
 from .types import Tier
 

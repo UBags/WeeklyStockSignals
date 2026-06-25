@@ -18,7 +18,7 @@ Auto-skipped when the sandbox isn't reachable.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, UTC
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -50,7 +50,7 @@ def _bar(day: date, *, price: float, vol: float = 1_000_000.0,
     ts_ist = datetime.combine(day, time(9, 15), tzinfo=_IST)
     half = hl_spread / 2
     return OHLCVBar(
-        timestamp=ts_ist.astimezone(timezone.utc),
+        timestamp=ts_ist.astimezone(UTC),
         open=price, high=price + half, low=price - half, close=price,
         volume=vol,
     )
@@ -221,7 +221,7 @@ class TestLiveSkipPaths:
                 ticker_id=1806,
                 ticker_ref=_TICKER,
                 timeframe=Timeframe.WEEKLY,
-                now=datetime(2025, 6, 1, 12, 0, tzinfo=timezone.utc),
+                now=datetime(2025, 6, 1, 12, 0, tzinfo=UTC),
             )
         assert isinstance(result, LiveTickResult)
         assert result.emitted is False
@@ -238,7 +238,7 @@ class TestLiveSkipPaths:
                 ticker_id=1806,
                 ticker_ref=_TICKER,
                 timeframe=Timeframe.WEEKLY,
-                now=datetime(2025, 6, 6, 18, 0, tzinfo=timezone.utc),
+                now=datetime(2025, 6, 6, 18, 0, tzinfo=UTC),
             )
         assert result.emitted is False
         assert result.skipped_reason == "insufficient_history"
@@ -253,21 +253,20 @@ class TestLiveSkipPaths:
                 ticker_id=1806,
                 ticker_ref=_TICKER,
                 timeframe=Timeframe.WEEKLY,
-                now=datetime(2025, 6, 6, 18, 0, tzinfo=timezone.utc),
+                now=datetime(2025, 6, 6, 18, 0, tzinfo=UTC),
             )
         assert result.emitted is False
         assert result.skipped_reason == "warmup"
 
     def test_rejects_non_weekly_timeframe(self, engine):
-        with engine.begin() as conn:
-            with pytest.raises(NotImplementedError):
-                generate_live_signal_for_ticker(
-                    conn,
-                    ticker_id=1806,
-                    ticker_ref=_TICKER,
-                    timeframe=Timeframe.DAILY,
-                    now=datetime(2025, 6, 1, tzinfo=timezone.utc),
-                )
+        with engine.begin() as conn, pytest.raises(NotImplementedError):
+            generate_live_signal_for_ticker(
+                conn,
+                ticker_id=1806,
+                ticker_ref=_TICKER,
+                timeframe=Timeframe.DAILY,
+                now=datetime(2025, 6, 1, tzinfo=UTC),
+            )
 
 
 # ===========================================================================
@@ -298,7 +297,7 @@ class TestLiveEndToEnd:
     # lower_outer). Later weeks have prev_regime_is_red already, and
     # neither leg of rule B triggers on a steady-state RED — that's
     # the spec working correctly.
-    _NOW_FRESH_RED = datetime(2025, 1, 3, 12, 30, tzinfo=timezone.utc)
+    _NOW_FRESH_RED = datetime(2025, 1, 3, 12, 30, tzinfo=UTC)
 
     def test_emits_signal_with_now_as_computed_at(self, engine):
         self._seed_long_history_with_crash(engine)
@@ -379,7 +378,7 @@ class TestLiveEndToEnd:
         but the pre-seeded SELL means state=SELL, blocking it."""
         self._seed_long_history_with_crash(engine)
         # Seed a prior SELL at an arbitrary earlier date.
-        seed_bar_ts = datetime(2024, 12, 16, tzinfo=_IST).astimezone(timezone.utc)
+        seed_bar_ts = datetime(2024, 12, 16, tzinfo=_IST).astimezone(UTC)
         with engine.begin() as conn:
             conn.exec_driver_sql(
                 "INSERT INTO signal_events "
@@ -388,7 +387,7 @@ class TestLiveEndToEnd:
                 "VALUES (1806, '1W', %(ts)s, 'SELL', 100.0, %(ca)s)",
                 dict(
                     ts=seed_bar_ts,
-                    ca=datetime(2024, 12, 20, tzinfo=timezone.utc),
+                    ca=datetime(2024, 12, 20, tzinfo=UTC),
                 ),
             )
         with engine.begin() as conn:
@@ -426,7 +425,7 @@ class TestLiveEndToEnd:
         """Pre-seed SELL → on the fresh-RED week, rule B is blocked
         → NO_CHANGE → cache must NOT be written."""
         self._seed_long_history_with_crash(engine)
-        seed_bar_ts = datetime(2024, 12, 16, tzinfo=_IST).astimezone(timezone.utc)
+        seed_bar_ts = datetime(2024, 12, 16, tzinfo=_IST).astimezone(UTC)
         with engine.begin() as conn:
             conn.exec_driver_sql(
                 "INSERT INTO signal_events "
@@ -435,7 +434,7 @@ class TestLiveEndToEnd:
                 "VALUES (1806, '1W', %(ts)s, 'SELL', 100.0, %(ca)s)",
                 dict(
                     ts=seed_bar_ts,
-                    ca=datetime(2024, 12, 20, tzinfo=timezone.utc),
+                    ca=datetime(2024, 12, 20, tzinfo=UTC),
                 ),
             )
         calls = []

@@ -9,7 +9,7 @@ NSE row exists in its expected shape.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 
 import pytest
 from sqlalchemy import text
@@ -38,8 +38,8 @@ class TestNseSeedRow:
             row = ExchangeStateRepository(conn).get("NSE")
         assert row.initial_load_started_at is not None
         # Stored value: '2026-05-18 22:52:37+05:30' = UTC '2026-05-18 17:22:37'
-        assert row.initial_load_started_at.astimezone(timezone.utc) == datetime(
-            2026, 5, 18, 17, 22, 37, tzinfo=timezone.utc,
+        assert row.initial_load_started_at.astimezone(UTC) == datetime(
+            2026, 5, 18, 17, 22, 37, tzinfo=UTC,
         )
 
     def test_nse_seed_initial_load_completed(self, db_engine):
@@ -47,8 +47,8 @@ class TestNseSeedRow:
             row = ExchangeStateRepository(conn).get("NSE")
         assert row.initial_load_completed_at is not None
         # Stored: '2026-05-19 02:09:23+05:30' = UTC '2026-05-18 20:39:23'
-        assert row.initial_load_completed_at.astimezone(timezone.utc) == datetime(
-            2026, 5, 18, 20, 39, 23, tzinfo=timezone.utc,
+        assert row.initial_load_completed_at.astimezone(UTC) == datetime(
+            2026, 5, 18, 20, 39, 23, tzinfo=UTC,
         )
 
     def test_nse_seed_last_eod_fields(self, db_engine):
@@ -80,7 +80,7 @@ class TestListAll:
     def test_ordered_by_exchange_code(self, db_engine):
         with db_engine.begin() as conn:
             repo = ExchangeStateRepository(conn)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             repo.record_intraday("NYSE", run_at=now)
             repo.record_intraday("BSE", run_at=now)
         with db_engine.connect() as conn:
@@ -95,7 +95,7 @@ class TestListAll:
 class TestRecordEod:
 
     def test_creates_row_for_new_exchange(self, db_engine):
-        now = datetime(2026, 5, 21, 1, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 5, 21, 1, 0, 0, tzinfo=UTC)
         with db_engine.begin() as conn:
             ExchangeStateRepository(conn).record_eod(
                 "BSE", run_at=now, outcome="success",
@@ -111,8 +111,8 @@ class TestRecordEod:
 
     def test_updates_existing_row(self, db_engine):
         """Calling record_eod twice updates the same row, not creates two."""
-        ts1 = datetime(2026, 5, 21, 1, 0, 0, tzinfo=timezone.utc)
-        ts2 = datetime(2026, 5, 22, 1, 0, 0, tzinfo=timezone.utc)
+        ts1 = datetime(2026, 5, 21, 1, 0, 0, tzinfo=UTC)
+        ts2 = datetime(2026, 5, 22, 1, 0, 0, tzinfo=UTC)
         with db_engine.begin() as conn:
             repo = ExchangeStateRepository(conn)
             repo.record_eod("BSE", run_at=ts1, outcome="success",
@@ -132,7 +132,7 @@ class TestRecordEod:
 
     def test_failed_outcome_persists(self, db_engine):
         """A failed EoD still updates state — operators need to see it."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with db_engine.begin() as conn:
             ExchangeStateRepository(conn).record_eod(
                 "BSE", run_at=now, outcome="failed",
@@ -146,17 +146,16 @@ class TestRecordEod:
     def test_invalid_outcome_rejected_by_check_constraint(self, db_engine):
         """The CHECK constraint defends against typos."""
         from sqlalchemy.exc import IntegrityError
-        now = datetime.now(timezone.utc)
-        with pytest.raises(IntegrityError):
-            with db_engine.begin() as conn:
-                ExchangeStateRepository(conn).record_eod(
-                    "BSE", run_at=now, outcome="bogus",
-                    data_date=None, run_id=1,
-                )
+        now = datetime.now(UTC)
+        with pytest.raises(IntegrityError), db_engine.begin() as conn:
+            ExchangeStateRepository(conn).record_eod(
+                "BSE", run_at=now, outcome="bogus",
+                data_date=None, run_id=1,
+            )
 
     def test_eod_does_not_touch_initial_load_fields(self, db_engine):
         """EoD writes must NOT overwrite the lifecycle markers."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with db_engine.begin() as conn:
             ExchangeStateRepository(conn).record_eod(
                 "NSE", run_at=now, outcome="success",
@@ -175,7 +174,7 @@ class TestRecordEod:
 class TestNonEodWrites:
 
     def test_record_intraday(self, db_engine):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with db_engine.begin() as conn:
             ExchangeStateRepository(conn).record_intraday(
                 "BSE", run_at=now,
@@ -187,7 +186,7 @@ class TestNonEodWrites:
         assert row.last_eod_run_at is None
 
     def test_record_listings_sync(self, db_engine):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with db_engine.begin() as conn:
             ExchangeStateRepository(conn).record_listings_sync(
                 "BSE", run_at=now, run_id=7,
@@ -198,7 +197,7 @@ class TestNonEodWrites:
         assert row.last_listings_run_id == 7
 
     def test_record_tier_recompute(self, db_engine):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with db_engine.begin() as conn:
             ExchangeStateRepository(conn).record_tier_recompute(
                 "BSE", run_at=now,
@@ -217,7 +216,7 @@ class TestInitialLoadLifecycle:
     fields."""
 
     def test_started_at_set_on_first_call(self, db_engine):
-        ts = datetime(2026, 5, 21, 0, 0, 0, tzinfo=timezone.utc)
+        ts = datetime(2026, 5, 21, 0, 0, 0, tzinfo=UTC)
         with db_engine.begin() as conn:
             ExchangeStateRepository(conn).record_backfill_started(
                 "BSE", started_at=ts,
@@ -227,8 +226,8 @@ class TestInitialLoadLifecycle:
         assert row.initial_load_started_at == ts
 
     def test_started_at_not_overwritten_on_second_call(self, db_engine):
-        ts1 = datetime(2026, 5, 21, 0, 0, 0, tzinfo=timezone.utc)
-        ts2 = datetime(2026, 5, 22, 0, 0, 0, tzinfo=timezone.utc)
+        ts1 = datetime(2026, 5, 21, 0, 0, 0, tzinfo=UTC)
+        ts2 = datetime(2026, 5, 22, 0, 0, 0, tzinfo=UTC)
         with db_engine.begin() as conn:
             repo = ExchangeStateRepository(conn)
             repo.record_backfill_started("BSE", started_at=ts1)
@@ -238,7 +237,7 @@ class TestInitialLoadLifecycle:
         assert row.initial_load_started_at == ts1  # not ts2
 
     def test_completed_at_set_only_on_success(self, db_engine):
-        ts = datetime(2026, 5, 21, 0, 0, 0, tzinfo=timezone.utc)
+        ts = datetime(2026, 5, 21, 0, 0, 0, tzinfo=UTC)
         with db_engine.begin() as conn:
             repo = ExchangeStateRepository(conn)
             repo.record_backfill_started("BSE", started_at=ts)
@@ -250,8 +249,8 @@ class TestInitialLoadLifecycle:
         assert row.initial_load_completed_at is None
 
     def test_completed_at_set_on_success(self, db_engine):
-        start = datetime(2026, 5, 21, 0, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2026, 5, 21, 1, 0, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 5, 21, 0, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 5, 21, 1, 0, 0, tzinfo=UTC)
         with db_engine.begin() as conn:
             repo = ExchangeStateRepository(conn)
             repo.record_backfill_started("BSE", started_at=start)
@@ -265,8 +264,8 @@ class TestInitialLoadLifecycle:
     def test_completed_at_not_overwritten_by_later_backfill(self, db_engine):
         """Once initial_load_completed_at is set, a later backfill
         (e.g. operator re-running for safety) does NOT update it."""
-        first = datetime(2026, 5, 21, 0, 0, 0, tzinfo=timezone.utc)
-        second = datetime(2026, 5, 25, 0, 0, 0, tzinfo=timezone.utc)
+        first = datetime(2026, 5, 21, 0, 0, 0, tzinfo=UTC)
+        second = datetime(2026, 5, 25, 0, 0, 0, tzinfo=UTC)
         with db_engine.begin() as conn:
             repo = ExchangeStateRepository(conn)
             repo.record_backfill_started("BSE", started_at=first)
@@ -288,10 +287,10 @@ class TestInitialLoadLifecycle:
         initial_load_completed_at should reflect the SECOND attempt's
         success — that's the genuine completion. initial_load_started_at
         should stay on the first attempt's timestamp (load began then)."""
-        start1 = datetime(2026, 5, 21, 0, 0, 0, tzinfo=timezone.utc)
-        end1 = datetime(2026, 5, 21, 1, 0, 0, tzinfo=timezone.utc)
-        start2 = datetime(2026, 5, 22, 0, 0, 0, tzinfo=timezone.utc)
-        end2 = datetime(2026, 5, 22, 1, 0, 0, tzinfo=timezone.utc)
+        start1 = datetime(2026, 5, 21, 0, 0, 0, tzinfo=UTC)
+        end1 = datetime(2026, 5, 21, 1, 0, 0, tzinfo=UTC)
+        start2 = datetime(2026, 5, 22, 0, 0, 0, tzinfo=UTC)
+        end2 = datetime(2026, 5, 22, 1, 0, 0, tzinfo=UTC)
         with db_engine.begin() as conn:
             repo = ExchangeStateRepository(conn)
             repo.record_backfill_started("BSE", started_at=start1)
@@ -316,26 +315,25 @@ class TestCheckConstraints:
     def test_completed_before_started_rejected(self, db_engine):
         """exchange_state_initial_load_order_chk: completed must be >= started."""
         from sqlalchemy.exc import IntegrityError
-        start = datetime(2026, 5, 22, 0, 0, 0, tzinfo=timezone.utc)
-        end_before = datetime(2026, 5, 21, 0, 0, 0, tzinfo=timezone.utc)
-        with pytest.raises(IntegrityError):
-            with db_engine.begin() as conn:
-                # Raw insert to bypass the repo (which doesn't expose
-                # this direct combo). The CHECK constraint catches it.
-                conn.execute(
-                    text("""
+        start = datetime(2026, 5, 22, 0, 0, 0, tzinfo=UTC)
+        end_before = datetime(2026, 5, 21, 0, 0, 0, tzinfo=UTC)
+        with pytest.raises(IntegrityError), db_engine.begin() as conn:
+            # Raw insert to bypass the repo (which doesn't expose
+            # this direct combo). The CHECK constraint catches it.
+            conn.execute(
+                text("""
                         INSERT INTO exchange_state (
                             exchange,
                             initial_load_started_at,
                             initial_load_completed_at
                         ) VALUES ('LSE', :start, :end)
                     """),
-                    {"start": start, "end": end_before},
-                )
+                {"start": start, "end": end_before},
+            )
 
     def test_null_completed_with_non_null_started_allowed(self, db_engine):
         """A load that started but never completed is a real state."""
-        start = datetime(2026, 5, 21, 0, 0, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 5, 21, 0, 0, 0, tzinfo=UTC)
         with db_engine.begin() as conn:
             ExchangeStateRepository(conn).record_backfill_started(
                 "LSE", started_at=start,
@@ -353,8 +351,8 @@ class TestFieldIsolation:
     """A write to one field must NOT clobber adjacent fields."""
 
     def test_intraday_after_eod_preserves_eod_fields(self, db_engine):
-        eod_ts = datetime(2026, 5, 21, 1, 0, 0, tzinfo=timezone.utc)
-        intraday_ts = datetime(2026, 5, 21, 10, 30, 0, tzinfo=timezone.utc)
+        eod_ts = datetime(2026, 5, 21, 1, 0, 0, tzinfo=UTC)
+        intraday_ts = datetime(2026, 5, 21, 10, 30, 0, tzinfo=UTC)
         with db_engine.begin() as conn:
             repo = ExchangeStateRepository(conn)
             repo.record_eod(
@@ -373,8 +371,8 @@ class TestFieldIsolation:
         assert row.last_intraday_run_at == intraday_ts
 
     def test_listings_sync_after_eod_preserves_eod_fields(self, db_engine):
-        eod_ts = datetime(2026, 5, 21, 1, 0, 0, tzinfo=timezone.utc)
-        listings_ts = datetime(2026, 5, 21, 18, 0, 0, tzinfo=timezone.utc)
+        eod_ts = datetime(2026, 5, 21, 1, 0, 0, tzinfo=UTC)
+        listings_ts = datetime(2026, 5, 21, 18, 0, 0, tzinfo=UTC)
         with db_engine.begin() as conn:
             repo = ExchangeStateRepository(conn)
             repo.record_eod(

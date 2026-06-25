@@ -35,8 +35,7 @@ Runners:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from datetime import date, datetime, timedelta, UTC
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -90,7 +89,7 @@ def _fetch_nifty_weekly_closes(conn):
     return [(b.timestamp.date(), float(b.close)) for b in bars]
 
 
-def _industry_for_ticker(conn, ticker_id: int) -> Optional[str]:
+def _industry_for_ticker(conn, ticker_id: int) -> str | None:
     """Resolve a ticker's industry classification. Returns None for
     unclassified tickers; returns 'ETF' for ETFs (caller skips
     INDUSTRY benchmark in that case)."""
@@ -108,7 +107,7 @@ def run_benchmark_stats_for_ticker(
     db_engine: Engine,
     ticker_id: int,
     *,
-    as_of_date: Optional[date] = None,
+    as_of_date: date | None = None,
 ) -> int:
     """Compute and persist benchmark stats for one ticker.
 
@@ -132,7 +131,7 @@ def run_benchmark_stats_for_ticker(
     )
 
     rows_to_write: list = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     with db_engine.connect() as conn:
         # 1. Stock weekly closes
@@ -237,7 +236,7 @@ def run_benchmark_stats_for_industry(
     db_engine: Engine,
     industry_name: str,
     *,
-    as_of_date: Optional[date] = None,
+    as_of_date: date | None = None,
 ) -> int:
     """Compute and persist industry vs NIFTY benchmark stats.
 
@@ -250,7 +249,7 @@ def run_benchmark_stats_for_industry(
         IndustryBenchmarkStatsRepository,
     )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with db_engine.connect() as conn:
         industry_pairs = _fetch_industry_weekly_closes(conn, industry_name)
         nifty_pairs = _fetch_nifty_weekly_closes(conn)
@@ -316,7 +315,7 @@ def run_benchmark_stats_for_industry(
 def run_benchmark_stats_for_all_industries(
     db_engine: Engine,
     *,
-    as_of_date: Optional[date] = None,
+    as_of_date: date | None = None,
 ) -> dict:
     """Compute benchmark stats for every active industry vs NIFTY.
 
@@ -361,8 +360,8 @@ def run_benchmark_stats_for_all_industries(
 def run_benchmark_stats_for_all_tickers(
     db_engine: Engine,
     *,
-    exchange: Optional[str] = None,
-    as_of_date: Optional[date] = None,
+    exchange: str | None = None,
+    as_of_date: date | None = None,
 ) -> dict:
     """Compute benchmark stats for every active ticker.
 

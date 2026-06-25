@@ -30,14 +30,13 @@ import signal
 import sys
 from datetime import timedelta
 from pathlib import Path
-from typing import NoReturn, Optional, TYPE_CHECKING
+from typing import NoReturn, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .transports.http.pulse_state import PulseState
 
 from .cache import SignalCache
 from .config import load_config
-from .domain import Timeframe
 from .notifications import EmailTransport, NullTransport, WebhookTransport
 from .notifications.base import NotificationTransport
 from .persistence import (
@@ -254,7 +253,7 @@ def _build_orchestrator_components(
     db_engine,
     compute_scheduler: ComputeScheduler,
     distributor: SubscriberDistributor,
-) -> tuple[Optional[PulseState], Optional[OrchestratorPool]]:
+) -> tuple[PulseState | None, OrchestratorPool | None]:
     """Phase 14: build (PulseState, OrchestratorPool) if enabled in config.
 
     Returns (None, None) when `scheduling.orchestrator.enabled = False` —
@@ -402,9 +401,9 @@ def _build_redis_queue(redis_config):
 
 
 def _wrap_transports_with_breakers(
-    transports: dict[str, "NotificationTransport"],
+    transports: dict[str, NotificationTransport],
     config,
-) -> dict[str, "NotificationTransport"]:
+) -> dict[str, NotificationTransport]:
     """If circuit-breakers are enabled in config, wrap each transport
     with a `CircuitBreakingTransport`. Otherwise return as-is.
 

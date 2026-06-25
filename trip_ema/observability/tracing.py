@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +90,7 @@ def get_tracer(name: str = "trip_ema"):
 def configure_tracing(
     service_name: str = "trip_ema",
     exporter: str = "console",
-    otlp_endpoint: Optional[str] = None,
+    otlp_endpoint: str | None = None,
 ) -> None:
     """Initialize OpenTelemetry. After this call, spans recorded by
     `get_tracer().start_as_current_span(...)` will be exported.

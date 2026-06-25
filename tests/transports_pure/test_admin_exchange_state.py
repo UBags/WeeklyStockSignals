@@ -8,7 +8,7 @@ instances rather than a live Postgres.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 from unittest.mock import MagicMock
 
 import pytest
@@ -70,7 +70,7 @@ def _make_state(exchange: str, **overrides) -> ExchangeState:
         last_listings_sync_at=None,
         last_listings_run_id=None,
         last_tier_recompute_at=None,
-        updated_at=datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 21, 12, 0, 0, tzinfo=UTC),
     )
     base.update(overrides)
     return ExchangeState(**base)
@@ -104,9 +104,9 @@ class TestExchangeStateList:
 
         nse = _make_state(
             "NSE",
-            initial_load_started_at=datetime(2026, 5, 18, 17, 22, 37, tzinfo=timezone.utc),
-            initial_load_completed_at=datetime(2026, 5, 18, 20, 39, 23, tzinfo=timezone.utc),
-            last_eod_run_at=datetime(2026, 5, 19, 19, 31, 21, tzinfo=timezone.utc),
+            initial_load_started_at=datetime(2026, 5, 18, 17, 22, 37, tzinfo=UTC),
+            initial_load_completed_at=datetime(2026, 5, 18, 20, 39, 23, tzinfo=UTC),
+            last_eod_run_at=datetime(2026, 5, 19, 19, 31, 21, tzinfo=UTC),
             last_eod_outcome="success",
             last_eod_data_date=date(2026, 5, 19),
         )
@@ -155,7 +155,7 @@ class TestExchangeStateOne:
 
         nse = _make_state(
             "NSE",
-            last_eod_run_at=datetime(2026, 5, 19, 19, 31, 21, tzinfo=timezone.utc),
+            last_eod_run_at=datetime(2026, 5, 19, 19, 31, 21, tzinfo=UTC),
             last_eod_outcome="success",
             last_eod_data_date=date(2026, 5, 19),
             last_eod_run_id=11,

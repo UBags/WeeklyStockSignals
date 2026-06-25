@@ -46,9 +46,8 @@ benchmark series starts earlier than the stock series.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
 from math import sqrt
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 
 # Window sizes in weekly-return units. Match the schema's CHECK
@@ -87,12 +86,12 @@ class RegressionStats:
     at least 2 closes (1 return).
     """
     n_weeks: int
-    beta: Optional[float]
-    alpha_annual: Optional[float]
-    r_squared: Optional[float]
-    sigma_annual: Optional[float]
-    rs_pct: Optional[float]
-    info_ratio: Optional[float]
+    beta: float | None
+    alpha_annual: float | None
+    r_squared: float | None
+    sigma_annual: float | None
+    rs_pct: float | None
+    info_ratio: float | None
 
 
 def compute_regression_stats(
@@ -133,7 +132,7 @@ def compute_regression_stats(
 
     # rs_pct can be computed at any length >= 2: total return of stock
     # minus total return of benchmark over the same window.
-    rs_pct: Optional[float] = (
+    rs_pct: float | None = (
         (stock_closes[-1] / stock_closes[0] - 1)
         - (bench_closes[-1] / bench_closes[0] - 1)
     )
@@ -181,7 +180,7 @@ def compute_regression_stats(
     var_residual = sum((x - mean_residual) ** 2 for x in residuals) / (n - 1)
     if var_residual > 0:
         te_per_week = sqrt(var_residual)
-        info_ratio: Optional[float] = (
+        info_ratio: float | None = (
             (alpha_per_week / te_per_week) * sqrt(WEEKS_PER_YEAR)
         )
     else:

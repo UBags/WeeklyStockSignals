@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 import pytest
 
@@ -13,7 +13,7 @@ from trip_ema.indicators.atr import ATR, compute_series
 
 def _bar(o: float, h: float, l: float, c: float, v: float = 1000.0) -> OHLCVBar:
     return OHLCVBar(
-        timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         open=o, high=h, low=l, close=c, volume=v,
     )
 

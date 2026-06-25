@@ -6,7 +6,7 @@ db_engine fixture from tests/persistence/conftest.py.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 
 import pytest
 from sqlalchemy import text
@@ -29,7 +29,7 @@ from trip_ema.persistence.tickers_repo import TickersRepository
 
 @pytest.fixture
 def now():
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 @pytest.fixture
@@ -86,7 +86,7 @@ class TestComputeHappyPath:
         tickers get COMPUTED rows. BSE ticker untouched (different
         exchange). ETF untouched (instrument_type filter)."""
         td = date(2026, 5, 22)
-        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=timezone.utc)
+        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=UTC)
 
         # Each NSE ticker gets a bar at td and a shares row dated
         # before-or-equal-to td.
@@ -132,7 +132,7 @@ class TestComputeHappyPath:
         a mcap row — the universe query filters on
         instrument_type='EQ'."""
         td = date(2026, 5, 22)
-        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=timezone.utc)
+        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=UTC)
         _insert_bar(db_engine, universe[("NSE", "GOLDBEES")], bar_ts, 60.0)
         _insert_shares(db_engine, universe[("NSE", "GOLDBEES")],
                        as_of_date=date(2026, 5, 21), count=1_000_000_000)
@@ -147,7 +147,7 @@ class TestComputeHappyPath:
         """compute for NSE should not touch BSE rows even if BSE has
         the same symbol present."""
         td = date(2026, 5, 22)
-        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=timezone.utc)
+        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=UTC)
         _insert_bar(db_engine, universe[("BSE", "RELIANCE")], bar_ts, 1450.0)
         _insert_shares(db_engine, universe[("BSE", "RELIANCE")],
                        as_of_date=date(2026, 5, 21), count=6_700_000_000)
@@ -172,7 +172,7 @@ class TestApproxFallback:
         """trade_date is 2025-06-01; shares are only known from
         2026-05-21. Default behavior: write APPROX_TODAYS_SHARES."""
         td = date(2025, 6, 1)
-        bar_ts = datetime(2025, 6, 1, 15, 30, tzinfo=timezone.utc)
+        bar_ts = datetime(2025, 6, 1, 15, 30, tzinfo=UTC)
         _insert_bar(db_engine, universe[("NSE", "RELIANCE")], bar_ts, 1300.0)
         # Shares as of LATER than the trade_date.
         _insert_shares(db_engine, universe[("NSE", "RELIANCE")],
@@ -198,7 +198,7 @@ class TestApproxFallback:
         """allow_approx_fallback=False → no APPROX row, count goes
         to skipped_no_shares."""
         td = date(2025, 6, 1)
-        bar_ts = datetime(2025, 6, 1, 15, 30, tzinfo=timezone.utc)
+        bar_ts = datetime(2025, 6, 1, 15, 30, tzinfo=UTC)
         _insert_bar(db_engine, universe[("NSE", "RELIANCE")], bar_ts, 1300.0)
         _insert_shares(db_engine, universe[("NSE", "RELIANCE")],
                        as_of_date=date(2026, 5, 21), count=6_700_000_000)
@@ -221,7 +221,7 @@ class TestApproxFallback:
         """When shares ARE known for the trade_date, source must be
         COMPUTED — not APPROX even though fallback is allowed."""
         td = date(2026, 5, 22)
-        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=timezone.utc)
+        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=UTC)
         _insert_bar(db_engine, universe[("NSE", "RELIANCE")], bar_ts, 1450.0)
         _insert_shares(db_engine, universe[("NSE", "RELIANCE")],
                        as_of_date=date(2026, 5, 22), count=6_700_000_000)
@@ -251,7 +251,7 @@ class TestSkipCases:
     def test_no_shares_at_all_skips(self, db_engine, universe):
         """Ticker has a bar but no shares anywhere → skipped_no_shares."""
         td = date(2026, 5, 22)
-        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=timezone.utc)
+        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=UTC)
         _insert_bar(db_engine, universe[("NSE", "RELIANCE")], bar_ts, 1450.0)
         # No shares insert.
         result = compute_market_cap_for_date(db_engine, "NSE", td)
@@ -281,7 +281,7 @@ class TestIdempotency:
         overwrite the old. Tests the repo's upsert semantics in
         the compute path."""
         td = date(2026, 5, 22)
-        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=timezone.utc)
+        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=UTC)
         _insert_bar(db_engine, universe[("NSE", "RELIANCE")], bar_ts, 1400.0)
         _insert_shares(db_engine, universe[("NSE", "RELIANCE")],
                        as_of_date=date(2026, 5, 21), count=1_000_000_000)

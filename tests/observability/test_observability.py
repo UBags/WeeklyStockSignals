@@ -19,6 +19,7 @@ from trip_ema.observability import (
     metrics,
 )
 from trip_ema.observability.logging_config import JsonFormatter, TextFormatter
+from datetime import UTC
 
 
 # -------------------- Correlation IDs -------------------- #
@@ -156,7 +157,7 @@ class TestJsonFormatter:
 
         f = JsonFormatter()
         out = f.format(self._make_record(
-            "x", custom_dt=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            "x", custom_dt=datetime(2026, 5, 17, tzinfo=UTC),
         ))
         parsed = json.loads(out)
         # The datetime is coerced to its str()

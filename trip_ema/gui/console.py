@@ -17,7 +17,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 from ..config.loader import load_config
 from ..observability.logging_config import configure_logging
@@ -27,7 +26,7 @@ from .http_client import HttpClientConfig, TripEmaHttpClient
 logger = logging.getLogger(__name__)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns a process exit code."""
     args = _parse_args(argv)
 
@@ -78,7 +77,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     return app.exec()
 
 
-def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="trip-ema-console",
         description="Desktop operator console for trip_ema.",

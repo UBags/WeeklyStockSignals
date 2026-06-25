@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -16,13 +16,13 @@ def ticker_id(db_engine):
     with transaction(db_engine) as conn:
         return TickersRepository(conn).insert(
             TickerRef("NSE", "NIFTY", "INDEX"),
-            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
 
 
 def _bar(day: int, close: float = 100.0) -> OHLCVBar:
     return OHLCVBar(
-        timestamp=datetime(2024, 1, day, tzinfo=timezone.utc),
+        timestamp=datetime(2024, 1, day, tzinfo=UTC),
         open=close - 0.5, high=close + 1, low=close - 1, close=close,
         volume=1000.0,
     )
@@ -67,7 +67,7 @@ def test_fetch_since_returns_only_newer_bars(db_engine, ticker_id):
         repo = BarsRepository(conn)
         for i in range(1, 6):
             repo.insert_bar(ticker_id, Timeframe.DAILY, _bar(i))
-    cutoff = datetime(2024, 1, 3, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 1, 3, tzinfo=UTC)
     with db_engine.connect() as conn:
         bars = BarsRepository(conn).fetch_since(ticker_id, Timeframe.DAILY, cutoff)
     assert [b.timestamp.day for b in bars] == [4, 5]
@@ -79,7 +79,7 @@ def test_fetch_since_is_strictly_exclusive(db_engine, ticker_id):
     'I've ingested up to X' and asks for everything strictly after X."""
     with transaction(db_engine) as conn:
         BarsRepository(conn).insert_bar(ticker_id, Timeframe.DAILY, _bar(3))
-    cutoff = datetime(2024, 1, 3, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 1, 3, tzinfo=UTC)
     with db_engine.connect() as conn:
         bars = BarsRepository(conn).fetch_since(ticker_id, Timeframe.DAILY, cutoff)
     assert bars == []
@@ -93,7 +93,7 @@ def test_latest_timestamp(db_engine, ticker_id):
         repo.insert_bar(ticker_id, Timeframe.DAILY, _bar(3))
     with db_engine.connect() as conn:
         ts = BarsRepository(conn).latest_timestamp(ticker_id, Timeframe.DAILY)
-    assert ts == datetime(2024, 1, 5, tzinfo=timezone.utc)
+    assert ts == datetime(2024, 1, 5, tzinfo=UTC)
 
 
 def test_latest_timestamp_none_when_empty(db_engine, ticker_id):

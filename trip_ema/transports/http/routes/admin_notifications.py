@@ -22,7 +22,7 @@ reads.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Engine, text
@@ -58,7 +58,7 @@ def list_recent_notifications(
 
     has_more=True when the query hit the limit; the GUI can offer a
     'show older' button that bumps `since_hours`."""
-    since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    since = datetime.now(UTC) - timedelta(hours=since_hours)
     params: dict = {"since": since, "lim": limit}
     sub_filter_sql = ""
     if subscriber_id is not None:
@@ -103,7 +103,7 @@ def list_recent_notifications(
         entries=entries,
         total=len(entries),
         has_more=(len(entries) == limit),
-        snapshot_taken_at=datetime.now(timezone.utc),
+        snapshot_taken_at=datetime.now(UTC),
     )
 
 
@@ -116,9 +116,9 @@ def _dlq_entry_from_payload(raw: dict) -> DlqEntry:
     """Translate a raw DLQ JSON payload into the typed schema."""
     failed_at_epoch = raw.get("_dlq_at")
     failed_at = (
-        datetime.fromtimestamp(failed_at_epoch, tz=timezone.utc)
+        datetime.fromtimestamp(failed_at_epoch, tz=UTC)
         if failed_at_epoch is not None
-        else datetime.now(timezone.utc)
+        else datetime.now(UTC)
     )
     return DlqEntry(
         job_id=raw.get("_job_id", "?"),
@@ -154,7 +154,7 @@ def list_dlq(
     return DlqListPayload(
         entries=entries,
         total=total,
-        snapshot_taken_at=datetime.now(timezone.utc),
+        snapshot_taken_at=datetime.now(UTC),
     )
 
 

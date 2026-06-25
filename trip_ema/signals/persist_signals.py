@@ -40,7 +40,6 @@ What this file deliberately does NOT do:
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import Optional
 
 from sqlalchemy.engine import Connection
 
@@ -63,7 +62,7 @@ def persist_signal_events(
     ticker_id: int,
     events: Iterable[SignalEvent],
     *,
-    signal_cache_writer: Optional[SignalCacheWriter] = None,
+    signal_cache_writer: SignalCacheWriter | None = None,
 ) -> list[int]:
     """Persist a sequence of SignalEvents to the `signal_events` table.
 

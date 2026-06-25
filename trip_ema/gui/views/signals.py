@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
 
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import (
@@ -45,14 +44,12 @@ from ..backtest_engine import (
 )
 from ..chart_widget import ChartMode, ChartWidget
 from ..db import GuiDbSession
-from ..http_client import ApiError, TripEmaHttpClient
+from ..http_client import TripEmaHttpClient
 from ..queries import ticker_universe_with_recent_signals
 from ..queries import latest_mcap_for_ticker
 from .._format_mcap import format_mcap_cr
 from ..benchmark_rerank_client import fetch_rank_scores
 from ..signals_helpers import (
-    format_date_label,
-    format_price_label,
     partition_ticker_rows,
     signal_industry_mcap_sort_key,
 )
@@ -81,7 +78,7 @@ class SignalsView(QWidget):
         db: GuiDbSession,
         http: TripEmaHttpClient,
         *,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
         populate_combo_on_init: bool = True,
     ):
         super().__init__(parent)
@@ -94,11 +91,11 @@ class SignalsView(QWidget):
         self._populate_combo_on_init = populate_combo_on_init
 
         # Selected-ticker state
-        self._current_exchange: Optional[str] = None
-        self._current_symbol: Optional[str] = None
-        self._current_instrument: Optional[str] = None
+        self._current_exchange: str | None = None
+        self._current_symbol: str | None = None
+        self._current_instrument: str | None = None
         self._current_years: int = 3
-        self._last_payload: Optional[dict] = None
+        self._last_payload: dict | None = None
 
         # Backtest dialog cache (Phase B)
         self._open_backtest_dialogs: list[BacktestDialog] = []

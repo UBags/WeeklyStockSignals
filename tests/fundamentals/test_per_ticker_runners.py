@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -37,12 +37,12 @@ def _setup_ticker_with_bars(
     """Create a ticker and populate n_bars of OHLCV history.
     Returns ticker_id."""
     if base_date is None:
-        base_date = datetime(2025, 1, 6, 9, 30, tzinfo=timezone.utc)
+        base_date = datetime(2025, 1, 6, 9, 30, tzinfo=UTC)
 
     with transaction(db_engine) as conn:
         ref = TickerRef(exchange, symbol, "EQ")
         ticker_id = TickersRepository(conn).insert(
-            ref, created_at=datetime.now(timezone.utc),
+            ref, created_at=datetime.now(UTC),
         )
         bars_repo = BarsRepository(conn)
         for i in range(n_bars):
@@ -104,7 +104,7 @@ class TestRunIndicatorStateForTicker:
 
     def test_idempotent_via_skip_if_recent(self, db_engine):
         # Use recent dates so the skip-if-recent guard fires.
-        today = datetime.now(timezone.utc).replace(
+        today = datetime.now(UTC).replace(
             hour=9, minute=30, second=0, microsecond=0,
         )
         base = today - timedelta(days=80 * 7)
@@ -122,7 +122,7 @@ class TestRunIndicatorStateForTicker:
         assert r2.skipped == 1
 
     def test_force_re_runs(self, db_engine):
-        today = datetime.now(timezone.utc).replace(
+        today = datetime.now(UTC).replace(
             hour=9, minute=30, second=0, microsecond=0,
         )
         base = today - timedelta(days=80 * 7)
@@ -249,7 +249,7 @@ class TestRunSignalEventsForTicker:
             assert e.close_at_event == close_by_date[e.trade_date]
 
     def test_idempotent_via_skip_if_recent(self, db_engine):
-        today = datetime.now(timezone.utc).replace(
+        today = datetime.now(UTC).replace(
             hour=9, minute=30, second=0, microsecond=0,
         )
         base = today - timedelta(days=80 * 7)

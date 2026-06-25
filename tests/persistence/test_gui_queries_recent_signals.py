@@ -18,7 +18,7 @@ fixture from tests/persistence/conftest.py.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -38,13 +38,13 @@ from trip_ema.persistence import (
 
 @pytest.fixture
 def now():
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 def _insert_ticker(conn, symbol: str, *, exchange: str = "NSE", now=None) -> int:
     return TickersRepository(conn).insert(
         TickerRef(exchange, symbol, "EQ"),
-        created_at=now or datetime.now(timezone.utc),
+        created_at=now or datetime.now(UTC),
     )
 
 

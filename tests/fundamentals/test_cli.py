@@ -6,7 +6,7 @@ We patch the runner so we don't make HTTP calls.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 from io import StringIO
 from unittest.mock import patch
 
@@ -67,7 +67,7 @@ def reliance_ticker(db_engine):
     ref = TickerRef("NSE", "RELIANCE", "EQ")
     with transaction(db_engine) as conn:
         tid = TickersRepository(conn).insert(
-            ref, created_at=datetime.now(timezone.utc),
+            ref, created_at=datetime.now(UTC),
         )
     return tid
 
@@ -344,7 +344,7 @@ class TestCmdBackfillEtfClassification:
         with transaction(db_engine) as conn:
             tr = TickersRepository(conn)
             for ref, start_row, has_override in refs_states:
-                tid = tr.insert(ref, created_at=datetime.now(timezone.utc))
+                tid = tr.insert(ref, created_at=datetime.now(UTC))
                 ids[ref.symbol] = tid
                 # Mark first four as ETF (last is equity).
                 if ref.symbol != "EQUITY1":
@@ -1536,7 +1536,7 @@ class TestCmdFundamentalsStatusShowsIndicatorCoverage:
                 med_turn_buy=False, med_turn_sell=False,
                 long_turn_buy=False, long_turn_sell=False,
                 longest_turn_buy=False, longest_turn_sell=False,
-                computed_at=datetime.now(timezone.utc),
+                computed_at=datetime.now(UTC),
             )
             IndicatorStateRepository(conn).upsert_for_industry(state)
         args = type("A", (), {})()
@@ -1597,7 +1597,7 @@ class TestCmdFundamentalsStatusShowsSignalCoverage:
                 event_kind="SELL",
                 regime_before=0, regime_after=-1,
                 close_at_event=844.27,
-                computed_at=datetime.now(timezone.utc),
+                computed_at=datetime.now(UTC),
             ))
         args = type("A", (), {})()
         args.exchange = None
@@ -1826,7 +1826,7 @@ class TestCmdRunEodPipeline:
             PipelineResult, StepResult, StepStatus,
         )
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         fake_result = PipelineResult(
             exchange="NSE", started_at=now, finished_at=now,
             steps=[
@@ -1865,7 +1865,7 @@ class TestCmdRunEodPipeline:
             PipelineResult, StepResult, StepStatus,
         )
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         fake_result = PipelineResult(
             exchange="NSE", started_at=now, finished_at=now,
             steps=[
@@ -1897,7 +1897,7 @@ class TestCmdRunEodPipeline:
             PipelineResult, StepResult, StepStatus,
         )
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         fake_result = PipelineResult(
             exchange="NSE", started_at=now, finished_at=now,
             steps=[
@@ -1929,7 +1929,7 @@ class TestCmdRunEodPipeline:
             PipelineResult, StepResult, StepStatus,
         )
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         captured_kwargs = {}
 
         def fake_pipeline(engine, exchange, **kw):

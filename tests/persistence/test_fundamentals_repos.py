@@ -6,7 +6,7 @@ through head.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 
 import pytest
 from sqlalchemy import text
@@ -27,7 +27,7 @@ from trip_ema.domain import TickerRef
 
 @pytest.fixture
 def now():
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 @pytest.fixture
@@ -2045,7 +2045,7 @@ def _make_ticker_state(
         "med_turn_buy": False, "med_turn_sell": False,
         "long_turn_buy": False, "long_turn_sell": False,
         "longest_turn_buy": False, "longest_turn_sell": False,
-        "computed_at": datetime(2026, 5, 22, 16, 0, tzinfo=timezone.utc),
+        "computed_at": datetime(2026, 5, 22, 16, 0, tzinfo=UTC),
     }
     defaults.update(overrides)
     return IndicatorState(**defaults)
@@ -2081,7 +2081,7 @@ def _make_industry_state(
         "med_turn_buy": False, "med_turn_sell": False,
         "long_turn_buy": False, "long_turn_sell": False,
         "longest_turn_buy": False, "longest_turn_sell": False,
-        "computed_at": datetime(2026, 5, 22, 16, 0, tzinfo=timezone.utc),
+        "computed_at": datetime(2026, 5, 22, 16, 0, tzinfo=UTC),
     }
     defaults.update(overrides)
     return IndicatorState(**defaults)
@@ -2548,10 +2548,9 @@ class TestIndicatorStateDBConstraints:
         the repo's validation."""
         from sqlalchemy.exc import IntegrityError
         tid = ticker_ids[("NSE", "RELIANCE")]
-        with transaction(db_engine) as conn:
-            with pytest.raises(IntegrityError):
-                # Bypass the repo by talking directly to SQL.
-                conn.execute(text("""
+        with transaction(db_engine) as conn, pytest.raises(IntegrityError):
+            # Bypass the repo by talking directly to SQL.
+            conn.execute(text("""
                     INSERT INTO indicator_state (
                         ticker_id, timeframe, industry_name, trade_date,
                         med_ema, long_ema, longest_ema,
@@ -2567,9 +2566,8 @@ class TestIndicatorStateDBConstraints:
 
     def test_db_rejects_neither_key_set(self, db_engine):
         from sqlalchemy.exc import IntegrityError
-        with transaction(db_engine) as conn:
-            with pytest.raises(IntegrityError):
-                conn.execute(text("""
+        with transaction(db_engine) as conn, pytest.raises(IntegrityError):
+            conn.execute(text("""
                     INSERT INTO indicator_state (
                         ticker_id, timeframe, industry_name, trade_date,
                         med_ema, long_ema, longest_ema,
@@ -2586,9 +2584,8 @@ class TestIndicatorStateDBConstraints:
     def test_db_rejects_bad_regime(self, db_engine, ticker_ids):
         from sqlalchemy.exc import IntegrityError
         tid = ticker_ids[("NSE", "RELIANCE")]
-        with transaction(db_engine) as conn:
-            with pytest.raises(IntegrityError):
-                conn.execute(text("""
+        with transaction(db_engine) as conn, pytest.raises(IntegrityError):
+            conn.execute(text("""
                     INSERT INTO indicator_state (
                         ticker_id, timeframe, industry_name, trade_date,
                         med_ema, long_ema, longest_ema,
@@ -2620,7 +2617,7 @@ def _make_signal(
         trade_date=td, event_kind=kind,
         regime_before=regime_before, regime_after=regime_after,
         close_at_event=close,
-        computed_at=datetime.now(timezone.utc),
+        computed_at=datetime.now(UTC),
     )
 
 
@@ -2909,10 +2906,9 @@ class TestSignalEventDBConstraints:
     def test_db_rejects_bad_event_kind(self, db_engine):
         from sqlalchemy.exc import IntegrityError
         _setup_industry_for_signals(db_engine)
-        bar_ts = datetime(2026, 1, 8, tzinfo=timezone.utc)
-        with transaction(db_engine) as conn:
-            with pytest.raises(IntegrityError):
-                conn.execute(text("""
+        bar_ts = datetime(2026, 1, 8, tzinfo=UTC)
+        with transaction(db_engine) as conn, pytest.raises(IntegrityError):
+            conn.execute(text("""
                     INSERT INTO signal_events (
                         ticker_id, timeframe, industry_name,
                         bar_timestamp, signal_type,
@@ -2927,10 +2923,9 @@ class TestSignalEventDBConstraints:
 
     def test_db_rejects_neither_key_set(self, db_engine):
         from sqlalchemy.exc import IntegrityError
-        bar_ts = datetime(2026, 1, 8, tzinfo=timezone.utc)
-        with transaction(db_engine) as conn:
-            with pytest.raises(IntegrityError):
-                conn.execute(text("""
+        bar_ts = datetime(2026, 1, 8, tzinfo=UTC)
+        with transaction(db_engine) as conn, pytest.raises(IntegrityError):
+            conn.execute(text("""
                     INSERT INTO signal_events (
                         ticker_id, timeframe, industry_name,
                         bar_timestamp, signal_type,

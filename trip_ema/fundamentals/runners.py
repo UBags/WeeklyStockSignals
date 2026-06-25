@@ -43,8 +43,8 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from typing import Callable, Optional
+from datetime import date, datetime, UTC
+from collections.abc import Callable
 
 from sqlalchemy import Engine, text
 
@@ -100,7 +100,7 @@ def run_industry_refresh(
     db_engine: Engine,
     exchange: str,
     *,
-    resume_run_id: Optional[int] = None,
+    resume_run_id: int | None = None,
     force: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn: Callable[[str, str], IndustryInfo] = fetch_industry,
@@ -129,7 +129,7 @@ def run_industry_refresh(
                 phase="industry", exchange=exchange,
             )
         if last is not None and last.completed_at is not None:
-            age = (datetime.now(timezone.utc) - last.completed_at).days
+            age = (datetime.now(UTC) - last.completed_at).days
             if age < 80:
                 logger.info(
                     "Skipping industry refresh for %s: last SUCCESS "
@@ -542,7 +542,7 @@ def run_shares_refresh(
     db_engine: Engine,
     exchange: str,
     *,
-    resume_run_id: Optional[int] = None,
+    resume_run_id: int | None = None,
     force: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn=None,
@@ -574,7 +574,7 @@ def run_shares_refresh(
     if fetch_fn is None:
         fetch_fn = fetch_shares
 
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
 
     # ----- 0. Skip-if-recent guard ----- #
     if not force and resume_run_id is None:
@@ -583,7 +583,7 @@ def run_shares_refresh(
                 phase="shares", exchange=exchange,
             )
         if last is not None and last.completed_at is not None:
-            age = (datetime.now(timezone.utc) - last.completed_at).days
+            age = (datetime.now(UTC) - last.completed_at).days
             if age < 80:
                 logger.info(
                     "Skipping shares refresh for %s: last SUCCESS "
@@ -790,7 +790,7 @@ def run_shares_backfill(
                 phase="shares", exchange=exchange,
             )
         if last is not None and last.completed_at is not None:
-            age = (datetime.now(timezone.utc) - last.completed_at).days  # noqa: F821
+            age = (datetime.now(UTC) - last.completed_at).days  # noqa: F821
             if age < 80:
                 logger.info(  # noqa: F821
                     "Skipping shares backfill for %s: last SUCCESS "
@@ -984,7 +984,7 @@ def run_financials_refresh(
     db_engine: Engine,
     exchange: str,
     *,
-    resume_run_id: Optional[int] = None,
+    resume_run_id: int | None = None,
     force: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn=None,
@@ -1019,7 +1019,7 @@ def run_financials_refresh(
                 phase="financials", exchange=exchange,
             )
         if last is not None and last.completed_at is not None:
-            age = (datetime.now(timezone.utc) - last.completed_at).days
+            age = (datetime.now(UTC) - last.completed_at).days
             if age < 80:
                 logger.info(
                     "Skipping financials refresh for %s: last SUCCESS "
@@ -1200,9 +1200,9 @@ def run_market_cap_backfill(
     db_engine: Engine,
     exchange: str,
     *,
-    from_date: "date",
-    to_date: "date",
-    resume_run_id: Optional[int] = None,
+    from_date: date,
+    to_date: date,
+    resume_run_id: int | None = None,
     force: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     hist_fetch_fn=None,
@@ -1247,7 +1247,7 @@ def run_market_cap_backfill(
                 phase="market_cap", exchange=exchange,
             )
         if last is not None and last.completed_at is not None:
-            age = (datetime.now(timezone.utc) - last.completed_at).days
+            age = (datetime.now(UTC) - last.completed_at).days
             if age < 80:
                 logger.info(
                     "Skipping market cap backfill for %s: last SUCCESS "
@@ -1424,7 +1424,7 @@ def run_market_cap_backfill(
     return run_id
 
 
-def _parse_iso_date(s: str) -> "date":
+def _parse_iso_date(s: str) -> date:
     """Parse a 'YYYY-MM-DD' string to date. Used to restore from
     progress_json on resume."""
     from datetime import date as _date
@@ -1459,7 +1459,7 @@ def _parse_iso_date(s: str) -> "date":
 # ---------- helpers ---------- #
 
 
-def _next_semiannual_rebalance_date(db_engine, after_date: "date") -> Optional["date"]:
+def _next_semiannual_rebalance_date(db_engine, after_date: date) -> date | None:
     """Find the first trading day (≥ after_date) that's also a
     1st-of-April or 1st-of-October target.
 
@@ -1513,8 +1513,8 @@ def _next_semiannual_rebalance_date(db_engine, after_date: "date") -> Optional["
 
 
 def _list_trading_days_in_range(
-    db_engine, from_date: "date", to_date: "date",
-) -> list["date"]:
+    db_engine, from_date: date, to_date: date,
+) -> list[date]:
     """All distinct trade_dates with daily_market_cap rows in the
     range, ascending. Used by run_index_value_backfill to walk
     only days that have data."""
@@ -1533,11 +1533,11 @@ class RebalanceResult:
     """Summary of one rebalance. Used by tests and by
     run_industry_index_build for logging."""
     industry_name: str
-    rebalance_date: "date"
+    rebalance_date: date
     constituents_picked: int
     constituents_closed: int  # how many prior constituents we closed
     rebalance_skipped: bool   # True if min_constituents not met
-    skip_reason: Optional[str]
+    skip_reason: str | None
 
 
 # ---------- run_rebalance ---------- #
@@ -1546,11 +1546,11 @@ class RebalanceResult:
 def run_rebalance(
     db_engine: Engine,
     industry_name: str,
-    rebalance_date: "date",
+    rebalance_date: date,
     *,
     n: int = 10,
-    exchange: Optional[str] = None,
-    min_constituents: Optional[int] = None,
+    exchange: str | None = None,
+    min_constituents: int | None = None,
 ) -> RebalanceResult:
     """Execute one rebalance for `industry_name` on `rebalance_date`.
 
@@ -1683,9 +1683,9 @@ def run_index_value_backfill(
     db_engine: Engine,
     industry_name: str,
     *,
-    from_date: "date",
-    to_date: "date",
-    resume_run_id: Optional[int] = None,
+    from_date: date,
+    to_date: date,
+    resume_run_id: int | None = None,
     force: bool = False,
 ) -> int:
     """Walk trading days in [from_date, to_date], computing and
@@ -2030,7 +2030,7 @@ def run_industry_index_build(
     # ----- 4. For each qualified industry: upsert index + rebalance ----- #
     from ..persistence.fundamentals_repo import IndustryIndexRepository
 
-    indexed: list[tuple[str, "date", int]] = []
+    indexed: list[tuple[str, date, int]] = []
     failed: list[tuple[str, str]] = []
 
     for industry, sector, count in qualified:
@@ -2152,7 +2152,7 @@ def run_indicator_state_for_industry(
     )
     from ..indicators.aggregation import daily_to_weekly
     from ..domain import OHLCVBar
-    from datetime import datetime, time, timezone
+    from datetime import datetime, time
     from zoneinfo import ZoneInfo
 
     # Sanity: industry must exist as an index.
@@ -2313,7 +2313,7 @@ def run_indicator_state_for_industry(
                 long_turn_sell=bs["long_turn_sell"],
                 longest_turn_buy=bs["longest_turn_buy"],
                 longest_turn_sell=bs["longest_turn_sell"],
-                computed_at=datetime.now(timezone.utc),
+                computed_at=datetime.now(UTC),
             )
             repo.upsert_for_industry(state)
             succeeded += 1
@@ -2514,7 +2514,6 @@ def run_indicator_state_for_ticker(
     runner.
     """
     import pandas as pd
-    from ..persistence.bars_repo import BarsRepository
     from ..persistence.fundamentals_repo import (
         IndicatorStateRepository,
     )
@@ -2526,7 +2525,7 @@ def run_indicator_state_for_ticker(
         compute_indicator_series,
         INDICATOR_DEFAULTS,
     )
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     # Coerce timeframe string to Timeframe enum.
     try:
@@ -2664,7 +2663,7 @@ def run_indicator_state_for_ticker(
                 long_turn_sell=bs["long_turn_sell"],
                 longest_turn_buy=bs["longest_turn_buy"],
                 longest_turn_sell=bs["longest_turn_sell"],
-                computed_at=datetime.now(timezone.utc),
+                computed_at=datetime.now(UTC),
             )
             repo.upsert_for_ticker(state)
             succeeded += 1
@@ -2686,7 +2685,7 @@ def run_indicator_state_for_all_tickers(
     db_engine: Engine,
     timeframe: str,
     *,
-    exchange: Optional[str] = None,
+    exchange: str | None = None,
     force: bool = False,
     min_bars: int = 30,
 ) -> dict:
@@ -2706,7 +2705,6 @@ def run_indicator_state_for_all_tickers(
        "skipped":   list[(ticker_id, symbol, reason)],
        "failed":    list[(ticker_id, symbol, error_message)]}
     """
-    from ..persistence.bars_repo import BarsRepository
     from ..persistence.tickers_repo import TickersRepository
     from ..domain import Timeframe
 
@@ -2790,7 +2788,6 @@ def run_signal_events_for_ticker(
     indicator_state rows.
     """
     from ..domain import Timeframe
-    from ..persistence.bars_repo import BarsRepository
     from ..persistence.fundamentals_repo import (
         IndicatorStateRepository,
         SignalEventRepository,
@@ -2889,7 +2886,7 @@ def run_signal_events_for_all_tickers(
     db_engine: Engine,
     timeframe: str,
     *,
-    exchange: Optional[str] = None,
+    exchange: str | None = None,
     force: bool = False,
 ) -> dict:
     """Bulk-compute signal events for all tickers (optionally

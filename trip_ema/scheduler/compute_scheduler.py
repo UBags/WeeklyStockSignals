@@ -50,12 +50,12 @@ import logging
 import threading
 import time as time_module
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, UTC
 
 from sqlalchemy import Engine, text
 
 from ..cache.signal_cache import SignalCache
-from ..domain import SignalEvent, Timeframe
+from ..domain import Timeframe
 from ..observability import correlation_id, new_correlation_id
 from ..observability import metrics as M
 from ..observability.tracing import (
@@ -139,7 +139,7 @@ class ComputeScheduler:
         flight, returns immediately with
         `skipped_due_to_concurrent_run=True`.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if not self._run_lock.acquire(blocking=False):
             logger.info("run_once skipped — another pass already in flight")
             M.scheduler_runs_total.labels(outcome="skipped_concurrent").inc()
@@ -165,7 +165,7 @@ class ComputeScheduler:
                         "events.fired", len(summary.events_fired),
                     )
                 M.scheduler_runs_total.labels(outcome="completed").inc()
-                self.last_run_completed_at = datetime.now(timezone.utc)
+                self.last_run_completed_at = datetime.now(UTC)
                 return summary
         finally:
             self._run_lock.release()
@@ -272,7 +272,7 @@ class ComputeScheduler:
                         )
                         summary.errors.append((str(record.ref), str(e)))
 
-        summary.finished_at = datetime.now(timezone.utc)
+        summary.finished_at = datetime.now(UTC)
         logger.info(
             "Compute pass done: %d examined, %d events, %d stale, "
             "%d recovered, %d errors",

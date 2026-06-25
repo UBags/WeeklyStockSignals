@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import date, timedelta
-from typing import Iterable
+from collections.abc import Iterable
 
 from .exchanges import (
     UnsupportedExchangeError,

@@ -23,7 +23,7 @@ parameter changes.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, UTC
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -64,7 +64,7 @@ def _bar(day: date, *, price: float, vol: float = 1_000_000.0,
     ts_ist = datetime.combine(day, time(9, 15), tzinfo=_IST)
     half = hl_spread / 2
     return OHLCVBar(
-        timestamp=ts_ist.astimezone(timezone.utc),
+        timestamp=ts_ist.astimezone(UTC),
         open=price, high=price + half, low=price - half, close=price,
         volume=vol,
     )

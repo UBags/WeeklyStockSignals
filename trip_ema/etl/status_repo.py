@@ -17,11 +17,9 @@ component (the runner) in the same transaction boundaries.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from typing import Optional
+from datetime import date, datetime, UTC
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -34,13 +32,13 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True, slots=True)
 class TickerStatus:
     ticker_id: int
-    last_successful_bar_date: Optional[date]
-    last_attempt_at: Optional[datetime]
+    last_successful_bar_date: date | None
+    last_attempt_at: datetime | None
     consecutive_failures: int
     parked: bool
-    parked_at: Optional[datetime]
-    parked_reason: Optional[str]
-    last_error: Optional[str]
+    parked_at: datetime | None
+    parked_reason: str | None
+    last_error: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,14 +46,14 @@ class RunRecord:
     run_id: int
     kind: str
     started_at: datetime
-    finished_at: Optional[datetime]
-    outcome: Optional[str]
+    finished_at: datetime | None
+    outcome: str | None
     tickers_attempted: int
     tickers_succeeded: int
     tickers_failed: int
     bars_written: int
-    correlation_id: Optional[str]
-    notes: Optional[str]
+    correlation_id: str | None
+    notes: str | None
 
 
 class EtlStatusRepository:
@@ -76,9 +74,9 @@ class EtlStatusRepository:
         self,
         kind: RunKind,
         *,
-        exchange: Optional[str] = None,
-        correlation_id: Optional[str] = None,
-        notes: Optional[str] = None,
+        exchange: str | None = None,
+        correlation_id: str | None = None,
+        notes: str | None = None,
     ) -> int:
         """Insert a new etl_runs row with started_at=NOW(); return the
         run_id. finished_at and outcome stay NULL until close_run.
@@ -152,7 +150,7 @@ class EtlStatusRepository:
         run_id: int,
         outcome: RunOutcome,
         *,
-        notes: Optional[str] = None,
+        notes: str | None = None,
     ) -> None:
         """Set finished_at = NOW() and the outcome. If `notes` is given,
         appends to the existing notes (separated by a newline) — this
@@ -264,15 +262,15 @@ class EtlStatusRepository:
     def record_success(
         self,
         ticker_id: int,
-        last_bar_date: Optional[date],
+        last_bar_date: date | None,
         *,
-        now: Optional[datetime] = None,
+        now: datetime | None = None,
     ) -> None:
         """Mark a ticker as successfully fetched. Resets
         consecutive_failures to 0 and clears parked state. Use
         INSERT ... ON CONFLICT so the first call for a new ticker
         creates the row."""
-        ts = now or datetime.now(timezone.utc)
+        ts = now or datetime.now(UTC)
         self._conn.execute(
             text("""
                 INSERT INTO etl_ticker_status
@@ -302,13 +300,13 @@ class EtlStatusRepository:
         error_message: str,
         *,
         park_threshold: int = 3,
-        now: Optional[datetime] = None,
+        now: datetime | None = None,
     ) -> bool:
         """Increment consecutive_failures. Returns True if the ticker
         is now parked (failure_count crossed park_threshold this
         call). The caller is responsible for appending to the parked
         CSV when True is returned."""
-        ts = now or datetime.now(timezone.utc)
+        ts = now or datetime.now(UTC)
         # The UPDATE-OR-INSERT does the increment server-side so we
         # don't race two ETL runs against each other.
         result = self._conn.execute(
@@ -356,7 +354,7 @@ class EtlStatusRepository:
         )
         return result.scalar_one()
 
-    def get_status(self, ticker_id: int) -> Optional[TickerStatus]:
+    def get_status(self, ticker_id: int) -> TickerStatus | None:
         result = self._conn.execute(
             text("""
                 SELECT ticker_id, last_successful_bar_date, last_attempt_at,

@@ -50,9 +50,9 @@ import asyncio
 import logging
 import threading
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import AsyncIterator, Optional
+from dataclasses import dataclass
+from datetime import datetime, UTC
+from collections.abc import AsyncIterator
 
 from ...scheduler.market_orchestrator import OrchestratorRunSummary
 
@@ -76,13 +76,13 @@ class PulseEvent:
     'orchestrator_started' | 'orchestrator_stopped'."""
     timestamp: datetime
     """When the event happened (UTC)."""
-    exchange: Optional[str] = None
+    exchange: str | None = None
     """Set for orchestrator-scoped events; None for service-level events."""
-    summary: Optional[OrchestratorRunSummary] = None
+    summary: OrchestratorRunSummary | None = None
     """Set only for `orchestrator_run` events. The full run summary so
     GUI clients can render whichever fields they want without further
     HTTP round-trips."""
-    details: Optional[dict] = None
+    details: dict | None = None
     """Free-form payload for service-level events. Kept loose because
     each event type carries different fields and we don't want a
     type explosion."""
@@ -121,7 +121,7 @@ class PulseState:
         *,
         ring_buffer_size: int = DEFAULT_RING_BUFFER_SIZE,
         subscriber_queue_size: int = DEFAULT_SUBSCRIBER_QUEUE_SIZE,
-        now_fn=lambda: datetime.now(timezone.utc),
+        now_fn=lambda: datetime.now(UTC),
     ):
         self._ring_buffer: deque[PulseEvent] = deque(maxlen=ring_buffer_size)
         self._subscriber_queue_size = subscriber_queue_size
@@ -138,7 +138,7 @@ class PulseState:
 
         # The asyncio loop where subscribers live. Bound at startup
         # via _bind_loop; until bound, publish() skips async fan-out.
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         # Captured at construction. Surfaced via the pulse snapshot so
         # GUI clients can detect service restarts.
@@ -243,7 +243,7 @@ class PulseState:
 
     # ---- Async subscription (called from SSE route handler) ----
 
-    def open_subscription(self) -> "Subscription":
+    def open_subscription(self) -> Subscription:
         """Register a fresh subscriber synchronously and return a
         Subscription handle.
 
@@ -282,7 +282,7 @@ class PulseState:
         return Subscription(state=self, queue=queue, backfill=backfill)
 
     def _unregister_subscription(
-        self, queue: "asyncio.Queue[PulseEvent]",
+        self, queue: asyncio.Queue[PulseEvent],
     ) -> None:
         """Called from Subscription.__exit__ and aclose paths."""
         with self._lock:
@@ -392,7 +392,7 @@ class Subscription:
         self,
         *,
         state: PulseState,
-        queue: "asyncio.Queue[PulseEvent]",
+        queue: asyncio.Queue[PulseEvent],
         backfill: list[PulseEvent],
     ):
         self._state = state
@@ -409,7 +409,7 @@ class Subscription:
         self._closed = True
         self._state._unregister_subscription(self._queue)
 
-    def __enter__(self) -> "Subscription":
+    def __enter__(self) -> Subscription:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

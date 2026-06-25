@@ -12,9 +12,8 @@ loose values.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from enum import Enum
-from typing import Optional
 
 
 class InstrumentType(str, Enum):
@@ -38,11 +37,11 @@ class NseListing:
     """
     symbol: str
     instrument_type: InstrumentType
-    isin: Optional[str]
-    full_name: Optional[str]
-    listing_date: Optional[date]
-    face_value: Optional[float]
-    lot_size: Optional[int]
+    isin: str | None
+    full_name: str | None
+    listing_date: date | None
+    face_value: float | None
+    lot_size: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +74,7 @@ class FetchOutcome:
     """
     yfinance_symbol: str
     bars: tuple[RawBar, ...] = field(default_factory=tuple)
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -95,7 +94,7 @@ class ReconcileResult:
     bars_written: int
     divergences_flagged: int
     skipped: int
-    notes: Optional[str] = None
+    notes: str | None = None
 
 
 class RunKind(str, Enum):

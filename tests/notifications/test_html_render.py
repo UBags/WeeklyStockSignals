@@ -15,7 +15,7 @@ separately (`tests/notifications/test_enrichment_sql.py` if/when added).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -46,7 +46,7 @@ RELIANCE = TickerRef("NSE", "RELIANCE", "EQ")
 TCS = TickerRef("NSE", "TCS", "EQ")
 HDFC = TickerRef("NSE", "HDFCBANK", "EQ")
 
-_NOW = datetime(2026, 6, 18, 4, 30, tzinfo=timezone.utc)
+_NOW = datetime(2026, 6, 18, 4, 30, tzinfo=UTC)
 
 
 def _event(

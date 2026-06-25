@@ -19,14 +19,14 @@ from __future__ import annotations
 import logging
 import threading
 import time as time_module
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, UTC
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Engine
 
 from ..domain import NotificationBatch, SignalEvent, TickerRef
-from ..observability import correlation_id, get_or_mint_correlation_id
+from ..observability import get_or_mint_correlation_id
 from ..observability import metrics as M
 from ..observability.tracing import (
     add_correlation_id_to_span,
@@ -80,7 +80,7 @@ class SubscriberDistributor:
         cadence_minutes: int = 15,
         max_event_age_hours: int = 24,
         max_notifications_each: int = 3,
-        queue: "RedisQueue | None" = None,
+        queue: RedisQueue | None = None,
     ):
         """Args:
             transports: Transport map for in-process / legacy mode. Used
@@ -150,7 +150,7 @@ class SubscriberDistributor:
     # ---------- Unit of work ---------- #
 
     def run_once(self) -> DistributionSummary:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         summary = DistributionSummary(started_at=now)
 
         tracer = get_tracer("trip_ema.subscriber_distributor")
@@ -189,7 +189,7 @@ class SubscriberDistributor:
                     summary.delivery_failures += 1
                     span.record_exception(e)
 
-            summary.finished_at = datetime.now(timezone.utc)
+            summary.finished_at = datetime.now(UTC)
             self.last_run_completed_at = summary.finished_at
             span.set_attribute("subscribers.notified", summary.subscribers_notified)
             span.set_attribute("events.dispatched", summary.events_dispatched)
@@ -363,7 +363,7 @@ class SubscriberDistributor:
         from ._wall_clock import seconds_until_next_tick
         while not self._stop_event.is_set():
             sleep_seconds = seconds_until_next_tick(
-                datetime.now(timezone.utc), self._cadence,
+                datetime.now(UTC), self._cadence,
             )
             slept = 0.0
             while slept < sleep_seconds and not self._stop_event.is_set():

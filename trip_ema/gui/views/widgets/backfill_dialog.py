@@ -27,7 +27,6 @@ second-guess.
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Optional
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
@@ -55,8 +54,8 @@ class BackfillDialog(QDialog):
         self,
         *,
         exchange: str,
-        parent: Optional[QWidget] = None,
-        default_start: Optional[date] = None,
+        parent: QWidget | None = None,
+        default_start: date | None = None,
     ):
         super().__init__(parent)
         self._exchange = exchange
@@ -142,7 +141,7 @@ class BackfillDialog(QDialog):
 
     # ---------- public API ---------- #
 
-    def values(self) -> tuple[date, Optional[int]]:
+    def values(self) -> tuple[date, int | None]:
         """Return the (start_date, tier) the operator selected.
 
         `tier` is None when the "Restrict to one tier" checkbox is

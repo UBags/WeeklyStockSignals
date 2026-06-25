@@ -20,8 +20,8 @@ transactions. That matches `EtlStatusRepository`'s contract.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from typing import Any, Optional
+from datetime import date, datetime
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -31,16 +31,16 @@ from sqlalchemy.engine import Connection
 class ExchangeState:
     """A single row from exchange_state."""
     exchange: str
-    initial_load_started_at: Optional[datetime]
-    initial_load_completed_at: Optional[datetime]
-    last_eod_run_at: Optional[datetime]
-    last_eod_outcome: Optional[str]
-    last_eod_data_date: Optional[date]
-    last_eod_run_id: Optional[int]
-    last_intraday_run_at: Optional[datetime]
-    last_listings_sync_at: Optional[datetime]
-    last_listings_run_id: Optional[int]
-    last_tier_recompute_at: Optional[datetime]
+    initial_load_started_at: datetime | None
+    initial_load_completed_at: datetime | None
+    last_eod_run_at: datetime | None
+    last_eod_outcome: str | None
+    last_eod_data_date: date | None
+    last_eod_run_id: int | None
+    last_intraday_run_at: datetime | None
+    last_listings_sync_at: datetime | None
+    last_listings_run_id: int | None
+    last_tier_recompute_at: datetime | None
     updated_at: datetime
 
 
@@ -57,7 +57,7 @@ class ExchangeStateRepository:
 
     # ---------- reads ---------- #
 
-    def get(self, exchange: str) -> Optional[ExchangeState]:
+    def get(self, exchange: str) -> ExchangeState | None:
         row = self._conn.execute(
             text("""
                 SELECT exchange,
@@ -110,8 +110,8 @@ class ExchangeStateRepository:
         *,
         run_at: datetime,
         outcome: str,
-        data_date: Optional[date],
-        run_id: Optional[int],
+        data_date: date | None,
+        run_id: int | None,
     ) -> None:
         """Called after an EoD pass closes.
 
@@ -173,7 +173,7 @@ class ExchangeStateRepository:
         exchange: str,
         *,
         run_at: datetime,
-        run_id: Optional[int],
+        run_id: int | None,
     ) -> None:
         """Called after refresh_listings closes successfully."""
         self._conn.execute(

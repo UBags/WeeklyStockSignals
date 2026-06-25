@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 
 def _bar_payload(day: int, close: float = 100.0) -> dict:
     """An OHLCVBarPayload as a JSON-safe dict."""
     return {
         "timestamp": (
-            datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(days=day)
+            datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=day)
         ).isoformat(),
         "open": close - 0.5,
         "high": close + 1,

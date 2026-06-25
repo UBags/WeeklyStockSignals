@@ -22,7 +22,7 @@ test teardown — no permanent state lands.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from typing import Optional
 from unittest.mock import MagicMock
 
@@ -47,8 +47,8 @@ _TICKER = TickerRef(exchange="NSE", symbol="SANSERA", instrument="EQ")
 def _event(
     *,
     signal: ChangeSignal = ChangeSignal.BUY,
-    bar_timestamp: Optional[datetime] = None,
-    computed_at: Optional[datetime] = None,
+    bar_timestamp: datetime | None = None,
+    computed_at: datetime | None = None,
     price: float = 1327.10,
     timeframe: Timeframe = Timeframe.WEEKLY,
 ) -> SignalEvent:
@@ -56,10 +56,10 @@ def _event(
     return SignalEvent(
         ticker=_TICKER,
         timeframe=timeframe,
-        bar_timestamp=bar_timestamp or datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc),
+        bar_timestamp=bar_timestamp or datetime(2025, 6, 16, 0, 0, tzinfo=UTC),
         signal=signal,
         price_at_signal=price,
-        computed_at=computed_at or datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc),
+        computed_at=computed_at or datetime(2025, 6, 16, 0, 0, tzinfo=UTC),
     )
 
 
@@ -106,11 +106,11 @@ class TestPersistSignalEventsUnit:
     def test_inserts_each_event_once_and_returns_ids_in_order(self, fake_repo_cls):
         events = [
             _event(signal=ChangeSignal.BUY,
-                   bar_timestamp=datetime(2025, 6, 16, tzinfo=timezone.utc)),
+                   bar_timestamp=datetime(2025, 6, 16, tzinfo=UTC)),
             _event(signal=ChangeSignal.EXIT_FROM_BUY,
-                   bar_timestamp=datetime(2025, 7, 14, tzinfo=timezone.utc)),
+                   bar_timestamp=datetime(2025, 7, 14, tzinfo=UTC)),
             _event(signal=ChangeSignal.SELL,
-                   bar_timestamp=datetime(2025, 7, 21, tzinfo=timezone.utc)),
+                   bar_timestamp=datetime(2025, 7, 21, tzinfo=UTC)),
         ]
         conn = MagicMock(name="connection")
 
@@ -150,11 +150,11 @@ class TestPersistSignalEventsUnit:
         conn = MagicMock()
         events = [
             _event(signal=ChangeSignal.BUY,
-                   bar_timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc)),
+                   bar_timestamp=datetime(2025, 1, 1, tzinfo=UTC)),
             _event(signal=ChangeSignal.NO_CHANGE,
-                   bar_timestamp=datetime(2025, 1, 8, tzinfo=timezone.utc)),
+                   bar_timestamp=datetime(2025, 1, 8, tzinfo=UTC)),
             _event(signal=ChangeSignal.SELL,
-                   bar_timestamp=datetime(2025, 1, 15, tzinfo=timezone.utc)),
+                   bar_timestamp=datetime(2025, 1, 15, tzinfo=UTC)),
         ]
 
         with pytest.raises(ValueError, match="NO_CHANGE"):
@@ -168,9 +168,9 @@ class TestPersistSignalEventsUnit:
     def test_cache_writer_invoked_after_each_insert(self, fake_repo_cls):
         events = [
             _event(signal=ChangeSignal.BUY,
-                   bar_timestamp=datetime(2025, 6, 16, tzinfo=timezone.utc)),
+                   bar_timestamp=datetime(2025, 6, 16, tzinfo=UTC)),
             _event(signal=ChangeSignal.EXIT_FROM_BUY,
-                   bar_timestamp=datetime(2025, 7, 14, tzinfo=timezone.utc)),
+                   bar_timestamp=datetime(2025, 7, 14, tzinfo=UTC)),
         ]
         conn = MagicMock()
         cache_calls: list[tuple[int, Timeframe, SignalEvent]] = []
@@ -221,9 +221,9 @@ class TestPersistSignalEventsUnit:
         """If the caller passes a generator, we consume it once cleanly."""
         def gen():
             yield _event(signal=ChangeSignal.BUY,
-                         bar_timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc))
+                         bar_timestamp=datetime(2025, 1, 1, tzinfo=UTC))
             yield _event(signal=ChangeSignal.EXIT_FROM_BUY,
-                         bar_timestamp=datetime(2025, 1, 8, tzinfo=timezone.utc))
+                         bar_timestamp=datetime(2025, 1, 8, tzinfo=UTC))
 
         conn = MagicMock()
         ids = persist_signal_events(conn, ticker_id=1806, events=gen())
@@ -234,7 +234,7 @@ class TestPersistSignalEventsUnit:
         """The whole point of the writer split — backfill stamps the
         simulated day, live stamps NOW(). The persist layer must not
         touch event.computed_at."""
-        simulated_day = datetime(2024, 3, 15, 23, 59, 59, tzinfo=timezone.utc)
+        simulated_day = datetime(2024, 3, 15, 23, 59, 59, tzinfo=UTC)
         events = [_event(signal=ChangeSignal.BUY, computed_at=simulated_day)]
         conn = MagicMock()
 
@@ -373,8 +373,8 @@ class TestPersistSignalEventsIntegration:
     def test_single_insert_lands_in_table(self, engine):
         event = _event(
             signal=ChangeSignal.BUY,
-            bar_timestamp=datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc),
-            computed_at=datetime(2026, 6, 20, 11, 36, tzinfo=timezone.utc),
+            bar_timestamp=datetime(2025, 6, 16, 0, 0, tzinfo=UTC),
+            computed_at=datetime(2026, 6, 20, 11, 36, tzinfo=UTC),
             price=1327.10,
         )
         with engine.begin() as conn:
@@ -414,11 +414,11 @@ class TestPersistSignalEventsIntegration:
         one row (the partial unique index doesn't include computed_at)."""
         event_first  = _event(
             signal=ChangeSignal.BUY,
-            computed_at=datetime(2026, 6, 20, 11, 36, tzinfo=timezone.utc),
+            computed_at=datetime(2026, 6, 20, 11, 36, tzinfo=UTC),
         )
         event_second = _event(
             signal=ChangeSignal.BUY,
-            computed_at=datetime(2026, 6, 20, 14, 36, tzinfo=timezone.utc),
+            computed_at=datetime(2026, 6, 20, 14, 36, tzinfo=UTC),
         )
         with engine.begin() as conn:
             persist_signal_events(conn, 1806, [event_first])
@@ -436,11 +436,11 @@ class TestPersistSignalEventsIntegration:
     def test_multiple_events_all_persisted_in_order(self, engine):
         events = [
             _event(signal=ChangeSignal.BUY,
-                   bar_timestamp=datetime(2025, 6, 16, tzinfo=timezone.utc)),
+                   bar_timestamp=datetime(2025, 6, 16, tzinfo=UTC)),
             _event(signal=ChangeSignal.EXIT_FROM_BUY,
-                   bar_timestamp=datetime(2025, 7, 14, tzinfo=timezone.utc)),
+                   bar_timestamp=datetime(2025, 7, 14, tzinfo=UTC)),
             _event(signal=ChangeSignal.SELL,
-                   bar_timestamp=datetime(2025, 7, 21, tzinfo=timezone.utc)),
+                   bar_timestamp=datetime(2025, 7, 21, tzinfo=UTC)),
         ]
         with engine.begin() as conn:
             ids = persist_signal_events(conn, ticker_id=1806, events=events)
@@ -458,7 +458,7 @@ class TestPersistSignalEventsIntegration:
     def test_computed_at_persisted_verbatim(self, engine):
         """Backfill writes the simulated day; live writes NOW().
         The persist layer must not override either."""
-        simulated_day = datetime(2024, 3, 15, 23, 59, 59, tzinfo=timezone.utc)
+        simulated_day = datetime(2024, 3, 15, 23, 59, 59, tzinfo=UTC)
         event = _event(signal=ChangeSignal.BUY, computed_at=simulated_day)
 
         with engine.begin() as conn:

@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import Iterator
+from collections.abc import Iterator
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Connection, Engine
 
 from ..config import Config

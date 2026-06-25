@@ -10,7 +10,7 @@ are the heart of the new lifecycle — these tests pin their semantics.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -141,7 +141,7 @@ def _ind_row(engine, ticker_id: int, trade_date: date,
              *, regime: int = 1, med: float = 100.0,
              computed_at: datetime = None) -> None:
     if computed_at is None:
-        computed_at = datetime(2025, 6, 13, 18, 0, tzinfo=timezone.utc)
+        computed_at = datetime(2025, 6, 13, 18, 0, tzinfo=UTC)
     with engine.begin() as conn:
         conn.exec_driver_sql(
             "INSERT INTO indicator_state "
@@ -160,7 +160,7 @@ def _sig_row(engine, ticker_id: int,
              *, bar_timestamp: datetime, signal_type: str,
              price: float = 100.0, computed_at: datetime = None) -> None:
     if computed_at is None:
-        computed_at = datetime(2025, 6, 13, 18, 0, tzinfo=timezone.utc)
+        computed_at = datetime(2025, 6, 13, 18, 0, tzinfo=UTC)
     with engine.begin() as conn:
         conn.exec_driver_sql(
             "INSERT INTO signal_events "
@@ -203,7 +203,7 @@ class TestPrimeCacheFromDB:
 
     def test_signal_only_ticker_populates_with_no_indicator(self, engine):
         _sig_row(engine, 1806,
-                 bar_timestamp=datetime(2025, 6, 9, tzinfo=timezone.utc),
+                 bar_timestamp=datetime(2025, 6, 9, tzinfo=UTC),
                  signal_type="BUY")
         cache = SignalCache()
         result = prime_cache_from_db(db_engine=engine, cache=cache)
@@ -216,7 +216,7 @@ class TestPrimeCacheFromDB:
     def test_both_components_populate_full_snapshot(self, engine):
         _ind_row(engine, 1806, date(2025, 6, 9))
         _sig_row(engine, 1806,
-                 bar_timestamp=datetime(2025, 6, 9, tzinfo=timezone.utc),
+                 bar_timestamp=datetime(2025, 6, 9, tzinfo=UTC),
                  signal_type="BUY")
         cache = SignalCache()
         result = prime_cache_from_db(db_engine=engine, cache=cache)
@@ -242,15 +242,15 @@ class TestPrimeCacheFromDB:
         """DISTINCT ON with ORDER BY computed_at DESC, event_id DESC
         picks the most recent emission. Two events on the same week
         but different computed_at — newest wins."""
-        ts = datetime(2025, 6, 9, tzinfo=timezone.utc)
+        ts = datetime(2025, 6, 9, tzinfo=UTC)
         # Older computed_at.
         _sig_row(engine, 1806, bar_timestamp=ts,
                  signal_type="BUY", price=99.0,
-                 computed_at=datetime(2025, 6, 10, tzinfo=timezone.utc))
+                 computed_at=datetime(2025, 6, 10, tzinfo=UTC))
         # Newer computed_at — same week.
         _sig_row(engine, 1806, bar_timestamp=ts,
                  signal_type="EXIT_FROM_BUY", price=98.5,
-                 computed_at=datetime(2025, 6, 13, tzinfo=timezone.utc))
+                 computed_at=datetime(2025, 6, 13, tzinfo=UTC))
         cache = SignalCache()
         prime_cache_from_db(db_engine=engine, cache=cache)
         snap = cache.get_snapshot(1806, Timeframe.WEEKLY)
@@ -260,13 +260,13 @@ class TestPrimeCacheFromDB:
         # ind+sig for 1806
         _ind_row(engine, 1806, date(2025, 6, 9))
         _sig_row(engine, 1806,
-                 bar_timestamp=datetime(2025, 6, 9, tzinfo=timezone.utc),
+                 bar_timestamp=datetime(2025, 6, 9, tzinfo=UTC),
                  signal_type="SELL")
         # ind only for 2200
         _ind_row(engine, 2200, date(2025, 6, 9))
         # sig only for 3000
         _sig_row(engine, 3000,
-                 bar_timestamp=datetime(2025, 6, 9, tzinfo=timezone.utc),
+                 bar_timestamp=datetime(2025, 6, 9, tzinfo=UTC),
                  signal_type="BUY")
         cache = SignalCache()
         result = prime_cache_from_db(db_engine=engine, cache=cache)

@@ -19,7 +19,7 @@ Step 9 demolition, neither exists. The new routes:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Engine
@@ -28,7 +28,6 @@ from ....api.lifecycle import (
     PrimeCacheResult,
     _load_latest_indicator_states,
     _load_latest_signal_events,
-    _load_ticker_refs,
     prime_cache_from_db,
 )
 from ....cache import SignalCache
@@ -129,7 +128,7 @@ def admin_stale_tickers(
         bar_ts = datetime.combine(
             s.latest_indicator_state.trade_date,
             datetime.min.time(),
-            tzinfo=timezone.utc,
+            tzinfo=UTC,
         )
         entries.append(StaleTickerEntry(
             ticker=TickerRefPayload.from_domain(s.ticker_ref),
@@ -216,7 +215,7 @@ def admin_reprime_ticker(
         timeframe=timeframe,
         latest_indicator_state=ind_snap,
         latest_signal_event=sig_snap,
-        snapshot_taken_at=datetime.now(timezone.utc),
+        snapshot_taken_at=datetime.now(UTC),
         stale_since=None,  # explicit clear on reprime
     ))
 
@@ -239,7 +238,7 @@ def admin_circuit_breakers(
     distributor: SubscriberDistributor | None = Depends(get_distributor),
 ) -> CircuitBreakersPayload:
     """Return the current circuit-breaker state for each transport."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cb_cfg = config.transports.circuit_breaker
 
     if not cb_cfg.enabled:

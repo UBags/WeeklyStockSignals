@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -36,7 +36,7 @@ class SignalBacktestRun:
     computed_from_date: date
     computed_through_date: date
     computed_at: datetime
-    last_run_id: Optional[int]
+    last_run_id: int | None
 
 
 def _row_to_record(row: Any) -> SignalBacktestRun:
@@ -71,7 +71,7 @@ class SignalBacktestRunsRepository:
         exchange: str,
         ticker_id: int,
         timeframe: Timeframe,
-    ) -> Optional[SignalBacktestRun]:
+    ) -> SignalBacktestRun | None:
         """Return the resume row for one (exchange, ticker, timeframe),
         or None if it doesn't exist (ticker has never been computed
         for this exchange+timeframe pair)."""
@@ -117,7 +117,7 @@ class SignalBacktestRunsRepository:
         timeframe: Timeframe,
         computed_from_date: date,
         computed_through_date: date,
-        last_run_id: Optional[int] = None,
+        last_run_id: int | None = None,
     ) -> None:
         """Insert or update the resume row.
 

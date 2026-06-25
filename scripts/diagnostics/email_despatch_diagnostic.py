@@ -5,7 +5,7 @@
   4. What does find_pending_for_subscriber actually return RIGHT NOW for sub 1?
   5. Subscriber 1's transport config — Brevo or SMTP or null?
 """
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, UTC
 from sqlalchemy import create_engine, text
 import yaml
 
@@ -21,7 +21,7 @@ url = (
 print(f"Connecting to: {url.replace(db_cfg.get('password',''), '***')}\n")
 eng = create_engine(url)
 
-now = datetime.now(timezone.utc)
+now = datetime.now(UTC)
 
 with eng.connect() as conn:
     # ---- 1. signal_events distribution by bar_timestamp recency ----

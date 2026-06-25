@@ -7,7 +7,7 @@ combinations.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, UTC
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -37,7 +37,7 @@ def fake_config():
 
 def _at(year: int, month: int, day: int) -> datetime:
     """Helper: build a UTC datetime at the given date."""
-    return datetime(year, month, day, 12, 0, tzinfo=timezone.utc)
+    return datetime(year, month, day, 12, 0, tzinfo=UTC)
 
 
 # ---------- in_refresh_window ---------- #

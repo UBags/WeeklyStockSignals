@@ -44,7 +44,6 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
 
 from ..domain import NotificationBatch
 from ..observability import metrics as M
@@ -136,7 +135,7 @@ class CircuitBreakingTransport:
 
     def __init__(
         self,
-        wrapped: "NotificationTransportProtocol",
+        wrapped: NotificationTransportProtocol,
         name: str,
         config: CircuitBreakerConfig | None = None,
     ):

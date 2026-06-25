@@ -33,7 +33,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Callable, Iterable, Optional, Protocol
+from typing import Any, Protocol
+from collections.abc import Callable, Iterable
 
 from .market_orchestrator import MarketOrchestrator
 
@@ -61,7 +62,7 @@ class OrchestratorPool:
         self,
         orchestrators: Iterable[MarketOrchestrator],
         *,
-        pulse_hook: Optional[_PoolPulseHook] = None,
+        pulse_hook: _PoolPulseHook | None = None,
     ):
         """Construct a pool from pre-built orchestrators.
 
@@ -132,7 +133,7 @@ class OrchestratorPool:
 
     # ---- Lookups for HTTP endpoints ----
 
-    def get(self, exchange: str) -> Optional[MarketOrchestrator]:
+    def get(self, exchange: str) -> MarketOrchestrator | None:
         """Return the orchestrator for `exchange`, or None if unknown.
         Case-sensitive: matches the config exchange string verbatim."""
         with self._lock:
@@ -180,8 +181,8 @@ def build_pool_from_configs(
     fetch_fn_factory: Callable[[str], Callable],
     compute_run_once: Callable,
     distribute_run_once: Callable,
-    pulse: Optional[_PoolPulseHook] = None,
-) -> "OrchestratorPool":
+    pulse: _PoolPulseHook | None = None,
+) -> OrchestratorPool:
     """Construct an OrchestratorPool from runtime dependencies.
 
     Used by app.py's startup wiring (Step 6). Tests construct pools

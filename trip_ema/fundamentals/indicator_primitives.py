@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -324,7 +324,7 @@ class TripleEMAParams:
     base_len: int
     first_smoothing: int
     hull_n: int
-    final_smoothing: Optional[int] = None
+    final_smoothing: int | None = None
 
 
 # Default parameter sets, taken from the operator's updated Pine
@@ -495,7 +495,7 @@ class EngineParams:
     volume_smoothing: int = 2
 
     @classmethod
-    def from_domain(cls, p: "DomainIndicatorParams") -> "EngineParams":
+    def from_domain(cls, p: DomainIndicatorParams) -> EngineParams:
         """Build an EngineParams from the flat-shape domain
         IndicatorParams that comes out of Config.to_indicator_params().
 
@@ -640,16 +640,16 @@ def _pattern_label_for_ema(
     buy_turn_now: bool,
     sell_turn_now: bool,
     source_now: float,
-    last_buy_value: Optional[float],
-    second_last_buy_value: Optional[float],
-    last_sell_value: Optional[float],
-    second_last_sell_value: Optional[float],
+    last_buy_value: float | None,
+    second_last_buy_value: float | None,
+    last_sell_value: float | None,
+    second_last_sell_value: float | None,
     last_buy_label: str,
     last_sell_label: str,
     *,
     label_ttl_bars: int = 3,
-    bars_since_last_buy: Optional[int] = None,
-    bars_since_last_sell: Optional[int] = None,
+    bars_since_last_buy: int | None = None,
+    bars_since_last_sell: int | None = None,
 ) -> str:
     """Return the pattern label for the current bar, given current
     turn signals and tracked state.
@@ -723,12 +723,12 @@ class _PerEMATrackState:
     detection), plus bar-since-last-turn counters and the most
     recent emitted labels for stickiness.
     """
-    last_buy_value: Optional[float] = None
-    second_last_buy_value: Optional[float] = None
-    last_sell_value: Optional[float] = None
-    second_last_sell_value: Optional[float] = None
-    last_buy_bar_idx: Optional[int] = None
-    last_sell_bar_idx: Optional[int] = None
+    last_buy_value: float | None = None
+    second_last_buy_value: float | None = None
+    last_sell_value: float | None = None
+    second_last_sell_value: float | None = None
+    last_buy_bar_idx: int | None = None
+    last_sell_bar_idx: int | None = None
     last_buy_label: str = "NA"
     last_sell_label: str = "NA"
 
@@ -740,9 +740,9 @@ def compute_bar_states(
     low: pd.Series,
     *,
     trade_dates: pd.Series,
-    series: "IndicatorSeries",
+    series: IndicatorSeries,
     params: EngineParams = INDICATOR_DEFAULTS,
-    open_: Optional[pd.Series] = None,
+    open_: pd.Series | None = None,
 ) -> list[dict]:
     """Walk the bar series and produce a per-bar dict of full
     indicator state values (including regime).
@@ -988,8 +988,8 @@ def _bars_and_pct_since_turn(
     close: pd.Series,
     state: _PerEMATrackState,
     ema_now: float,
-    prev_ema: Optional[float],
-) -> tuple[Optional[int], Optional[float]]:
+    prev_ema: float | None,
+) -> tuple[int | None, float | None]:
     """Compute (bars_since_turn, pct_change_since_turn) for one EMA
     at bar i, following the Pine table's display logic.
 

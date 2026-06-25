@@ -39,7 +39,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional
 
 from sqlalchemy import Engine, text
 
@@ -166,7 +165,7 @@ def compute_market_cap_for_date(
         #   2. otherwise, shares from a LATER date (today's known
         #      shares) → APPROX_TODAYS_SHARES row (if allowed).
         #   3. otherwise, skip.
-        ticker_shares_info: dict[int, tuple[Optional[int], str]] = {}
+        ticker_shares_info: dict[int, tuple[int | None, str]] = {}
         for tid, _sym in universe:
             row = shares_repo.get_as_of(tid, trade_date)
             if row is not None and row.shares_outstanding is not None:

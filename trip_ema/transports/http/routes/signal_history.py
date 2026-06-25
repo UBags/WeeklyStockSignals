@@ -38,8 +38,7 @@ See the README for the integration sketch.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from datetime import date, datetime, timedelta, UTC
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
@@ -48,7 +47,6 @@ from sqlalchemy.engine import Connection
 from ....domain import (
     CoreRegime,
     OHLCVBar,
-    SignalEvent,
     TickerRef,
     Timeframe,
 )
@@ -72,7 +70,7 @@ def build_signal_history_payload(
     ticker_ref: TickerRef,
     timeframe: Timeframe,
     years_back: int = 3,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
     week_anchor_tz: str = "Asia/Kolkata",
 ) -> SignalHistoryPayload:
     """Assemble the chart-history payload for one (ticker, timeframe).
@@ -114,7 +112,7 @@ def build_signal_history_payload(
         )
 
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
     tz = ZoneInfo(week_anchor_tz)
     end_date = now.astimezone(tz).date()

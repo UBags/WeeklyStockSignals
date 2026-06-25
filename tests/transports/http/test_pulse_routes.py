@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 import httpx
 import pytest
@@ -34,7 +34,7 @@ from trip_ema.transports.http.pulse_state import PulseState
 from trip_ema.transports.http.routes import pulse as pulse_routes
 
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _build_app(pulse_state):
@@ -314,15 +314,14 @@ class TestPulseStream:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test",
-        ) as client:
-            async with client.stream(
-                "GET", "/v1/pulse/stream", timeout=2.0,
-            ) as resp:
-                assert resp.headers.get("x-accel-buffering") == "no"
-                assert resp.headers.get("cache-control") == "no-cache"
-                # The `: connected` comment is emitted immediately, so
-                # we don't need to wait for a real event to confirm
-                # streaming. Just drain one chunk and exit.
-                async for chunk in resp.aiter_text():
-                    assert ":" in chunk  # comment line marker
-                    break
+        ) as client, client.stream(
+            "GET", "/v1/pulse/stream", timeout=2.0,
+        ) as resp:
+            assert resp.headers.get("x-accel-buffering") == "no"
+            assert resp.headers.get("cache-control") == "no-cache"
+            # The `: connected` comment is emitted immediately, so
+            # we don't need to wait for a real event to confirm
+            # streaming. Just drain one chunk and exit.
+            async for chunk in resp.aiter_text():
+                assert ":" in chunk  # comment line marker
+                break

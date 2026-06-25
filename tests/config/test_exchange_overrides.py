@@ -290,4 +290,4 @@ class TestSupportedBacktestTimeframesConstant:
     def test_constant_matches_d3_design_decision(self):
         """Design D3: Phase 15 supports 1D and 1W only. Locked here
         so any change has to walk through this test."""
-        assert SUPPORTED_BACKTEST_TIMEFRAMES == frozenset({"1D", "1W"})
+        assert frozenset({"1D", "1W"}) == SUPPORTED_BACKTEST_TIMEFRAMES

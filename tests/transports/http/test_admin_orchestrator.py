@@ -13,7 +13,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,7 +31,7 @@ from trip_ema.transports.http.dependencies import (
 from trip_ema.transports.http.routes import admin_orchestrator as admin_routes
 
 
-UTC = timezone.utc
+UTC = UTC
 
 
 # ---------------------------------------------------------------------------

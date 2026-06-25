@@ -51,7 +51,8 @@ from __future__ import annotations
 
 import gc
 import os
-from typing import Callable, TypeVar
+from typing import TypeVar
+from collections.abc import Callable
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 

@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any
+from collections.abc import Iterable
 
 from sqlalchemy import insert, select
 from sqlalchemy.engine import Connection

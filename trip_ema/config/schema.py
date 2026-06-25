@@ -67,7 +67,7 @@ class DatabaseConfig(BaseModel):
     # When unset, all processes use the user/password above (back-compat).
     # When set, the listed roles override the default per process; see
     # alembic_pkg/versions/0002_db_roles.py for the GRANT model.
-    roles: "DbRolesConfig | None" = Field(
+    roles: DbRolesConfig | None = Field(
         default=None,
         description="Optional per-process DB credentials. When None, all "
                     "processes use the top-level user/password. When set, "
@@ -268,7 +268,7 @@ class TickScheduleEntry(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _validate_midpoint_no_offset(self) -> "TickScheduleEntry":
+    def _validate_midpoint_no_offset(self) -> TickScheduleEntry:
         if self.anchor == "midpoint" and self.offset_minutes != 0:
             raise ValueError(
                 f"tick {self.name!r}: anchor='midpoint' does not support "
@@ -390,7 +390,7 @@ class MarketHoursConfig(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _validate_tick_schedule(self) -> "MarketHoursConfig":
+    def _validate_tick_schedule(self) -> MarketHoursConfig:
         """Cross-entry validation of `tick_schedule`.
 
         Rules (applied only when tick_schedule is set):
@@ -449,7 +449,7 @@ class MarketHoursConfig(BaseModel):
 
         return self
 
-    def to_tick_config(self) -> "MarketTickConfig":
+    def to_tick_config(self) -> MarketTickConfig:
         """Adapt the YAML-shaped config into the runtime dataclass used
         by `scheduler.tick_planner`. Lazy-imported to avoid the cycle
         flagged at module top.
@@ -490,7 +490,7 @@ class MarketHoursConfig(BaseModel):
             tick_schedule=resolved_schedule,
         )
 
-    def to_calendar_config(self) -> "TradingCalendarConfig":
+    def to_calendar_config(self) -> TradingCalendarConfig:
         """Adapt the YAML-shaped config into the runtime dataclass used
         by `scheduler.market_calendar`. Lazy-imported."""
         from ..scheduler.market_calendar import TradingCalendarConfig  # noqa: PLC0415
@@ -812,13 +812,13 @@ class Config(BaseModel):
     observability: ObservabilityConfig = ObservabilityConfig()
     transports: TransportsConfig = TransportsConfig()
     etl: EtlConfig = EtlConfig()
-    redis: "RedisConfig | None" = None
+    redis: RedisConfig | None = None
     """Redis configuration for the notifier queue. If None, the
     SubscriberDistributor runs in legacy in-process mode (synchronous
     transport calls from the distributor thread). When set, the
     distributor enqueues jobs to Redis and a separate notifier worker
     process dispatches them."""
-    notifier: "NotifierConfig | None" = None
+    notifier: NotifierConfig | None = None
     """Notifier worker process settings. Only consulted when `redis` is
     set."""
 
@@ -834,7 +834,7 @@ class Config(BaseModel):
     it (per design OOS-7)."""
 
     @model_validator(mode="after")
-    def _validate_exchange_overrides(self) -> "Config":
+    def _validate_exchange_overrides(self) -> Config:
         """Cross-field validation of exchange_overrides:
 
         1. Every outer key (exchange code) must appear in

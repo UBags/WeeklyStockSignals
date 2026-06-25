@@ -27,8 +27,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime, timezone
-from typing import Optional
+from datetime import date, datetime, UTC
 
 from sqlalchemy import Engine
 
@@ -91,8 +90,8 @@ class QuarterlyFundamentalsScheduler:
         self._db_engine = db_engine
         self._config = config
         self._wakeup_seconds = wakeup_seconds
-        self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
-        self._thread: Optional[threading.Thread] = None
+        self._now_fn = now_fn or (lambda: datetime.now(UTC))
+        self._thread: threading.Thread | None = None
         self._stop_evt = threading.Event()
 
     # ----- lifecycle ----- #

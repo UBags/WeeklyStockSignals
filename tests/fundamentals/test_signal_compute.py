@@ -10,7 +10,7 @@ exact set and ordering of events produced.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 
 import pytest
 
@@ -55,7 +55,7 @@ def _state(
         med_turn_buy=False, med_turn_sell=False,
         long_turn_buy=False, long_turn_sell=False,
         longest_turn_buy=False, longest_turn_sell=False,
-        computed_at=datetime.now(timezone.utc),
+        computed_at=datetime.now(UTC),
     )
 
 
@@ -311,7 +311,7 @@ class TestSeriesIdentityPreserved:
             med_turn_buy=False, med_turn_sell=False,
             long_turn_buy=False, long_turn_sell=False,
             longest_turn_buy=False, longest_turn_sell=False,
-            computed_at=datetime.now(timezone.utc),
+            computed_at=datetime.now(UTC),
         )
         events = compute_signal_events_from_states([ticker_state], _close)
         assert events[0].ticker_id == 42

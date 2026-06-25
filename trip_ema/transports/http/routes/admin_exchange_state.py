@@ -18,7 +18,7 @@ Both endpoints sit under `require_admin_token` like the rest of
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import Engine
@@ -55,7 +55,7 @@ def admin_exchange_state_list(
     return ExchangeStateListPayload(
         exchanges=[_to_payload(r) for r in rows],
         total=len(rows),
-        snapshot_taken_at=datetime.now(timezone.utc),
+        snapshot_taken_at=datetime.now(UTC),
     )
 
 

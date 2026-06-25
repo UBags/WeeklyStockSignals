@@ -12,14 +12,12 @@ human-readable strings on the wire.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...api import TerseResponse, VerboseResponse
 from ...domain import (
     BarState,
-    ChangeSignal,
     CoreRegime,
     OHLCVBar,
     TickerRef,
@@ -89,7 +87,7 @@ class TickerRefPayload(BaseModel):
     instrument: str
 
     @classmethod
-    def from_domain(cls, ref: TickerRef) -> "TickerRefPayload":
+    def from_domain(cls, ref: TickerRef) -> TickerRefPayload:
         return cls(
             exchange=ref.exchange, symbol=ref.symbol, instrument=ref.instrument,
         )
@@ -117,7 +115,7 @@ class BarStatePayload(BaseModel):
     display_bg: str
 
     @classmethod
-    def from_domain(cls, s: BarState) -> "BarStatePayload":
+    def from_domain(cls, s: BarState) -> BarStatePayload:
         def f(x: float) -> float | None:
             return None if x != x else x  # NaN -> None
         return cls(
@@ -150,7 +148,7 @@ class TerseResponsePayload(BaseModel):
     computed_at: datetime
 
     @classmethod
-    def from_domain(cls, r: TerseResponse) -> "TerseResponsePayload":
+    def from_domain(cls, r: TerseResponse) -> TerseResponsePayload:
         return cls(
             ticker=TickerRefPayload.from_domain(r.ticker),
             timeframe=r.timeframe.value,
@@ -171,7 +169,7 @@ class VerboseResponsePayload(BaseModel):
     computed_at: datetime
 
     @classmethod
-    def from_domain(cls, r: VerboseResponse) -> "VerboseResponsePayload":
+    def from_domain(cls, r: VerboseResponse) -> VerboseResponsePayload:
         return cls(
             ticker=TickerRefPayload.from_domain(r.ticker),
             timeframe=r.timeframe.value,

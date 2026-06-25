@@ -13,7 +13,7 @@ get_etl_executor. We verify:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 from unittest.mock import MagicMock
 
 import pytest
@@ -359,8 +359,8 @@ class TestStatusEndpoint:
         fake_recent = [
             RunRecord(
                 run_id=1, kind="eod",
-                started_at=datetime(2026, 5, 17, 10, 0, tzinfo=timezone.utc),
-                finished_at=datetime(2026, 5, 17, 10, 5, tzinfo=timezone.utc),
+                started_at=datetime(2026, 5, 17, 10, 0, tzinfo=UTC),
+                finished_at=datetime(2026, 5, 17, 10, 5, tzinfo=UTC),
                 outcome="success",
                 tickers_attempted=2300, tickers_succeeded=2295,
                 tickers_failed=5, bars_written=2295,
@@ -476,7 +476,7 @@ class TestParkedEndpoint:
         # Fake the SQL result row objects
         row1 = MagicMock(
             ticker_id=42, symbol="RELIANCE",
-            parked_at=datetime(2026, 5, 17, 10, 0, tzinfo=timezone.utc),
+            parked_at=datetime(2026, 5, 17, 10, 0, tzinfo=UTC),
             parked_reason="3 consecutive failures",
             consecutive_failures=3,
             last_error="yfinance timeout",

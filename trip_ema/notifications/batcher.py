@@ -30,9 +30,7 @@ For HTML rendering:
 from __future__ import annotations
 
 import html
-from dataclasses import asdict
-from datetime import datetime, timezone
-from typing import Iterable, Optional
+from datetime import datetime, UTC
 
 from ..domain import ChangeSignal, NotificationBatch, SignalEvent
 from .enrichment import (
@@ -182,7 +180,7 @@ def _html_preamble(*, total_events: int) -> str:
 
 def _html_footer(*, total_events: int) -> str:
     """Bottom of the email body: small grey caption + closing div."""
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     return (
         f'<p style="font-size: 11px; color: {_COLOR_MUTED}; '
         f'margin: 24px 0 0 0;">'
@@ -234,8 +232,8 @@ def _html_section(
         f'</thead>'
         f'<tbody>'
         + "".join(rows_html) +
-        f'</tbody>'
-        f'</table>'
+        '</tbody>'
+        '</table>'
     )
 
 

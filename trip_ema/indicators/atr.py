@@ -22,7 +22,7 @@ This module exposes a stateful `ATR` class for O(1) updates and a pure
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from collections.abc import Iterable
 
 from ..domain import OHLCVBar
 

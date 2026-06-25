@@ -43,7 +43,6 @@ Notes:
 
 from __future__ import annotations
 
-from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
@@ -77,7 +76,7 @@ class BacktestDialog(QDialog):
         *,
         ticker_label: str,
         range_label: str,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f"Backtest — {ticker_label} ({range_label})")
@@ -228,7 +227,7 @@ class BacktestDialog(QDialog):
         """One row in the trades table."""
         is_win = trade.return_pct > 0
         is_loss = trade.return_pct < 0
-        row_bg: Optional[QBrush] = None
+        row_bg: QBrush | None = None
         if is_win:
             row_bg = QBrush(QColor(_COLOR_WIN_BG))
         elif is_loss:

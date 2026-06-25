@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -17,7 +17,7 @@ from trip_ema.indicators.aggregation import (
 
 def _d(year: int, month: int, day: int, o: float, h: float, l: float, c: float, v: float) -> OHLCVBar:
     return OHLCVBar(
-        timestamp=datetime(year, month, day, tzinfo=timezone.utc),
+        timestamp=datetime(year, month, day, tzinfo=UTC),
         open=o, high=h, low=l, close=c, volume=v,
     )
 
@@ -62,7 +62,7 @@ def test_full_week_aggregated_correctly():
     assert w.low == 99         # min of Monday
     assert w.volume == 6000    # sum
     # Timestamp is Monday midnight UTC
-    assert w.timestamp == datetime(2024, 1, 1, tzinfo=timezone.utc)
+    assert w.timestamp == datetime(2024, 1, 1, tzinfo=UTC)
 
 
 def test_multiple_weeks_split_correctly():
@@ -78,11 +78,11 @@ def test_multiple_weeks_split_correctly():
     assert len(weekly) == 2
     assert weekly[0].open == 100
     assert weekly[0].close == 112
-    assert weekly[0].timestamp == datetime(2024, 1, 1, tzinfo=timezone.utc)
+    assert weekly[0].timestamp == datetime(2024, 1, 1, tzinfo=UTC)
     assert weekly[1].open == 113
     assert weekly[1].close == 121
     assert weekly[1].volume == 4100
-    assert weekly[1].timestamp == datetime(2024, 1, 8, tzinfo=timezone.utc)
+    assert weekly[1].timestamp == datetime(2024, 1, 8, tzinfo=UTC)
 
 
 def test_mid_week_start_handled():
@@ -99,7 +99,7 @@ def test_mid_week_start_handled():
     assert w.open == 105     # Wednesday's open
     assert w.close == 114    # Friday's close
     # Week timestamp is still the Monday of that week (Jan 1)
-    assert w.timestamp == datetime(2024, 1, 1, tzinfo=timezone.utc)
+    assert w.timestamp == datetime(2024, 1, 1, tzinfo=UTC)
 
 
 def test_weekend_bars_grouped_with_preceding_week():
@@ -113,7 +113,7 @@ def test_weekend_bars_grouped_with_preceding_week():
     ]
     weekly = daily_to_weekly(bars)
     assert len(weekly) == 1
-    assert weekly[0].timestamp == datetime(2024, 1, 1, tzinfo=timezone.utc)
+    assert weekly[0].timestamp == datetime(2024, 1, 1, tzinfo=UTC)
     assert weekly[0].close == 119   # Sunday's close
     assert weekly[0].volume == 3000
 
@@ -132,9 +132,9 @@ class TestTimezoneAwareMondayOf:
     def test_utc_monday_unchanged(self):
         # Sunday 2026-05-17 12:00 UTC → Monday 2026-05-11 in UTC week
         # (a Sunday is the *last* day of the prior ISO week)
-        sun = datetime(2026, 5, 17, 12, tzinfo=timezone.utc)
+        sun = datetime(2026, 5, 17, 12, tzinfo=UTC)
         assert _monday_of(sun, tz="UTC") == datetime(
-            2026, 5, 11, tzinfo=timezone.utc
+            2026, 5, 11, tzinfo=UTC
         )
 
     def test_ist_monday_is_530_earlier_in_utc(self):
@@ -144,31 +144,31 @@ class TestTimezoneAwareMondayOf:
         18:30 UTC. Anything before that, in IST, was still last week."""
         # A timestamp that's Sunday 19:00 UTC, which is Monday 00:30 IST —
         # in IST terms this is already in the new week.
-        sun_late_utc = datetime(2026, 5, 17, 19, tzinfo=timezone.utc)
-        expected_monday_utc = datetime(2026, 5, 17, 18, 30, tzinfo=timezone.utc)
+        sun_late_utc = datetime(2026, 5, 17, 19, tzinfo=UTC)
+        expected_monday_utc = datetime(2026, 5, 17, 18, 30, tzinfo=UTC)
         assert _monday_of(sun_late_utc, tz="Asia/Kolkata") == expected_monday_utc
 
     def test_ist_monday_for_timestamp_just_before_boundary(self):
         """Sunday 18:00 UTC = Sunday 23:30 IST — still last week in IST."""
-        sun_before = datetime(2026, 5, 17, 18, tzinfo=timezone.utc)
+        sun_before = datetime(2026, 5, 17, 18, tzinfo=UTC)
         # Previous Monday in IST = Mon 2026-05-11 IST = Sun 2026-05-10 18:30 UTC
-        expected = datetime(2026, 5, 10, 18, 30, tzinfo=timezone.utc)
+        expected = datetime(2026, 5, 10, 18, 30, tzinfo=UTC)
         assert _monday_of(sun_before, tz="Asia/Kolkata") == expected
 
     def test_et_monday_during_dst(self):
         """In DST (EDT, UTC-4), Monday 00:00 ET = Monday 04:00 UTC.
         May 2026 is well inside DST (DST is March → November)."""
-        wed = datetime(2026, 5, 20, 16, tzinfo=timezone.utc)
+        wed = datetime(2026, 5, 20, 16, tzinfo=UTC)
         # Monday 2026-05-18 in ET → 04:00 UTC
-        expected = datetime(2026, 5, 18, 4, tzinfo=timezone.utc)
+        expected = datetime(2026, 5, 18, 4, tzinfo=UTC)
         assert _monday_of(wed, tz="America/New_York") == expected
 
     def test_et_monday_during_standard_time(self):
         """In EST (UTC-5), Monday 00:00 ET = Monday 05:00 UTC."""
         # December — standard time
-        dec = datetime(2026, 12, 16, 16, tzinfo=timezone.utc)
+        dec = datetime(2026, 12, 16, 16, tzinfo=UTC)
         # Monday 2026-12-14 in ET → 05:00 UTC
-        expected = datetime(2026, 12, 14, 5, tzinfo=timezone.utc)
+        expected = datetime(2026, 12, 14, 5, tzinfo=UTC)
         assert _monday_of(dec, tz="America/New_York") == expected
 
     def test_naive_datetime_rejected(self):
@@ -181,24 +181,24 @@ class TestTimezoneAwareBucketEnd:
     """bucket_end and is_provisional must honor the tz argument."""
 
     def test_weekly_bucket_in_utc(self):
-        mon = datetime(2026, 5, 18, tzinfo=timezone.utc)
+        mon = datetime(2026, 5, 18, tzinfo=UTC)
         end = bucket_end(mon, Timeframe.WEEKLY, tz="UTC")
-        assert end == datetime(2026, 5, 25, tzinfo=timezone.utc)
+        assert end == datetime(2026, 5, 25, tzinfo=UTC)
 
     def test_weekly_bucket_in_ist(self):
         """The IST-Monday bar's bucket ends at the next IST-Monday."""
         # IST Monday 2026-05-18 = Sun 2026-05-17 18:30 UTC
-        mon_ist = datetime(2026, 5, 17, 18, 30, tzinfo=timezone.utc)
+        mon_ist = datetime(2026, 5, 17, 18, 30, tzinfo=UTC)
         end = bucket_end(mon_ist, Timeframe.WEEKLY, tz="Asia/Kolkata")
         # Next IST Monday = 2026-05-25 IST = 2026-05-24 18:30 UTC
-        assert end == datetime(2026, 5, 24, 18, 30, tzinfo=timezone.utc)
+        assert end == datetime(2026, 5, 24, 18, 30, tzinfo=UTC)
 
     def test_is_provisional_during_ist_week(self):
         """Tuesday afternoon IST: a Monday-IST weekly bar is still
         provisional in the IST sense."""
         # IST Mon = Sun 18:30 UTC; we're at Tue 14:00 UTC = Tue 19:30 IST
-        mon_ist_utc = datetime(2026, 5, 17, 18, 30, tzinfo=timezone.utc)
-        tue_afternoon_utc = datetime(2026, 5, 19, 14, tzinfo=timezone.utc)
+        mon_ist_utc = datetime(2026, 5, 17, 18, 30, tzinfo=UTC)
+        tue_afternoon_utc = datetime(2026, 5, 19, 14, tzinfo=UTC)
         assert is_provisional(
             mon_ist_utc, Timeframe.WEEKLY, tue_afternoon_utc, tz="Asia/Kolkata"
         )
@@ -206,9 +206,9 @@ class TestTimezoneAwareBucketEnd:
     def test_is_provisional_after_ist_week_close(self):
         """Sunday IST afternoon: the prior IST-Monday weekly bar's
         bucket has closed (next IST-Monday starts at Sun 18:30 UTC)."""
-        mon_ist_utc = datetime(2026, 5, 17, 18, 30, tzinfo=timezone.utc)
+        mon_ist_utc = datetime(2026, 5, 17, 18, 30, tzinfo=UTC)
         # Sunday 2026-05-24 20:00 UTC = Mon 2026-05-25 01:30 IST — new week
-        next_sun_late = datetime(2026, 5, 24, 20, tzinfo=timezone.utc)
+        next_sun_late = datetime(2026, 5, 24, 20, tzinfo=UTC)
         assert not is_provisional(
             mon_ist_utc, Timeframe.WEEKLY, next_sun_late, tz="Asia/Kolkata"
         )
@@ -221,7 +221,7 @@ class TestDailyToWeeklyTimezoneAware:
         """5 daily bars Mon-Fri (all in IST) should aggregate to one
         weekly bar anchored at IST Monday."""
         # IST Monday 2026-05-18 00:00 = 2026-05-17 18:30 UTC
-        ist_mon_utc = datetime(2026, 5, 17, 18, 30, tzinfo=timezone.utc)
+        ist_mon_utc = datetime(2026, 5, 17, 18, 30, tzinfo=UTC)
         bars = [
             OHLCVBar(
                 timestamp=ist_mon_utc + timedelta(days=i),
@@ -245,7 +245,7 @@ class TestDailyToWeeklyTimezoneAware:
         """A bar at Sunday 19:00 UTC is in different ISO weeks in UTC
         vs IST (in UTC, it's still Sunday of the prior week; in IST,
         it's Monday 00:30 of the new week)."""
-        sun_late_utc = datetime(2026, 5, 17, 19, tzinfo=timezone.utc)
+        sun_late_utc = datetime(2026, 5, 17, 19, tzinfo=UTC)
         bar = OHLCVBar(
             timestamp=sun_late_utc, open=100, high=101, low=99,
             close=100.5, volume=500.0,
@@ -255,9 +255,9 @@ class TestDailyToWeeklyTimezoneAware:
         # The weekly bars exist in both views but anchor at different Mondays
         assert utc_weekly[0].timestamp != ist_weekly[0].timestamp
         # UTC: Mon 2026-05-11 (still in the prior week per UTC ISO)
-        assert utc_weekly[0].timestamp == datetime(2026, 5, 11, tzinfo=timezone.utc)
+        assert utc_weekly[0].timestamp == datetime(2026, 5, 11, tzinfo=UTC)
         # IST: Mon 2026-05-18 IST = Sun 2026-05-17 18:30 UTC
-        assert ist_weekly[0].timestamp == datetime(2026, 5, 17, 18, 30, tzinfo=timezone.utc)
+        assert ist_weekly[0].timestamp == datetime(2026, 5, 17, 18, 30, tzinfo=UTC)
 
 
 class TestDailyToWeeklyWithFinerSource:
@@ -266,7 +266,7 @@ class TestDailyToWeeklyWithFinerSource:
 
     def test_hourly_bars_aggregate_to_weekly(self):
         """24 hourly bars across one day → 1 weekly bar (partial week)."""
-        mon = datetime(2026, 5, 18, tzinfo=timezone.utc)
+        mon = datetime(2026, 5, 18, tzinfo=UTC)
         bars = [
             OHLCVBar(
                 timestamp=mon + timedelta(hours=i),
@@ -315,14 +315,14 @@ class TestBucketEndDST:
         which is 04:00 UTC (NOT 05:00 UTC, which is what the buggy
         implementation would produce by adding 168h to 05:00 UTC)."""
         # Monday 2026-03-02 00:00 EST = 2026-03-02 05:00 UTC
-        monday_2026_03_02 = datetime(2026, 3, 2, 5, 0, tzinfo=timezone.utc)
+        monday_2026_03_02 = datetime(2026, 3, 2, 5, 0, tzinfo=UTC)
         end = bucket_end(monday_2026_03_02, Timeframe.WEEKLY, tz="America/New_York")
         # Monday 2026-03-09 00:00 EDT = 2026-03-09 04:00 UTC (after DST)
-        expected = datetime(2026, 3, 9, 4, 0, tzinfo=timezone.utc)
+        expected = datetime(2026, 3, 9, 4, 0, tzinfo=UTC)
         assert end == expected, (
             f"Expected bucket end at {expected} (next Monday midnight EDT, "
             f"04:00 UTC after spring-forward), got {end}. "
-            f"If got {datetime(2026, 3, 9, 5, 0, tzinfo=timezone.utc)}, "
+            f"If got {datetime(2026, 3, 9, 5, 0, tzinfo=UTC)}, "
             f"DST drift bug has regressed."
         )
 
@@ -333,14 +333,14 @@ class TestBucketEndDST:
         which is 05:00 UTC (NOT 04:00 UTC, which is what the buggy
         implementation would produce)."""
         # Monday 2026-10-26 00:00 EDT = 2026-10-26 04:00 UTC
-        monday_2026_10_26 = datetime(2026, 10, 26, 4, 0, tzinfo=timezone.utc)
+        monday_2026_10_26 = datetime(2026, 10, 26, 4, 0, tzinfo=UTC)
         end = bucket_end(monday_2026_10_26, Timeframe.WEEKLY, tz="America/New_York")
         # Monday 2026-11-02 00:00 EST = 2026-11-02 05:00 UTC (after fall-back)
-        expected = datetime(2026, 11, 2, 5, 0, tzinfo=timezone.utc)
+        expected = datetime(2026, 11, 2, 5, 0, tzinfo=UTC)
         assert end == expected, (
             f"Expected bucket end at {expected} (next Monday midnight EST, "
             f"05:00 UTC after fall-back), got {end}. "
-            f"If got {datetime(2026, 11, 2, 4, 0, tzinfo=timezone.utc)}, "
+            f"If got {datetime(2026, 11, 2, 4, 0, tzinfo=UTC)}, "
             f"DST drift bug has regressed."
         )
 
@@ -349,24 +349,24 @@ class TestBucketEndDST:
         timedelta(days=7) would have. The fix must not break the
         common case."""
         # Monday 2026-06-01 00:00 EDT = 2026-06-01 04:00 UTC
-        monday = datetime(2026, 6, 1, 4, 0, tzinfo=timezone.utc)
+        monday = datetime(2026, 6, 1, 4, 0, tzinfo=UTC)
         end = bucket_end(monday, Timeframe.WEEKLY, tz="America/New_York")
-        expected = datetime(2026, 6, 8, 4, 0, tzinfo=timezone.utc)
+        expected = datetime(2026, 6, 8, 4, 0, tzinfo=UTC)
         assert end == expected
 
     def test_weekly_bucket_in_utc_unaffected(self):
         """UTC zone doesn't observe DST — fix must be a no-op here."""
-        monday = datetime(2026, 3, 2, 0, 0, tzinfo=timezone.utc)
+        monday = datetime(2026, 3, 2, 0, 0, tzinfo=UTC)
         end = bucket_end(monday, Timeframe.WEEKLY, tz="UTC")
-        assert end == datetime(2026, 3, 9, 0, 0, tzinfo=timezone.utc)
+        assert end == datetime(2026, 3, 9, 0, 0, tzinfo=UTC)
 
     def test_weekly_bucket_in_ist_unaffected(self):
         """IST (Asia/Kolkata) doesn't observe DST — fix must be a no-op."""
         # Monday 2026-03-02 00:00 IST = 2026-03-01 18:30 UTC
-        monday = datetime(2026, 3, 1, 18, 30, tzinfo=timezone.utc)
+        monday = datetime(2026, 3, 1, 18, 30, tzinfo=UTC)
         end = bucket_end(monday, Timeframe.WEEKLY, tz="Asia/Kolkata")
         # Next IST Monday: 2026-03-09 00:00 IST = 2026-03-08 18:30 UTC
-        expected = datetime(2026, 3, 8, 18, 30, tzinfo=timezone.utc)
+        expected = datetime(2026, 3, 8, 18, 30, tzinfo=UTC)
         assert end == expected
 
     # ---------- DAILY ----------
@@ -376,10 +376,10 @@ class TestBucketEndDST:
         The daily bucket for Sunday must end at midnight EDT on Monday
         2026-03-09, i.e., 04:00 UTC."""
         # Sunday 2026-03-08 00:00 EST = 2026-03-08 05:00 UTC
-        sunday = datetime(2026, 3, 8, 5, 0, tzinfo=timezone.utc)
+        sunday = datetime(2026, 3, 8, 5, 0, tzinfo=UTC)
         end = bucket_end(sunday, Timeframe.DAILY, tz="America/New_York")
         # Monday 2026-03-09 00:00 EDT = 2026-03-09 04:00 UTC
-        expected = datetime(2026, 3, 9, 4, 0, tzinfo=timezone.utc)
+        expected = datetime(2026, 3, 9, 4, 0, tzinfo=UTC)
         assert end == expected
 
     def test_daily_bucket_in_ny_on_fall_back_day(self):
@@ -387,10 +387,10 @@ class TestBucketEndDST:
         The daily bucket must end at midnight EST on Monday 2026-11-02,
         i.e., 05:00 UTC."""
         # Sunday 2026-11-01 00:00 EDT = 2026-11-01 04:00 UTC
-        sunday = datetime(2026, 11, 1, 4, 0, tzinfo=timezone.utc)
+        sunday = datetime(2026, 11, 1, 4, 0, tzinfo=UTC)
         end = bucket_end(sunday, Timeframe.DAILY, tz="America/New_York")
         # Monday 2026-11-02 00:00 EST = 2026-11-02 05:00 UTC
-        expected = datetime(2026, 11, 2, 5, 0, tzinfo=timezone.utc)
+        expected = datetime(2026, 11, 2, 5, 0, tzinfo=UTC)
         assert end == expected
 
     # ---------- is_provisional propagation ----------
@@ -401,14 +401,14 @@ class TestBucketEndDST:
         after spring-forward). The buggy implementation would have said
         the bucket ended at 05:00 UTC, marking 03:00-05:00 UTC of Monday
         as still provisional for the prior week, which is wrong by 1h."""
-        monday_2026_03_02 = datetime(2026, 3, 2, 5, 0, tzinfo=timezone.utc)
+        monday_2026_03_02 = datetime(2026, 3, 2, 5, 0, tzinfo=UTC)
         # 03:30 UTC Mon 2026-03-09 is local 23:30 EDT Sun — that's still
         # technically Sunday evening in NY, BUT the bucket end is at
         # 04:00 UTC, so this IS within the bucket.
-        within = datetime(2026, 3, 9, 3, 30, tzinfo=timezone.utc)
+        within = datetime(2026, 3, 9, 3, 30, tzinfo=UTC)
         assert is_provisional(monday_2026_03_02, Timeframe.WEEKLY, within, tz="America/New_York")
         # 04:30 UTC Mon 2026-03-09 is local 00:30 EDT Mon — bucket has ended.
-        beyond = datetime(2026, 3, 9, 4, 30, tzinfo=timezone.utc)
+        beyond = datetime(2026, 3, 9, 4, 30, tzinfo=UTC)
         assert not is_provisional(monday_2026_03_02, Timeframe.WEEKLY, beyond, tz="America/New_York")
 
 
@@ -422,7 +422,7 @@ class TestExpectedClosedWeeklyBuckets:
     between engine_last_ts and now that the ETL should have data for."""
 
     def _utc(self, y, mo, d):
-        return datetime(y, mo, d, tzinfo=timezone.utc)
+        return datetime(y, mo, d, tzinfo=UTC)
 
     def test_same_week_returns_empty(self):
         """If engine_last_ts and now are in the same local week, there
@@ -473,11 +473,11 @@ class TestExpectedClosedWeeklyBuckets:
         Sun 18:30 UTC)."""
         from trip_ema.indicators.aggregation import expected_closed_weekly_buckets
         # IST Monday 2026-05-04 00:00 = 2026-05-03 18:30 UTC
-        engine_last = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+        engine_last = datetime(2026, 5, 3, 18, 30, tzinfo=UTC)
         now = self._utc(2026, 5, 19)
         result = expected_closed_weekly_buckets(engine_last, now, tz="Asia/Kolkata")
         # Expected: IST Mon 5/11 (= UTC 2026-05-10 18:30)
-        assert result == [datetime(2026, 5, 10, 18, 30, tzinfo=timezone.utc)]
+        assert result == [datetime(2026, 5, 10, 18, 30, tzinfo=UTC)]
 
 
 class TestDetectWeeklyGaps:
@@ -485,7 +485,7 @@ class TestDetectWeeklyGaps:
     closed weeks."""
 
     def _utc(self, y, mo, d):
-        return datetime(y, mo, d, tzinfo=timezone.utc)
+        return datetime(y, mo, d, tzinfo=UTC)
 
     def test_no_gap_when_all_expected_weeks_have_bars(self):
         from trip_ema.indicators.aggregation import detect_weekly_gaps
@@ -546,7 +546,7 @@ class TestDetectWeeklyGaps:
 
 class TestMinBarsForCompleteWeek:
 
-    UTC = timezone.utc
+    UTC = UTC
 
     def test_recommended_thresholds_per_source_timeframe(self):
         from trip_ema.indicators.aggregation import recommended_min_bars_per_week

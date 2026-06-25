@@ -6,7 +6,7 @@ Locks in the *_SOURCES tuples and the dataclass contracts (frozen
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 
 import pytest
 
@@ -132,7 +132,7 @@ class TestIndustryIndexValueDataclass:
             "constituents_missing": 0,
             "renormalized": False,
             "effective_rebalance_date": date(2025, 10, 1),
-            "computed_at": datetime(2025, 10, 15, 16, 0, tzinfo=timezone.utc),
+            "computed_at": datetime(2025, 10, 15, 16, 0, tzinfo=UTC),
         }
         defaults.update(overrides)
         return IndustryIndexValue(**defaults)

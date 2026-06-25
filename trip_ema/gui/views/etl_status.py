@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
@@ -51,7 +50,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..db import GuiDbSession
-from ..http_client import ApiError, TripEmaHttpClient
+from ..http_client import TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
 from .exchange_state_panel import ExchangeStatePanel
 from .widgets.exchange_picker import ExchangePicker
@@ -83,7 +82,7 @@ class EtlStatusView(QWidget):
         db: GuiDbSession,
         http: TripEmaHttpClient,
         *,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
         start_refresh_on_init: bool = True,
     ):
         super().__init__(parent)
@@ -266,13 +265,13 @@ class EtlStatusView(QWidget):
     # ---------- exchange picker plumbing (15c: delegated to widget) ---------- #
 
     @property
-    def _selected_exchange(self) -> Optional[str]:
+    def _selected_exchange(self) -> str | None:
         """Backward-compat: pre-15c code stored this as a plain
         attribute. Now it's just whatever the picker reports."""
         return self._picker.current_exchange() if hasattr(self, "_picker") else None
 
     @_selected_exchange.setter
-    def _selected_exchange(self, value: Optional[str]) -> None:
+    def _selected_exchange(self, value: str | None) -> None:
         """No-op setter. The picker owns this state in 15c; the
         property is read-only in practice. Kept as a setter to
         absorb any legacy code that might still try to assign it
@@ -508,7 +507,7 @@ class EtlStatusView(QWidget):
     # by the picker). The buttons are disabled when that value is None,
     # so the helper below can assume a non-None exchange.
 
-    def _require_exchange(self) -> Optional[str]:
+    def _require_exchange(self) -> str | None:
         """Defensive: return the current picker selection or None.
         Action handlers call this first; None means "something has
         gone wrong with button gating" — we just return without
@@ -676,7 +675,7 @@ class EtlStatusView(QWidget):
             pass
 
 
-def _parse_iso(s: Optional[str]) -> Optional[datetime]:
+def _parse_iso(s: str | None) -> datetime | None:
     if not s:
         return None
     try:

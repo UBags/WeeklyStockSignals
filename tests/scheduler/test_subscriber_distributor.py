@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -30,7 +30,7 @@ RELIANCE = TickerRef("NSE", "RELIANCE", "EQ")
 
 @pytest.fixture
 def now():
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 # ---------- Recording transport: captures send() calls for inspection ---------- #
@@ -403,8 +403,8 @@ class TestB3DeliveryRegardlessOfBarBucket:
         This is the Friday-15:00-signal-on-Saturday case: trader missed
         it during the week, distributor still tries Saturday morning
         because age-cap hasn't expired."""
-        now = datetime(2026, 5, 18, 12, tzinfo=timezone.utc)  # Mon
-        event_bar_ts = datetime(2026, 5, 11, tzinfo=timezone.utc)  # last Mon
+        now = datetime(2026, 5, 18, 12, tzinfo=UTC)  # Mon
+        event_bar_ts = datetime(2026, 5, 11, tzinfo=UTC)  # last Mon
         # Event computed 18 hours ago (well inside the default 24h cap)
         event_computed = now - timedelta(hours=18)
 
@@ -446,7 +446,7 @@ class TestB3DeliveryRegardlessOfBarBucket:
     def test_event_beyond_max_age_still_suppressed_by_age_cap(self, db_engine):
         """The single remaining freshness gate is `max_event_age_hours`.
         An event 48 hours old with max_age=24h should not deliver."""
-        now = datetime(2026, 5, 18, 12, tzinfo=timezone.utc)
+        now = datetime(2026, 5, 18, 12, tzinfo=UTC)
         event_computed = now - timedelta(hours=48)
 
         with transaction(db_engine) as conn:

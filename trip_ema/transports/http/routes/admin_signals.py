@@ -53,7 +53,7 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -297,7 +297,7 @@ def admin_signals_generate(
         timeframes=[t.value for t in tfs],
         force_full=force_full,
         estimated_output_path=f"{_OUTPUT_DIR_NAME}/{exchange}.json",
-        submitted_at=datetime.now(timezone.utc),
+        submitted_at=datetime.now(UTC),
     )
 
 
@@ -379,7 +379,7 @@ def admin_signals_generated(
         exists=True,
         filename=path.name,
         size_bytes=st.st_size,
-        mtime=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc),
+        mtime=datetime.fromtimestamp(st.st_mtime, tz=UTC),
         generated_by_run_id=payload.get("generated_by_run_id"),
         schema_version=payload.get("schema_version"),
         counts=payload.get("counts"),

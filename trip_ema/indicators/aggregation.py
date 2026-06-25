@@ -13,8 +13,8 @@ this consistently.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
-from typing import Iterable
+from datetime import datetime, time, timedelta, UTC
+from collections.abc import Iterable
 from zoneinfo import ZoneInfo
 
 from ..domain import OHLCVBar, Timeframe
@@ -38,7 +38,7 @@ def _monday_of(d: datetime, tz: str = "UTC") -> datetime:
     d_local = d.astimezone(zone)
     monday_date_local = d_local.date() - timedelta(days=d_local.weekday())
     monday_local = datetime.combine(monday_date_local, time.min, tzinfo=zone)
-    return monday_local.astimezone(timezone.utc)
+    return monday_local.astimezone(UTC)
 
 
 def bucket_end(
@@ -84,7 +84,7 @@ def bucket_end(
         next_monday_local = datetime.combine(
             next_monday_local_date, time.min, tzinfo=zone,
         )
-        return next_monday_local.astimezone(timezone.utc)
+        return next_monday_local.astimezone(UTC)
     if timeframe == Timeframe.DAILY:
         zone = ZoneInfo(tz)
         local = bar_timestamp.astimezone(zone)
@@ -95,7 +95,7 @@ def bucket_end(
         next_midnight_local = datetime.combine(
             next_day_local_date, time.min, tzinfo=zone,
         )
-        return next_midnight_local.astimezone(timezone.utc)
+        return next_midnight_local.astimezone(UTC)
     raise ValueError(f"bucket_end not defined for {timeframe}")
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -11,7 +11,7 @@ from trip_ema.persistence import SubscribersRepository, transaction
 
 @pytest.fixture
 def now():
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 # ---------- Subscribers ---------- #
@@ -45,12 +45,11 @@ def test_invalid_cadence_rejected(db_engine, now):
 
 
 def test_invalid_transport_rejected(db_engine, now):
-    with pytest.raises(Exception):
-        with transaction(db_engine) as conn:
-            SubscribersRepository(conn).create_subscriber(
-                transport="carrier_pigeon", address="x", notify_cadence_minutes=15,
-                created_at=now,
-            )
+    with pytest.raises(Exception), transaction(db_engine) as conn:
+        SubscribersRepository(conn).create_subscriber(
+            transport="carrier_pigeon", address="x", notify_cadence_minutes=15,
+            created_at=now,
+        )
 
 
 # ---------- find_due_for_notification ---------- #

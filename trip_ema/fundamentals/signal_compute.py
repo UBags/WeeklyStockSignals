@@ -51,8 +51,8 @@ Why close_at_event is passed in via callable:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Callable, Iterable
+from datetime import datetime, UTC
+from collections.abc import Callable, Iterable
 
 from . import SignalEvent
 
@@ -80,7 +80,7 @@ def compute_signal_events_from_states(
     """
     events: list = []
     prev_display = 0  # nz() default in Pine
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for state in states:
         curr = state.display_regime

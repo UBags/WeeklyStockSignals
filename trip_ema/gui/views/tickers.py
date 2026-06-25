@@ -58,8 +58,8 @@ intent is "never scroll to find a fresh signal".
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import (
@@ -73,7 +73,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..db import GuiDbSession
-from ..http_client import ApiError, TripEmaHttpClient
+from ..http_client import TripEmaHttpClient
 from ..queries import (
     BenchmarkWindowSnapshot, IndustryIndicators, SignalEventRow,
     SymbolHistoryRow, TickerRow, industry_indicators_for_ticker,
@@ -140,8 +140,8 @@ class TickerTableModel(QAbstractTableModel):
     def set_rows(
         self,
         rows: list[TickerRow],
-        last_signals: Optional[dict[int, str]] = None,
-        rank_scores: Optional[dict[int, float]] = None,
+        last_signals: dict[int, str] | None = None,
+        rank_scores: dict[int, float] | None = None,
     ) -> None:
         """Replace the entire row set. Bulk update is cheaper than
         per-row delete-and-insert for our refresh cadence.
@@ -163,7 +163,7 @@ class TickerTableModel(QAbstractTableModel):
         self._rank_scores = rank_scores if rank_scores is not None else {}
         self.endResetModel()
 
-    def row_at(self, source_row: int) -> Optional[TickerRow]:
+    def row_at(self, source_row: int) -> TickerRow | None:
         if 0 <= source_row < len(self._rows):
             return self._rows[source_row]
         return None
@@ -343,7 +343,7 @@ class TickerSortFilterProxy(QSortFilterProxyModel):
         # universe, and operators expect their column clicks to win.
         return super().lessThan(left, right)
 
-    def _group_rank(self, signal_type: Optional[str]) -> int:
+    def _group_rank(self, signal_type: str | None) -> int:
         if signal_type is None:
             return self.UNSIGNALLED_GROUP
         return self.SIGNAL_GROUP_ORDER.get(signal_type, self.UNSIGNALLED_GROUP)
@@ -365,7 +365,7 @@ class TickersView(QWidget):
         db: GuiDbSession,
         http: TripEmaHttpClient,
         *,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
         start_refresh_on_init: bool = True,
     ):
         super().__init__(parent)
@@ -377,7 +377,7 @@ class TickersView(QWidget):
         self._proxy.setSourceModel(self._model)
         self._proxy.setSortRole(Qt.DisplayRole)
 
-        self._selected_ticker_id: Optional[int] = None
+        self._selected_ticker_id: int | None = None
 
         self._build_ui()
         self._scheduler = RefreshScheduler(
@@ -592,7 +592,7 @@ class TickersView(QWidget):
         # right snapshot.
         substr = self._search_input.text().strip()
         tier_text = self._tier_combo.currentText()
-        tier_filter: Optional[int] = None
+        tier_filter: int | None = None
         if tier_text.isdigit():
             tier_filter = int(tier_text)
         include_delisted = self._show_delisted_checkbox.isChecked()
@@ -814,7 +814,7 @@ class TickersView(QWidget):
 
     def _populate_indicator_tab(
         self, window_key: str,
-        snap: Optional[BenchmarkWindowSnapshot],
+        snap: BenchmarkWindowSnapshot | None,
     ) -> None:
         """Update the 7 labels on one tab from a snapshot.
 
@@ -875,7 +875,7 @@ class TickersView(QWidget):
         logger.warning("industry_indicators fetch failed: %s", message)
 
     def _format_tristate(
-        self, value: Optional[int], labels: tuple[str, str, str],
+        self, value: int | None, labels: tuple[str, str, str],
     ) -> tuple[str, str]:
         '''Map -1/0/+1 to (label, color). labels=(neg, zero, pos).
         Returns ('—', neutral-grey) for None.'''
@@ -887,7 +887,7 @@ class TickersView(QWidget):
             return (labels[0], self._BEARISH_COLOR)
         return (labels[1], self._NEUTRAL_COLOR)
 
-    def _fmt_pct_colored(self, value: Optional[float]) -> str:
+    def _fmt_pct_colored(self, value: float | None) -> str:
         '''Format a decimal (0.034) as a colored percentage string
         ("<font color=green>+3.4%</font>"). Returns plain "—" for None.'''
         if value is None:
@@ -899,7 +899,7 @@ class TickersView(QWidget):
         )
         return f"<font color='{color}'>{value * 100:+.1f}%</font>"
 
-    def _fmt_score_colored(self, value: Optional[float]) -> str:
+    def _fmt_score_colored(self, value: float | None) -> str:
         '''Format rank_score with 4 decimals + sign + color.'''
         if value is None:
             return f"<font color='{self._UNKNOWN_COLOR}'>—</font>"
@@ -910,7 +910,7 @@ class TickersView(QWidget):
         )
         return f"<font color='{color}'>{value:+.4f}</font>"
 
-    def _fmt_float(self, value: Optional[float], places: int = 2) -> str:
+    def _fmt_float(self, value: float | None, places: int = 2) -> str:
         '''Format a plain number, no color (β / R²).'''
         if value is None:
             return f"<font color='{self._UNKNOWN_COLOR}'>—</font>"

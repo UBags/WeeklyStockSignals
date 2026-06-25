@@ -30,9 +30,8 @@ import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
@@ -106,7 +105,7 @@ def save_gui_settings(values: dict) -> None:
 # symbol on the Signals tab, last-opened tab name).
 
 
-def load_last_selected_exchange() -> Optional[str]:
+def load_last_selected_exchange() -> str | None:
     """Return the operator's last-picked exchange in the ETL Status
     tab, or None if nothing's been saved yet (first launch).
 
@@ -139,8 +138,8 @@ class SettingsView(QWidget):
     def __init__(
         self,
         *,
-        config_path: Optional[Path] = None,
-        parent: Optional[QWidget] = None,
+        config_path: Path | None = None,
+        parent: QWidget | None = None,
     ):
         """Args:
           config_path: Path to the loaded config.yaml. Used by the

@@ -12,7 +12,7 @@ The repository, fetcher, and runner tests are in separate files
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 
 import pytest
 
@@ -52,7 +52,7 @@ class TestDailyMarketCapDataclass:
             "shares_used": 6_700_000_000,
             "market_cap": 9_711_350_000_000.0,
             "source": "COMPUTED",
-            "computed_at": datetime(2026, 5, 22, 12, 0, tzinfo=timezone.utc),
+            "computed_at": datetime(2026, 5, 22, 12, 0, tzinfo=UTC),
         }
         defaults.update(overrides)
         return DailyMarketCap(**defaults)

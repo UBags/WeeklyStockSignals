@@ -15,7 +15,7 @@ returns exactly what those tables hold.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, UTC
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -177,7 +177,7 @@ def _seed_daily_bars(engine, days_back: int, end_date: date,
         while bars_inserted < days_back:
             if d.weekday() < 5:  # Mon-Fri
                 ts = datetime.combine(d, time(9, 15), tzinfo=_IST)
-                ts_utc = ts.astimezone(timezone.utc)
+                ts_utc = ts.astimezone(UTC)
                 conn.exec_driver_sql(
                     "INSERT INTO ohlcv_bars "
                     "(ticker_id, timeframe, bar_timestamp, open, high, low, close, volume) "
@@ -226,7 +226,7 @@ def _seed_signal_event(engine, bar_timestamp_ist: datetime,
             "(ticker_id, timeframe, bar_timestamp, signal_type, "
             " price_at_signal, computed_at) "
             "VALUES (1806, '1W', %(bt)s, %(st)s, %(p)s, %(ca)s)",
-            dict(bt=bar_timestamp_ist.astimezone(timezone.utc),
+            dict(bt=bar_timestamp_ist.astimezone(UTC),
                  st=signal_type, p=price, ca=computed_at_utc),
         )
 
@@ -240,7 +240,7 @@ class TestSignalHistoryPayload:
 
     def test_empty_returns_empty_payload(self, engine):
         """No bars, no indicators, no events → empty lists."""
-        now = datetime(2025, 6, 20, 12, 0, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 20, 12, 0, tzinfo=UTC)
         with engine.begin() as conn:
             payload = build_signal_history_payload(
                 conn,
@@ -259,14 +259,13 @@ class TestSignalHistoryPayload:
         assert payload.warmup_bars_count == 0
 
     def test_rejects_non_weekly_timeframe(self, engine):
-        with engine.begin() as conn:
-            with pytest.raises(NotImplementedError):
-                build_signal_history_payload(
-                    conn,
-                    ticker_id=1806,
-                    ticker_ref=_TICKER,
-                    timeframe=Timeframe.DAILY,
-                )
+        with engine.begin() as conn, pytest.raises(NotImplementedError):
+            build_signal_history_payload(
+                conn,
+                ticker_id=1806,
+                ticker_ref=_TICKER,
+                timeframe=Timeframe.DAILY,
+            )
 
     def test_bars_carry_ohlc_from_ohlcv_bars(self, engine):
         """OHLC fields in the payload come from `ohlcv_bars`
@@ -278,14 +277,14 @@ class TestSignalHistoryPayload:
                                    date(2025, 6, 11), date(2025, 6, 12),
                                    date(2025, 6, 13)]):
                 price = 100.0 + i * 0.5
-                ts_utc = datetime.combine(d, time(9, 15), tzinfo=_IST).astimezone(timezone.utc)
+                ts_utc = datetime.combine(d, time(9, 15), tzinfo=_IST).astimezone(UTC)
                 conn.exec_driver_sql(
                     "INSERT INTO ohlcv_bars (ticker_id, timeframe, bar_timestamp, "
                     "open, high, low, close, volume) "
                     "VALUES (1806, '1D', %(ts)s, %(p)s, %(h)s, %(l)s, %(p)s, 1000)",
                     dict(ts=ts_utc, p=price, h=price + 0.5, l=price - 0.5),
                 )
-        now = datetime(2025, 6, 16, 12, 0, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 16, 12, 0, tzinfo=UTC)
         with engine.begin() as conn:
             payload = build_signal_history_payload(
                 conn, ticker_id=1806, ticker_ref=_TICKER,
@@ -308,7 +307,7 @@ class TestSignalHistoryPayload:
         _seed_daily_bars(engine, days_back=10, end_date=date(2025, 6, 16),
                          base_price=100.0)
         # NO indicator_state rows seeded.
-        now = datetime(2025, 6, 16, 12, 0, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 16, 12, 0, tzinfo=UTC)
         with engine.begin() as conn:
             payload = build_signal_history_payload(
                 conn, ticker_id=1806, ticker_ref=_TICKER,
@@ -338,7 +337,7 @@ class TestSignalHistoryPayload:
             display_regime=1,  # BULLISH
             med=101.0, long_=100.5, longest=100.0, atr=1.5,
         )
-        now = datetime(2025, 6, 14, 12, 0, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 14, 12, 0, tzinfo=UTC)
         with engine.begin() as conn:
             payload = build_signal_history_payload(
                 conn, ticker_id=1806, ticker_ref=_TICKER,
@@ -368,7 +367,7 @@ class TestSignalHistoryPayload:
             engine, trade_date_ist=date(2025, 6, 9),
             display_regime=-1,
         )
-        now = datetime(2025, 6, 14, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 14, tzinfo=UTC)
         with engine.begin() as conn:
             payload = build_signal_history_payload(
                 conn, ticker_id=1806, ticker_ref=_TICKER,
@@ -388,7 +387,7 @@ class TestSignalHistoryPayload:
             engine, trade_date_ist=date(2025, 6, 9),
             display_regime=0,
         )
-        now = datetime(2025, 6, 14, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 14, tzinfo=UTC)
         with engine.begin() as conn:
             payload = build_signal_history_payload(
                 conn, ticker_id=1806, ticker_ref=_TICKER,
@@ -409,21 +408,21 @@ class TestSignalHistoryPayload:
             engine,
             bar_timestamp_ist=datetime(2025, 5, 26, tzinfo=_IST),
             signal_type="BUY", price=100.0,
-            computed_at_utc=datetime(2025, 5, 30, tzinfo=timezone.utc),
+            computed_at_utc=datetime(2025, 5, 30, tzinfo=UTC),
         )
         _seed_signal_event(
             engine,
             bar_timestamp_ist=datetime(2025, 6, 2, tzinfo=_IST),
             signal_type="EXIT_FROM_BUY", price=99.0,
-            computed_at_utc=datetime(2025, 6, 6, tzinfo=timezone.utc),
+            computed_at_utc=datetime(2025, 6, 6, tzinfo=UTC),
         )
         _seed_signal_event(
             engine,
             bar_timestamp_ist=datetime(2025, 6, 9, tzinfo=_IST),
             signal_type="SELL", price=95.0,
-            computed_at_utc=datetime(2025, 6, 13, tzinfo=timezone.utc),
+            computed_at_utc=datetime(2025, 6, 13, tzinfo=UTC),
         )
-        now = datetime(2025, 6, 16, 12, 0, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 16, 12, 0, tzinfo=UTC)
         with engine.begin() as conn:
             payload = build_signal_history_payload(
                 conn, ticker_id=1806, ticker_ref=_TICKER,
@@ -444,16 +443,16 @@ class TestSignalHistoryPayload:
             engine,
             bar_timestamp_ist=datetime(2010, 1, 4, tzinfo=_IST),
             signal_type="BUY", price=50.0,
-            computed_at_utc=datetime(2010, 1, 8, tzinfo=timezone.utc),
+            computed_at_utc=datetime(2010, 1, 8, tzinfo=UTC),
         )
         # In window.
         _seed_signal_event(
             engine,
             bar_timestamp_ist=datetime(2025, 6, 9, tzinfo=_IST),
             signal_type="SELL", price=95.0,
-            computed_at_utc=datetime(2025, 6, 13, tzinfo=timezone.utc),
+            computed_at_utc=datetime(2025, 6, 13, tzinfo=UTC),
         )
-        now = datetime(2025, 6, 16, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 16, tzinfo=UTC)
         with engine.begin() as conn:
             payload = build_signal_history_payload(
                 conn, ticker_id=1806, ticker_ref=_TICKER,
@@ -467,14 +466,14 @@ class TestSignalHistoryPayload:
         computed_at, not bar_timestamp. The payload must carry the
         DB's computed_at value verbatim."""
         _seed_daily_bars(engine, days_back=5, end_date=date(2025, 6, 13))
-        ca = datetime(2025, 6, 11, 11, 36, 9, tzinfo=timezone.utc)
+        ca = datetime(2025, 6, 11, 11, 36, 9, tzinfo=UTC)
         _seed_signal_event(
             engine,
             bar_timestamp_ist=datetime(2025, 6, 9, tzinfo=_IST),
             signal_type="BUY", price=100.0,
             computed_at_utc=ca,
         )
-        now = datetime(2025, 6, 16, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 16, tzinfo=UTC)
         with engine.begin() as conn:
             payload = build_signal_history_payload(
                 conn, ticker_id=1806, ticker_ref=_TICKER,
@@ -490,7 +489,7 @@ class TestSignalHistoryPayload:
         _seed_daily_bars(engine, days_back=20, end_date=date(2025, 6, 13))
         _seed_indicator_state(engine, date(2025, 6, 2),  display_regime=1)
         _seed_indicator_state(engine, date(2025, 6, 9),  display_regime=1)
-        now = datetime(2025, 6, 14, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 14, tzinfo=UTC)
         with engine.begin() as conn:
             payload = build_signal_history_payload(
                 conn, ticker_id=1806, ticker_ref=_TICKER,
@@ -504,7 +503,7 @@ class TestSignalHistoryPayload:
 
     def test_bars_sorted_oldest_to_newest(self, engine):
         _seed_daily_bars(engine, days_back=30, end_date=date(2025, 6, 13))
-        now = datetime(2025, 6, 14, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 14, tzinfo=UTC)
         with engine.begin() as conn:
             payload = build_signal_history_payload(
                 conn, ticker_id=1806, ticker_ref=_TICKER,
