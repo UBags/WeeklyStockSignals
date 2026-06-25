@@ -309,6 +309,12 @@ class CircuitBreakingTransport:
             )
 
 
-# Type alias for the protocol — avoid circular import
-class NotificationTransportProtocol:
+# Structural protocol for the transport interface. Declared
+# here (not in trip_ema.notifications.transports) to avoid the
+# circular import. Concrete transports satisfy this implicitly
+# via their `send(address, batch) -> bool` method.
+from typing import Protocol  # noqa: E402  # local; declared near use
+
+
+class NotificationTransportProtocol(Protocol):
     def send(self, address: str, batch: NotificationBatch) -> bool: ...

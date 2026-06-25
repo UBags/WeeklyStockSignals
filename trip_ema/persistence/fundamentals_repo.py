@@ -933,7 +933,11 @@ class QuarterlyFinancialsRepository:
                   AND qf.fiscal_quarter = :fq
                 ORDER BY qf.ticker_id, qf.fetched_at DESC
             """
-            params = {"ex": exchange, "fq": fiscal_quarter}
+            # mypy infers dict[str, str] from the sibling branch's
+            # exchange-only params; this branch adds a date. Proper
+            # fix is a function-scoped `params: dict[str, Any]` decl
+            # (deferred — would touch both branches).
+            params = {"ex": exchange, "fq": fiscal_quarter}  # type: ignore[dict-item]
         rows = self._conn.execute(text(sql), params)
         return [_qfinancial_from_row(r) for r in rows]
 
@@ -1130,10 +1134,14 @@ class DailyMarketCapRepository:
                 WHERE mc.trade_date = :td AND t.exchange = :ex
                 ORDER BY mc.market_cap DESC
             """
-            params = {"td": trade_date, "ex": exchange}
+            # mypy infers dict[str, date] from the sibling branch's
+            # date-only params; this branch adds a str. Same deferred
+            # `params: dict[str, Any]` refactor applies.
+            params = {"td": trade_date, "ex": exchange}  # type: ignore[dict-item]
         if limit is not None:
             sql += " LIMIT :lim"
-            params["lim"] = limit
+            # See note above on dict-type inference; same deferred fix.
+            params["lim"] = limit  # type: ignore[assignment]
         rows = self._conn.execute(text(sql), params)
         return [_mcap_from_row(r) for r in rows]
 

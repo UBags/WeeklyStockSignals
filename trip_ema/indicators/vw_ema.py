@@ -147,9 +147,17 @@ class VolumeWeightedTripleEMA:
             self._vw1_num = cv
             self._vw1_den = smoothed_volume
         else:
+            # Snapshot to locals so mypy keeps the narrowing from
+            # the `if self._vw1_num is None` check above. Attribute
+            # narrowing doesn't survive across statements; locals do.
+            # The class invariant is that _vw1_num and _vw1_den are
+            # paired (both None or both set).
+            prev_num = self._vw1_num
+            prev_den = self._vw1_den
+            assert prev_num is not None and prev_den is not None
             a = self._alpha_base
-            self._vw1_num = a * cv + (1.0 - a) * self._vw1_num
-            self._vw1_den = a * smoothed_volume + (1.0 - a) * self._vw1_den
+            self._vw1_num = a * cv + (1.0 - a) * prev_num
+            self._vw1_den = a * smoothed_volume + (1.0 - a) * prev_den
 
         # Guard against zero-volume periods which would NaN out the chain
         if self._vw1_den == 0.0:

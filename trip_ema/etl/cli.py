@@ -366,7 +366,10 @@ def _build_parser() -> argparse.ArgumentParser:
     # argparse wiring AND the handler functions; we only need to
     # merge the returned handler map into the dispatcher below.
     from ..fundamentals.cli import register_subparsers as _register_fundamentals
-    p._fundamentals_handlers = _register_fundamentals(sub, _add_exchange_arg)
+    # Stash the handler map on the ArgumentParser instance so the
+    # dispatcher below can find it. ArgumentParser has no such
+    # attribute in its public interface; deliberate runtime hack.
+    p._fundamentals_handlers = _register_fundamentals(sub, _add_exchange_arg)  # type: ignore[attr-defined]
 
     return p
 

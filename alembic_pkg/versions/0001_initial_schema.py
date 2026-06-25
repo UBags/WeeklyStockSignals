@@ -68,7 +68,9 @@ def upgrade() -> None:
     # interpreted as a parameter placeholder.
     conn = op.get_bind()
     raw_conn = conn.connection
-    with raw_conn.cursor() as cur:
+    # psycopg2 cursors ARE context managers; the DBAPI Protocol
+    # stubs don't declare __enter__/__exit__.
+    with raw_conn.cursor() as cur:  # type: ignore[attr-defined]
         cur.execute(sql)
 
 

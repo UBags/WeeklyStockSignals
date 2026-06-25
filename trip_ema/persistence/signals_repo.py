@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
@@ -202,7 +202,7 @@ class SignalsRepository:
                 allowed = [s.strip() for s in signal_filter.split(",") if s.strip()]
                 if allowed:
                     sub_clause.append(signal_events.c.signal_type.in_(allowed))
-            clauses.append(and_(*sub_clause) if sub_clause else True)
+            clauses.append(and_(*sub_clause) if sub_clause else true())
         match_any_subscription = or_(*clauses)
 
         # Step 2: count prior notifications per event for this subscriber.

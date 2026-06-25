@@ -217,7 +217,11 @@ def build_pool_from_configs(
             fetch_fn=fetch_fn_factory(tick_config.exchange),
             compute_run_once=compute_run_once,
             distribute_run_once=distribute_run_once,
-            pulse=pulse,  # The same PulseState instance for everyone.
+            # Two narrow protocols satisfied by the same concrete
+            # PulseState instance: _PoolPulseHook (this module) for
+            # publish_orchestrator_*, PulsePublisher (orchestrator)
+            # for publish. mypy can't see the cross-protocol shape.
+            pulse=pulse,  # type: ignore[arg-type]
         )
         orchestrators.append(orch)
 

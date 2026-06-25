@@ -125,7 +125,9 @@ def apply_pending(engine: Engine, migrations_dir: Path) -> list[str]:
         # must be executed verbatim.
         with engine.begin() as conn:
             raw_conn = conn.connection           # the underlying DBAPI connection
-            with raw_conn.cursor() as cur:
+            # psycopg2 cursors ARE context managers; the DBAPI
+            # Protocol stubs don't declare __enter__/__exit__.
+            with raw_conn.cursor() as cur:  # type: ignore[attr-defined]
                 cur.execute(sql)
         newly_applied.append(version)
         logger.info("Migration %s applied successfully", version)
