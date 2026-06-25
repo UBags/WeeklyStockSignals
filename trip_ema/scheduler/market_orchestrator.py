@@ -422,7 +422,7 @@ class MarketOrchestrator:
                 future.cancel()
                 raise TimeoutError(
                     f"fetch exceeded {timeout_seconds:.0f}s wall-clock budget"
-                )
+                ) from None
             step.detail = detail
             step.succeeded = True
             logger.info(

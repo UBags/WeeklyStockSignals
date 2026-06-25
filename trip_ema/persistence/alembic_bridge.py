@@ -197,7 +197,7 @@ def run_alembic_upgrade_head(
         raise RuntimeError(
             "Alembic is required to apply migrations. Install with "
             "`pip install trip-ema[migrations]`."
-        )
+        ) from None
 
     alembic_cfg = AlembicConfig("alembic.ini")
     if config_path is not None:

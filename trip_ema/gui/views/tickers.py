@@ -184,12 +184,15 @@ class TickerTableModel(QAbstractTableModel):
 
     # ---------- QAbstractTableModel API ---------- #
 
-    def rowCount(self, parent=QModelIndex()) -> int:
+    # B008 noqa: QModelIndex() as default is the standard Qt override
+    # contract — Qt passes an invalid (parent-less) index by
+    # constructing one. `None` would break the QAbstractTableModel API.
+    def rowCount(self, parent=QModelIndex()) -> int:  # noqa: B008
         if parent.isValid():
             return 0
         return len(self._rows)
 
-    def columnCount(self, parent=QModelIndex()) -> int:
+    def columnCount(self, parent=QModelIndex()) -> int:  # noqa: B008
         return len(HEADERS)
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> Any:

@@ -59,7 +59,7 @@ def build_db_url_for_role(config: Config, role: Role) -> str:
         raise RuntimeError(
             f"DB role {role!r} password env var "
             f"{role_creds.password_env!r} is not set"
-        )
+        ) from None
     return (
         f"postgresql+psycopg2://{role_creds.user}:{pwd}"
         f"@{db.host}:{db.port}/{db.database}"
