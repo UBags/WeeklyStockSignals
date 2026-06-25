@@ -145,7 +145,7 @@ class SignalsRepository:
         subscriber_id: int,
         *,
         max_age: timedelta = timedelta(hours=24),
-        max_bar_age: timedelta = timedelta(days=7),
+        max_bar_age: timedelta | None = None,
         max_notifications_each: int = 3,
         now: datetime,
     ) -> list[tuple[int, SignalEvent, TickerRef]]:
@@ -166,10 +166,23 @@ class SignalsRepository:
         """
         cutoff = now - max_age
         # bar_cutoff: events whose underlying bar_timestamp is older
-        # than `max_bar_age` (default 7 days) are filtered out. This
-        # is what prevents the regen scenario from emailing 2000+
-        # stocks: after regen every event has fresh computed_at, so
-        # the original 24h max_age filter alone passes everything.
+        # than `max_bar_age` are filtered out. This is what prevents
+        # the regen scenario from emailing 2000+ stocks: after regen
+        # every event has fresh computed_at, so the 24h max_age
+        # filter alone passes everything.
+        #
+        # When `max_bar_age` is not provided, derive it as
+        # `max_age + 7 days`. The 7d term is one weekly bucket: a
+        # weekly signal computed at the end of its bar's week (or
+        # later by a small regen / weekend recompute) has a
+        # bar_timestamp that's already ~7d old by the time the
+        # distributor next runs. Adding `max_age` on top means the
+        # gate moves in lock-step with the freshness cap, so the
+        # 'last-Monday's bar pinged on this Monday at noon' case
+        # always passes without weakening regen protection by more
+        # than the freshness cap itself.
+        if max_bar_age is None:
+            max_bar_age = max_age + timedelta(days=7)
         bar_cutoff = now - max_bar_age
 
         # Step 1: subscriber's subscriptions
