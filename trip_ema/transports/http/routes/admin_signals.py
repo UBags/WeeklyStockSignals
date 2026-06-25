@@ -386,82 +386,32 @@ def admin_signals_generated(
     )
 
 
-# ---------- Internal runner wrapper (catch + log + close row) ---------- #
+# ---------- Internal runner wrapper (currently 501) ---------- #
 #
-# Phase 15b owns the etl_runs lifecycle for signal-backtest runs:
-#   - The route handler opens the row (inside the concurrent-run
-#     guard's transaction, so the guard's SELECT and the INSERT are
-#     serialized per-exchange via advisory lock).
-#   - The route hands the run_id to generate_historical_signals.
-#   - generate_historical_signals, per its docstring's "split
-#     ownership" branch, runs the work but does NOT close the row
-#     when run_id was passed in. That's intentional — Phase 15a's
-#     test_passing_run_id_skips_open_but_still_closes asserts
-#     exactly this contract.
-#   - THIS WRAPPER closes the row at the end, either with
-#     outcome='success' (runner returned cleanly) or
-#     outcome='failed' (runner raised). Without this close, the
-#     row stays NULL-outcome forever and the concurrent-run guard
-#     thinks a run is in flight indefinitely.
+# Phase 15a's signal_generator.py was removed in the demolition.
+# This wrapper exists so the route signature stays stable, but it
+# always raises 501. Operators run the equivalent CLI command:
 #
-# This is the opposite pattern from admin_etl.py's _run_*_safe
-# wrappers, where the runner owns its own close. Don't copy from
-# admin_etl.py here.
+#   trip-ema-etl compute-signals --all-tickers --force \
+#       --timeframe 1W [--ticker SYMBOL]
+#
+# Re-wiring the route to the working compute-signals path is
+# tracked separately (Phase-15 modernization slice — also covers
+# moving the GUI signal_generation_panel off the deprecated JSON
+# file output and onto the signal_events DB read endpoints).
 
 
 def _run_signal_generation_safe(
     db_engine, config, exchange, timeframes, force_full, run_id,
 ):
-    # Step 9c: signal_generator.py is deleted. Route returns 501
-    # until Step 10 lands the regenerate-signals CLI.
     from fastapi import HTTPException
     raise HTTPException(
         status_code=501,
         detail=(
-            "Historical signal generation via HTTP is unavailable "
-            "after Step 9 demolition. Run `trip-ema-etl "
-            "regenerate-signals` from the CLI (Step 10) until the "
-            "route is re-wired."
+            "Historical signal generation via HTTP is unavailable. "
+            "Use the CLI instead: "
+            "`trip-ema-etl compute-signals --all-tickers --force "
+            "--timeframe 1W`. Phase-15 modernization will re-wire "
+            "this route to the working compute-signals path."
         ),
     )
-    from ....etl.types import RunOutcome  # noqa: F401  unreachable
-
-    outcome = RunOutcome.FAILED
-    close_notes: str | None = None
-    try:
-        # TODO(step-10): restore once the regenerate-signals CLI ships.
-        # Tracked in the project priority queue; this route raises
-        # NameError at runtime until then. The noqa just silences
-        # the linter so the rest of the file lints clean.
-        result = generate_historical_signals(  # noqa: F821
-            db_engine=db_engine,
-            config=config,
-            exchange=exchange,
-            timeframes=timeframes,
-            force_full=force_full,
-            run_id=run_id,
-        )
-        outcome = RunOutcome.SUCCESS
-        close_notes = (
-            f"tickers_processed={result.tickers_processed}, "
-            f"tickers_skipped={result.tickers_skipped}, "
-            f"signals_emitted={sum(result.signals_emitted.values())}"
-        )
-    except Exception:
-        logger.exception(
-            "Background signal-generation failed",
-            extra={"exchange": exchange, "run_id": run_id},
-        )
-    finally:
-        # Close the row regardless of outcome. The runner did NOT
-        # close it (split-ownership: we opened it, we close it).
-        try:
-            with db_engine.begin() as conn:
-                EtlStatusRepository(conn).close_run(
-                    run_id, outcome, notes=close_notes,
-                )
-        except Exception:
-            logger.exception(
-                "Failed to close etl_runs row after signal generation",
-                extra={"run_id": run_id, "exchange": exchange},
-            )
