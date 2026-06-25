@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import datetime
 from typing import Any, Protocol
 from collections.abc import Callable, Iterable
 
@@ -170,11 +171,9 @@ class OrchestratorPool:
             return False
         return all(o.is_alive() for o in orchs)
 
-    def last_tick_completed_at(self):
+    def last_tick_completed_at(self) -> "datetime | None":
         """Max `last_run_completed_at` across all orchestrators,
         or None if no orchestrator has completed a tick yet.
-        Returns Optional[datetime]; type unannotated to avoid the
-        forward-ref cycle with market_orchestrator.
         """
         with self._lock:
             orchs = list(self._by_exchange.values())
@@ -182,7 +181,7 @@ class OrchestratorPool:
         timestamps = [t for t in timestamps if t is not None]
         return max(timestamps) if timestamps else None
 
-    def is_unhealthy(self, now) -> str | None:
+    def is_unhealthy(self, now: "datetime") -> str | None:
         """Aggregator: return a description string when any orchestrator
         is unhealthy, else None. Same convention as
         ComputeScheduler.is_unhealthy / SubscriberDistributor.is_unhealthy:
