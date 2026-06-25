@@ -10,6 +10,12 @@ Subcommands:
   unpark               — clear parked flag for all parked tickers
   approve-action       — promote a corporate_actions row to approved
 
+Note: historical signal regeneration is provided by
+`trip-ema-etl compute-signals --all-tickers --force --timeframe 1W`
+(in the fundamentals sub-CLI). The Phase 15a `generate-signals`
+command was removed in Step 10 — its underlying signal_generator
+module was deleted during the demolition work.
+
 Phase 14.6a: every ETL subcommand that touches ticker data requires
 `--exchange NAME`. NAME must be:
   1. Known to the codebase (NSE, BSE, NYSE, NASDAQ, TSE, HKSE, SSE,
@@ -175,47 +181,6 @@ def cmd_unpark(args, config: Config) -> int:
     return 0
 
 
-def cmd_generate_signals(args, config: Config) -> int:
-    """Phase 15a — generate historical signals for a whole exchange's
-    universe across the requested timeframes. Writes to
-    `generated_signals/{EXCHANGE}.json` (atomic temp+rename).
-
-    Synchronous: the CLI invocation blocks until the run completes.
-    The HTTP equivalent (Phase 15b) submits the same function to
-    the etl_executor for async operation.
-
-    Resume semantics: a second invocation without --force-full picks
-    up where the first left off per ticker; tickers that have no
-    new bars are skipped. --force-full wipes resume rows for the
-    exchange in a small transaction at run start and recomputes
-    every ticker from earliest history.
-    """
-    # Lazy import — heavy module pulls in the engine, indicators,
-    # etc.; keep the CLI's startup time short for other subcommands.
-    from .signal_generator import generate_historical_signals
-    from ..domain import Timeframe
-
-    try:
-        tfs = [Timeframe(t) for t in args.timeframe]
-    except ValueError as e:
-        print(f"error: invalid timeframe: {e}", file=sys.stderr)
-        return 2
-
-    db_engine = create_engine_from_config(config)
-    try:
-        result = generate_historical_signals(
-            db_engine, config,
-            exchange=args.exchange,
-            timeframes=tfs,
-            force_full=args.force_full,
-        )
-    finally:
-        db_engine.dispose()
-
-    print(result.summary_line())
-    return 0
-
-
 def cmd_approve_action(args, config: Config) -> int:
     db_engine = create_engine_from_config(config)
     try:
@@ -334,32 +299,6 @@ def _build_parser() -> argparse.ArgumentParser:
     appr.add_argument("action_id", type=int)
     appr.add_argument("--notes", help="Optional reviewer notes")
 
-    gs = sub.add_parser(
-        "generate-signals",
-        help="Phase 15a — generate historical signals for backtesting",
-    )
-    _add_exchange_arg(gs)
-    gs.add_argument(
-        "--timeframe",
-        action="append",
-        default=None,
-        choices=("1D", "1W"),
-        help=(
-            "Timeframe to generate (repeatable). Defaults to ['1W'] "
-            "when omitted, matching the live system's primary."
-        ),
-    )
-    gs.add_argument(
-        "--force-full",
-        action="store_true",
-        help=(
-            "Wipe resume tracking rows for this exchange and "
-            "recompute every ticker from earliest history. Use when "
-            "engine params or exchange_overrides have changed. "
-            "May take 30+ minutes for a full NSE universe."
-        ),
-    )
-
     # Phase 1 fundamentals commands. Registered here so the user
     # types `trip-ema-etl refresh-industry` exactly like the other
     # ETL commands. The fundamentals package's CLI module owns the
@@ -408,16 +347,10 @@ def main(argv: list[str] | None = None) -> int:
         "status":               cmd_status,
         "unpark":               cmd_unpark,
         "approve-action":       cmd_approve_action,
-        "generate-signals":     cmd_generate_signals,
     }
     # Merge Phase 1 fundamentals handlers (registered by
     # _build_parser via fundamentals.cli.register_subparsers).
     handlers.update(getattr(parser, "_fundamentals_handlers", {}))
-    # `--timeframe` with action='append' starts as None, not [].
-    # Apply the documented default (`['1W']`) here so subcommand
-    # handlers don't have to repeat the logic.
-    if args.command == "generate-signals" and not args.timeframe:
-        args.timeframe = ["1W"]
     handler = handlers.get(args.command)
     if handler is None:
         parser.error(f"unknown command: {args.command}")
