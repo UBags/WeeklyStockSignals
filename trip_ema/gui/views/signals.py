@@ -54,6 +54,7 @@ from ..signals_helpers import (
     format_date_label,
     format_price_label,
     partition_ticker_rows,
+    signal_industry_mcap_sort_key,
 )
 from ..workers import submit
 from .backtest_dialog import BacktestDialog
@@ -366,12 +367,17 @@ class SignalsView(QWidget):
         rows, rank_scores = payload
         recent, other = partition_ticker_rows(rows)
 
-        def _rank_sort_key(row):
-            tid = getattr(row, "ticker_id", None)
-            score = rank_scores.get(tid, 0.0) if tid is not None else 0.0
-            return (-score, row.symbol.lower())
-
-        recent = sorted(recent, key=_rank_sort_key)
+        # Recent partition: group by signal type, then industry ASC
+        # (NULLs last), then market cap DESC (NULLs last), then
+        # symbol ASC. Mirrors the Tickers tab proxy exactly via the
+        # shared `signal_industry_mcap_sort_key` helper. rank_score
+        # stays available for the per-item tooltip below.
+        recent = sorted(
+            recent,
+            key=lambda r: signal_industry_mcap_sort_key(
+                r, getattr(r, 'latest_signal', None),
+            ),
+        )
         other = sorted(other, key=lambda r: r.symbol.lower())
         model = QStandardItemModel(self)
         grey_brush = QBrush(QColor(_DROPDOWN_GREY_BG))

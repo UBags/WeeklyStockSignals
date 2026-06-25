@@ -81,6 +81,7 @@ from ..queries import (
     ticker_symbol_history, ticker_universe_summary,
 )
 from ..benchmark_rerank_client import fetch_rank_scores
+from ..signals_helpers import signal_industry_mcap_sort_key
 from ..workers import RefreshScheduler, submit
 
 logger = logging.getLogger(__name__)
@@ -322,19 +323,17 @@ class TickerSortFilterProxy(QSortFilterProxyModel):
         if left_group != right_group:
             return left_group < right_group
 
-        # Layer 2a (Phase 6-3): same signalled group → rank_score DESC.
-        # Surfaces high-momentum BUYs above low-momentum BUYs (same for
-        # SELL/EXIT). Symbol ASC is the tiebreak. Tickers without a
-        # rank_score (sub-threshold history) get 0.0 — they land in
-        # the middle rather than being demoted to the bottom of the
-        # signalled section (lacking stats != bad momentum).
+        # Layer 2a: same signalled group → industry ASC (NULLs last),
+        # market cap DESC (NULLs last within industry), symbol ASC
+        # tiebreak. Implemented as a tuple compare against the shared
+        # helper so the Signals tab dropdown can use the identical
+        # ordering policy.
         if left_group != self.UNSIGNALLED_GROUP:
-            ranks = src.rank_scores
-            left_rs = ranks.get(left_row.ticker_id, 0.0)
-            right_rs = ranks.get(right_row.ticker_id, 0.0)
-            if left_rs != right_rs:
-                return left_rs > right_rs   # DESC
-            return left_row.symbol.lower() < right_row.symbol.lower()
+            return signal_industry_mcap_sort_key(
+                left_row, left_sig,
+            ) < signal_industry_mcap_sort_key(
+                right_row, right_sig,
+            )
 
         # Layer 2b: both unsignalled → defer to whatever column the
         # user has clicked. The view's initial sortByColumn() call

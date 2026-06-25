@@ -32,7 +32,8 @@ agnostic.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Iterable, Protocol
+from decimal import Decimal
+from typing import Iterable, Optional, Protocol
 
 
 class _HasRecentFlag(Protocol):
@@ -64,6 +65,63 @@ def format_date_label(dt: datetime, *, timeframe: str = "1W") -> str:
     different format (e.g., '1H' -> 'HH:MM'); it's a no-op today.
     """
     return dt.strftime("%d-%b-%y")
+
+
+# Signal-group rank — lower sorts first. Matches the four signal_type
+# values that signal_events carries today. EXIT_FROM_BUY and
+# EXIT_FROM_SELL share a rank because they share the same blue badge
+# in the Tickers tab and the same blue background in the dropdown.
+SIGNAL_GROUP_RANK: dict[str, int] = {
+    "BUY": 0,
+    "SELL": 1,
+    "EXIT_FROM_BUY": 2,
+    "EXIT_FROM_SELL": 2,
+}
+UNSIGNALLED_RANK: int = 99
+
+
+def signal_industry_mcap_sort_key(
+    row, signal_type: Optional[str],
+) -> tuple:
+    """Sort key used by both the Tickers tab proxy and the Signals
+    tab dropdown for signalled rows.
+
+    Ordering, in priority:
+      1. Signal group: BUY < SELL < EXIT_* < unknown.
+      2. Industry name ASC, with industry IS NULL last.
+      3. Market cap DESC, with market_cap IS NULL last (within an
+         industry, a row without a tagged mcap can't be ranked, so
+         it sinks to the bottom of its industry sub-group).
+      4. Symbol ASC (case-insensitive) as a deterministic tiebreak.
+
+    `row` must expose `.industry`, `.market_cap`, `.symbol`. Missing
+    attributes are treated as None so the helper works on either
+    `TickerRow` (Tickers tab) or `TickerComboRow` (Signals dropdown).
+    `signal_type` is the four-string signal_events value or None.
+    """
+    sig_rank = SIGNAL_GROUP_RANK.get(signal_type, UNSIGNALLED_RANK) \
+        if signal_type is not None else UNSIGNALLED_RANK
+
+    industry = getattr(row, 'industry', None)
+    industry_is_null = industry is None
+    industry_key = (industry or '').lower()
+
+    mcap = getattr(row, 'market_cap', None)
+    mcap_is_null = mcap is None
+    # Negate so larger mcap sorts ascending-first.
+    # When mcap is None the bool sentinel above already pushes the
+    # row to the bottom; the Decimal(0) placeholder is just a
+    # comparable sentinel so the tuple stays well-typed.
+    mcap_key: Decimal = -mcap if mcap is not None else Decimal(0)
+
+    return (
+        sig_rank,
+        industry_is_null,
+        industry_key,
+        mcap_is_null,
+        mcap_key,
+        row.symbol.lower(),
+    )
 
 
 def partition_ticker_rows(
