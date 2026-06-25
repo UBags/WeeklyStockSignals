@@ -81,7 +81,7 @@ UNSIGNALLED_RANK: int = 99
 
 
 def signal_industry_mcap_sort_key(
-    row, signal_type: Optional[str],
+    row, signal_type: str | None,
 ) -> tuple:
     """Sort key used by both the Tickers tab proxy and the Signals
     tab dropdown for signalled rows.

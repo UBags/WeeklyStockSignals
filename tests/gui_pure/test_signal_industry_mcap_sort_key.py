@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
 
 from trip_ema.gui.signals_helpers import (
     SIGNAL_GROUP_RANK,
@@ -19,11 +18,11 @@ from trip_ema.gui.signals_helpers import (
 @dataclass
 class _Row:
     symbol: str
-    industry: Optional[str] = None
-    market_cap: Optional[Decimal] = None
+    industry: str | None = None
+    market_cap: Decimal | None = None
 
 
-def _sorted_symbols(items: list[tuple[_Row, Optional[str]]]) -> list[str]:
+def _sorted_symbols(items: list[tuple[_Row, str | None]]) -> list[str]:
     items_sorted = sorted(
         items, key=lambda pair: signal_industry_mcap_sort_key(*pair),
     )
