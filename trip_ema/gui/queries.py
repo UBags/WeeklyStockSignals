@@ -41,6 +41,7 @@ class TickerRow:
     consecutive_failures: int
     parked: bool
     market_cap: Optional[Decimal] = None
+    industry: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,13 +90,23 @@ def list_tickers(
     get failure-count and parked info inline (NULL when the ticker
     has never been touched by the ETL — equivalent to 0/False)."""
     sql = """
+        WITH latest_mcap AS (
+            SELECT DISTINCT ON (ticker_id)
+                ticker_id, market_cap
+            FROM daily_market_cap
+            ORDER BY ticker_id, trade_date DESC
+        )
         SELECT t.ticker_id, t.exchange, t.symbol, t.instrument_type,
                t.full_name, t.isin, t.tier, t.is_active, t.delisted_at,
                s.last_successful_bar_date,
                COALESCE(s.consecutive_failures, 0) AS consecutive_failures,
-               COALESCE(s.parked, FALSE) AS parked
+               COALESCE(s.parked, FALSE) AS parked,
+               ii.industry AS industry,
+               lm.market_cap AS market_cap
         FROM tickers t
-        LEFT JOIN etl_ticker_status s ON t.ticker_id = s.ticker_id
+        LEFT JOIN etl_ticker_status   s  ON t.ticker_id = s.ticker_id
+        LEFT JOIN instrument_industry ii ON t.ticker_id = ii.ticker_id
+        LEFT JOIN latest_mcap         lm ON t.ticker_id = lm.ticker_id
         WHERE t.exchange = :ex
     """
     params: dict = {"ex": exchange}
@@ -120,6 +131,8 @@ def list_tickers(
             last_successful_bar_date=r.last_successful_bar_date,
             consecutive_failures=r.consecutive_failures,
             parked=r.parked,
+            market_cap=r.market_cap,
+            industry=r.industry,
         )
         for r in rows
     ]
@@ -216,25 +229,26 @@ def last_run_signals(
     older than 60s before the global max (shouldn't happen but
     surfaces cleanly as no coloring).
     """
-    # Phase 6-2 fix: the unification moved industry signal_events into
-    # the same table as ticker signal_events. Industry compute runs
-    # AFTER ticker compute in the EoD pipeline, so an unscoped
-    # MAX(computed_at) anchors to the industry tick — and the 60-second
-    # window then excludes the ticker rows. Scope the MAX to ticker
-    # rows only.
+    # Pin coloring to the bar_timestamp of the current IST week or
+    # the previous IST week. The earlier `computed_at` 60-second
+    # window incorrectly flashed every ticker after a batch regen
+    # (the regen rewrote every row's computed_at to NOW(), so the
+    # window matched every event in the universe). Sharing the same
+    # window expression as `ticker_universe_with_recent_signals`
+    # keeps the Tickers tab coloring and the Signals tab dropdown
+    # partition aligned on the same definition of 'recent'.
     rows = conn.execute(text("""
         SELECT DISTINCT ON (s.ticker_id) s.ticker_id, s.signal_type
         FROM signal_events s
         JOIN tickers t USING (ticker_id)
         WHERE t.exchange = :ex
           AND s.ticker_id IS NOT NULL
-          AND s.computed_at >= (
-              (SELECT MAX(computed_at)
-               FROM signal_events
-               WHERE ticker_id IS NOT NULL)
-              - INTERVAL '60 seconds'
+          AND s.bar_timestamp >= (
+              (date_trunc('week',
+                          (NOW() AT TIME ZONE 'Asia/Kolkata'))::timestamp
+               - INTERVAL '7 days') AT TIME ZONE 'Asia/Kolkata'
           )
-        ORDER BY s.ticker_id, s.bar_timestamp DESC
+        ORDER BY s.ticker_id, s.bar_timestamp DESC, s.computed_at DESC
     """), {"ex": exchange})
     return {r.ticker_id: r.signal_type for r in rows}
 
@@ -289,6 +303,8 @@ class TickerComboRow:
     full_name: Optional[str]
     has_recent_signal: bool
     latest_signal: Optional[str] = None
+    industry: Optional[str] = None
+    market_cap: Optional[Decimal] = None
 
 
 def ticker_universe_with_recent_signals(
@@ -336,14 +352,24 @@ def ticker_universe_with_recent_signals(
                 (date_trunc('week', (NOW() AT TIME ZONE 'Asia/Kolkata'))::timestamp
                  - INTERVAL '7 days') AT TIME ZONE 'Asia/Kolkata'
             )
-            ORDER BY ticker_id, computed_at DESC
+            ORDER BY ticker_id, bar_timestamp DESC, computed_at DESC
+        ),
+        latest_mcap AS (
+            SELECT DISTINCT ON (ticker_id)
+                ticker_id, market_cap
+            FROM daily_market_cap
+            ORDER BY ticker_id, trade_date DESC
         )
         SELECT t.ticker_id, t.exchange, t.symbol, t.instrument_type,
                t.full_name,
                (r.ticker_id IS NOT NULL) AS has_recent_signal,
-               r.signal_type AS latest_signal
+               r.signal_type AS latest_signal,
+               ii.industry  AS industry,
+               lm.market_cap AS market_cap
         FROM tickers t
-        LEFT JOIN recent_sigs r ON r.ticker_id = t.ticker_id
+        LEFT JOIN recent_sigs         r  ON r.ticker_id  = t.ticker_id
+        LEFT JOIN instrument_industry ii ON ii.ticker_id = t.ticker_id
+        LEFT JOIN latest_mcap         lm ON lm.ticker_id = t.ticker_id
         WHERE t.is_active = TRUE AND t.delisted_at IS NULL
     """
     params: dict = {}
@@ -362,6 +388,8 @@ def ticker_universe_with_recent_signals(
             full_name=r.full_name,
             has_recent_signal=bool(r.has_recent_signal),
             latest_signal=r.latest_signal,
+            industry=r.industry,
+            market_cap=r.market_cap,
         )
         for r in rows
     ]
