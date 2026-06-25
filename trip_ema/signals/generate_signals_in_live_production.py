@@ -250,10 +250,15 @@ def generate_live_signal_for_ticker(
         prev_upper_env = upper_env
 
     # ---------- 5. Pull the current + previous-completed slots ----------
-    current_regime = regimes[-1]
+    # Extract through a fresh local so mypy doesn't see this as a
+    # widen-back-to-Optional reassignment of the loop-local
+    # `current_regime` (which it inferred as Regime from
+    # compute_regime's return type at line ~237).
+    last_regime = regimes[-1]
     current_bar_inputs = bar_inputs_list[-1]
-    if current_regime is None or current_bar_inputs is None:
+    if last_regime is None or current_bar_inputs is None:
         return _skipped(ticker_id, timeframe, "warmup")
+    current_regime = last_regime  # now narrowed to Regime
 
     # Walk backward to find the most recent mature bar BEFORE the
     # current one. Normally this is regimes[-2]; if that's None

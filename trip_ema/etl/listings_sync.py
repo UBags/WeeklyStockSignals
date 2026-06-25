@@ -229,8 +229,9 @@ class ListingsSync:
             return True
         if listing.listing_date and listing.listing_date != existing.get("listing_date"):
             return True
+        existing_fv = existing.get("face_value")
         if listing.face_value is not None and listing.face_value != (
-            float(existing.get("face_value")) if existing.get("face_value") is not None else None
+            float(existing_fv) if existing_fv is not None else None
         ):
             return True
         if listing.lot_size is not None and listing.lot_size != existing.get("lot_size"):

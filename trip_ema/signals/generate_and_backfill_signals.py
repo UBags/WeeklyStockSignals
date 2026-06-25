@@ -214,6 +214,9 @@ def walk_and_generate_events(
             cur_volume = daily_bar.volume
         elif bar_week_start != cur_week_start:
             # Week transition. Finalize the previous week.
+            assert cur_open is not None and cur_close is not None, (
+                "week-transition path entered without an initialized current week"
+            )
             completed_weeks.append(OHLCVBar(
                 timestamp=cur_week_start,
                 open=cur_open,
@@ -236,6 +239,9 @@ def walk_and_generate_events(
             cur_volume += daily_bar.volume
 
         # The current (provisional) weekly bar.
+        assert cur_open is not None and cur_close is not None, (
+            "provisional bar construction without an initialized current week"
+        )
         provisional = OHLCVBar(
             timestamp=cur_week_start,
             open=cur_open,

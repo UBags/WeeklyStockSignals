@@ -208,6 +208,10 @@ def run_benchmark_stats_for_ticker(
             ))
 
     if industry_pairs:
+        assert industry_name is not None, (
+            "industry_pairs computed without an industry_name; "
+            "the two come from the same upstream loop"
+        )
         _stats_for_benchmark("INDUSTRY", industry_name, industry_pairs)
     if nifty_pairs:
         _stats_for_benchmark("NIFTY", NIFTY_BENCHMARK_ID, nifty_pairs)

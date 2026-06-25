@@ -130,6 +130,10 @@ def admin_stale_tickers(
             datetime.min.time(),
             tzinfo=UTC,
         )
+        assert s.stale_since is not None, (
+            "non-stale entries should have been skipped above; "
+            "reached StaleTickerEntry append with stale_since=None"
+        )
         entries.append(StaleTickerEntry(
             ticker=TickerRefPayload.from_domain(s.ticker_ref),
             timeframe=s.timeframe.value,

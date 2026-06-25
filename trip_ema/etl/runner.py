@@ -755,7 +755,10 @@ def _process_one_batch(
     for ticker in batch:
         outcome = results_by_symbol.get(ticker.symbol)
         if outcome is None or not outcome.succeeded:
-            err = (outcome.error_message if outcome else "no result")
+            err = (
+                (outcome.error_message or "<unknown error>")
+                if outcome else "no result"
+            )
             _handle_ticker_failure(db_engine, config, ticker, err)
             failed += 1
             M.etl_tickers_fetched_total.labels(
