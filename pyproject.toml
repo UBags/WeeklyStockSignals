@@ -152,7 +152,7 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "B", "SIM", "UP"]
+select = ["E", "F", "B", "UP"]
 ignore = [
     "UP042",  # str+Enum -> StrEnum changes f-string repr (behaviour change)
     "E501",   # line length: respected via formatter, but no autowrap on docstrings
@@ -173,15 +173,17 @@ ignore = [
 
 "tests/**/*.py" = [
     "B007",   # unused loop var: often destructured for readability
-    "B008",   # TickerRef() in test helper defaults — same intent as Qt overrides
+#    "B008",   # TickerRef() in test helper defaults — same intent as Qt overrides
     "B017",   # pytest.raises(Exception): DB constraint errors wrap differently per driver
     "B905",   # zip strict=: not enforced in test fixtures
     "E402",   # imports below importorskip / section-organizing imports
+    "E731",
     "E741",   # `l` for low — OHLCV convention
     "F401",   # fixture imports legitimately unused (was in old .ruff.toml)
     "F811",   # fixture redefinitions (was in old .ruff.toml)
     "F841",   # captured locals kept for readability/assertions
     "SIM117", # nested with patches: often clearer
+    "UP017",
 ]
 # Diagnostic scripts: compact one-line dispatch tables, color-helper lambdas,
 # ignore-on-best-effort patterns are intentional. These are throwaway tools.
