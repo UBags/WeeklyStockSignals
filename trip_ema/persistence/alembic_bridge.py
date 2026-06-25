@@ -159,7 +159,9 @@ def stamp_baseline_if_needed(
     alembic_cfg = AlembicConfig("alembic.ini")
     if config_path is not None:
         # env.py reads -x config=... before falling back to env var.
-        alembic_cfg.cmd_opts = type("X", (), {"x": [f"config={config_path}"]})()
+        # Stub-deficiency: Config.cmd_opts is typed Namespace | None,
+        # but the documented -x injection uses an ad-hoc obj exposing .x
+        alembic_cfg.cmd_opts = type("X", (), {"x": [f"config={config_path}"]})()  # pyright: ignore[reportAttributeAccessIssue]
 
     command.stamp(alembic_cfg, _BASELINE_REVISION)
     logger.info("Alembic baseline stamped.")
@@ -201,7 +203,8 @@ def run_alembic_upgrade_head(
 
     alembic_cfg = AlembicConfig("alembic.ini")
     if config_path is not None:
-        alembic_cfg.cmd_opts = type("X", (), {"x": [f"config={config_path}"]})()
+        # Same stub-deficiency as the stamp path above.
+        alembic_cfg.cmd_opts = type("X", (), {"x": [f"config={config_path}"]})()  # pyright: ignore[reportAttributeAccessIssue]
 
     logger.info("Running alembic upgrade head")
     command.upgrade(alembic_cfg, "head")

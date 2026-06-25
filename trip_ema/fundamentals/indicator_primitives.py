@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+from typing import cast
 
 if TYPE_CHECKING:
     # The flat-shape IndicatorParams from the domain layer. Used by
@@ -82,7 +83,7 @@ def pine_ema(src: pd.Series, n: int) -> pd.Series:
         raise ValueError(f"n must be >= 1, got {n}")
     # adjust=False uses recursive formula with src[0] as seed;
     # this matches Pine's ta.ema.
-    return src.ewm(span=n, adjust=False).mean()
+    return cast(pd.Series, src.ewm(span=n, adjust=False).mean())
 
 
 def pine_wma(src: pd.Series, n: int) -> pd.Series:
@@ -105,10 +106,10 @@ def pine_wma(src: pd.Series, n: int) -> pd.Series:
     weights = np.arange(1, n + 1, dtype=float)
     weight_sum = weights.sum()
     # rolling.apply lets us pass a custom weighted sum.
-    return src.rolling(window=n, min_periods=n).apply(
+    return cast(pd.Series, src.rolling(window=n, min_periods=n).apply(
         lambda window: np.dot(window, weights) / weight_sum,
         raw=True,
-    )
+    ))
 
 
 def pine_sma(src: pd.Series, n: int) -> pd.Series:
@@ -117,7 +118,7 @@ def pine_sma(src: pd.Series, n: int) -> pd.Series:
     Simple moving average. Returns NaN for the first (n-1) bars."""
     if n < 1:
         raise ValueError(f"n must be >= 1, got {n}")
-    return src.rolling(window=n, min_periods=n).mean()
+    return cast(pd.Series, src.rolling(window=n, min_periods=n).mean())
 
 
 def pine_rma(src: pd.Series, n: int) -> pd.Series:
@@ -135,7 +136,7 @@ def pine_rma(src: pd.Series, n: int) -> pd.Series:
         raise ValueError(f"n must be >= 1, got {n}")
     # alpha = 1/n means span = 2n - 1 (from alpha = 2/(span+1)).
     # Easier to specify alpha directly.
-    return src.ewm(alpha=1.0 / n, adjust=False).mean()
+    return cast(pd.Series, src.ewm(alpha=1.0 / n, adjust=False).mean())
 
 
 # ============================================================
@@ -784,7 +785,7 @@ def compute_bar_states(
 
     # Default open_ to prev_close for the index case.
     if open_ is None:
-        open_ = close.shift(1)
+        open_ = cast(pd.Series, close.shift(1))
 
     # Compute the unified display_regime upfront (one walk over the bar
     # series). Step 9b replaced the old display_regime
