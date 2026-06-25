@@ -294,6 +294,10 @@ class CircuitBreakingTransport:
             },
         )
         _, transitions = _ensure_metrics()
+        assert transitions is not None, (
+            "_ensure_metrics returned None transitions counter; "
+            "the no-op shim path should set both elements"
+        )
         transitions.labels(
             transport=self._name, from_state=old.value, to_state=new_state.value,
         ).inc()

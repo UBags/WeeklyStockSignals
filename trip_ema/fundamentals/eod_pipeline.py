@@ -184,6 +184,10 @@ def run_eod_pipeline(
                 FundamentalsRunRepository,
             )
             r = FundamentalsRunRepository(conn).get(run_id)
+        assert r is not None, (
+            f"run_id {run_id} just returned by run_industry_refresh "
+            f"was not found in fundamentals_run"
+        )
         s = _status_from_run(r)
         return (s, r.succeeded, r.failed, r.skipped,
                 f"refresh-industry on {exchange}")
@@ -195,6 +199,10 @@ def run_eod_pipeline(
                 FundamentalsRunRepository,
             )
             r = FundamentalsRunRepository(conn).get(run_id)
+        assert r is not None, (
+            f"run_id {run_id} just returned by run_shares_refresh "
+            f"was not found in fundamentals_run"
+        )
         s = _status_from_run(r)
         return (s, r.succeeded, r.failed, r.skipped,
                 f"refresh-shares on {exchange}")
@@ -206,6 +214,10 @@ def run_eod_pipeline(
                 FundamentalsRunRepository,
             )
             r = FundamentalsRunRepository(conn).get(run_id)
+        assert r is not None, (
+            f"run_id {run_id} just returned by run_financials_refresh "
+            f"was not found in fundamentals_run"
+        )
         s = _status_from_run(r)
         return (s, r.succeeded, r.failed, r.skipped,
                 f"refresh-financials on {exchange}")

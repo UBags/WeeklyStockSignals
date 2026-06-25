@@ -731,7 +731,7 @@ def run_shares_backfill(
         start_date,  # date
         resume_run_id=None,  # Optional[int]
         force: bool = False,
-        request_delay_s: float = None,  # uses DEFAULT_REQUEST_DELAY_S
+        request_delay_s: float | None = None,  # uses DEFAULT_REQUEST_DELAY_S
         fetch_fn=None,
 ) -> int:
     """Backfill historical shares-outstanding for every active ticker
