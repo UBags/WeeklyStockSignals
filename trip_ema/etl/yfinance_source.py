@@ -302,21 +302,21 @@ class YFinanceSource:
                 for ts, row in sub.iterrows():
                     o = row.get("Open")
                     h = row.get("High")
-                    l = row.get("Low")
+                    lo = row.get("Low")
                     c = row.get("Close")
                     ac = row.get("Adj Close", c)
                     v = row.get("Volume", 0.0)
                     # yfinance returns NaN for missing-data rows in
                     # multi-symbol responses. Skip them rather than
                     # writing garbage.
-                    if any(_is_nan(x) for x in (o, h, l, c)):
+                    if any(_is_nan(x) for x in (o, h, lo, c)):
                         continue
                     trading_date = ts.date() if hasattr(ts, "date") else ts
                     bars.append(RawBar(
                         trading_date=trading_date,
                         open=float(o),
                         high=float(h),
-                        low=float(l),
+                        low=float(lo),
                         close=float(c),
                         adj_close=float(ac) if not _is_nan(ac) else float(c),
                         volume=float(v) if not _is_nan(v) else 0.0,

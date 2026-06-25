@@ -260,8 +260,6 @@ def generate_live_signal_for_ticker(
     # (warmup), keep going. If we never find one, treat as first-bar.
     prev_completed_regime: Regime = Regime.NEUTRAL
     prev_completed_close: float | None = None
-    prev_completed_lower_env: float | None = None
-    prev_completed_upper_env: float | None = None
     for j in range(len(regimes) - 2, -1, -1):
         # Bind indexed access to locals so pyright narrows via flow
         # analysis. Indexed access (regimes[j]) doesn't get narrowed by

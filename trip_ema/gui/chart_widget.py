@@ -103,13 +103,13 @@ class _Candlestick(pg.GraphicsObject):
         p = QPainter(self._picture)
         try:
             width = 0.6
-            for x, o, h, l, c in self._points:
+            for x, o, h, lo, c in self._points:
                 color = COLOR_CANDLE_UP if c >= o else COLOR_CANDLE_DOWN
                 pen = QPen(QColor(color))
                 pen.setWidthF(0.0)
                 p.setPen(pen)
                 p.setBrush(QBrush(QColor(color)))
-                p.drawLine(QPointF(x, l), QPointF(x, h))
+                p.drawLine(QPointF(x, lo), QPointF(x, h))
                 top = max(o, c)
                 bot = min(o, c)
                 if abs(top - bot) < 1e-9:

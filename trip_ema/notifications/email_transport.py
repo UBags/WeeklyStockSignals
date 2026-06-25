@@ -170,7 +170,10 @@ class EmailTransport:
                         rec = repo.get_by_ref(ev.ticker)
                         if rec is not None:
                             ticker_ids.append(rec.ticker_id)
-                    rank_scores = fetch_rank_scores(conn, ticker_ids)
+                    # TODO: thread rank_scores into render_html for
+                    # mcap-weighted BUY sort. The fetch is in place;
+                    # the render-side parameter is the missing piece.
+                    rank_scores = fetch_rank_scores(conn, ticker_ids)  # noqa: F841
             except Exception:
                 logger.exception(
                     "rank-score fetch failed; emails will fall back to "
