@@ -171,17 +171,22 @@ class OrchestratorPool:
             return False
         return all(o.is_alive() for o in orchs)
 
-    def last_tick_completed_at(self) -> "datetime | None":
+    def last_tick_completed_at(self) -> datetime | None:
         """Max `last_run_completed_at` across all orchestrators,
         or None if no orchestrator has completed a tick yet.
         """
         with self._lock:
             orchs = list(self._by_exchange.values())
-        timestamps = [o.last_run_completed_at for o in orchs]
-        timestamps = [t for t in timestamps if t is not None]
+        # Filter into a fresh non-Optional list so mypy can prove
+        # max() gets only datetime values (its type-var bound
+        # rejects Optional[datetime]).
+        timestamps: list[datetime] = [
+            o.last_run_completed_at for o in orchs
+            if o.last_run_completed_at is not None
+        ]
         return max(timestamps) if timestamps else None
 
-    def is_unhealthy(self, now: "datetime") -> str | None:
+    def is_unhealthy(self, now: datetime) -> str | None:
         """Aggregator: return a description string when any orchestrator
         is unhealthy, else None. Same convention as
         ComputeScheduler.is_unhealthy / SubscriberDistributor.is_unhealthy:
