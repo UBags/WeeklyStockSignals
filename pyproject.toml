@@ -143,3 +143,48 @@ packages = ["trip_ema"]
 [tool.pytest.ini_options]
 postgresql_exec = "/usr/lib/postgresql/18/bin/pg_ctl"
 #addopts = "--deselect tests/gui/test_signals.py::TestRangeButton::test_range_button_click_updates_years"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [
+    "alembic_pkg/versions",  # auto-generated; not for us to lint
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "SIM", "UP"]
+ignore = [
+    "UP042",  # str+Enum -> StrEnum changes f-string repr (behaviour change)
+    "E501",   # line length: respected via formatter, but no autowrap on docstrings
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Sectioned imports: the file is large and groups endpoints with their
+# own narrow import blocks for readability. E402 is intentional here.
+"trip_ema/transports/http/routes/fundamentals.py" = ["E402"]
+# FastAPI route files: Depends()/Query() in defaults IS the canonical pattern.
+"trip_ema/transports/http/routes/*.py" = ["B008"]
+"trip_ema/transports/http/dependencies.py" = ["B008"]
+# Qt overrides: QModelIndex() in defaults is required by the QAbstractTableModel API.
+"trip_ema/gui/views/*.py" = ["B008"]
+# Test conventions: `l` for low (OHLCV); pytest.raises(Exception) for DB
+# constraint wrapping; importorskip imports below `pytest.importorskip(...)`;
+# captured-but-unused for clarity in assertions; nested-with for organized patching.
+
+"tests/**/*.py" = [
+    "B007",   # unused loop var: often destructured for readability
+    "B008",   # TickerRef() in test helper defaults — same intent as Qt overrides
+    "B017",   # pytest.raises(Exception): DB constraint errors wrap differently per driver
+    "B905",   # zip strict=: not enforced in test fixtures
+    "E402",   # imports below importorskip / section-organizing imports
+    "E741",   # `l` for low — OHLCV convention
+    "F401",   # fixture imports legitimately unused (was in old .ruff.toml)
+    "F811",   # fixture redefinitions (was in old .ruff.toml)
+    "F841",   # captured locals kept for readability/assertions
+    "SIM117", # nested with patches: often clearer
+]
+# Diagnostic scripts: compact one-line dispatch tables, color-helper lambdas,
+# ignore-on-best-effort patterns are intentional. These are throwaway tools.
+"scripts/**/*.py" = [
+    "E701", "E702", "E731", "SIM105", "SIM110", "SIM115",
+]

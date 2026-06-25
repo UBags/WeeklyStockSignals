@@ -43,7 +43,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, StrEnum
 
 from ..domain import NotificationBatch
 from ..observability import metrics as M
@@ -51,7 +51,7 @@ from ..observability import metrics as M
 logger = logging.getLogger(__name__)
 
 
-class CircuitState(str, Enum):
+class CircuitState(StrEnum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"

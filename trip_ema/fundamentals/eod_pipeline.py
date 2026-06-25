@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
-from enum import Enum
+from enum import Enum, StrEnum
 from collections.abc import Callable
 
 from sqlalchemy.engine import Engine
@@ -52,7 +52,7 @@ from sqlalchemy.engine import Engine
 logger = logging.getLogger(__name__)
 
 
-class StepStatus(str, Enum):
+class StepStatus(StrEnum):
     """Outcome of a single pipeline step."""
     PENDING = "PENDING"      # not yet run
     RUNNING = "RUNNING"      # currently executing

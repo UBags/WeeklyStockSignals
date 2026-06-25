@@ -13,10 +13,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from enum import Enum
+from enum import Enum, StrEnum
 
 
-class InstrumentType(str, Enum):
+class InstrumentType(StrEnum):
     EQ = "EQ"
     ETF = "ETF"
 
@@ -97,7 +97,7 @@ class ReconcileResult:
     notes: str | None = None
 
 
-class RunKind(str, Enum):
+class RunKind(StrEnum):
     """Discriminator for etl_runs.kind. Each CLI subcommand maps to one."""
     LISTINGS = "listings"
     BACKFILL = "backfill"
@@ -114,7 +114,7 @@ class RunKind(str, Enum):
     the CLI (`trip-ema-etl generate-signals`)."""
 
 
-class RunOutcome(str, Enum):
+class RunOutcome(StrEnum):
     SUCCESS = "success"
     PARTIAL = "partial"
     FAILED = "failed"

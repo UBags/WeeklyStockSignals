@@ -8,10 +8,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum, IntEnum
+from enum import Enum, IntEnum, StrEnum
 
 
-class Timeframe(str, Enum):
+class Timeframe(StrEnum):
     """Bar interval. String value matches what's stored in the DB
     `ohlcv_bars.timeframe` column."""
 
