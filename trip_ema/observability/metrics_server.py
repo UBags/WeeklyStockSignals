@@ -80,7 +80,10 @@ def start_metrics_server(port: int | None) -> MetricsServer | None:
         )
         return None
     try:
-        http_server, thread = start_http_server(port, registry=REGISTRY)
+        # TODO: queued — refactor _NoOpRegistry to satisfy Collector.
+        # Until then, the no-op shim is unreachable here (we just
+        # imported prometheus_client successfully).
+        http_server, thread = start_http_server(port, registry=REGISTRY)  # pyright: ignore[reportArgumentType]
         logger.info("Metrics server started on port %d", port)
         return MetricsServer(http_server, thread, port)
     except Exception:

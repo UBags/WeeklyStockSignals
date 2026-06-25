@@ -91,13 +91,19 @@ def _ensure_metrics():
                 "Current circuit-breaker state per transport "
                 "(1 = active state, 0 otherwise; one row per state).",
                 labelnames=("transport", "state"),
-                registry=M.REGISTRY,
+                # TODO: queued — refactor _NoOpRegistry to inherit
+                # CollectorRegistry. Until then, no-op shim is
+                # unreachable on this branch (prom_client imported).
+                registry=M.REGISTRY,  # pyright: ignore[reportArgumentType]
             )
             _circuit_transition_counter = Counter(
                 "trip_ema_transport_circuit_transitions_total",
                 "Circuit-breaker state transitions per transport.",
                 labelnames=("transport", "from_state", "to_state"),
-                registry=M.REGISTRY,
+                # TODO: queued — refactor _NoOpRegistry to inherit
+                # CollectorRegistry. Until then, no-op shim is
+                # unreachable on this branch (prom_client imported).
+                registry=M.REGISTRY,  # pyright: ignore[reportArgumentType]
             )
         except ImportError:
             # prometheus_client not installed — use the no-op shims
