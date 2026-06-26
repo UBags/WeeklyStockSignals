@@ -21,6 +21,7 @@ from .indicator_primitives import (
     INDICATOR_DEFAULTS,
     EngineParams,
     _compute_regime_series,
+    compute_bar_states,
     compute_indicator_series,
 )
 
@@ -106,4 +107,101 @@ def compute_state_primitives(
             "display_regime": int(regime_series.iloc[i]),
         })
 
+    return out
+
+
+def compute_enrichment_primitives(
+    close: pd.Series,
+    volume: pd.Series,
+    high: pd.Series,
+    low: pd.Series,
+    *,
+    trade_dates: pd.Series,
+    params: EngineParams = INDICATOR_DEFAULTS,
+    synthetic_atr_for_index: bool = False,
+) -> list[dict]:
+    """Walk the input bar series and emit one dict per indicator-ready
+    bar with the 23 enrichment fields.
+
+    Per-bar dict keys:
+      bar_timestamp,
+      pierces_upper_mid, pierces_lower_mid,
+      dist_to_{med,long,longest}_in_hl_units,
+      mean_dist_to_{med,long,longest}_in_hl_units,
+      bars_since_{med,long,longest}_turn,
+      pct_change_since_{med,long,longest}_turn,
+      {med,long,longest}_pattern_label,
+      {med,long,longest}_turn_{buy,sell}
+
+    Implementation: this function wraps the legacy `compute_bar_states`
+    (which emits all 38 fields per bar) and FILTERS its output to the
+    23 enrichment fields. This reuses 100% of the legacy compute logic
+    — no risk of divergence between the V1 enrichment values and what
+    the legacy pipeline produced.
+
+    Bars where any core indicator is NaN (warmup) are SKIPPED using
+    the exact same skip condition as `compute_state_primitives`, so
+    the returned list is row-by-row alignment-compatible with that
+    function's output.
+
+    For industry indices, pass `synthetic_atr_for_index=True` and the
+    synthetic OHLC shape (high=low=close=value, volume=1).
+    """
+    if len(close) == 0:
+        return []
+
+    series = compute_indicator_series(
+        close, volume, high, low,
+        params=params,
+        synthetic_atr_for_index=synthetic_atr_for_index,
+    )
+    legacy_bar_states = compute_bar_states(
+        close, volume, high, low,
+        trade_dates=trade_dates,
+        series=series,
+        params=params,
+    )
+
+    out: list[dict] = []
+    for bs in legacy_bar_states:
+        if (pd.isna(bs["med_ema"]) or pd.isna(bs["long_ema"])
+                or pd.isna(bs["longest_ema"]) or pd.isna(bs["atr"])):
+            continue
+        out.append({
+            "bar_timestamp": bs["trade_date"],
+            # Band-pierce flags
+            "pierces_upper_mid": bool(bs["pierces_upper_mid"]),
+            "pierces_lower_mid": bool(bs["pierces_lower_mid"]),
+            # Per-EMA distance metrics (nullable)
+            "dist_to_med_in_hl_units": bs["dist_to_med_in_hl_units"],
+            "dist_to_long_in_hl_units": bs["dist_to_long_in_hl_units"],
+            "dist_to_longest_in_hl_units":
+                bs["dist_to_longest_in_hl_units"],
+            "mean_dist_to_med_in_hl_units":
+                bs["mean_dist_to_med_in_hl_units"],
+            "mean_dist_to_long_in_hl_units":
+                bs["mean_dist_to_long_in_hl_units"],
+            "mean_dist_to_longest_in_hl_units":
+                bs["mean_dist_to_longest_in_hl_units"],
+            # Bars / pct change since each EMA last turned (nullable)
+            "bars_since_med_turn": bs["bars_since_med_turn"],
+            "bars_since_long_turn": bs["bars_since_long_turn"],
+            "bars_since_longest_turn": bs["bars_since_longest_turn"],
+            "pct_change_since_med_turn": bs["pct_change_since_med_turn"],
+            "pct_change_since_long_turn":
+                bs["pct_change_since_long_turn"],
+            "pct_change_since_longest_turn":
+                bs["pct_change_since_longest_turn"],
+            # Pattern labels per EMA
+            "med_pattern_label": bs["med_pattern_label"],
+            "long_pattern_label": bs["long_pattern_label"],
+            "longest_pattern_label": bs["longest_pattern_label"],
+            # Per-EMA turn flags
+            "med_turn_buy": bool(bs["med_turn_buy"]),
+            "med_turn_sell": bool(bs["med_turn_sell"]),
+            "long_turn_buy": bool(bs["long_turn_buy"]),
+            "long_turn_sell": bool(bs["long_turn_sell"]),
+            "longest_turn_buy": bool(bs["longest_turn_buy"]),
+            "longest_turn_sell": bool(bs["longest_turn_sell"]),
+        })
     return out

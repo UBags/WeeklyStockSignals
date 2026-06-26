@@ -34,6 +34,8 @@ from ....etl.exchanges import (
     validate_exchange,
 )
 from ....fundamentals.v1_runners import (
+    populate_stock_indicator_enrichment_for_exchange,
+    populate_stock_indicator_enrichment_for_ticker,
     populate_stock_indicator_state_for_exchange,
     populate_stock_indicator_state_for_ticker,
 )
@@ -197,6 +199,129 @@ def admin_v1pipeline_stock_indicator_state(
         accepted_at=datetime.now(UTC),
         notes=(
             f"V1 stock indicator state submitted for "
+            f"exchange={exchange} tf={timeframe} (bulk; per-ticker "
+            f"error isolation)."
+        ),
+    )
+
+
+# ============================================================
+# Stock indicator enrichment populator (Step 5)
+# ============================================================
+
+
+def _run_stock_enrichment_for_ticker_safe(
+    db_engine: Engine, ticker_id: int, timeframe: str,
+) -> None:
+    """Wrap the per-ticker enrichment runner so a failure on the
+    executor thread is logged rather than swallowed silently."""
+    try:
+        populate_stock_indicator_enrichment_for_ticker(
+            db_engine, ticker_id, timeframe,
+        )
+    except Exception:
+        logger.exception(
+            "populate_stock_indicator_enrichment_for_ticker failed: "
+            "ticker_id=%d tf=%s",
+            ticker_id, timeframe,
+        )
+
+
+def _run_stock_enrichment_for_exchange_safe(
+    db_engine: Engine, exchange: str, timeframe: str,
+) -> None:
+    """Wrap the per-exchange enrichment runner the same way."""
+    try:
+        populate_stock_indicator_enrichment_for_exchange(
+            db_engine, exchange, timeframe,
+        )
+    except Exception:
+        logger.exception(
+            "populate_stock_indicator_enrichment_for_exchange failed: "
+            "exchange=%s tf=%s",
+            exchange, timeframe,
+        )
+
+
+@router.post(
+    "/stock-indicator-enrichment",
+    response_model=EtlActionAcceptedPayload,
+)
+def admin_v1pipeline_stock_indicator_enrichment(
+    timeframe: str = Query("1W", min_length=2, max_length=8),
+    ticker_id: int | None = Query(
+        None, ge=1,
+        description="Compute for a single ticker. Mutually exclusive "
+                    "with `exchange`.",
+    ),
+    exchange: str | None = Query(
+        None, min_length=2, max_length=10,
+        description="Compute for all active tickers on this exchange. "
+                    "Mutually exclusive with `ticker_id`.",
+    ),
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+    executor=Depends(get_etl_executor),
+) -> EtlActionAcceptedPayload:
+    """Trigger V1 stock indicator enrichment population.
+
+    Provide exactly ONE of `ticker_id` or `exchange`. The endpoint
+    requires the matching state row(s) to already exist (call the
+    Step 4 endpoint first). Tickers with no state are reported as
+    skipped, not failed, in the bulk variant.
+
+    Returns 202 Accepted with no run_id.
+    """
+    _require_executor(executor)
+
+    if (ticker_id is None) == (exchange is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Exactly one of `ticker_id` or `exchange` must be "
+                "provided (got "
+                f"ticker_id={ticker_id}, exchange={exchange})."
+            ),
+        )
+
+    if ticker_id is not None:
+        logger.info(
+            "Admin: V1 stock-indicator-enrichment requested for "
+            "ticker_id=%d tf=%s",
+            ticker_id, timeframe,
+        )
+        executor.submit(
+            _run_stock_enrichment_for_ticker_safe,
+            db_engine, ticker_id, timeframe,
+        )
+        return EtlActionAcceptedPayload(
+            action="v1pipeline.stock-indicator-enrichment",
+            run_id=None,
+            accepted_at=datetime.now(UTC),
+            notes=(
+                f"V1 stock indicator enrichment submitted for "
+                f"ticker_id={ticker_id} tf={timeframe}."
+            ),
+        )
+
+    # exchange branch
+    assert exchange is not None
+    _validate_exchange_or_400(exchange, config)
+    logger.info(
+        "Admin: V1 stock-indicator-enrichment requested for "
+        "exchange=%s tf=%s (bulk)",
+        exchange, timeframe,
+    )
+    executor.submit(
+        _run_stock_enrichment_for_exchange_safe,
+        db_engine, exchange, timeframe,
+    )
+    return EtlActionAcceptedPayload(
+        action="v1pipeline.stock-indicator-enrichment",
+        run_id=None,
+        accepted_at=datetime.now(UTC),
+        notes=(
+            f"V1 stock indicator enrichment submitted for "
             f"exchange={exchange} tf={timeframe} (bulk; per-ticker "
             f"error isolation)."
         ),

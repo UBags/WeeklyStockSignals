@@ -62,6 +62,7 @@ RUN_PHASES = (
     # Each is the audit-row phase value for one stage of the three-runner
     # pipeline (state populator + enrichment populator, per series type).
     "v1_stock_indicator_state",
+    "v1_stock_indicator_enrichment",
 )
 
 # Allowed values for `fundamentals_run.status`.
