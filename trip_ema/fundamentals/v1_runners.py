@@ -24,18 +24,24 @@ side validation period.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, UTC
+from datetime import date, datetime, time, UTC
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sqlalchemy.engine import Engine
 
-from ..domain import Timeframe
+from ..domain import OHLCVBar, Timeframe
+from ..domain.industry_indicator_state import IndustryIndicatorState
 from ..domain.stock_indicator_enrichment import StockIndicatorEnrichment
 from ..domain.stock_indicator_state import StockIndicatorState
+from ..indicators.aggregation import daily_to_weekly
 from ..persistence.fundamentals_repo import (
     FundamentalsRunRepository,
     IndustryIndexRepository,
     IndustryIndexValueRepository,
+)
+from ..persistence.industry_indicator_state_repo import (
+    IndustryIndicatorStateRepository,
 )
 from ..persistence.stock_indicator_enrichment_repo import (
     StockIndicatorEnrichmentRepository,
@@ -63,6 +69,11 @@ logger = logging.getLogger(__name__)
 PHASE_V1_STOCK_STATE = "v1_stock_indicator_state"
 PHASE_V1_STOCK_ENRICHMENT = "v1_stock_indicator_enrichment"
 PHASE_V1_INDUSTRY_INDEX_VALUE = "v1_industry_index_value"
+PHASE_V1_INDUSTRY_INDICATOR_STATE = "v1_industry_indicator_state"
+
+# IST is used for the industry weekly-bar Monday anchor — see Phase 1B
+# unification (commit 607a2a5). Computed once at module load.
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 def populate_stock_indicator_state_for_ticker(
@@ -827,6 +838,288 @@ def populate_industry_index_value_for_all(
         "populate_industry_index_value_for_all [%s, %s]: "
         "succeeded=%d failed=%d skipped=%d",
         from_date, to_date,
+        len(succeeded), len(failed), len(skipped),
+    )
+    return report
+
+
+# ====================================================================
+# Step 7 — industry indicator state populator
+# ====================================================================
+#
+# Reads industry_index_value daily rows, aggregates to IST-Monday
+# weekly bars via the same daily_to_weekly helper used for stocks
+# (Phase 1B unification), runs compute_state_primitives with
+# synthetic_atr_for_index=False (true-range ATR), and upserts the
+# resulting rows to industry_indicator_state.
+#
+# The aggregation is needed because industry_index_value rows are
+# daily (one per trading day) but the indicator math runs on weekly
+# bars. The legacy `run_indicator_state_for_industry` used the same
+# pattern.
+#
+# No skip-if-recent guard. V1 treats every invocation as a full
+# idempotent recompute.
+
+
+def _build_industry_weekly_bars(
+    history: list,
+) -> list[OHLCVBar]:
+    """Convert industry_index_value rows to IST-Monday-anchored
+    weekly bars.
+
+    Args:
+        history: List of IndustryIndexValue records (oldest-first).
+            Each has `.trade_date` and `.value`.
+
+    Returns:
+        Weekly OHLCVBar list. Open = first day's value in the week,
+        high/low = max/min daily values that week, close = last
+        day's value. Volume = bar count (synthetic).
+
+    Empty input → empty output.
+    """
+    if not history:
+        return []
+    # Build pseudo-daily bars: H=L=O=C=value (no intra-day OHLC on
+    # IIV). The daily_to_weekly aggregator will compute meaningful
+    # weekly H/L as max/min across the days in each week.
+    pseudo_daily_bars = [
+        OHLCVBar(
+            timestamp=datetime.combine(
+                h.trade_date, time.min, tzinfo=_IST,
+            ),
+            open=float(h.value),
+            high=float(h.value),
+            low=float(h.value),
+            close=float(h.value),
+            volume=1.0,
+        )
+        for h in history
+    ]
+    return daily_to_weekly(
+        pseudo_daily_bars,
+        include_partial_last_week=True,
+        tz="Asia/Kolkata",
+    )
+
+
+def populate_industry_indicator_state_for_industry(
+    db_engine: Engine,
+    industry_name: str,
+    *,
+    timeframe: str = "Weekly",
+    min_bars: int = 30,
+) -> int:
+    """Compute V1 industry indicator state for one industry.
+
+    Reads the full industry_index_value history, aggregates to weekly
+    bars (IST Monday-anchored), runs compute_state_primitives, and
+    upserts to industry_indicator_state.
+
+    Args:
+        industry_name: The index to compute.
+        timeframe: Always 'Weekly' in V1 (column kept for future
+            multi-timeframe support). Pass anything else and you
+            get a ValueError.
+        min_bars: Minimum weekly bars required to seed EMAs. Bars
+            shorter than this raise ValueError.
+
+    Returns:
+        fundamentals_run.run_id.
+
+    Raises:
+        ValueError: industry doesn't exist, has no IIV rows, or
+            has fewer than min_bars weekly bars after aggregation.
+    """
+    # Validate timeframe. V1 only supports Weekly for industry but
+    # the column is kept for future expansion.
+    if timeframe != "Weekly":
+        raise ValueError(
+            f"populate_industry_indicator_state_for_industry: "
+            f"only 'Weekly' is supported for industry indices in V1, "
+            f"got {timeframe!r}"
+        )
+
+    # Sanity: industry must exist as an index.
+    with db_engine.connect() as conn:
+        idx = IndustryIndexRepository(conn).get(industry_name)
+    if idx is None:
+        raise ValueError(
+            f"populate_industry_indicator_state_for_industry: "
+            f"industry {industry_name!r} does not exist"
+        )
+
+    # Read the full value history (oldest-first for the walk).
+    with db_engine.connect() as conn:
+        history = IndustryIndexValueRepository(conn).get_history(
+            industry_name,
+        )
+    if not history:
+        raise ValueError(
+            f"populate_industry_indicator_state_for_industry: "
+            f"industry {industry_name!r} has no value rows. Run "
+            f"v1_industry_index_value first."
+        )
+    # get_history returns newest-first; the indicator walk needs
+    # oldest-first.
+    history = list(reversed(history))
+
+    # Aggregate to weekly bars.
+    weekly_bars = _build_industry_weekly_bars(history)
+    if len(weekly_bars) < min_bars:
+        raise ValueError(
+            f"populate_industry_indicator_state_for_industry: "
+            f"industry {industry_name!r} has only {len(weekly_bars)} "
+            f"weekly bars after aggregation (need at least "
+            f"{min_bars} to seed EMAs)"
+        )
+
+    # Build pandas Series for the compute layer.
+    open_s = pd.Series(  # noqa: F841  (kept for parity / readability)
+        [b.open for b in weekly_bars], dtype=float,
+    )
+    high_s = pd.Series([b.high for b in weekly_bars], dtype=float)
+    low_s = pd.Series([b.low for b in weekly_bars], dtype=float)
+    close_s = pd.Series([b.close for b in weekly_bars], dtype=float)
+    volume_s = pd.Series(
+        [b.volume for b in weekly_bars], dtype=float,
+    )
+    # The weekly bar's IST-Monday timestamp carries through to
+    # industry_indicator_state.bar_timestamp 1:1. Both columns are
+    # TIMESTAMPTZ.
+    timestamps = pd.Series([b.timestamp for b in weekly_bars])
+
+    # Compute core state — true-range ATR (Phase 1B unification).
+    primitives = compute_state_primitives(
+        close_s, volume_s, high_s, low_s,
+        trade_dates=timestamps,
+        synthetic_atr_for_index=False,
+    )
+
+    # Convert to dataclass list. computed_at is set on the runner
+    # side so all rows of one run share the same audit timestamp.
+    now = datetime.now(UTC)
+    states = [
+        IndustryIndicatorState(
+            industry_name=industry_name,
+            timeframe=timeframe,
+            bar_timestamp=p["bar_timestamp"],
+            med_ema=p["med_ema"],
+            long_ema=p["long_ema"],
+            longest_ema=p["longest_ema"],
+            atr=p["atr"],
+            upper_inner_band=p["upper_inner_band"],
+            lower_inner_band=p["lower_inner_band"],
+            upper_mid_band=p["upper_mid_band"],
+            lower_mid_band=p["lower_mid_band"],
+            upper_outer_band=p["upper_outer_band"],
+            lower_outer_band=p["lower_outer_band"],
+            display_regime=p["display_regime"],
+            computed_at=now,
+        )
+        for p in primitives
+    ]
+
+    # Atomic write: one transaction, all rows or none.
+    with transaction(db_engine) as conn:
+        run_id = FundamentalsRunRepository(conn).open(
+            phase=PHASE_V1_INDUSTRY_INDICATOR_STATE,
+            exchange="ALL",
+            notes=(
+                f"v1_industry_indicator_state for {industry_name} "
+                f"tf={timeframe}"
+            ),
+        )
+        IndustryIndicatorStateRepository(conn).upsert_many(states)
+        FundamentalsRunRepository(conn).close(
+            run_id, status="SUCCESS",
+            succeeded=len(states), failed=0,
+            skipped=(len(weekly_bars) - len(states)),
+        )
+
+    logger.info(
+        "populate_industry_indicator_state_for_industry %s tf=%s: "
+        "emitted=%d skipped=%d weekly_bars=%d daily_iiv_rows=%d",
+        industry_name, timeframe,
+        len(states), len(weekly_bars) - len(states),
+        len(weekly_bars), len(history),
+    )
+    return run_id
+
+
+def populate_industry_indicator_state_for_all(
+    db_engine: Engine,
+    *,
+    timeframe: str = "Weekly",
+    min_bars: int = 30,
+) -> dict:
+    """Bulk-compute V1 industry indicator state for every ACTIVE
+    industry.
+
+    Iterates in alphabetical order (IndustryIndexRepository.
+    list_active). Per-industry error isolation: a failure on one
+    industry doesn't abort the others.
+
+    Industries with no IIV rows or insufficient weekly bars after
+    aggregation are reported as `skipped` (not failed).
+
+    Returns a report dict:
+        {
+          "timeframe": str,
+          "succeeded": [(industry_name, run_id, num_rows), ...],
+          "failed":    [(industry_name, error_message), ...],
+          "skipped":   [(industry_name, reason), ...],
+        }
+    """
+    with db_engine.connect() as conn:
+        indices = IndustryIndexRepository(conn).list_active()
+
+    succeeded: list[tuple[str, int, int]] = []
+    failed: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
+
+    for idx in indices:
+        try:
+            run_id = populate_industry_indicator_state_for_industry(
+                db_engine, idx.industry_name,
+                timeframe=timeframe, min_bars=min_bars,
+            )
+            with db_engine.connect() as conn:
+                cnt = IndustryIndicatorStateRepository(
+                    conn,
+                ).count_for_industry(idx.industry_name, timeframe)
+            succeeded.append((idx.industry_name, run_id, cnt))
+            logger.debug(
+                "industry=%s tf=%s OK (run_id=%d, count=%d)",
+                idx.industry_name, timeframe, run_id, cnt,
+            )
+        except ValueError as e:
+            # ValueError covers "no IIV rows", "insufficient bars",
+            # "industry doesn't exist". Treat as skipped, not failed
+            # — the industry simply isn't ready yet.
+            skipped.append((idx.industry_name, str(e)))
+            logger.info(
+                "industry=%s tf=%s skipped: %s",
+                idx.industry_name, timeframe, e,
+            )
+        except Exception as e:
+            failed.append((idx.industry_name, str(e)))
+            logger.warning(
+                "industry=%s tf=%s failed: %s",
+                idx.industry_name, timeframe, e, exc_info=True,
+            )
+
+    report = {
+        "timeframe": timeframe,
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped": skipped,
+    }
+    logger.info(
+        "populate_industry_indicator_state_for_all tf=%s: "
+        "succeeded=%d failed=%d skipped=%d",
+        timeframe,
         len(succeeded), len(failed), len(skipped),
     )
     return report
