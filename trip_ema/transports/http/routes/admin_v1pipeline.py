@@ -23,7 +23,7 @@ fast enough (~ms per ticker) that this isn't a contention point.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, UTC
+from datetime import date, datetime, UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Engine
@@ -34,6 +34,8 @@ from ....etl.exchanges import (
     validate_exchange,
 )
 from ....fundamentals.v1_runners import (
+    populate_industry_index_value_for_all,
+    populate_industry_index_value_for_industry,
     populate_stock_indicator_enrichment_for_exchange,
     populate_stock_indicator_enrichment_for_ticker,
     populate_stock_indicator_state_for_exchange,
@@ -324,5 +326,175 @@ def admin_v1pipeline_stock_indicator_enrichment(
             f"V1 stock indicator enrichment submitted for "
             f"exchange={exchange} tf={timeframe} (bulk; per-ticker "
             f"error isolation)."
+        ),
+    )
+
+
+# ============================================================
+# Industry index value populator (Step 6)
+# ============================================================
+
+
+def _run_industry_index_value_for_industry_safe(
+    db_engine: Engine,
+    industry_name: str,
+    from_date: date | None,
+    to_date: date | None,
+    resume_run_id: int | None,
+) -> None:
+    """Wrap the per-industry runner so a failure on the executor
+    thread is logged rather than swallowed silently."""
+    try:
+        populate_industry_index_value_for_industry(
+            db_engine, industry_name,
+            from_date=from_date, to_date=to_date,
+            resume_run_id=resume_run_id,
+        )
+    except Exception:
+        logger.exception(
+            "populate_industry_index_value_for_industry failed: "
+            "industry=%s", industry_name,
+        )
+
+
+def _run_industry_index_value_for_all_safe(
+    db_engine: Engine,
+    from_date: date | None,
+    to_date: date | None,
+) -> None:
+    """Wrap the bulk runner the same way."""
+    try:
+        populate_industry_index_value_for_all(
+            db_engine, from_date=from_date, to_date=to_date,
+        )
+    except Exception:
+        logger.exception(
+            "populate_industry_index_value_for_all failed",
+        )
+
+
+@router.post(
+    "/industry-index-value",
+    response_model=EtlActionAcceptedPayload,
+)
+def admin_v1pipeline_industry_index_value(
+    industry: str | None = Query(
+        None, min_length=1, max_length=200,
+        description="Compute for one industry. Mutually exclusive "
+                    "with `all_industries`.",
+    ),
+    all_industries: bool = Query(
+        False,
+        description="Compute for every ACTIVE industry. Mutually "
+                    "exclusive with `industry`.",
+    ),
+    from_date: date | None = Query(
+        None,
+        description="Start of date range (inclusive). Default: the "
+                    "industry's base_date.",
+    ),
+    to_date: date | None = Query(
+        None,
+        description="End of date range (inclusive). Default: today.",
+    ),
+    resume_run_id: int | None = Query(
+        None, ge=1,
+        description="Resume an existing RUNNING run by id. Only "
+                    "valid with single `industry`.",
+    ),
+    db_engine: Engine = Depends(get_db_engine),
+    executor=Depends(get_etl_executor),
+) -> EtlActionAcceptedPayload:
+    """Trigger V1 industry index value population.
+
+    Provide exactly ONE of `industry` or `all_industries=true`. The
+    per-industry variant is resumable via `resume_run_id`; the bulk
+    variant is not (but is upsert-idempotent — safe to re-run).
+
+    The runner walks every trading day in the range (defaulted from
+    industry.base_date to today) and upserts the computed index
+    value. No skip-if-recent guard; every invocation is a full
+    recompute of the requested range.
+
+    Returns 202 Accepted with no run_id (the runner opens its own
+    fundamentals_run row on the worker thread).
+    """
+    _require_executor(executor)
+
+    if (industry is None) == (not all_industries):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Exactly one of `industry` or "
+                "`all_industries=true` must be provided (got "
+                f"industry={industry}, "
+                f"all_industries={all_industries})."
+            ),
+        )
+
+    if resume_run_id is not None and all_industries:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "`resume_run_id` is only valid with a single "
+                "`industry`. The bulk variant does not support "
+                "resume; re-run it (upsert-idempotent) or resume "
+                "individual industries."
+            ),
+        )
+
+    if (from_date is not None and to_date is not None
+            and from_date > to_date):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"from_date {from_date} must be <= to_date {to_date}"
+            ),
+        )
+
+    if industry is not None:
+        logger.info(
+            "Admin: V1 industry-index-value requested for "
+            "industry=%s (from=%s to=%s resume=%s)",
+            industry, from_date, to_date, resume_run_id,
+        )
+        executor.submit(
+            _run_industry_index_value_for_industry_safe,
+            db_engine, industry, from_date, to_date, resume_run_id,
+        )
+        notes_parts = [
+            f"V1 industry index value submitted for industry={industry}"
+        ]
+        if from_date is not None:
+            notes_parts.append(f"from_date={from_date}")
+        if to_date is not None:
+            notes_parts.append(f"to_date={to_date}")
+        if resume_run_id is not None:
+            notes_parts.append(f"resume_run_id={resume_run_id}")
+        return EtlActionAcceptedPayload(
+            action="v1pipeline.industry-index-value",
+            run_id=None,
+            accepted_at=datetime.now(UTC),
+            notes=" ".join(notes_parts) + ".",
+        )
+
+    # all_industries=True branch
+    logger.info(
+        "Admin: V1 industry-index-value requested for ALL active "
+        "industries (from=%s to=%s)",
+        from_date, to_date,
+    )
+    executor.submit(
+        _run_industry_index_value_for_all_safe,
+        db_engine, from_date, to_date,
+    )
+    return EtlActionAcceptedPayload(
+        action="v1pipeline.industry-index-value",
+        run_id=None,
+        accepted_at=datetime.now(UTC),
+        notes=(
+            f"V1 industry index value submitted for all active "
+            f"industries (from_date={from_date}, to_date={to_date}; "
+            f"bulk; per-industry error isolation)."
         ),
     )

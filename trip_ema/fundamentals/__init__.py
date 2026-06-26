@@ -63,6 +63,7 @@ RUN_PHASES = (
     # pipeline (state populator + enrichment populator, per series type).
     "v1_stock_indicator_state",
     "v1_stock_indicator_enrichment",
+    "v1_industry_index_value",
 )
 
 # Allowed values for `fundamentals_run.status`.

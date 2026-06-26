@@ -24,7 +24,7 @@ side validation period.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, UTC
+from datetime import date, datetime, UTC
 
 import pandas as pd
 from sqlalchemy.engine import Engine
@@ -32,7 +32,11 @@ from sqlalchemy.engine import Engine
 from ..domain import Timeframe
 from ..domain.stock_indicator_enrichment import StockIndicatorEnrichment
 from ..domain.stock_indicator_state import StockIndicatorState
-from ..persistence.fundamentals_repo import FundamentalsRunRepository
+from ..persistence.fundamentals_repo import (
+    FundamentalsRunRepository,
+    IndustryIndexRepository,
+    IndustryIndexValueRepository,
+)
 from ..persistence.stock_indicator_enrichment_repo import (
     StockIndicatorEnrichmentRepository,
 )
@@ -41,7 +45,12 @@ from ..persistence.stock_indicator_state_repo import (
 )
 from ..persistence.tickers_repo import TickersRepository
 from ..persistence import transaction
-from .runners import _fetch_bars_at_timeframe
+from .index_compute import compute_index_value_for_date
+from .runners import (
+    _fetch_bars_at_timeframe,
+    _list_trading_days_in_range,
+    _parse_iso_date,
+)
 from .v1_compute_primitives import (
     compute_enrichment_primitives,
     compute_state_primitives,
@@ -53,6 +62,7 @@ logger = logging.getLogger(__name__)
 # the RUN_PHASES tuple in fundamentals/__init__.py.
 PHASE_V1_STOCK_STATE = "v1_stock_indicator_state"
 PHASE_V1_STOCK_ENRICHMENT = "v1_stock_indicator_enrichment"
+PHASE_V1_INDUSTRY_INDEX_VALUE = "v1_industry_index_value"
 
 
 def populate_stock_indicator_state_for_ticker(
@@ -493,6 +503,330 @@ def populate_stock_indicator_enrichment_for_exchange(
         "populate_stock_indicator_enrichment_for_exchange %s tf=%s: "
         "succeeded=%d failed=%d skipped=%d",
         exchange, timeframe,
+        len(succeeded), len(failed), len(skipped),
+    )
+    return report
+
+
+# ====================================================================
+# Step 6 — industry index value populator
+# ====================================================================
+#
+# Unlike the stock state/enrichment runners, this one is resumable.
+# Industry index value backfills span ~250+ trading days × 60+
+# industries, so a power or network outage mid-run could lose a lot
+# of work. The runner persists its date-list cursor to
+# fundamentals_run.progress_json and accepts a resume_run_id to pick
+# up from where it left off.
+#
+# Architectural notes:
+#   - No skip-if-recent guard. Every invocation is a full upsert
+#     recompute of the requested range. (The legacy
+#     run_index_value_backfill had an 80-day guard that was the
+#     suspected cause of stale-data symptoms — dropped here.)
+#   - One transaction per date for the upsert; progress_json is
+#     updated every `checkpoint_every` dates (default 50).
+#   - Uses exchange="ALL" in the audit row because industry phases
+#     don't map to a single exchange (legacy convention).
+
+
+def populate_industry_index_value_for_industry(
+    db_engine: Engine,
+    industry_name: str,
+    *,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    resume_run_id: int | None = None,
+    checkpoint_every: int = 50,
+) -> int:
+    """Compute V1 industry index values for one industry across a
+    date range. Resumable.
+
+    Args:
+        industry_name: The index to compute.
+        from_date: Start of date range (inclusive). Defaults to
+            the index's `base_date` (the earliest meaningful date).
+        to_date: End of date range (inclusive). Defaults to
+            today (UTC).
+        resume_run_id: If set, resume an existing RUNNING run from
+            where it left off. The runner restores the date list,
+            cursor, and counters from progress_json. The caller's
+            from_date / to_date are ignored — the resumed run uses
+            the range from the original invocation.
+        checkpoint_every: Update progress_json every N dates.
+
+    Returns:
+        fundamentals_run.run_id (either the new run's id or the
+        resumed one).
+
+    Raises:
+        ValueError: industry_name unknown, from_date > to_date, or
+            resume_run_id points to a non-existent/wrong-phase/
+            non-RUNNING run.
+    """
+    # --- resume path ---
+    if resume_run_id is not None:
+        with db_engine.connect() as conn:
+            run = FundamentalsRunRepository(conn).get(resume_run_id)
+        if run is None:
+            raise ValueError(
+                f"populate_industry_index_value_for_industry: "
+                f"no fundamentals_run with id={resume_run_id}"
+            )
+        if run.phase != PHASE_V1_INDUSTRY_INDEX_VALUE:
+            raise ValueError(
+                f"populate_industry_index_value_for_industry: "
+                f"resume run {resume_run_id} has phase {run.phase!r}, "
+                f"expected {PHASE_V1_INDUSTRY_INDEX_VALUE!r}"
+            )
+        if run.status != "RUNNING":
+            raise ValueError(
+                f"populate_industry_index_value_for_industry: "
+                f"resume run {resume_run_id} has status "
+                f"{run.status!r}, can only resume RUNNING runs"
+            )
+        progress = run.progress_json or {}
+        resumed_industry = progress.get("industry_name")
+        if resumed_industry != industry_name:
+            raise ValueError(
+                f"populate_industry_index_value_for_industry: "
+                f"resume run {resume_run_id} is for industry "
+                f"{resumed_industry!r}, not {industry_name!r}"
+            )
+        date_list = [
+            _parse_iso_date(s) for s in progress.get("date_list", [])
+        ]
+        cursor_index = int(progress.get("cursor_index", 0))
+        from_date = _parse_iso_date(progress["from_date"])
+        to_date = _parse_iso_date(progress["to_date"])
+        succeeded = run.succeeded
+        failed = run.failed
+        skipped = run.skipped
+        run_id = resume_run_id
+        logger.info(
+            "Resuming v1_industry_index_value run %d for %s at "
+            "date %d/%d (from=%s to=%s)",
+            run_id, industry_name, cursor_index, len(date_list),
+            from_date, to_date,
+        )
+    else:
+        # --- fresh run ---
+        with db_engine.connect() as conn:
+            idx = IndustryIndexRepository(conn).get(industry_name)
+        if idx is None:
+            raise ValueError(
+                f"populate_industry_index_value_for_industry: "
+                f"industry {industry_name!r} does not exist"
+            )
+
+        if from_date is None:
+            from_date = idx.base_date
+        if to_date is None:
+            to_date = datetime.now(UTC).date()
+        if from_date > to_date:
+            raise ValueError(
+                f"populate_industry_index_value_for_industry: "
+                f"from_date {from_date} must be <= to_date {to_date}"
+            )
+
+        date_list = _list_trading_days_in_range(
+            db_engine, from_date, to_date,
+        )
+
+        if not date_list:
+            # Open + close a zero-row SUCCESS run for audit
+            # consistency. No work to do but we still want the
+            # operator to see the empty result in fundamentals_run.
+            with transaction(db_engine) as conn:
+                run_id = FundamentalsRunRepository(conn).open(
+                    phase=PHASE_V1_INDUSTRY_INDEX_VALUE,
+                    exchange="ALL",
+                    notes=(
+                        f"v1_industry_index_value for {industry_name}: "
+                        f"no trading days in [{from_date}, {to_date}]"
+                    ),
+                )
+                FundamentalsRunRepository(conn).close(
+                    run_id, status="SUCCESS",
+                    succeeded=0, failed=0, skipped=0,
+                )
+            logger.info(
+                "populate_industry_index_value_for_industry %s: "
+                "no trading days in [%s, %s] — no-op run %d",
+                industry_name, from_date, to_date, run_id,
+            )
+            return run_id
+
+        cursor_index = 0
+        succeeded = 0
+        failed = 0
+        skipped = 0
+        with transaction(db_engine) as conn:
+            run_id = FundamentalsRunRepository(conn).open(
+                phase=PHASE_V1_INDUSTRY_INDEX_VALUE,
+                exchange="ALL",
+                notes=(
+                    f"v1_industry_index_value for {industry_name}: "
+                    f"{len(date_list)} trading days in "
+                    f"[{from_date}, {to_date}]"
+                ),
+            )
+            FundamentalsRunRepository(conn).update_progress(
+                run_id,
+                progress_json={
+                    "industry_name": industry_name,
+                    "date_list": [d.isoformat() for d in date_list],
+                    "cursor_index": 0,
+                    "from_date": from_date.isoformat(),
+                    "to_date": to_date.isoformat(),
+                },
+            )
+
+    # --- walk dates ---
+    for i in range(cursor_index, len(date_list)):
+        d = date_list[i]
+        try:
+            computed = compute_index_value_for_date(
+                db_engine, industry_name, d,
+            )
+            if computed is None:
+                # Pre-base date, or empty rebalance, or missing
+                # mcap — None is "nothing to write", not an error.
+                skipped += 1
+            else:
+                with transaction(db_engine) as conn:
+                    IndustryIndexValueRepository(conn).upsert_value(
+                        industry_name,
+                        trade_date=computed.trade_date,
+                        value=computed.value,
+                        constituents_used=computed.constituents_used,
+                        constituents_missing=
+                            computed.constituents_missing,
+                        renormalized=computed.renormalized,
+                        effective_rebalance_date=
+                            computed.effective_rebalance_date,
+                    )
+                succeeded += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(
+                "v1_industry_index_value %s date=%s failed: %s",
+                industry_name, d, e, exc_info=True,
+            )
+
+        # Checkpoint progress every N dates so a crash here doesn't
+        # lose more than `checkpoint_every` dates worth of work.
+        if (i + 1) % checkpoint_every == 0:
+            with transaction(db_engine) as conn:
+                FundamentalsRunRepository(conn).update_progress(
+                    run_id,
+                    succeeded=succeeded, failed=failed, skipped=skipped,
+                    progress_json={
+                        "industry_name": industry_name,
+                        "date_list": [d.isoformat() for d in date_list],
+                        "cursor_index": i + 1,
+                        "from_date": from_date.isoformat(),
+                        "to_date": to_date.isoformat(),
+                    },
+                )
+
+    # --- close the run ---
+    status = "SUCCESS" if failed == 0 else "PARTIAL"
+    with transaction(db_engine) as conn:
+        FundamentalsRunRepository(conn).close(
+            run_id, status=status,
+            succeeded=succeeded, failed=failed, skipped=skipped,
+        )
+
+    logger.info(
+        "populate_industry_index_value_for_industry %s [%s, %s]: "
+        "succeeded=%d failed=%d skipped=%d (run_id=%d, status=%s)",
+        industry_name, from_date, to_date,
+        succeeded, failed, skipped, run_id, status,
+    )
+    return run_id
+
+
+def populate_industry_index_value_for_all(
+    db_engine: Engine,
+    *,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    checkpoint_every: int = 50,
+) -> dict:
+    """Bulk-compute V1 industry index values for every ACTIVE industry.
+
+    Iterates in alphabetical order (via IndustryIndexRepository.
+    list_active). Per-industry error isolation: a failure on one
+    industry doesn't abort the others.
+
+    NOTE: This bulk variant does NOT support resume. If interrupted
+    mid-way, the operator can look at fundamentals_run for any
+    RUNNING v1_industry_index_value rows and call
+    populate_industry_index_value_for_industry with resume_run_id
+    for each. The upserts are idempotent so re-running the bulk
+    variant after interruption is also safe (just wasteful — it
+    will recompute already-done industries).
+
+    Returns a report dict:
+        {
+          "from_date": str | None,
+          "to_date": str | None,
+          "succeeded": [(industry_name, run_id, num_value_rows), ...],
+          "failed":    [(industry_name, error_message), ...],
+          "skipped":   [(industry_name, reason), ...],
+        }
+    """
+    with db_engine.connect() as conn:
+        indices = IndustryIndexRepository(conn).list_active()
+
+    succeeded: list[tuple[str, int, int]] = []
+    failed: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
+
+    for idx in indices:
+        try:
+            run_id = populate_industry_index_value_for_industry(
+                db_engine, idx.industry_name,
+                from_date=from_date, to_date=to_date,
+                checkpoint_every=checkpoint_every,
+            )
+            with db_engine.connect() as conn:
+                cnt = len(
+                    IndustryIndexValueRepository(conn).get_history(
+                        idx.industry_name,
+                    )
+                )
+            succeeded.append((idx.industry_name, run_id, cnt))
+            logger.debug(
+                "industry=%s OK (run_id=%d, total_rows=%d)",
+                idx.industry_name, run_id, cnt,
+            )
+        except ValueError as e:
+            skipped.append((idx.industry_name, str(e)))
+            logger.info(
+                "industry=%s skipped: %s", idx.industry_name, e,
+            )
+        except Exception as e:
+            failed.append((idx.industry_name, str(e)))
+            logger.warning(
+                "industry=%s failed: %s",
+                idx.industry_name, e, exc_info=True,
+            )
+
+    report = {
+        "from_date":
+            from_date.isoformat() if from_date is not None else None,
+        "to_date":
+            to_date.isoformat() if to_date is not None else None,
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped": skipped,
+    }
+    logger.info(
+        "populate_industry_index_value_for_all [%s, %s]: "
+        "succeeded=%d failed=%d skipped=%d",
+        from_date, to_date,
         len(succeeded), len(failed), len(skipped),
     )
     return report
