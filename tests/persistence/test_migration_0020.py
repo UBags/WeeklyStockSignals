@@ -438,7 +438,10 @@ def test_downgrade_then_upgrade(db_engine):
     alembic_cfg.cmd_opts = type("X", (), {"x": ["test_mode=1"]})()
 
     # Downgrade one revision
-    command.downgrade(alembic_cfg, "-1")
+    # Pin to the down_revision name rather than the relative "-1".
+    # "-1" means "one back from current head", which silently moves
+    # when later migrations land on top, breaking this test.
+    command.downgrade(alembic_cfg, "0019_drop_signal_industry")
     with db_engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT table_name FROM information_schema.tables

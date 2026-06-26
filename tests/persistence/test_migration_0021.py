@@ -606,7 +606,10 @@ def test_downgrade_then_upgrade(db_engine):
     alembic_cfg.set_main_option("sqlalchemy.url", str(db_engine.url))
     alembic_cfg.cmd_opts = type("X", (), {"x": ["test_mode=1"]})()
 
-    command.downgrade(alembic_cfg, "-1")
+    # Pin to the down_revision name rather than the relative "-1".
+    # "-1" means "one back from current head", which silently moves
+    # when later migrations land on top, breaking this test.
+    command.downgrade(alembic_cfg, "0020_clean_pipeline_tables")
     with db_engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT table_name FROM information_schema.tables

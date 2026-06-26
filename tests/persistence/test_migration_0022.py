@@ -90,8 +90,11 @@ def test_downgrade_removes_v1_phase_and_restores_old_check(db_engine):
         """)).scalar_one()
     assert cnt_v1 >= 1
 
-    # Downgrade.
-    command.downgrade(alembic_cfg, "-1")
+    # Pin to the down_revision name rather than the relative "-1".
+    # "-1" means "one back from current head", which silently moves
+    # when later migrations land on top (like Step 5 → 0023), breaking
+    # this test. The explicit revision keeps it stable.
+    command.downgrade(alembic_cfg, "0021_indicator_enrichment")
 
     # The v1 rows should be gone.
     with db_engine.connect() as conn:
@@ -130,7 +133,9 @@ def test_downgrade_then_upgrade_round_trip(db_engine):
     alembic_cfg.set_main_option("sqlalchemy.url", str(db_engine.url))
     alembic_cfg.cmd_opts = type("X", (), {"x": ["test_mode=1"]})()
 
-    command.downgrade(alembic_cfg, "-1")
+    # Pin to the down_revision name rather than the relative "-1"
+    # so this test stays stable across future migrations.
+    command.downgrade(alembic_cfg, "0021_indicator_enrichment")
     command.upgrade(alembic_cfg, "head")
 
     with db_engine.begin() as conn:
