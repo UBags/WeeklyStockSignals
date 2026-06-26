@@ -36,6 +36,8 @@ from ....etl.exchanges import (
 from ....fundamentals.v1_runners import (
     populate_industry_index_value_for_all,
     populate_industry_index_value_for_industry,
+    populate_industry_indicator_enrichment_for_all,
+    populate_industry_indicator_enrichment_for_industry,
     populate_industry_indicator_state_for_all,
     populate_industry_indicator_state_for_industry,
     populate_stock_indicator_enrichment_for_exchange,
@@ -633,5 +635,145 @@ def admin_v1pipeline_industry_indicator_state(
             f"V1 industry indicator state submitted for all active "
             f"industries tf={timeframe} (bulk; per-industry error "
             f"isolation)."
+        ),
+    )
+
+
+# ============================================================
+# Industry indicator enrichment populator (Step 8)
+# Closes the V1 clean-pipeline refactor.
+# ============================================================
+
+
+def _run_industry_indicator_enrichment_for_industry_safe(
+    db_engine: Engine,
+    industry_name: str,
+    timeframe: str,
+    min_bars: int,
+) -> None:
+    """Wrap the per-industry runner so a failure on the executor
+    thread is logged rather than swallowed silently."""
+    try:
+        populate_industry_indicator_enrichment_for_industry(
+            db_engine, industry_name,
+            timeframe=timeframe, min_bars=min_bars,
+        )
+    except Exception:
+        logger.exception(
+            "populate_industry_indicator_enrichment_for_industry "
+            "failed: industry=%s tf=%s",
+            industry_name, timeframe,
+        )
+
+
+def _run_industry_indicator_enrichment_for_all_safe(
+    db_engine: Engine,
+    timeframe: str,
+    min_bars: int,
+) -> None:
+    """Wrap the bulk runner the same way."""
+    try:
+        populate_industry_indicator_enrichment_for_all(
+            db_engine, timeframe=timeframe, min_bars=min_bars,
+        )
+    except Exception:
+        logger.exception(
+            "populate_industry_indicator_enrichment_for_all "
+            "failed: tf=%s", timeframe,
+        )
+
+
+@router.post(
+    "/industry-indicator-enrichment",
+    response_model=EtlActionAcceptedPayload,
+)
+def admin_v1pipeline_industry_indicator_enrichment(
+    industry: str | None = Query(
+        None, min_length=1, max_length=200,
+        description="Compute for one industry. Mutually exclusive "
+                    "with `all_industries`.",
+    ),
+    all_industries: bool = Query(
+        False,
+        description="Compute for every ACTIVE industry. Mutually "
+                    "exclusive with `industry`.",
+    ),
+    timeframe: str = Query(
+        "Weekly",
+        description="Always 'Weekly' in V1. Column kept for future "
+                    "multi-timeframe support.",
+    ),
+    min_bars: int = Query(
+        30, ge=1, le=1000,
+        description="Minimum weekly bars required. Default 30.",
+    ),
+    db_engine: Engine = Depends(get_db_engine),
+    executor=Depends(get_etl_executor),
+) -> EtlActionAcceptedPayload:
+    """Trigger V1 industry indicator enrichment population.
+
+    Provide exactly ONE of `industry` or `all_industries=true`.
+    Reads industry_index_value, aggregates to weekly bars, computes
+    the 23 enrichment fields, and upserts to
+    industry_indicator_enrichment.
+
+    Requires Step 7 (industry-indicator-state) to have populated
+    the matching state rows — the FK ON DELETE CASCADE requires
+    state to exist before enrichment.
+
+    Returns 202 Accepted with no run_id (the runner opens its own
+    fundamentals_run row on the worker thread).
+    """
+    _require_executor(executor)
+
+    if (industry is None) == (not all_industries):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Exactly one of `industry` or "
+                "`all_industries=true` must be provided (got "
+                f"industry={industry}, "
+                f"all_industries={all_industries})."
+            ),
+        )
+
+    if industry is not None:
+        logger.info(
+            "Admin: V1 industry-indicator-enrichment requested for "
+            "industry=%s tf=%s min_bars=%d",
+            industry, timeframe, min_bars,
+        )
+        executor.submit(
+            _run_industry_indicator_enrichment_for_industry_safe,
+            db_engine, industry, timeframe, min_bars,
+        )
+        return EtlActionAcceptedPayload(
+            action="v1pipeline.industry-indicator-enrichment",
+            run_id=None,
+            accepted_at=datetime.now(UTC),
+            notes=(
+                f"V1 industry indicator enrichment submitted for "
+                f"industry={industry} tf={timeframe}."
+            ),
+        )
+
+    # all_industries=True
+    logger.info(
+        "Admin: V1 industry-indicator-enrichment requested for ALL "
+        "active industries tf=%s min_bars=%d",
+        timeframe, min_bars,
+    )
+    executor.submit(
+        _run_industry_indicator_enrichment_for_all_safe,
+        db_engine, timeframe, min_bars,
+    )
+    return EtlActionAcceptedPayload(
+        action="v1pipeline.industry-indicator-enrichment",
+        run_id=None,
+        accepted_at=datetime.now(UTC),
+        notes=(
+            f"V1 industry indicator enrichment submitted for all "
+            f"active industries tf={timeframe} (bulk; per-industry "
+            f"error isolation)."
         ),
     )

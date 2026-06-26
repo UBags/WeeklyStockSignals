@@ -65,6 +65,7 @@ RUN_PHASES = (
     "v1_stock_indicator_enrichment",
     "v1_industry_index_value",
     "v1_industry_indicator_state",
+    "v1_industry_indicator_enrichment",
 )
 
 # Allowed values for `fundamentals_run.status`.

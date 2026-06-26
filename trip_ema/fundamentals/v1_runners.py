@@ -31,6 +31,9 @@ import pandas as pd
 from sqlalchemy.engine import Engine
 
 from ..domain import OHLCVBar, Timeframe
+from ..domain.industry_indicator_enrichment import (
+    IndustryIndicatorEnrichment,
+)
 from ..domain.industry_indicator_state import IndustryIndicatorState
 from ..domain.stock_indicator_enrichment import StockIndicatorEnrichment
 from ..domain.stock_indicator_state import StockIndicatorState
@@ -39,6 +42,9 @@ from ..persistence.fundamentals_repo import (
     FundamentalsRunRepository,
     IndustryIndexRepository,
     IndustryIndexValueRepository,
+)
+from ..persistence.industry_indicator_enrichment_repo import (
+    IndustryIndicatorEnrichmentRepository,
 )
 from ..persistence.industry_indicator_state_repo import (
     IndustryIndicatorStateRepository,
@@ -70,6 +76,9 @@ PHASE_V1_STOCK_STATE = "v1_stock_indicator_state"
 PHASE_V1_STOCK_ENRICHMENT = "v1_stock_indicator_enrichment"
 PHASE_V1_INDUSTRY_INDEX_VALUE = "v1_industry_index_value"
 PHASE_V1_INDUSTRY_INDICATOR_STATE = "v1_industry_indicator_state"
+PHASE_V1_INDUSTRY_INDICATOR_ENRICHMENT = (
+    "v1_industry_indicator_enrichment"
+)
 
 # IST is used for the industry weekly-bar Monday anchor — see Phase 1B
 # unification (commit 607a2a5). Computed once at module load.
@@ -1118,6 +1127,278 @@ def populate_industry_indicator_state_for_all(
     }
     logger.info(
         "populate_industry_indicator_state_for_all tf=%s: "
+        "succeeded=%d failed=%d skipped=%d",
+        timeframe,
+        len(succeeded), len(failed), len(skipped),
+    )
+    return report
+
+
+# ====================================================================
+# Step 8 — industry indicator enrichment populator
+# ====================================================================
+#
+# V1 industry-side mirror of Step 5. Reads industry_index_value daily
+# rows, aggregates to IST-Monday weekly bars via
+# `_build_industry_weekly_bars` (REUSED from Step 7), runs
+# `compute_enrichment_primitives` with synthetic_atr_for_index=False
+# (true-range ATR — matching Step 7), and upserts to
+# industry_indicator_enrichment.
+#
+# Sequencing: industry_indicator_state must exist first (FK ON DELETE
+# CASCADE from enrichment → state). The runner fail-fasts with a
+# clear error if state has not been populated.
+#
+# Closes the V1 refactor.
+
+
+def populate_industry_indicator_enrichment_for_industry(
+    db_engine: Engine,
+    industry_name: str,
+    *,
+    timeframe: str = "Weekly",
+    min_bars: int = 30,
+) -> int:
+    """Compute V1 industry indicator enrichment for one industry.
+
+    Reads industry_index_value history, aggregates to weekly bars,
+    runs compute_enrichment_primitives, and upserts to
+    industry_indicator_enrichment.
+
+    Returns the fundamentals_run.run_id.
+
+    Raises:
+        ValueError: industry doesn't exist, has no IIV rows, has no
+            matching state rows (Step 7 not yet run), or has fewer
+            than min_bars weekly bars.
+    """
+    # Validate timeframe — V1 only supports Weekly.
+    if timeframe != "Weekly":
+        raise ValueError(
+            f"populate_industry_indicator_enrichment_for_industry: "
+            f"only 'Weekly' is supported for industry indices in V1, "
+            f"got {timeframe!r}"
+        )
+
+    # Sanity: industry must exist.
+    with db_engine.connect() as conn:
+        idx = IndustryIndexRepository(conn).get(industry_name)
+    if idx is None:
+        raise ValueError(
+            f"populate_industry_indicator_enrichment_for_industry: "
+            f"industry {industry_name!r} does not exist"
+        )
+
+    # Sanity: state must have been populated first. The FK ON DELETE
+    # CASCADE requires a state row per enrichment row; fail-fast for
+    # a cleaner error than the IntegrityError that would otherwise
+    # come from the upsert.
+    with db_engine.connect() as conn:
+        state_count = IndustryIndicatorStateRepository(
+            conn,
+        ).count_for_industry(industry_name, timeframe)
+    if state_count == 0:
+        raise ValueError(
+            f"populate_industry_indicator_enrichment_for_industry: "
+            f"industry {industry_name!r} tf={timeframe} has no "
+            f"state rows. Run the state populator first (Step 7 "
+            f"endpoint)."
+        )
+
+    # Read the full value history.
+    with db_engine.connect() as conn:
+        history = IndustryIndexValueRepository(conn).get_history(
+            industry_name,
+        )
+    if not history:
+        raise ValueError(
+            f"populate_industry_indicator_enrichment_for_industry: "
+            f"industry {industry_name!r} has no value rows. Run "
+            f"v1_industry_index_value first."
+        )
+    history = list(reversed(history))  # oldest-first for the walk
+
+    # Aggregate to weekly bars (reuse Step 7 helper).
+    weekly_bars = _build_industry_weekly_bars(history)
+    if len(weekly_bars) < min_bars:
+        raise ValueError(
+            f"populate_industry_indicator_enrichment_for_industry: "
+            f"industry {industry_name!r} has only {len(weekly_bars)} "
+            f"weekly bars after aggregation (need at least "
+            f"{min_bars})"
+        )
+
+    # Build pandas Series for the compute layer.
+    high_s = pd.Series([b.high for b in weekly_bars], dtype=float)
+    low_s = pd.Series([b.low for b in weekly_bars], dtype=float)
+    close_s = pd.Series([b.close for b in weekly_bars], dtype=float)
+    volume_s = pd.Series(
+        [b.volume for b in weekly_bars], dtype=float,
+    )
+    timestamps = pd.Series([b.timestamp for b in weekly_bars])
+
+    # Compute enrichment (skips NaN-warmup bars with the EXACT same
+    # condition as compute_state_primitives, so the FK is satisfied
+    # for every emitted enrichment row).
+    primitives = compute_enrichment_primitives(
+        close_s, volume_s, high_s, low_s,
+        trade_dates=timestamps,
+        synthetic_atr_for_index=False,
+    )
+
+    # Convert to dataclass list. computed_at is set on the runner
+    # side so all rows of one run share the same audit timestamp.
+    now = datetime.now(UTC)
+    enrichments = [
+        IndustryIndicatorEnrichment(
+            industry_name=industry_name,
+            timeframe=timeframe,
+            bar_timestamp=p["bar_timestamp"],
+            pierces_upper_mid=p["pierces_upper_mid"],
+            pierces_lower_mid=p["pierces_lower_mid"],
+            dist_to_med_in_hl_units=p["dist_to_med_in_hl_units"],
+            dist_to_long_in_hl_units=p["dist_to_long_in_hl_units"],
+            dist_to_longest_in_hl_units=(
+                p["dist_to_longest_in_hl_units"]
+            ),
+            mean_dist_to_med_in_hl_units=(
+                p["mean_dist_to_med_in_hl_units"]
+            ),
+            mean_dist_to_long_in_hl_units=(
+                p["mean_dist_to_long_in_hl_units"]
+            ),
+            mean_dist_to_longest_in_hl_units=(
+                p["mean_dist_to_longest_in_hl_units"]
+            ),
+            bars_since_med_turn=p["bars_since_med_turn"],
+            bars_since_long_turn=p["bars_since_long_turn"],
+            bars_since_longest_turn=p["bars_since_longest_turn"],
+            pct_change_since_med_turn=(
+                p["pct_change_since_med_turn"]
+            ),
+            pct_change_since_long_turn=(
+                p["pct_change_since_long_turn"]
+            ),
+            pct_change_since_longest_turn=(
+                p["pct_change_since_longest_turn"]
+            ),
+            med_pattern_label=p["med_pattern_label"],
+            long_pattern_label=p["long_pattern_label"],
+            longest_pattern_label=p["longest_pattern_label"],
+            med_turn_buy=p["med_turn_buy"],
+            med_turn_sell=p["med_turn_sell"],
+            long_turn_buy=p["long_turn_buy"],
+            long_turn_sell=p["long_turn_sell"],
+            longest_turn_buy=p["longest_turn_buy"],
+            longest_turn_sell=p["longest_turn_sell"],
+            computed_at=now,
+        )
+        for p in primitives
+    ]
+
+    # Atomic write: one transaction, all rows or none.
+    with transaction(db_engine) as conn:
+        run_id = FundamentalsRunRepository(conn).open(
+            phase=PHASE_V1_INDUSTRY_INDICATOR_ENRICHMENT,
+            exchange="ALL",
+            notes=(
+                f"v1_industry_indicator_enrichment for "
+                f"{industry_name} tf={timeframe}"
+            ),
+        )
+        IndustryIndicatorEnrichmentRepository(conn).upsert_many(
+            enrichments,
+        )
+        FundamentalsRunRepository(conn).close(
+            run_id, status="SUCCESS",
+            succeeded=len(enrichments), failed=0,
+            skipped=(len(weekly_bars) - len(enrichments)),
+        )
+
+    logger.info(
+        "populate_industry_indicator_enrichment_for_industry %s "
+        "tf=%s: emitted=%d skipped=%d weekly_bars=%d "
+        "daily_iiv_rows=%d",
+        industry_name, timeframe,
+        len(enrichments), len(weekly_bars) - len(enrichments),
+        len(weekly_bars), len(history),
+    )
+    return run_id
+
+
+def populate_industry_indicator_enrichment_for_all(
+    db_engine: Engine,
+    *,
+    timeframe: str = "Weekly",
+    min_bars: int = 30,
+) -> dict:
+    """Bulk-compute V1 industry indicator enrichment for every
+    ACTIVE industry.
+
+    Iterates in alphabetical order. Per-industry error isolation:
+    a failure on one industry doesn't abort the others.
+
+    Industries with no IIV rows, no state rows, or insufficient
+    weekly bars after aggregation are reported as `skipped`
+    (not `failed`).
+
+    Returns a report dict:
+        {
+          "timeframe": str,
+          "succeeded": [(industry_name, run_id, num_rows), ...],
+          "failed":    [(industry_name, error_message), ...],
+          "skipped":   [(industry_name, reason), ...],
+        }
+    """
+    with db_engine.connect() as conn:
+        indices = IndustryIndexRepository(conn).list_active()
+
+    succeeded: list[tuple[str, int, int]] = []
+    failed: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
+
+    for idx in indices:
+        try:
+            run_id = (
+                populate_industry_indicator_enrichment_for_industry(
+                    db_engine, idx.industry_name,
+                    timeframe=timeframe, min_bars=min_bars,
+                )
+            )
+            with db_engine.connect() as conn:
+                cnt = IndustryIndicatorEnrichmentRepository(
+                    conn,
+                ).count_for_industry(idx.industry_name, timeframe)
+            succeeded.append((idx.industry_name, run_id, cnt))
+            logger.debug(
+                "industry=%s tf=%s OK (run_id=%d, count=%d)",
+                idx.industry_name, timeframe, run_id, cnt,
+            )
+        except ValueError as e:
+            # ValueError covers "no state rows", "no IIV rows",
+            # "insufficient bars", "industry doesn't exist". Treat
+            # as skipped, not failed — the industry simply isn't
+            # ready yet (likely Step 7 not yet run for it).
+            skipped.append((idx.industry_name, str(e)))
+            logger.info(
+                "industry=%s tf=%s skipped: %s",
+                idx.industry_name, timeframe, e,
+            )
+        except Exception as e:
+            failed.append((idx.industry_name, str(e)))
+            logger.warning(
+                "industry=%s tf=%s failed: %s",
+                idx.industry_name, timeframe, e, exc_info=True,
+            )
+
+    report = {
+        "timeframe": timeframe,
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped": skipped,
+    }
+    logger.info(
+        "populate_industry_indicator_enrichment_for_all tf=%s: "
         "succeeded=%d failed=%d skipped=%d",
         timeframe,
         len(succeeded), len(failed), len(skipped),
