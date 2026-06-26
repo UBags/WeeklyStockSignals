@@ -27,6 +27,7 @@ from fastapi import FastAPI
 from .routes import (
     admin, admin_etl, admin_exchange_state, admin_exchanges, admin_health,
     admin_notifications, admin_orchestrator, admin_signals, admin_subscribers,
+    admin_v1pipeline,
     compute, fundamentals, health, pulse, signals,
 )
 
@@ -120,4 +121,6 @@ def create_app(
     # Phase 1 fundamentals — industry classification + overrides + run
     # status. Reuses AppState.etl_executor for fire-and-forget refresh.
     app.include_router(fundamentals.router)
+    # V1 clean-pipeline admin endpoints (Steps 4–8). Reuses etl_executor.
+    app.include_router(admin_v1pipeline.router)
     return app

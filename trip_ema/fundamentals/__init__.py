@@ -58,6 +58,10 @@ FINANCIAL_SOURCES = (
 RUN_PHASES = (
     "industry", "shares", "financials",
     "market_cap", "index_build", "index_value", "index_indicators",
+    # V1 clean-pipeline phases (Steps 4–8 of clean-pipeline V1 refactor).
+    # Each is the audit-row phase value for one stage of the three-runner
+    # pipeline (state populator + enrichment populator, per series type).
+    "v1_stock_indicator_state",
 )
 
 # Allowed values for `fundamentals_run.status`.
