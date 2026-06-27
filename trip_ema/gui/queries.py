@@ -58,7 +58,10 @@ class SignalEventRow:
     in-progress bar, multiple `computed_at` values share the same
     `bar_timestamp` (one per tick that observed a regime change).
     """
-    event_id: int
+    # Step 12a: int | None — current_signals contributes
+    # rows with event_id=None (no surrogate id; PK is ticker_id
+    # alone). historical_signals contributes its real event_id.
+    event_id: int | None
     bar_timestamp: datetime
     computed_at: datetime
     timeframe: str
@@ -137,47 +140,109 @@ def list_tickers(
     ]
 
 
+# Step 12a: V1 read path — queries.py reads current_signals + historical_signals.
+
+
+def _ist_week_anchors(conn: Connection) -> tuple[datetime, datetime]:
+    """Return (current_monday_ts, previous_monday_ts) as timestamptz
+    values matching the bar_timestamp shape used in
+    current_signals / historical_signals for weekly bars
+    (Monday 00:00:00 UTC of the IST week).
+
+    Week boundaries follow Postgres' date_trunc('week', ...) which
+    is ISO 8601 (Monday-start). Sunday 23:59:59 IST belongs to the
+    same week as its preceding Monday. This matches the operator's
+    week definition: "00:00:01 Monday to 23:59:59 Sunday IST".
+
+    The weekly bar's bar_timestamp is stored as Monday 00:00:00 UTC
+    (renders as Monday 05:30:00 IST) — anchored to a Monday but
+    using UTC midnight as the time-of-day. The helper returns the
+    same shape so direct equality comparison works.
+    """
+    row = conn.execute(text("""
+        SELECT
+            (date_trunc('week',
+                        (NOW() AT TIME ZONE 'Asia/Kolkata'))::date
+            )::timestamptz                       AS current_monday_ts,
+            (date_trunc('week',
+                        (NOW() AT TIME ZONE 'Asia/Kolkata'))::date
+             - INTERVAL '7 days'
+            )::timestamptz                       AS previous_monday_ts
+    """)).first()
+    return row.current_monday_ts, row.previous_monday_ts
+
+
 def recent_signal_events(
     conn: Connection,
     ticker_id: int,
-    *,
-    limit: int = 10,
+    limit: int = 5,
 ) -> list[SignalEventRow]:
-    """The detail panel's signal-history list.
+    """Return the most recent N signals for one ticker.
 
-    Ordered by `computed_at DESC` (when the signal fired) rather than
-    `bar_timestamp DESC` (when the bar started), so the most recently
-    *generated* signal sits at the top — matching how the operator
-    thinks about the panel ("what fired most recently?"). For weekly
-    signals on the in-progress bar, multiple events share the same
-    `bar_timestamp`; sorting by `computed_at` is what separates them
-    visually.
+    Step 12a: V1 read path. NO JOIN between current_signals and
+    historical_signals — two separate queries composed in Python.
 
-    The DB column is `signal_type` (see signal_events DDL in
-    0001_initial_schema.sql); we alias it to `signal` here so the
-    dataclass field and the view's e.signal access stay consistent
-    with the HTTP-side payload shape, which also aliases this way
-    (see transports/http/routes/signals.py).
+    Strategy (operator's spec):
+      1. Check current_signals for a row for this ticker. If found,
+         take it as row #1 (newest).
+      2. Top up from historical_signals (bar_timestamp DESC,
+         computed_at DESC) for the remaining (limit - 1) rows. If
+         current_signals had no match, take all `limit` from
+         historical.
+
+    `SignalEventRow.event_id` is int | None. current_signals has
+    no surrogate id (PK is ticker_id alone, no event log
+    semantics), so its contribution carries event_id=None.
+    historical_signals rows carry their actual event_id. No GUI
+    consumer reads event_id today; the field is preserved on the
+    dataclass to keep `tests/persistence/test_gui_queries.py`'s
+    assertions usable when comparing identities.
     """
-    rows = conn.execute(text("""
-        SELECT event_id, bar_timestamp, computed_at, timeframe,
+    if limit <= 0:
+        return []
+
+    out: list[SignalEventRow] = []
+
+    # ---- 1. current_signals (at most 1 row per ticker) ----
+    current = conn.execute(text("""
+        SELECT bar_timestamp, computed_at, timeframe,
                signal_type AS signal, price_at_signal
-        FROM signal_events
-        WHERE ticker_id = :tid
-        ORDER BY computed_at DESC, bar_timestamp DESC
-        LIMIT :lim
-    """), {"tid": ticker_id, "lim": limit})
-    return [
-        SignalEventRow(
-            event_id=r.event_id, bar_timestamp=r.bar_timestamp,
+          FROM current_signals
+         WHERE ticker_id = :tid
+    """), {"tid": ticker_id}).first()
+
+    if current is not None:
+        out.append(SignalEventRow(
+            event_id=None,
+            bar_timestamp=current.bar_timestamp,
+            computed_at=current.computed_at,
+            timeframe=current.timeframe,
+            signal=current.signal,
+            price_at_signal=float(current.price_at_signal),
+        ))
+        if limit == 1:
+            return out
+
+    # ---- 2. historical_signals top-up ----
+    remaining = limit - len(out)
+    rows = conn.execute(text("""
+        SELECT signal_id AS event_id, bar_timestamp, computed_at,
+               timeframe, signal_type AS signal, price_at_signal
+          FROM historical_signals
+         WHERE ticker_id = :tid
+         ORDER BY bar_timestamp DESC, computed_at DESC
+         LIMIT :lim
+    """), {"tid": ticker_id, "lim": remaining})
+    for r in rows:
+        out.append(SignalEventRow(
+            event_id=int(r.event_id),
+            bar_timestamp=r.bar_timestamp,
             computed_at=r.computed_at,
-            timeframe=r.timeframe, signal=r.signal,
+            timeframe=r.timeframe,
+            signal=r.signal,
             price_at_signal=float(r.price_at_signal),
-        )
-        for r in rows
-    ]
-
-
+        ))
+    return out
 def ticker_symbol_history(
     conn: Connection, ticker_id: int,
 ) -> list[SymbolHistoryRow]:
@@ -201,57 +266,65 @@ def ticker_symbol_history(
 def last_run_signals(
     conn: Connection, *, exchange: str = "NSE",
 ) -> dict[int, str]:
-    """Return {ticker_id: signal_type} for tickers that fired in the
-    most recent compute pass on `exchange`.
+    """Return {ticker_id: signal_type} for tickers to color on the
+    Tickers tab.
 
-    "Most recent compute pass" is defined as: all signal_events whose
-    `computed_at` falls within a 60-second window of the global
-    `MAX(computed_at)`. The orchestrator's signal-emission per tick
-    completes in well under a second, so 60s comfortably groups one
-    tick's events while staying narrower than the smallest inter-tick
-    gap (NSE post-open to mid-session is 2h 45min in Phase 16a).
+    Step 12a: V1 read path. NO JOIN between current_signals and
+    historical_signals — two separate queries composed in Python.
 
-    Why "most recent" rather than "today's" or "last hour":
-      - "Today's" misses the first tick of the day before it fires.
-      - "Last hour" can miss a tick if the GUI is opened > 1h after
-        the last tick of the day.
-      - "Most recent" always returns something useful provided any
-        signal has ever fired, and naturally goes empty when nothing
-        has fired (initial deploys, ticker universe with no movers).
+    Operator's spec ("which tickers get colored right now"):
+      1. For each ticker, check current_signals for a row at the
+         current_bar (Monday 00:00 UTC of the current IST week).
+         If yes, color with its signal_type.
+      2. Else, check historical_signals for a row at the current
+         bar OR the previous bar (Monday of the prior IST week).
+         If yes, color with the matching signal_type (newest wins
+         if both bars matched, which can happen mid-week after a
+         flip rotates last week's signal out of current_signals).
 
-    If a ticker has multiple events in the same window (unusual:
-    would require an orchestrator catching up across several missed
-    weekly bars), the latest by `bar_timestamp` wins via
-    `DISTINCT ON (s.ticker_id) ... ORDER BY s.bar_timestamp DESC`.
+    Result: a ticker has at most one entry in the returned dict.
+    Tickers with no matching signal are absent (the model treats
+    absence as "no coloring").
 
-    Empty dict is a normal return — no events ever, or all events
-    older than 60s before the global max (shouldn't happen but
-    surfaces cleanly as no coloring).
+    Week anchors: IST Monday 00:00:00 boundary. See
+    `_ist_week_anchors` for the timestamptz shape used.
     """
-    # Pin coloring to the bar_timestamp of the current IST week or
-    # the previous IST week. The earlier `computed_at` 60-second
-    # window incorrectly flashed every ticker after a batch regen
-    # (the regen rewrote every row's computed_at to NOW(), so the
-    # window matched every event in the universe). Sharing the same
-    # window expression as `ticker_universe_with_recent_signals`
-    # keeps the Tickers tab coloring and the Signals tab dropdown
-    # partition aligned on the same definition of 'recent'.
-    rows = conn.execute(text("""
-        SELECT DISTINCT ON (s.ticker_id) s.ticker_id, s.signal_type
-        FROM signal_events s
-        JOIN tickers t USING (ticker_id)
-        WHERE t.exchange = :ex
-          AND s.ticker_id IS NOT NULL
-          AND s.bar_timestamp >= (
-              (date_trunc('week',
-                          (NOW() AT TIME ZONE 'Asia/Kolkata'))::timestamp
-               - INTERVAL '7 days') AT TIME ZONE 'Asia/Kolkata'
-          )
-        ORDER BY s.ticker_id, s.bar_timestamp DESC, s.computed_at DESC
-    """), {"ex": exchange})
-    return {r.ticker_id: r.signal_type for r in rows}
+    current_ts, previous_ts = _ist_week_anchors(conn)
 
+    # ---- 1. current_signals at current bar ----
+    current_rows = conn.execute(text("""
+        SELECT cs.ticker_id, cs.signal_type
+          FROM current_signals cs
+          JOIN tickers t USING (ticker_id)
+         WHERE t.exchange = :ex
+           AND cs.bar_timestamp = :current_ts
+    """), {"ex": exchange, "current_ts": current_ts})
+    result: dict[int, str] = {
+        int(r.ticker_id): r.signal_type for r in current_rows
+    }
 
+    # ---- 2. historical_signals at current OR previous bar ----
+    historical_rows = conn.execute(text("""
+        SELECT DISTINCT ON (hs.ticker_id)
+               hs.ticker_id, hs.signal_type
+          FROM historical_signals hs
+          JOIN tickers t USING (ticker_id)
+         WHERE t.exchange = :ex
+           AND hs.bar_timestamp IN (:current_ts, :previous_ts)
+         ORDER BY hs.ticker_id,
+                  hs.bar_timestamp DESC,
+                  hs.computed_at DESC
+    """), {
+        "ex": exchange,
+        "current_ts": current_ts,
+        "previous_ts": previous_ts,
+    })
+    for r in historical_rows:
+        tid = int(r.ticker_id)
+        if tid not in result:
+            result[tid] = r.signal_type
+
+    return result
 def ticker_universe_summary(
     conn: Connection, *, exchange: str = "NSE",
 ) -> dict:
@@ -311,49 +384,70 @@ def ticker_universe_with_recent_signals(
     *,
     exchange: str | None = None,
 ) -> list[TickerComboRow]:
-    """Active ticker universe, flagged for recent signal activity.
+    """Active ticker universe with `has_recent_signal` flag.
 
-    "Recent" means: any row in `signal_events` whose `bar_timestamp`
-    lies within the rolling 'this week + last week' window, where
-    weeks are Monday-anchored IST (the same anchor the Pine-style
-    weekly bucketing uses).
+    Step 12a: V1 read path. Uses the same `last_run_signals`-style
+    two-query lookup to determine the recent-signal dict, then
+    joins to tickers / industry / market_cap for the row payload.
 
-    The cutoff is computed in SQL as:
-        date_trunc('week', NOW() AT TIME ZONE 'Asia/Kolkata')
-            - INTERVAL '7 days'
-        interpreted as IST and converted back to timestamptz UTC
-        for comparison with bar_timestamp.
+    "Recent" means: a signal at the current bar OR the previous
+    bar (per the operator's Step 12 spec). See `last_run_signals`
+    for the precise rules.
 
-    Example: at any moment on Thu 2026-06-18 IST,
-        date_trunc('week', NOW() AT TIME ZONE 'Asia/Kolkata')
-            = 2026-06-15 00:00 (Mon of this week IST)
-        - 7 days
-            = 2026-06-08 00:00 (Mon of last week IST)
-        AT TIME ZONE 'Asia/Kolkata'
-            = 2026-06-07 18:30 UTC (timestamptz form for comparison)
-
-    Implementation: one CTE producing distinct ticker_ids with any
-    matching event, then a LEFT JOIN to the tickers table. Single
-    scan of signal_events, no N+1. The LEFT JOIN means tickers with
-    zero historical events still appear (with has_recent_signal =
-    False), which is what the dropdown wants.
-
-    Ordering: (has_recent_signal DESC, symbol ASC) so the consumer
-    can split the list at the True->False boundary in one pass via
-    `partition_ticker_rows`.
+    Ordering: (has_recent_signal DESC, symbol ASC) — preserved
+    from the legacy contract so the consumer can partition the
+    list at the True→False boundary. Step 12b layers
+    industry-grouped + composite-rank-score ordering on top
+    inside the views.
     """
+    # Step 1+2: V1 recent-signal dict (matches last_run_signals
+    # semantics; inlined here so the exchange filter applies even
+    # when `exchange is None` — the legacy contract treats None as
+    # "all exchanges", and this function predates per-exchange
+    # filtering).
+    current_ts, previous_ts = _ist_week_anchors(conn)
+
+    if exchange is None:
+        ex_clause = ""
+        ex_params: dict = {}
+    else:
+        ex_clause = " AND t.exchange = :ex"
+        ex_params = {"ex": exchange}
+
+    current_rows = conn.execute(text(f"""
+        SELECT cs.ticker_id, cs.signal_type
+          FROM current_signals cs
+          JOIN tickers t USING (ticker_id)
+         WHERE cs.bar_timestamp = :current_ts
+               {ex_clause}
+    """), {"current_ts": current_ts, **ex_params})
+    recent: dict[int, str] = {
+        int(r.ticker_id): r.signal_type for r in current_rows
+    }
+
+    historical_rows = conn.execute(text(f"""
+        SELECT DISTINCT ON (hs.ticker_id)
+               hs.ticker_id, hs.signal_type
+          FROM historical_signals hs
+          JOIN tickers t USING (ticker_id)
+         WHERE hs.bar_timestamp IN (:current_ts, :previous_ts)
+               {ex_clause}
+         ORDER BY hs.ticker_id,
+                  hs.bar_timestamp DESC,
+                  hs.computed_at DESC
+    """), {
+        "current_ts": current_ts,
+        "previous_ts": previous_ts,
+        **ex_params,
+    })
+    for r in historical_rows:
+        tid = int(r.ticker_id)
+        if tid not in recent:
+            recent[tid] = r.signal_type
+
+    # Step 3: full universe with industry + market_cap.
     sql = """
-        WITH recent_sigs AS (
-            SELECT DISTINCT ON (ticker_id)
-                ticker_id, signal_type
-            FROM signal_events
-            WHERE bar_timestamp >= (
-                (date_trunc('week', (NOW() AT TIME ZONE 'Asia/Kolkata'))::timestamp
-                 - INTERVAL '7 days') AT TIME ZONE 'Asia/Kolkata'
-            )
-            ORDER BY ticker_id, bar_timestamp DESC, computed_at DESC
-        ),
-        latest_mcap AS (
+        WITH latest_mcap AS (
             SELECT DISTINCT ON (ticker_id)
                 ticker_id, market_cap
             FROM daily_market_cap
@@ -361,40 +455,37 @@ def ticker_universe_with_recent_signals(
         )
         SELECT t.ticker_id, t.exchange, t.symbol, t.instrument_type,
                t.full_name,
-               (r.ticker_id IS NOT NULL) AS has_recent_signal,
-               r.signal_type AS latest_signal,
                ii.industry  AS industry,
                lm.market_cap AS market_cap
         FROM tickers t
-        LEFT JOIN recent_sigs         r  ON r.ticker_id  = t.ticker_id
         LEFT JOIN instrument_industry ii ON ii.ticker_id = t.ticker_id
         LEFT JOIN latest_mcap         lm ON lm.ticker_id = t.ticker_id
         WHERE t.is_active = TRUE AND t.delisted_at IS NULL
     """
-    params: dict = {}
     if exchange is not None:
         sql += " AND t.exchange = :ex"
-        params["ex"] = exchange
-    sql += " ORDER BY has_recent_signal DESC, t.symbol ASC"
+    sql += " ORDER BY t.symbol ASC"
 
-    rows = conn.execute(text(sql), params)
-    return [
-        TickerComboRow(
-            ticker_id=int(r.ticker_id),
+    rows = conn.execute(text(sql), ex_params).all()
+
+    out: list[TickerComboRow] = []
+    for r in rows:
+        tid = int(r.ticker_id)
+        has_recent = tid in recent
+        out.append(TickerComboRow(
+            ticker_id=tid,
             exchange=r.exchange,
             symbol=r.symbol,
             instrument_type=r.instrument_type,
             full_name=r.full_name,
-            has_recent_signal=bool(r.has_recent_signal),
-            latest_signal=r.latest_signal,
+            has_recent_signal=has_recent,
+            latest_signal=recent.get(tid),
             industry=r.industry,
             market_cap=r.market_cap,
-        )
-        for r in rows
-    ]
-
-
-
+        ))
+    # Python-side sort: has_recent_signal DESC, then symbol ASC.
+    out.sort(key=lambda x: (not x.has_recent_signal, x.symbol))
+    return out
 def top_n_tickers_in_industry_by_mcap(
     conn: Connection,
     industry_name: str,

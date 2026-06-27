@@ -106,17 +106,29 @@ _SCHEMA_DDL = """
     CREATE UNIQUE INDEX uq_indicator_state_ticker
         ON indicator_state (ticker_id, timeframe, trade_date)
         WHERE ticker_id IS NOT NULL;
-    CREATE TABLE signal_events (
-        event_id        BIGSERIAL PRIMARY KEY,
-        ticker_id       INTEGER REFERENCES tickers(ticker_id),
-        timeframe       VARCHAR(8),
-        industry_name   VARCHAR(128) REFERENCES industry_index(industry_name),
+    -- Step 12a: V1 read path — current_signals +
+    -- historical_signals replace the legacy signal_events table.
+    CREATE TABLE current_signals (
+        ticker_id       INTEGER PRIMARY KEY REFERENCES tickers(ticker_id),
+        timeframe       VARCHAR(8) NOT NULL,
         bar_timestamp   TIMESTAMPTZ NOT NULL,
         signal_type     VARCHAR(16) NOT NULL,
-        regime_before   INTEGER,
-        regime_after    INTEGER,
+        regime_before   SMALLINT NOT NULL,
+        regime_after    SMALLINT NOT NULL,
         price_at_signal DOUBLE PRECISION NOT NULL,
         computed_at     TIMESTAMPTZ NOT NULL
+    );
+    CREATE TABLE historical_signals (
+        signal_id       BIGSERIAL PRIMARY KEY,
+        ticker_id       INTEGER NOT NULL REFERENCES tickers(ticker_id),
+        timeframe       VARCHAR(8) NOT NULL,
+        bar_timestamp   TIMESTAMPTZ NOT NULL,
+        signal_type     VARCHAR(16) NOT NULL,
+        regime_before   SMALLINT NOT NULL,
+        regime_after    SMALLINT NOT NULL,
+        price_at_signal DOUBLE PRECISION NOT NULL,
+        computed_at     TIMESTAMPTZ NOT NULL,
+        archived_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     INSERT INTO tickers (ticker_id, exchange, symbol, instrument)
         VALUES (1806, 'NSE', 'SANSERA', 'EQ');
@@ -219,15 +231,52 @@ def _seed_indicator_state(engine, trade_date_ist: date,
 
 def _seed_signal_event(engine, bar_timestamp_ist: datetime,
                        signal_type: str, price: float,
-                       computed_at_utc: datetime) -> None:
+                       computed_at_utc: datetime,
+                       *, target: str = "historical") -> None:
+    """Step 12a: V1 read path. Default writes to historical_signals
+    (matches the bulk of chart-marker test scenarios which seed
+    past-bar signals). Pass target='current' to write to
+    current_signals instead — useful for the "current_signals
+    contributes to the window" scenario.
+
+    regime_before / regime_after are chosen consistently with
+    signal_type so a CHECK constraint match holds in production
+    parity tests; the test schema omits the CHECK itself but the
+    NOT NULL columns must be populated.
+    """
+    regime_map = {
+        "BUY":            (-1,  1),
+        "SELL":           ( 1, -1),
+        "EXIT_FROM_BUY":  ( 1,  0),
+        "EXIT_FROM_SELL": (-1,  0),
+    }
+    rb, ra = regime_map.get(signal_type, (-1, 1))
+    bar_utc = bar_timestamp_ist.astimezone(UTC)
+    if target == "current":
+        sql = (
+            "INSERT INTO current_signals "
+            "(ticker_id, timeframe, bar_timestamp, signal_type, "
+            " regime_before, regime_after, price_at_signal, computed_at) "
+            "VALUES (1806, '1W', %(bt)s, %(st)s, %(rb)s, %(ra)s, "
+            "        %(p)s, %(ca)s)"
+        )
+    elif target == "historical":
+        sql = (
+            "INSERT INTO historical_signals "
+            "(ticker_id, timeframe, bar_timestamp, signal_type, "
+            " regime_before, regime_after, price_at_signal, computed_at) "
+            "VALUES (1806, '1W', %(bt)s, %(st)s, %(rb)s, %(ra)s, "
+            "        %(p)s, %(ca)s)"
+        )
+    else:
+        raise ValueError(
+            f"target must be 'current' or 'historical', got {target!r}"
+        )
     with engine.begin() as conn:
         conn.exec_driver_sql(
-            "INSERT INTO signal_events "
-            "(ticker_id, timeframe, bar_timestamp, signal_type, "
-            " price_at_signal, computed_at) "
-            "VALUES (1806, '1W', %(bt)s, %(st)s, %(p)s, %(ca)s)",
-            dict(bt=bar_timestamp_ist.astimezone(UTC),
-                 st=signal_type, p=price, ca=computed_at_utc),
+            sql,
+            dict(bt=bar_utc, st=signal_type, rb=rb, ra=ra,
+                 p=price, ca=computed_at_utc),
         )
 
 

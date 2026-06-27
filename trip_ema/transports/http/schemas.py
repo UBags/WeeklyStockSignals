@@ -500,7 +500,9 @@ class HistoricalSignalEventPayload(BaseModel):
     signals' list uses `computed_at` so users see WHEN the signal
     was generated, not which weekly bucket it fired on."""
     model_config = ConfigDict(frozen=True)
-    event_id: int
+    # Step 12a: int | None — current_signals contributes
+    # rows with event_id=None.
+    event_id: int | None
     bar_timestamp: datetime
     computed_at: datetime
     signal: str

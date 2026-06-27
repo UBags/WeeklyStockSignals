@@ -313,6 +313,9 @@ def _load_indicator_rows_by_date(
     }
 
 
+# Step 12a: V1 read path — signal_history reads current_signals + historical_signals.
+
+
 def _load_signal_events_for_window(
     conn: Connection,
     *,
@@ -321,31 +324,79 @@ def _load_signal_events_for_window(
     start: date,
     end: date,
 ) -> list[HistoricalSignalEventPayload]:
-    """Fetch signal_events rows for the window.
+    """Fetch signal events for the chart-history window.
 
-    Ordered by bar_timestamp ascending — the chart's marker layer
-    walks this list left-to-right.
+    Step 12a: V1 read path. Two separate queries — current_signals
+    (at most 1 row) + historical_signals (the bulk for a years-back
+    window) — composed in Python. No JOIN. No UNION.
+
+    `event_id` on the payload is now `int | None`: current_signals
+    has no surrogate event_id (its PK is ticker_id alone), so its
+    contribution carries None. historical_signals rows carry their
+    actual event_id. The GUI's chart_widget marker layer doesn't
+    read event_id; it iterates the list left-to-right purely for
+    placement.
+
+    Result is ordered by bar_timestamp ascending — the chart's
+    marker layer walks left-to-right.
+
+    Edge case (concurrent rotation): if the rotation primitive
+    fires between these two queries, the same (ticker, bar) pair
+    could appear in BOTH tables briefly. The merge prefers
+    current_signals (no event_id) and skips the historical
+    duplicate via (bar_timestamp, computed_at) keying. This costs
+    one O(n) scan; the dedup set is small (1 element).
     """
-    sql = text("""
-        SELECT event_id, bar_timestamp, computed_at, signal_type,
+    rows: list[HistoricalSignalEventPayload] = []
+    seen_keys: set[tuple[datetime, datetime]] = set()
+
+    # ---- 1. current_signals (at most 1 row for this ticker) ----
+    cur = conn.execute(text("""
+        SELECT bar_timestamp, computed_at, signal_type,
                price_at_signal
-          FROM signal_events
+          FROM current_signals
+         WHERE ticker_id = :tid
+           AND timeframe = :tf
+           AND bar_timestamp::date BETWEEN :start AND :end
+    """), {
+        "tid": ticker_id, "tf": timeframe.value,
+        "start": start, "end": end,
+    }).first()
+    if cur is not None:
+        rows.append(HistoricalSignalEventPayload(
+            event_id=None,
+            bar_timestamp=cur.bar_timestamp,
+            computed_at=cur.computed_at,
+            signal=cur.signal_type,
+            price_at_signal=cur.price_at_signal,
+        ))
+        seen_keys.add((cur.bar_timestamp, cur.computed_at))
+
+    # ---- 2. historical_signals ----
+    hist = conn.execute(text("""
+        SELECT signal_id AS event_id, bar_timestamp, computed_at,
+               signal_type, price_at_signal
+          FROM historical_signals
          WHERE ticker_id = :tid
            AND timeframe = :tf
            AND bar_timestamp::date BETWEEN :start AND :end
       ORDER BY bar_timestamp ASC
-    """)
-    rows = conn.execute(sql, {
+    """), {
         "tid": ticker_id, "tf": timeframe.value,
         "start": start, "end": end,
     }).fetchall()
-    return [
-        HistoricalSignalEventPayload(
-            event_id=r.event_id,
+    for r in hist:
+        key = (r.bar_timestamp, r.computed_at)
+        if key in seen_keys:
+            continue
+        rows.append(HistoricalSignalEventPayload(
+            event_id=int(r.event_id),
             bar_timestamp=r.bar_timestamp,
             computed_at=r.computed_at,
             signal=r.signal_type,
             price_at_signal=r.price_at_signal,
-        )
-        for r in rows
-    ]
+        ))
+
+    # Final order: bar_timestamp ASC across the merged set.
+    rows.sort(key=lambda x: x.bar_timestamp)
+    return rows
