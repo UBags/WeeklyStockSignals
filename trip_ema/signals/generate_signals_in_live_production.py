@@ -74,10 +74,57 @@ from trip_ema.fundamentals.indicator_primitives import (
 )
 from trip_ema.indicators.aggregation import daily_to_weekly
 from trip_ema.regime import BarInputs, Regime, compute_regime
-from trip_ema.signals.generate_and_backfill_signals import (
-    _load_daily_bars,
-    date_minus_days,
-)
+# Step 11b2: the legacy generate_and_backfill_signals.py
+# module was removed. Its two helpers used by this module
+# (_load_daily_bars + date_minus_days) are inlined below.
+# When Step 14 demolishes this live_production.py file entirely
+# (along with the rest of the legacy live cycle), these inlines
+# disappear with it.
+from datetime import timedelta as _timedelta
+
+from sqlalchemy import text as _text
+from sqlalchemy.engine import Connection as _Connection
+
+from trip_ema.domain.ohlcv import OHLCVBar as _OHLCVBar
+
+
+def date_minus_days(d, n):
+    """Return d minus n days as a date. Inlined from the removed
+    generate_and_backfill_signals module (Step 11b2)."""
+    return d - _timedelta(days=n)
+
+
+def _load_daily_bars(
+    conn: _Connection,
+    *,
+    ticker_id: int,
+    start,
+    end,
+):
+    """Fetch daily bars for ticker_id in [start, end], chronologically.
+    Inlined from the removed generate_and_backfill_signals module
+    (Step 11b2)."""
+    sql = _text("""
+        SELECT bar_timestamp, open, high, low, close, volume
+          FROM ohlcv_bars
+         WHERE ticker_id = :tid
+           AND timeframe = '1D'
+           AND bar_timestamp::date BETWEEN :start AND :end
+      ORDER BY bar_timestamp
+    """)
+    rows = conn.execute(sql, {
+        "tid": ticker_id,
+        "start": start,
+        "end": end,
+    }).fetchall()
+    return [
+        _OHLCVBar(
+            timestamp=r.bar_timestamp,
+            open=r.open, high=r.high, low=r.low, close=r.close,
+            volume=r.volume,
+        )
+        for r in rows
+    ]
 from trip_ema.signals.generate_signals import (
     PositionState,
     generate_signal,

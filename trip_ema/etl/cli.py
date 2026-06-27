@@ -2,7 +2,7 @@
 
 Subcommands:
   refresh-listings     — pull NSE CSVs, sync tickers table
-  backfill             — historical OHLCV load from --start
+  backfill             — V1 backfill (full pipeline: bars + state + signals)
   incremental-eod      — daily EoD fetch (all tickers, tier-ordered)
   incremental-intraday — hourly Tier-1-only fetch during market hours
   recompute-tiers      — refresh tickers.tier from 30-day ADV
@@ -83,22 +83,296 @@ def cmd_refresh_listings(args, config: Config) -> int:
 
 
 def cmd_backfill(args, config: Config) -> int:
-    start = _parse_date(args.start)
-    if start is None:
-        print(f"error: --start must be YYYY-MM-DD, got {args.start!r}", file=sys.stderr)
-        return 2
-    tier_filter = _parse_tier_filter(args.tier)
+    """V1 backfill — Step 11b2 rewrite.
+
+    The legacy implementation called `run_backfill()` which was a
+    pure yfinance bar-fetch. The V1 cycle covers the full pipeline:
+    bar fetch + stock state + enrichment + industry stages +
+    historical_signals + current_signals rebuild. See
+    `trip_ema.backfill.pipeline.backfill` for stage details.
+
+    Args (post-argparse):
+        --date_from YYYY-MM-DD (required unless --release-lock is
+            given alone)
+        --date_to YYYY-MM-DD (defaults to today)
+        --stocks 'SYM1,SYM2' / 'SYM1 SYM2 SYM3' (defaults to ALL)
+        --exchange NSE / BSE / NYSE (default NSE)
+        --no_fetch_bars (skip stage 1)
+        --release-lock (clear stale backfill_runs orphans first;
+            then continue with the backfill if date_from given,
+            else exit 0)
+    """
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    from ..backfill import backfill
+    from ..persistence import transaction
+    from ..persistence.backfill_runs_repo import (
+        BackfillRunsRepository,
+    )
+
+    # ---- 1. Release-lock first (operator-explicit cleanup) ----
     db_engine = create_engine_from_config(config)
     try:
-        run_id = run_backfill(
-            db_engine, config,
-            exchange=args.exchange,
-            start_date=start, tier_filter=tier_filter,
+        if args.release_lock:
+            with transaction(db_engine) as conn:
+                n = BackfillRunsRepository(conn).release_locks()
+            if n == 0:
+                print("--release-lock: no active marker rows found.")
+            else:
+                print(
+                    f"--release-lock: cleared {n} orphan marker "
+                    f"row(s) in backfill_runs."
+                )
+            if args.date_from is None:
+                # Cleanup-only mode. Print clear guidance about
+                # what arguments to provide for a proper backfill.
+                print()
+                print(
+                    "To run a backfill, provide --date_from "
+                    "(YYYY-MM-DD, required) and optionally:"
+                )
+                print(
+                    "  --date_to YYYY-MM-DD   (default: today)"
+                )
+                print(
+                    "  --stocks SYM1,SYM2     (default: ALL "
+                    "active tickers on the exchange)"
+                )
+                print(
+                    "  --exchange NSE|BSE|NYSE  (default: NSE)"
+                )
+                print(
+                    "  --no_fetch_bars        (skip yfinance "
+                    "stage 1; useful for state-only rebuild)"
+                )
+                return 0
+        elif args.date_from is None:
+            print(
+                "error: --date_from is required (YYYY-MM-DD), "
+                "or use --release-lock for cleanup-only mode",
+                file=sys.stderr,
+            )
+            return 2
+
+        # ---- 2. Parse + validate dates ----
+        date_from = _parse_date(args.date_from)
+        if date_from is None:
+            print(
+                f"error: --date_from must be YYYY-MM-DD, "
+                f"got {args.date_from!r}",
+                file=sys.stderr,
+            )
+            return 2
+
+        date_to = None
+        if args.date_to:
+            date_to = _parse_date(args.date_to)
+            if date_to is None:
+                print(
+                    f"error: --date_to must be YYYY-MM-DD, "
+                    f"got {args.date_to!r}",
+                    file=sys.stderr,
+                )
+                return 2
+
+        # ---- 3. Resolve --stocks symbols → ticker_ids ----
+        stocks: list[int] | None = None
+        if args.stocks:
+            # Accept both 'A,B,C' and 'A B C' shapes.
+            symbols: list[str] = []
+            for item in args.stocks:
+                for part in item.split(","):
+                    p = part.strip().upper()
+                    if p:
+                        symbols.append(p)
+            if not symbols:
+                print(
+                    "error: --stocks must list at least one symbol",
+                    file=sys.stderr,
+                )
+                return 2
+
+            with db_engine.connect() as conn:
+                rows = conn.execute(
+                    text("""
+                        SELECT ticker_id, symbol FROM tickers
+                         WHERE symbol = ANY(:syms)
+                           AND exchange = :ex
+                           AND is_active = TRUE
+                           AND delisted_at IS NULL
+                    """),
+                    {"syms": symbols, "ex": args.exchange},
+                ).all()
+            found = {r.symbol: r.ticker_id for r in rows}
+            missing = [s for s in symbols if s not in found]
+            if missing:
+                print(
+                    f"error: symbol(s) not found / inactive / wrong "
+                    f"exchange on {args.exchange}: "
+                    f"{', '.join(missing)}",
+                    file=sys.stderr,
+                )
+                return 2
+            stocks = sorted(found.values())
+
+        # ---- 4. Print plan + rough ETA ----
+        refetch = not args.no_fetch_bars
+        _print_backfill_plan(
+            date_from=date_from, date_to=date_to,
+            exchange=args.exchange, stocks=stocks,
+            refetch_bars=refetch, db_engine=db_engine,
         )
+
+        # ---- 5. Run the pipeline ----
+        def _progress(stage: str, message: str) -> None:
+            print(f"  [{stage}] {message}", flush=True)
+
+        try:
+            result = backfill(
+                db_engine, config,
+                date_from=date_from,
+                date_to=date_to,
+                exchange=args.exchange,
+                stocks=stocks,
+                refetch_bars=refetch,
+                progress_cb=_progress,
+            )
+        except IntegrityError:
+            print(
+                "error: another backfill appears to be active "
+                "(backfill_runs.uq_one_active fired). If a previous "
+                "run was Ctrl-C'd or crashed, use "
+                "`backfill --release-lock` to clear the orphan, "
+                "then re-run.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # ---- 6. Report ----
+        return _report_backfill_result(result)
+
     finally:
         db_engine.dispose()
-    print(f"backfill complete ({args.exchange}, run_id={run_id})")
-    return 0
+
+
+def _print_backfill_plan(
+    *,
+    date_from, date_to, exchange, stocks,
+    refetch_bars, db_engine,
+) -> None:
+    """Print operator-facing summary + rough ETA before the
+    pipeline starts. ETA is a back-of-envelope estimate based on
+    typical yfinance + recompute rates."""
+    from sqlalchemy import text
+
+    if stocks is None:
+        with db_engine.connect() as conn:
+            n_tickers = conn.execute(text("""
+                SELECT COUNT(*) FROM tickers
+                 WHERE exchange = :ex
+                   AND is_active = TRUE
+                   AND delisted_at IS NULL
+            """), {"ex": exchange}).scalar_one()
+    else:
+        n_tickers = len(stocks)
+
+    print(f"V1 Backfill — {exchange}")
+    print(f"  date_from:     {date_from.isoformat()}")
+    if date_to:
+        print(f"  date_to:       {date_to.isoformat()}")
+    else:
+        print(f"  date_to:       (defaults to today)")
+    if stocks is None:
+        print(f"  stocks:        ALL ({n_tickers} active)")
+    else:
+        print(
+            f"  stocks:        {n_tickers} specified "
+            f"({','.join(str(t) for t in stocks[:5])}"
+            f"{'...' if n_tickers > 5 else ''})"
+        )
+    print(f"  refetch_bars:  {refetch_bars}")
+    print()
+    # Rough ETA — back of envelope, just to give operator a sense
+    # whether to expect minutes or hours.
+    seconds_est = _estimate_runtime_seconds(
+        n_tickers=n_tickers, refetch_bars=refetch_bars,
+    )
+    minutes_est = max(1, round(seconds_est / 60))
+    print(
+        f"  Estimated runtime: ~{minutes_est} min "
+        f"(rough; per-ticker cost dominates)."
+    )
+    print()
+
+
+def _estimate_runtime_seconds(
+    *, n_tickers: int, refetch_bars: bool,
+) -> float:
+    """Back-of-envelope estimator. Numbers are approximate;
+    actual runtime depends on network, CPU, DB load."""
+    yfinance_per_ticker = 0.4 if refetch_bars else 0.0
+    stock_state_per_ticker = 0.1
+    stock_enrichment_per_ticker = 0.1
+    industry_stages_total = 30.0
+    per_ticker = (
+        yfinance_per_ticker
+        + stock_state_per_ticker
+        + stock_enrichment_per_ticker
+    )
+    return n_tickers * per_ticker + industry_stages_total
+
+
+def _report_backfill_result(result) -> int:
+    """Print the BackfillResult summary. Returns exit code: 0 on
+    success, 1 on stage failure."""
+    print()
+    print("=" * 60)
+    if result.failed_stage is not None:
+        print(
+            f"backfill FAILED in {result.failed_stage}: "
+            f"{result.error_message}"
+        )
+        print(
+            f"  run_id:      {result.run_id} "
+            f"(marker finished; live cycle resumes)"
+        )
+    else:
+        print("backfill complete")
+        print(f"  run_id:      {result.run_id}")
+    print(f"  range:       {result.date_from} .. {result.date_to}")
+    print(
+        f"  scope:       {result.ticker_scope_size} tickers "
+        f"({result.ticker_scope_label[:50]}"
+        f"{'...' if len(result.ticker_scope_label) > 50 else ''})"
+    )
+    if result.bars_fetch_run_id is not None:
+        print(
+            f"  bars fetch:  etl_runs.run_id={result.bars_fetch_run_id}"
+        )
+    print(
+        f"  stock state: {result.stock_state_tickers_done} "
+        f"done, {len(result.stock_state_failed)} failed"
+    )
+    print(
+        f"  enrichment:  {result.stock_enrichment_tickers_done} "
+        f"done, {len(result.stock_enrichment_failed)} failed"
+    )
+    print(
+        f"  industries:  iiv={result.iiv_industries_done}, "
+        f"state={result.industry_state_done}, "
+        f"enrich={result.industry_enrichment_done}"
+    )
+    print(
+        f"  signals:     deleted={result.historical_signals_deleted}, "
+        f"inserted={result.historical_signals_inserted}, "
+        f"mondays_walked={result.mondays_walked}"
+    )
+    print(
+        f"  current:     upserted={result.current_signals_upserted}, "
+        f"deleted={result.current_signals_deleted}"
+    )
+    return 0 if result.failed_stage is None else 1
 
 
 def cmd_incremental_eod(args, config: Config) -> int:
@@ -247,16 +521,54 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_exchange_arg(rl)
 
-    bk = sub.add_parser("backfill", help="Historical OHLCV load")
+    bk = sub.add_parser(
+        "backfill",
+        help=(
+            "V1 backfill: re-run the full pipeline (bars + state + "
+            "enrichment + industries + historical_signals + "
+            "current_signals) for a date range and ticker scope."
+        ),
+    )
     _add_exchange_arg(bk)
     bk.add_argument(
-        "--start", required=True,
-        help="Start date (YYYY-MM-DD). e.g., 2010-01-01 for 15-year backfill",
+        "--date_from",
+        help=(
+            "Start date YYYY-MM-DD (ISO 8601). Required unless "
+            "--release-lock is used alone. Rounds DOWN to Monday."
+        ),
     )
     bk.add_argument(
-        "--tier", choices=("1", "2", "3", "all"),
-        default="all",
-        help="Restrict to one tier (default: all). 'all' fetches every active ticker.",
+        "--date_to",
+        help=(
+            "End date YYYY-MM-DD. Defaults to today. The walk "
+            "goes up through monday_of(date_to) inclusive."
+        ),
+    )
+    bk.add_argument(
+        "--stocks", nargs="+", default=None,
+        help=(
+            "Symbols to backfill. Accepts both 'RELIANCE,TCS' "
+            "(comma-separated) and 'RELIANCE TCS' (space-separated). "
+            "Default: ALL active tickers on the exchange."
+        ),
+    )
+    bk.add_argument(
+        "--no_fetch_bars", action="store_true",
+        help=(
+            "Skip stage 1 (yfinance bar refetch). Useful when the "
+            "OHLCV table is already populated and only the V1 "
+            "derivations need rebuilding."
+        ),
+    )
+    bk.add_argument(
+        "--release-lock", action="store_true",
+        dest="release_lock",
+        help=(
+            "Clear any orphan rows in backfill_runs (finished_at "
+            "IS NULL) before proceeding. Use after a prior backfill "
+            "was Ctrl-C'd or crashed. With --date_from also given, "
+            "continues with the backfill; alone, exits after cleanup."
+        ),
     )
 
     eod = sub.add_parser("incremental-eod", help="Daily EoD ETL pass")
