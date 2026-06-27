@@ -115,6 +115,7 @@ def derive_signal_for_ticker_this_cycle(
     now: datetime,
     timeframe: str = Timeframe.WEEKLY,
     on_or_before: datetime | None = None,
+    as_of: datetime | None = None,
 ) -> SignalEvent | None:
     """Compare the latest two stock_indicator_state rows. Emit a
     SignalEvent if their display_regime differs, else None.
@@ -133,8 +134,12 @@ def derive_signal_for_ticker_this_cycle(
             For backfill use; leave None for live cycle.
     """
     repo = StockIndicatorStateRepository(conn)
+    # Step 11b1: when as_of is set (backfill caller), bound the
+    # state-row read so we see the two most recent rows AS OF that
+    # historical instant — not the absolute latest.
     states = repo.get_history_for_ticker(
-        ticker_id, str(timeframe), limit=2,
+        ticker_id, str(timeframe),
+        to_dt=as_of, limit=2,
     )
     if len(states) < 2:
         return None
@@ -143,8 +148,16 @@ def derive_signal_for_ticker_this_cycle(
     if latest.display_regime == previous.display_regime:
         return None
 
+    # Step 11b1: in backfill mode (as_of set), the daily-close
+    # lookup also needs to be capped — using the live cycle's
+    # "absolute latest" price would attribute a future price to a
+    # historical signal. Explicit on_or_before still wins if the
+    # caller provided one.
+    effective_on_or_before = (
+        on_or_before if on_or_before is not None else as_of
+    )
     price = _latest_daily_close(
-        conn, ticker_id, on_or_before=on_or_before,
+        conn, ticker_id, on_or_before=effective_on_or_before,
     )
     if price is None or price <= 0:
         # No valid price → can't emit a signal. The DB CHECK on

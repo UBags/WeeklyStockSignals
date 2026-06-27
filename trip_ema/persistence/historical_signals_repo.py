@@ -47,15 +47,45 @@ _INSERT_SQL = """
 class HistoricalSignalsRepository:
     """V1 historical_signals CRUD.
 
-    Pure append-only — no upsert, no delete. The only writer is the
-    rotation primitive (Step 4) plus the backfill rewire (Step 11);
-    both treat this as a write-once audit log.
+    Two writers: (1) the rotation primitive (Step 4) which moves
+    rows from current_signals on each cycle, and (2) the backfill
+    pipeline (Step 11b1) which uses delete_for_tickers_from_date +
+    insert_many to rewrite a date range when an operator runs a
+    historical replay.
     """
 
     def __init__(self, conn: Connection):
         self._conn = conn
 
     # ---------- writes ---------- #
+
+    def delete_for_tickers_from_date(
+        self,
+        *,
+        ticker_ids: list[int],
+        from_date: datetime,
+    ) -> int:
+        """Delete historical_signals rows for the given ticker_ids
+        where computed_at >= from_date.
+
+        Step 11b1 (backfill): breaks the original "pure append-only"
+        invariant — backfill needs to wipe rows in a historical range
+        before re-inserting fresh ones. The rotation primitive (Step 4)
+        still treats historical as append-only.
+
+        Returns the row count deleted.
+        """
+        if not ticker_ids:
+            return 0
+        result = self._conn.execute(
+            text("""
+                DELETE FROM historical_signals
+                 WHERE ticker_id = ANY(:ids)
+                   AND computed_at >= :from_dt
+            """),
+            {"ids": ticker_ids, "from_dt": from_date},
+        )
+        return result.rowcount
 
     def insert_many(
         self,

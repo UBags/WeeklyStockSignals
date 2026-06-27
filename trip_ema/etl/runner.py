@@ -456,7 +456,118 @@ def run_intraday(
     )
 
 
+def fetch_bars_for_tickers(
+    db_engine: Engine,
+    config: Config,
+    *,
+    ticker_ids: list[int],
+    start_date: date,
+    end_date: date | None = None,
+    source: "YFinanceSource | None" = None,
+) -> int:
+    """Per-ticker yfinance daily-bar fetch for a date range.
+
+    Step 11b1: closes the gap left by `run_backfill`, which is
+    full-exchange only. For partial-ticker backfill (operator
+    invokes `backfill --stocks SYM1,SYM2`), the pipeline needs to
+    refetch only the listed tickers — not the whole exchange.
+
+    All listed tickers must be on the same exchange (validated;
+    raises ValueError on mixed-exchange input). Inactive / delisted
+    tickers are silently dropped from the fetch.
+
+    Args:
+        db_engine: SQLAlchemy Engine.
+        config: trip_ema Config (for yfinance batch + concurrency).
+        ticker_ids: ticker_ids to fetch. Must be non-empty.
+        start_date: inclusive lower bound on the fetch range.
+        end_date: inclusive upper bound. None defaults to today.
+        source: optional YFinanceSource override (mainly for tests
+            with mocked fetches; production code lets this default
+            so a fresh source per call gets the correct exchange).
+
+    Returns:
+        The `etl_runs.run_id` of the fetch operation, matching
+        `run_backfill`'s return shape.
+
+    Raises:
+        ValueError: ticker_ids empty, no active tickers resolved, or
+            mixed exchanges in the input.
+    """
+    if not ticker_ids:
+        raise ValueError(
+            "fetch_bars_for_tickers: ticker_ids must be non-empty"
+        )
+
+    # Resolve symbol + tier + exchange for each ticker_id.
+    with db_engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT ticker_id, exchange, symbol, tier
+                  FROM tickers
+                 WHERE ticker_id = ANY(:ids)
+                   AND is_active = TRUE
+                   AND delisted_at IS NULL
+                 ORDER BY tier ASC, symbol ASC
+            """),
+            {"ids": ticker_ids},
+        ).all()
+
+    if not rows:
+        raise ValueError(
+            f"fetch_bars_for_tickers: no active tickers found for "
+            f"ticker_ids={ticker_ids!r}"
+        )
+
+    exchanges = {r.exchange for r in rows}
+    if len(exchanges) > 1:
+        raise ValueError(
+            f"fetch_bars_for_tickers: ticker_ids span multiple "
+            f"exchanges {exchanges!r}; call once per exchange"
+        )
+    exchange = exchanges.pop()
+    validate_exchange(exchange, config)
+
+    src = source or YFinanceSource(exchange=exchange)
+    tickers = [
+        _TickerInfo(
+            ticker_id=r.ticker_id, symbol=r.symbol,
+            tier=Tier(r.tier),
+        )
+        for r in rows
+    ]
+
+    if end_date is None:
+        end_date = date.today()
+
+    cid = new_correlation_id()
+    with correlation_id(cid):
+        with db_engine.begin() as conn:
+            run_id = EtlStatusRepository(conn).open_run(
+                RunKind.BACKFILL,
+                exchange=exchange,
+                correlation_id=cid,
+            )
+        outcome = _execute_batches(
+            db_engine=db_engine,
+            config=config,
+            src=src,
+            tickers=tickers,
+            run_id=run_id,
+            start=start_date,
+            end=end_date,
+            timeframe=Timeframe.DAILY,
+            kind=RunKind.BACKFILL,
+            intraday=False,
+        )
+        with db_engine.begin() as conn:
+            EtlStatusRepository(conn).close_run(run_id, outcome)
+
+    return run_id
+
+
 def run_backfill(
+
     db_engine: Engine,
     config: Config,
     *,

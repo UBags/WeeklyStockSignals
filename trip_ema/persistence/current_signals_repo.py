@@ -86,6 +86,28 @@ class CurrentSignalsRepository:
         )
         return len(signals)
 
+    def delete_for_tickers(self, ticker_ids: list[int]) -> int:
+        """Delete current_signals rows for the listed ticker_ids.
+
+        Step 11b1 (backfill Stage 9): when the latest-bar derivation
+        shows NO regime flip for a ticker, any pre-existing
+        current_signals row for that ticker is stale and must be
+        removed.
+
+        Returns the row count deleted. No-op (returns 0) if the
+        list is empty.
+        """
+        if not ticker_ids:
+            return 0
+        result = self._conn.execute(
+            text("""
+                DELETE FROM current_signals
+                 WHERE ticker_id = ANY(:ids)
+            """),
+            {"ids": ticker_ids},
+        )
+        return result.rowcount
+
     def truncate(self) -> None:
         """Wipe all rows. Used by rotation (Step 4) after the
         INSERT...SELECT into historical_signals lands.
