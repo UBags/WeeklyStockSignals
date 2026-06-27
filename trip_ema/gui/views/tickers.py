@@ -91,19 +91,21 @@ from ..workers import RefreshScheduler, submit
 logger = logging.getLogger(__name__)
 
 
-# Column indices — single source of truth used by header labels,
-# data accessors, and filter logic.
+# Step 12c: Industry column inserted at position 2 (right after
+# Symbol). All other column indices shifted up by 1.
 COL_TICKER_ID = 0
 COL_SYMBOL = 1
-COL_INSTRUMENT = 2
-COL_TIER = 3
-COL_LAST_BAR = 4
-COL_FAILURES = 5
-COL_PARKED = 6
-COL_FULL_NAME = 7
+COL_INDUSTRY = 2
+COL_INSTRUMENT = 3
+COL_TIER = 4
+COL_LAST_BAR = 5
+COL_FAILURES = 6
+COL_PARKED = 7
+COL_FULL_NAME = 8
 
 HEADERS = [
-    "ID", "Symbol", "Type", "Tier", "Last bar", "Fails", "Parked", "Name",
+    "ID", "Symbol", "Industry", "Type", "Tier", "Last bar",
+    "Fails", "Parked", "Name",
 ]
 
 
@@ -246,6 +248,8 @@ class TickerTableModel(QAbstractTableModel):
             return str(row.ticker_id)
         if col == COL_SYMBOL:
             return row.symbol
+        if col == COL_INDUSTRY:
+            return row.industry or "—"
         if col == COL_INSTRUMENT:
             return row.instrument_type
         if col == COL_TIER:
