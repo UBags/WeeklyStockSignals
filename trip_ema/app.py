@@ -28,6 +28,9 @@ import argparse
 import logging
 import signal
 import sys
+import threading
+import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn, TYPE_CHECKING
@@ -44,6 +47,7 @@ from .orchestrator import notify_subscribers, recompute_market
 from .persistence import (
     create_engine_from_config,
 )
+from .persistence.backfill_runs_repo import BackfillRunsRepository
 from .persistence.current_signals_repo import CurrentSignalsRepository
 from .scheduler import (
     ComputeScheduler,
@@ -385,12 +389,27 @@ def _build_orchestrator_components(
     # longer reachable from the orchestrator — ComputeScheduler is
     # constructed but neither `.start()`'d nor `.run_once()`'d.
     # Step 14 demolishes both.
-    compute_run_once = _make_v1_compute_run_once(
+    base_compute_run_once = _make_v1_compute_run_once(
         db_engine=db_engine, v1_cache=v1_cache,
     )
-    distribute_run_once = _make_v1_distribute_run_once(
+    base_distribute_run_once = _make_v1_distribute_run_once(
         db_engine=db_engine,
         brevo_config=config.transports.brevo,
+    )
+
+    # Step 11a: deferring layer. When `backfill_runs.is_running()`
+    # returns True, ticks no-op and a background poller spawns to
+    # run one catch-up tick after backfill completes.
+    poller_state = _BackfillPollerState()
+    compute_run_once = _make_deferring_compute(
+        base_callable=base_compute_run_once,
+        db_engine=db_engine,
+        poller_state=poller_state,
+        catch_up_distribute=base_distribute_run_once,
+    )
+    distribute_run_once = _make_deferring_distribute(
+        base_callable=base_distribute_run_once,
+        db_engine=db_engine,
     )
 
     pool = build_pool_from_configs(
@@ -550,7 +569,159 @@ def _make_v1_distribute_run_once(
     return _run
 
 
+# =====================================================================
+# Backfill marker / deferred tick (V1 cutover Step 11a)
+# =====================================================================
+# When a backfill is active (a row in `backfill_runs` with
+# `finished_at IS NULL`), the orchestrator's tick must not race against
+# the backfill's writes to indicator_state / signals / cache. Instead,
+# tick stages no-op and a background polling thread (15-min cadence)
+# runs ONE catch-up tick after the backfill completes.
+#
+# Dedup invariant: only one polling thread exists at a time. The orches-
+# trator may fire multiple ticks during a multi-hour backfill (4x daily
+# NSE schedule); each tick checks `state.active` under the lock and
+# bails out if a poller is already running.
+
+_BACKFILL_POLL_INTERVAL_SECONDS: float = 15 * 60  # 15 min
+
+
+@dataclass
+class _BackfillPollerState:
+    """Per-orchestrator-pool poller dedup state. One instance lives
+    in the `_build_orchestrator_components` scope, shared between
+    the deferring compute + distribute wrappers."""
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    active: bool = False
+
+
+def _spawn_backfill_poller(
+    *,
+    db_engine,
+    state: _BackfillPollerState,
+    catch_up_compute,
+    catch_up_distribute,
+    poll_interval_seconds: float = _BACKFILL_POLL_INTERVAL_SECONDS,
+) -> threading.Thread | None:
+    """Spawn one polling thread (if none is active) that waits for
+    the active backfill to finish, then runs one catch-up
+    compute + distribute pair.
+
+    Returns the spawned Thread, or None if a poller was already
+    active (dedup case).
+    """
+    with state.lock:
+        if state.active:
+            return None
+        state.active = True
+
+    def _poll() -> None:
+        try:
+            while True:
+                time.sleep(poll_interval_seconds)
+                with db_engine.connect() as conn:
+                    still_running = BackfillRunsRepository(
+                        conn,
+                    ).is_running()
+                if not still_running:
+                    break
+                logger.info(
+                    "backfill-poller: backfill still active; "
+                    "sleeping %.0fs",
+                    poll_interval_seconds,
+                )
+            logger.info(
+                "backfill-poller: backfill finished; running "
+                "one catch-up tick (compute + distribute)",
+            )
+            try:
+                catch_up_compute()
+            except Exception:
+                logger.exception(
+                    "backfill-poller: catch-up compute failed",
+                )
+            try:
+                catch_up_distribute()
+            except Exception:
+                logger.exception(
+                    "backfill-poller: catch-up distribute failed",
+                )
+        finally:
+            with state.lock:
+                state.active = False
+
+    thread = threading.Thread(
+        target=_poll,
+        name="backfill-poller",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _make_deferring_compute(
+    *,
+    base_callable,
+    db_engine,
+    poller_state: _BackfillPollerState,
+    catch_up_distribute,
+) -> "Callable[[], object]":
+    """Wraps the Step 10 V1 compute callable with a marker check.
+
+    On each invocation:
+      - If `backfill_runs.is_running()` is True: spawn the poller
+        (if one isn't already running) and return None
+      - Else: invoke `base_callable()` and return its result
+
+    The compute factory is the one responsible for spawning the
+    poller because the orchestrator's tick calls compute first;
+    distribute's deferring wrapper just no-ops on deferral.
+    """
+    def _run():
+        with db_engine.connect() as conn:
+            running = BackfillRunsRepository(conn).is_running()
+        if running:
+            _spawn_backfill_poller(
+                db_engine=db_engine,
+                state=poller_state,
+                catch_up_compute=base_callable,
+                catch_up_distribute=catch_up_distribute,
+            )
+            logger.info(
+                "compute tick deferred: backfill is running",
+            )
+            return None
+        return base_callable()
+    return _run
+
+
+def _make_deferring_distribute(
+    *,
+    base_callable,
+    db_engine,
+) -> "Callable[[], object]":
+    """Wraps the Step 10 V1 distribute callable with a marker check.
+
+    On each invocation:
+      - If `backfill_runs.is_running()` is True: return None
+      - Else: invoke `base_callable()` and return its result
+
+    No poller spawned here — the compute wrapper handles that.
+    """
+    def _run():
+        with db_engine.connect() as conn:
+            running = BackfillRunsRepository(conn).is_running()
+        if running:
+            logger.info(
+                "distribute tick deferred: backfill is running",
+            )
+            return None
+        return base_callable()
+    return _run
+
+
 def _build_email_transport_or_null(config, *, enrichment_provider=None, db_engine=None):
+
 
     """Build the email transport from `config.transports.brevo`.
 

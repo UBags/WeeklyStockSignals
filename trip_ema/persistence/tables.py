@@ -17,6 +17,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -129,6 +130,24 @@ subscriptions = Table(
     Column("ticker_id", Integer, ForeignKey("tickers.ticker_id")),
     Column("signal_filter", String(64)),
     Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+
+backfill_runs = Table(
+    "backfill_runs",
+    metadata,
+    Column("run_id", BigInteger, primary_key=True, autoincrement=True),
+    Column(
+        "started_at", DateTime(timezone=True),
+        nullable=False, server_default="NOW()",
+    ),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("pid", Integer, nullable=False),
+    Column("exchange", String(8), nullable=False),
+    Column("date_from", Date, nullable=False),
+    Column("date_to", Date, nullable=False),
+    Column("refetch_bars", Boolean, nullable=False),
+    Column("ticker_scope", Text, nullable=False),
 )
 
 
