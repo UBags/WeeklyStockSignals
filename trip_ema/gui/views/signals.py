@@ -50,8 +50,8 @@ from ..queries import latest_mcap_for_ticker
 from .._format_mcap import format_mcap_cr
 from ..benchmark_rerank_client import fetch_rank_scores
 from ..signals_helpers import (
+    industry_rank_alpha_sort_key,
     partition_ticker_rows,
-    signal_industry_mcap_sort_key,
 )
 from ..workers import submit
 from .backtest_dialog import BacktestDialog
@@ -364,18 +364,28 @@ class SignalsView(QWidget):
         rows, rank_scores = payload
         recent, other = partition_ticker_rows(rows)
 
-        # Recent partition: group by signal type, then industry ASC
-        # (NULLs last), then market cap DESC (NULLs last), then
-        # symbol ASC. Mirrors the Tickers tab proxy exactly via the
-        # shared `signal_industry_mcap_sort_key` helper. rank_score
-        # stays available for the per-item tooltip below.
+        # Step 12b: industry-grouped + rank dropdown sort.
+        # Both recent and "other" partitions are sorted by
+        # industry_rank_alpha_sort_key — industry primary, signaled
+        # rows before unsignaled within each industry, signaled
+        # rows by rank_score DESC, unsignaled by symbol ASC. The
+        # Tickers tab proxy uses the identical sort, so the two
+        # views are aligned.
         recent = sorted(
             recent,
-            key=lambda r: signal_industry_mcap_sort_key(
-                r, getattr(r, 'latest_signal', None),
+            key=lambda r: industry_rank_alpha_sort_key(
+                r,
+                getattr(r, 'latest_signal', None),
+                rank_scores.get(r.ticker_id),
             ),
         )
-        other = sorted(other, key=lambda r: r.symbol.lower())
+        other = sorted(
+            other,
+            key=lambda r: industry_rank_alpha_sort_key(
+                r, None,
+                rank_scores.get(r.ticker_id),
+            ),
+        )
         model = QStandardItemModel(self)
         grey_brush = QBrush(QColor(_DROPDOWN_GREY_BG))
         buy_brush = QBrush(QColor(_DROPDOWN_BUY_BG))

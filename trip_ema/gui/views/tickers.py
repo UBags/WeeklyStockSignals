@@ -81,7 +81,11 @@ from ..queries import (
     ticker_symbol_history, ticker_universe_summary,
 )
 from ..benchmark_rerank_client import fetch_rank_scores
-from ..signals_helpers import signal_industry_mcap_sort_key
+from fuzzywuzzy import fuzz   # Step 12b
+from ..signals_helpers import (
+    industry_rank_alpha_sort_key,
+    signal_industry_mcap_sort_key,
+)
 from ..workers import RefreshScheduler, submit
 
 logger = logging.getLogger(__name__)
@@ -299,6 +303,72 @@ class TickerSortFilterProxy(QSortFilterProxyModel):
     }
     UNSIGNALLED_GROUP = 99
 
+    # Step 12b: client-side fuzzy filter state. Both queries
+    # default to "" (match everything). textChanged signals from
+    # the view push updates here.
+    _FUZZY_THRESHOLD = 60   # 0-100; fuzzywuzzy's partial_ratio scale
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._stock_query: str = ""
+        self._industry_query: str = ""
+
+    def set_stock_query(self, q: str) -> None:
+        new = (q or "").strip().lower()
+        if new == self._stock_query:
+            return
+        self._stock_query = new
+        self.invalidateFilter()
+
+    def set_industry_query(self, q: str) -> None:
+        new = (q or "").strip().lower()
+        if new == self._industry_query:
+            return
+        self._industry_query = new
+        self.invalidateFilter()
+
+    def filterAcceptsRow(
+        self, source_row: int, source_parent: QModelIndex,
+    ) -> bool:
+        """Step 12b: client-side fuzzy filter.
+
+        - Empty queries accept all rows.
+        - Stock query matches against symbol + full_name (max of
+          the two fuzzywuzzy partial_ratio scores).
+        - Industry query matches against the industry name.
+        - Both queries apply (AND), so e.g. "RELI" + "energy"
+          narrows to RELIANCE INDUSTRIES if it's tagged Energy.
+        - Threshold _FUZZY_THRESHOLD (60/100): catches typos
+          ("relainc" ~ "RELIANCE") without dragging in random
+          partial substrings.
+        """
+        src = self.sourceModel()
+        if not isinstance(src, TickerTableModel):
+            return True
+        row = src.row_at(source_row)
+        if row is None:
+            return True
+
+        if self._stock_query:
+            sym = (row.symbol or "").lower()
+            full = (row.full_name or "").lower()
+            score = max(
+                fuzz.partial_ratio(self._stock_query, sym),
+                fuzz.partial_ratio(self._stock_query, full),
+            )
+            if score < self._FUZZY_THRESHOLD:
+                return False
+
+        if self._industry_query:
+            ind = (getattr(row, "industry", None) or "").lower()
+            if not ind:
+                return False
+            score = fuzz.partial_ratio(self._industry_query, ind)
+            if score < self._FUZZY_THRESHOLD:
+                return False
+
+        return True
+
     def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
         # The proxy always works against the source model; access it
         # via sourceModel() so this proxy is reusable even if a future
@@ -309,42 +379,28 @@ class TickerSortFilterProxy(QSortFilterProxyModel):
             # but if someone does in a test, fall through to default.
             return super().lessThan(left, right)
 
+        # Step 12b: single industry-grouped sort key for ALL rows
+        # (signaled + unsignaled). Industry primary, then within
+        # industry: signaled-rank-DESC then unsignaled-symbol-ASC.
+        # See industry_rank_alpha_sort_key for the full ordering
+        # contract. The shared helper means the Tickers tab and the
+        # Signals dropdown order rows identically.
         left_row = src.row_at(left.row())
         right_row = src.row_at(right.row())
         if left_row is None or right_row is None:
             return super().lessThan(left, right)
 
         signals = src.last_signals
+        ranks = src.rank_scores
         left_sig = signals.get(left_row.ticker_id)
         right_sig = signals.get(right_row.ticker_id)
-        left_group = self._group_rank(left_sig)
-        right_group = self._group_rank(right_sig)
-
-        # Layer 1: cross-group comparison wins immediately. Signalled
-        # groups (0/1/2) sort before unsignalled (99), and within
-        # signalled, BUY < SELL < EXIT.
-        if left_group != right_group:
-            return left_group < right_group
-
-        # Layer 2a: same signalled group → industry ASC (NULLs last),
-        # market cap DESC (NULLs last within industry), symbol ASC
-        # tiebreak. Implemented as a tuple compare against the shared
-        # helper so the Signals tab dropdown can use the identical
-        # ordering policy.
-        if left_group != self.UNSIGNALLED_GROUP:
-            return signal_industry_mcap_sort_key(
-                left_row, left_sig,
-            ) < signal_industry_mcap_sort_key(
-                right_row, right_sig,
-            )
-
-        # Layer 2b: both unsignalled → defer to whatever column the
-        # user has clicked. The view's initial sortByColumn() call
-        # makes this Tier ASC by default; subsequent column-header
-        # clicks change it. Rank-score sorting deliberately does NOT
-        # apply here — the unsignalled section is for browsing the
-        # universe, and operators expect their column clicks to win.
-        return super().lessThan(left, right)
+        left_rank = ranks.get(left_row.ticker_id)
+        right_rank = ranks.get(right_row.ticker_id)
+        return industry_rank_alpha_sort_key(
+            left_row, left_sig, left_rank,
+        ) < industry_rank_alpha_sort_key(
+            right_row, right_sig, right_rank,
+        )
 
     def _group_rank(self, signal_type: str | None) -> int:
         if signal_type is None:
@@ -408,12 +464,33 @@ class TickersView(QWidget):
         outer.addWidget(self._build_summary_row())
 
     def _build_filter_row(self) -> QHBoxLayout:
+        # Step 12b: fuzzy search bars. Two QLineEdits replace the
+        # single substring "Search:" box. Both use fuzzywuzzy on
+        # the client side (no SQL hit per keystroke) against the
+        # full active universe loaded once per refresh tick.
         row = QHBoxLayout()
-        row.addWidget(QLabel("Search:"))
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("symbol substring (e.g. RELI)")
-        self._search_input.textChanged.connect(self._on_filter_changed)
-        row.addWidget(self._search_input, 1)
+        row.addWidget(QLabel("Stocks:"))
+        self._stock_search_input = QLineEdit()
+        self._stock_search_input.setPlaceholderText(
+            "symbol or full name (fuzzy; e.g. 'relainc' matches "
+            "RELIANCE)"
+        )
+        self._stock_search_input.textChanged.connect(
+            self._on_filter_changed,
+        )
+        row.addWidget(self._stock_search_input, 1)
+
+        row.addSpacing(12)
+        row.addWidget(QLabel("Industry:"))
+        self._industry_search_input = QLineEdit()
+        self._industry_search_input.setPlaceholderText(
+            "industry name (fuzzy; e.g. 'chem' matches "
+            "Specialty Chemicals)"
+        )
+        self._industry_search_input.textChanged.connect(
+            self._on_filter_changed,
+        )
+        row.addWidget(self._industry_search_input, 1)
 
         row.addSpacing(20)
         row.addWidget(QLabel("Tier:"))
@@ -586,14 +663,31 @@ class TickersView(QWidget):
         self._scheduler.trigger_now()
 
     def _on_filter_changed(self) -> None:
-        # Filtering is a server-side concern (we requery the DB rather
-        # than client-filtering a 2300-row model). Just trigger a refresh.
+        # Step 12b: stocks + industry search are CLIENT-side (fuzzy
+        # match in the proxy). Push the current text to the proxy
+        # and let invalidateFilter() repaint. Tier + include-delisted
+        # remain server-side — those still trigger a DB requery so
+        # the model gets a different row set.
+        sender = self.sender()
+        if sender in (
+            self._stock_search_input, self._industry_search_input,
+        ):
+            self._proxy.set_stock_query(
+                self._stock_search_input.text(),
+            )
+            self._proxy.set_industry_query(
+                self._industry_search_input.text(),
+            )
+            return
+        # tier / delisted changed → DB requery
         self._scheduler.trigger_now()
 
     def _on_refresh_tick(self) -> None:
         # Capture filters at tick time so the async worker uses the
         # right snapshot.
-        substr = self._search_input.text().strip()
+        # Step 12b: stock/industry search is client-side
+        # via the proxy. Server-side only filters by tier
+        # and delisted.
         tier_text = self._tier_combo.currentText()
         tier_filter: int | None = None
         if tier_text.isdigit():
@@ -606,7 +700,7 @@ class TickersView(QWidget):
             with db.connect() as conn:
                 rows = list_tickers(
                     conn,
-                    symbol_substr=substr or None,
+                    symbol_substr=None,
                     tier_filter=tier_filter,
                     include_delisted=include_delisted,
                 )

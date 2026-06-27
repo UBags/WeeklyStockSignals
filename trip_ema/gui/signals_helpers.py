@@ -125,6 +125,61 @@ def signal_industry_mcap_sort_key(
     )
 
 
+# Step 12b: industry-grouped sort with rank_score (NOT mcap) as the
+# secondary key inside the signaled subgroup. Used by both the
+# Tickers tab proxy and the Signals dropdown. Coexists with the
+# legacy `signal_industry_mcap_sort_key` above.
+def industry_rank_alpha_sort_key(
+    row, signal_type: str | None,
+    rank_score: float | None = None,
+) -> tuple:
+    """V1 sort key per Step 12b spec.
+
+    Ordering, in priority:
+      1. industry ASC, with industry IS NULL last.
+      2. Within an industry: signaled rows (any of BUY/SELL/
+         EXIT_FROM_BUY/EXIT_FROM_SELL) come BEFORE unsignaled.
+      3. Within signaled: rank_score DESC (higher momentum first).
+         Missing rank_score treated as 0.0.
+      4. Within unsignaled: symbol ASC alphabetically.
+      5. symbol ASC as a deterministic tiebreak across all rows.
+
+    Key difference from the legacy `signal_industry_mcap_sort_key`:
+      - This key groups by INDUSTRY first, not by signal type.
+        BUY tickers in industry A appear in the A group, not at
+        the global top of all BUYs.
+      - Within signaled, rank_score (not market_cap) is the
+        secondary sort. The operator can see the highest-momentum
+        signal in each industry first.
+
+    `row` must expose `.industry` and `.symbol`. Missing attributes
+    treated as None / empty.
+    """
+    industry = getattr(row, 'industry', None)
+    industry_is_null = industry is None
+    industry_key = (industry or '').lower()
+
+    is_signaled = signal_type in (
+        "BUY", "SELL", "EXIT_FROM_BUY", "EXIT_FROM_SELL",
+    )
+    # Within an industry, signaled rows come first (False < True).
+    unsignaled_flag = not is_signaled
+
+    rank = rank_score if rank_score is not None else 0.0
+    # Negate so larger rank_score sorts first.
+    # For unsignaled rows the rank is forced to 0 — they fall
+    # through to the symbol tiebreak in step 5.
+    rank_key = -rank if is_signaled else 0.0
+
+    return (
+        industry_is_null,
+        industry_key,
+        unsignaled_flag,
+        rank_key,
+        row.symbol.lower(),
+    )
+
+
 def partition_ticker_rows(
     rows: Iterable[_HasRecentFlag],
 ) -> tuple[list, list]:
