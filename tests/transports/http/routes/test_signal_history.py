@@ -14,7 +14,6 @@ returns exactly what those tables hold.
 
 from __future__ import annotations
 
-import os
 from datetime import date, datetime, time, timedelta, timezone, UTC
 from zoneinfo import ZoneInfo
 
@@ -35,144 +34,46 @@ _TICKER = TickerRef(exchange="NSE", symbol="SANSERA", instrument="EQ")
 # ---------------------------------------------------------------------------
 
 
-def _pg_available() -> bool:
-    try:
-        import psycopg2  # noqa: F401
-    except ImportError:
-        return False
-    url = os.environ.get(
-        "TRIP_EMA_TEST_DB_URL",
-        "postgresql://postgres@/postgres",
-    )
-    try:
-        import psycopg2
-        conn = psycopg2.connect(url)
-        conn.close()
-        return True
-    except Exception:
-        return False
+# Step 12a fixup: uses shared db_engine fixture from
+# tests/persistence/conftest.py (pytest-postgresql +
+# Alembic-migrated ephemeral Postgres). The old
+# _pg_available skip-gate is no longer needed —
+# pytest-postgresql spawns its own Postgres process and
+# tears it down on session end, so the production DB is
+# never touched and external Postgres availability is
+# irrelevant.
 
 
-pytestmark = pytest.mark.skipif(
-    not _pg_available(),
-    reason="sandbox Postgres not reachable; set TRIP_EMA_TEST_DB_URL",
-)
 
-
-# Schema mirrors the production-relevant slice of indicator_state +
-# ohlcv_bars + signal_events. We include only the columns
-# build_signal_history_payload reads.
-_SCHEMA_DDL = """
-    CREATE TABLE tickers (
-        ticker_id   SERIAL PRIMARY KEY,
-        exchange    VARCHAR(8)  NOT NULL,
-        symbol      VARCHAR(64) NOT NULL,
-        instrument  VARCHAR(8)  NOT NULL
-    );
-    CREATE TABLE industry_index (
-        industry_name VARCHAR(128) PRIMARY KEY
-    );
-    CREATE TABLE ohlcv_bars (
-        ticker_id     INTEGER NOT NULL REFERENCES tickers(ticker_id),
-        timeframe     VARCHAR(8) NOT NULL,
-        bar_timestamp TIMESTAMPTZ NOT NULL,
-        open          DOUBLE PRECISION NOT NULL,
-        high          DOUBLE PRECISION NOT NULL,
-        low           DOUBLE PRECISION NOT NULL,
-        close         DOUBLE PRECISION NOT NULL,
-        volume        DOUBLE PRECISION NOT NULL,
-        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        adj_close     DOUBLE PRECISION,
-        PRIMARY KEY (ticker_id, timeframe, bar_timestamp)
-    );
-    CREATE TABLE indicator_state (
-        ticker_id        INTEGER REFERENCES tickers(ticker_id),
-        timeframe        VARCHAR(8),
-        industry_name    VARCHAR(128) REFERENCES industry_index(industry_name),
-        trade_date       DATE NOT NULL,
-        med_ema          DOUBLE PRECISION NOT NULL,
-        long_ema         DOUBLE PRECISION NOT NULL,
-        longest_ema      DOUBLE PRECISION NOT NULL,
-        atr              DOUBLE PRECISION NOT NULL,
-        upper_inner_band DOUBLE PRECISION NOT NULL,
-        lower_inner_band DOUBLE PRECISION NOT NULL,
-        upper_mid_band   DOUBLE PRECISION NOT NULL,
-        lower_mid_band   DOUBLE PRECISION NOT NULL,
-        upper_outer_band DOUBLE PRECISION NOT NULL,
-        lower_outer_band DOUBLE PRECISION NOT NULL,
-        display_regime   SMALLINT NOT NULL,
-        computed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE UNIQUE INDEX uq_indicator_state_ticker
-        ON indicator_state (ticker_id, timeframe, trade_date)
-        WHERE ticker_id IS NOT NULL;
-    -- Step 12a: V1 read path — current_signals +
-    -- historical_signals replace the legacy signal_events table.
-    CREATE TABLE current_signals (
-        ticker_id       INTEGER PRIMARY KEY REFERENCES tickers(ticker_id),
-        timeframe       VARCHAR(8) NOT NULL,
-        bar_timestamp   TIMESTAMPTZ NOT NULL,
-        signal_type     VARCHAR(16) NOT NULL,
-        regime_before   SMALLINT NOT NULL,
-        regime_after    SMALLINT NOT NULL,
-        price_at_signal DOUBLE PRECISION NOT NULL,
-        computed_at     TIMESTAMPTZ NOT NULL
-    );
-    CREATE TABLE historical_signals (
-        signal_id       BIGSERIAL PRIMARY KEY,
-        ticker_id       INTEGER NOT NULL REFERENCES tickers(ticker_id),
-        timeframe       VARCHAR(8) NOT NULL,
-        bar_timestamp   TIMESTAMPTZ NOT NULL,
-        signal_type     VARCHAR(16) NOT NULL,
-        regime_before   SMALLINT NOT NULL,
-        regime_after    SMALLINT NOT NULL,
-        price_at_signal DOUBLE PRECISION NOT NULL,
-        computed_at     TIMESTAMPTZ NOT NULL,
-        archived_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    INSERT INTO tickers (ticker_id, exchange, symbol, instrument)
-        VALUES (1806, 'NSE', 'SANSERA', 'EQ');
-"""
 
 
 @pytest.fixture
-def engine(request):
-    import psycopg2
-    from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-    from sqlalchemy import create_engine
+def engine(db_engine):
+    """Step 12a fixup: yields the shared Alembic-migrated db_engine
+    with the SANSERA ticker seeded at ticker_id=1806 — matching
+    the constant the existing test bodies reference.
 
-    db_url = os.environ.get(
-        "TRIP_EMA_TEST_DB_URL",
-        "postgresql://postgres@/postgres",
-    )
-    test_db = f"trip_ema_hist_test_{os.getpid()}_{abs(hash(request.node.name)) % 100000}"
-
-    admin = psycopg2.connect(db_url)
-    admin.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-    with admin.cursor() as c:
-        c.execute(f"DROP DATABASE IF EXISTS {test_db}")
-        c.execute(f"CREATE DATABASE {test_db}")
-    admin.close()
-
-    test_url = db_url.rsplit("/", 1)[0] + f"/{test_db}"
-    engine = create_engine(test_url)
-    with engine.begin() as conn:
-        conn.exec_driver_sql(_SCHEMA_DDL)
-
-    yield engine
-
-    engine.dispose()
-    admin = psycopg2.connect(db_url)
-    admin.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-    with admin.cursor() as c:
-        c.execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            "WHERE datname = %s AND pid <> pg_backend_pid()",
-            (test_db,),
-        )
-        c.execute(f"DROP DATABASE IF EXISTS {test_db}")
-    admin.close()
-
+    Cleanup is automatic — pytest-postgresql drops the entire
+    function-scoped database after each test, so the seed is
+    invisible to the next test and the production DB is never
+    touched.
+    """
+    from sqlalchemy import text
+    with db_engine.begin() as conn:
+        # Step 12a fixup-fixup: actual tickers schema has
+        # `instrument` (original column), not `instrument_type`,
+        # as the canonical identity column; consecutive_failures
+        # and parked live in etl_ticker_status, not tickers.
+        # Defaults handle tier (3), is_active (TRUE), and
+        # instrument_type (defaults from instrument='EQ').
+        conn.execute(text("""
+            INSERT INTO tickers (
+                ticker_id, exchange, symbol, instrument
+            ) VALUES (
+                1806, 'NSE', 'SANSERA', 'EQ'
+            )
+        """))
+    yield db_engine
 
 # ---------------------------------------------------------------------------
 # Seed helpers.
