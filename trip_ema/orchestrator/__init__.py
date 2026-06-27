@@ -17,9 +17,12 @@ Public surface:
     rotate_current_to_historical — atomic move of current_signals
         rows into historical_signals.
 
+- `recompute_market` (Step 6):
+    recompute_market — one pass through the V1 cycle compute
+        pipeline (8 stages, live mode only — backfill in Step 11).
+
 Later steps fill out the rest of this package:
 
-- `recompute_market` (Step 6): wires Steps 2-5 + cache rebuild
 - `notify_subscribers` (Step 9): wires Step 7's composer + sender
 """
 from __future__ import annotations
@@ -28,10 +31,16 @@ from .derive_signals import (
     derive_signal_for_ticker_this_cycle,
     derive_signals_for_all_active_stocks,
 )
+from .recompute_market import (
+    RecomputeMarketResult,
+    recompute_market,
+)
 from .rotate_signals import rotate_current_to_historical
 
 __all__ = [
+    "RecomputeMarketResult",
     "derive_signal_for_ticker_this_cycle",
     "derive_signals_for_all_active_stocks",
+    "recompute_market",
     "rotate_current_to_historical",
 ]
