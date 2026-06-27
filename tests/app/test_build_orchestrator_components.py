@@ -44,6 +44,12 @@ def _make_config(*, orchestrator_enabled: bool, markets: list | None = None):
     cfg.scheduling.orchestrator.catch_up_skip_if_recent_minutes = 30
     cfg.market_hours = markets or []
     cfg.etl.exchange = "NSE"
+    # Step 10: _build_orchestrator_components calls
+    # _make_v1_distribute_run_once(brevo_config=config.transports.brevo).
+    # A default MagicMock here would be truthy → factory tries to
+    # load a fake secrets file. None puts it on the no-op branch,
+    # which is what these pool-construction tests want.
+    cfg.transports.brevo = None
     return cfg
 
 
@@ -60,6 +66,7 @@ class TestOrchestratorDisabled:
             db_engine=MagicMock(),
             compute_scheduler=MagicMock(),
             distributor=MagicMock(),
+            v1_cache=MagicMock(),
         )
         assert ps is None
         assert pool is None
@@ -72,6 +79,7 @@ class TestOrchestratorDisabled:
             db_engine=MagicMock(),
             compute_scheduler=MagicMock(),
             distributor=MagicMock(),
+            v1_cache=MagicMock(),
         )
         assert ps is None and pool is None
 
@@ -92,6 +100,7 @@ class TestOrchestratorEnabled:
             db_engine=MagicMock(),
             compute_scheduler=MagicMock(),
             distributor=MagicMock(),
+            v1_cache=MagicMock(),
         )
         assert ps is not None
         assert pool is not None
@@ -110,6 +119,7 @@ class TestOrchestratorEnabled:
             db_engine=MagicMock(),
             compute_scheduler=MagicMock(),
             distributor=MagicMock(),
+            v1_cache=MagicMock(),
         )
         assert pool.exchanges() == ["BSE", "NSE"]
 
@@ -123,6 +133,7 @@ class TestOrchestratorEnabled:
             db_engine=MagicMock(),
             compute_scheduler=MagicMock(),
             distributor=MagicMock(),
+            v1_cache=MagicMock(),
         )
         assert ps is not None
         assert pool is not None
@@ -141,6 +152,7 @@ class TestOrchestratorEnabled:
             db_engine=MagicMock(),
             compute_scheduler=MagicMock(),
             distributor=MagicMock(),
+            v1_cache=MagicMock(),
         )
         # The pool's internal pulse_hook is what receives
         # orchestrator_started/stopped events. Calling start_all
@@ -169,6 +181,7 @@ class TestOrchestratorEnabled:
             db_engine=MagicMock(),
             compute_scheduler=MagicMock(),
             distributor=MagicMock(),
+            v1_cache=MagicMock(),
         )
         orch = pool.get("NSE")
         s = orch._settings  # noqa: access private

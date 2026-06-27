@@ -28,7 +28,7 @@ import argparse
 import logging
 import signal
 import sys
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn, TYPE_CHECKING
 
@@ -36,12 +36,15 @@ if TYPE_CHECKING:
     from .transports.http.pulse_state import PulseState
 
 from .cache import SignalCache
+from .cache.current_signals_cache import CurrentSignalsCache
 from .config import load_config
 from .notifications import EmailTransport, NullTransport, WebhookTransport
 from .notifications.base import NotificationTransport
+from .orchestrator import notify_subscribers, recompute_market
 from .persistence import (
     create_engine_from_config,
 )
+from .persistence.current_signals_repo import CurrentSignalsRepository
 from .scheduler import (
     ComputeScheduler,
     MarketHoursService,
@@ -126,6 +129,20 @@ def _build_app_state(config_path: Path) -> AppState:
     from trip_ema.api.lifecycle import prime_cache_from_db
     result = prime_cache_from_db(db_engine=db_engine, cache=cache)
     logger.info("Cache primed: %d snapshots", result.snapshots_populated)
+
+    # Step 10 cutover: build the V1 CurrentSignalsCache alongside the
+    # legacy SignalCache. Both coexist until Step 14 demolishes the
+    # latter. Primed from `current_signals` so GUI reads against the
+    # V1 cache work immediately at startup — not only after the first
+    # recompute_market cycle.
+    logger.info("Building V1 current_signals cache")
+    v1_cache = CurrentSignalsCache()
+    with db_engine.connect() as conn:
+        v1_signals = CurrentSignalsRepository(conn).list_all()
+    v1_cache.rebuild_from(v1_signals)
+    logger.info(
+        "V1 cache primed: %d signals", v1_cache.signal_count(),
+    )
 
     compute_scheduler = ComputeScheduler(
         db_engine=db_engine,
@@ -231,6 +248,7 @@ def _build_app_state(config_path: Path) -> AppState:
         db_engine=db_engine,
         compute_scheduler=compute_scheduler,
         distributor=distributor,
+        v1_cache=v1_cache,
     )
 
     return AppState(
@@ -253,6 +271,7 @@ def _build_orchestrator_components(
     db_engine,
     compute_scheduler: ComputeScheduler,
     distributor: SubscriberDistributor,
+    v1_cache: CurrentSignalsCache,
 ) -> tuple[PulseState | None, OrchestratorPool | None]:
     """Phase 14: build (PulseState, OrchestratorPool) if enabled in config.
 
@@ -361,12 +380,25 @@ def _build_orchestrator_components(
             return result
         return _fetch
 
+    # Step 10 cutover: V1 lambdas. The legacy
+    # `compute_scheduler.run_once` and `distributor.run_once` are no
+    # longer reachable from the orchestrator — ComputeScheduler is
+    # constructed but neither `.start()`'d nor `.run_once()`'d.
+    # Step 14 demolishes both.
+    compute_run_once = _make_v1_compute_run_once(
+        db_engine=db_engine, v1_cache=v1_cache,
+    )
+    distribute_run_once = _make_v1_distribute_run_once(
+        db_engine=db_engine,
+        brevo_config=config.transports.brevo,
+    )
+
     pool = build_pool_from_configs(
         market_configs=config.market_hours,
         settings=settings,
         fetch_fn_factory=_fetch_fn_for,
-        compute_run_once=compute_scheduler.run_once,
-        distribute_run_once=distributor.run_once,
+        compute_run_once=compute_run_once,
+        distribute_run_once=distribute_run_once,
         pulse=pulse_state,
     )
     logger.info(
@@ -430,7 +462,96 @@ def _wrap_transports_with_breakers(
     }
 
 
+def _make_v1_compute_run_once(
+    *,
+    db_engine,
+    v1_cache: CurrentSignalsCache,
+    exchange: str = "NSE",
+):
+    """Factory: build the V1 `compute_run_once` callable that the
+    orchestrator's pipeline invokes once per tick.
+
+    Closes over `db_engine` and `v1_cache`. `exchange` defaults to
+    'NSE' — the V1 cycle is NSE-only for now; BSE/NYSE wiring is
+    Phase 14.7+ work. Other callers (e.g. backfill in Step 11) can
+    pass a different exchange.
+
+    The returned callable takes no args and returns the
+    `RecomputeMarketResult` from `recompute_market`. The orchestrator's
+    pipeline machinery stores the result for `/admin/health` snapshots.
+    """
+    def _run():
+        return recompute_market(
+            db_engine,
+            mode="live",
+            cache=v1_cache,
+            exchange=exchange,
+        )
+    return _run
+
+
+def _make_v1_distribute_run_once(
+    *,
+    db_engine,
+    brevo_config,
+):
+    """Factory: build the V1 `distribute_run_once` callable that the
+    orchestrator's pipeline invokes once per tick (after the compute
+    step finishes).
+
+    When `brevo_config` is None (transports.brevo not configured),
+    returns a no-op lambda that returns None. This is the "Brevo
+    deliberately disabled" path — the cycle runs to completion, no
+    emails go out, no error is logged each tick.
+
+    When configured, the returned callable:
+      1. Generates a per-tick cycle_id from the current wall clock
+         (UTC-anchored YYYYMMDD-HHMM for deterministic ordering
+         across pods/markets).
+      2. Calls `notify_subscribers` with the Brevo credentials and
+         the current wall clock.
+      3. Returns the `NotifyResult` for the orchestrator's pipeline
+         to capture in its tick record.
+    """
+    if brevo_config is None:
+        logger.warning(
+            "V1 distribute: transports.brevo not configured — "
+            "notify_subscribers will be a no-op each tick. "
+            "Set transports.brevo in config to enable emails.",
+        )
+        def _noop():
+            return None
+        return _noop
+
+    # Re-load the API key the same way EmailTransport does. The key
+    # is short-lived in memory; we capture it into this closure
+    # rather than re-reading the file on every tick.
+    from .config.brevo_secrets import load_brevo_api_key
+    api_key = load_brevo_api_key(brevo_config.secrets_file)
+    from_address = brevo_config.sender_email
+    from_name = brevo_config.sender_name
+
+    logger.info(
+        "V1 distribute: wired with Brevo (sender=%s)",
+        from_address,
+    )
+
+    def _run():
+        now = datetime.now(UTC)
+        cycle_id = now.strftime("%Y%m%d-%H%M")
+        return notify_subscribers(
+            db_engine,
+            brevo_api_key=api_key,
+            brevo_from_address=from_address,
+            brevo_from_name=from_name,
+            cycle_id=cycle_id,
+            now=now,
+        )
+    return _run
+
+
 def _build_email_transport_or_null(config, *, enrichment_provider=None, db_engine=None):
+
     """Build the email transport from `config.transports.brevo`.
 
     Returns NullTransport when `transports.brevo` is None (the
