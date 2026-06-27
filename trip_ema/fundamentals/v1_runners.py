@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, time, UTC
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -74,6 +75,26 @@ logger = logging.getLogger(__name__)
 # the RUN_PHASES tuple in fundamentals/__init__.py.
 PHASE_V1_STOCK_STATE = "v1_stock_indicator_state"
 PHASE_V1_STOCK_ENRICHMENT = "v1_stock_indicator_enrichment"
+
+
+def _slice_for_mode(
+    rows: list, mode: str, n_weeks_to_upsert: int,
+) -> list:
+    """For incremental mode, return only the last
+    `n_weeks_to_upsert` rows; otherwise return the full list
+    unchanged.
+
+    Shared helper for all four V1 indicator populators (state +
+    enrichment × stock + industry) so they share identical
+    incremental-mode semantics: compute the full trajectory (cheap
+    pandas math), then slice the write set.
+
+    If `n_weeks_to_upsert >= len(rows)` the slice is a no-op (we
+    just upsert everything; equivalent to full mode).
+    """
+    if mode == "incremental" and n_weeks_to_upsert < len(rows):
+        return rows[-n_weeks_to_upsert:]
+    return rows
 PHASE_V1_INDUSTRY_INDEX_VALUE = "v1_industry_index_value"
 PHASE_V1_INDUSTRY_INDICATOR_STATE = "v1_industry_indicator_state"
 PHASE_V1_INDUSTRY_INDICATOR_ENRICHMENT = (
@@ -92,6 +113,8 @@ def populate_stock_indicator_state_for_ticker(
     *,
     force: bool = False,
     min_bars: int = 30,
+    mode: Literal["full", "incremental"] = "full",
+    n_weeks_to_upsert: int = 2,
 ) -> int:
     """Compute V1 stock indicator state for one (ticker, timeframe).
 
@@ -180,6 +203,13 @@ def populate_stock_indicator_state_for_ticker(
         for p in primitives
     ]
 
+    # Incremental mode: slice the write set to the last
+    # n_weeks_to_upsert rows. The full trajectory is still computed
+    # (cheap pandas math); only the DB-write cost is reduced.
+    states_to_upsert = _slice_for_mode(
+        states, mode, n_weeks_to_upsert,
+    )
+
     # Atomic write: one transaction, all rows or none.
     with transaction(db_engine) as conn:
         run_id = FundamentalsRunRepository(conn).open(
@@ -187,21 +217,25 @@ def populate_stock_indicator_state_for_ticker(
             notes=(
                 f"v1_stock_indicator_state for ticker_id={ticker_id} "
                 f"({ticker.ref.exchange}:{ticker.ref.symbol}) "
-                f"tf={timeframe}"
+                f"tf={timeframe} mode={mode}"
             ),
         )
-        StockIndicatorStateRepository(conn).upsert_many(states)
+        StockIndicatorStateRepository(conn).upsert_many(
+            states_to_upsert,
+        )
         FundamentalsRunRepository(conn).close(
             run_id, status="SUCCESS",
-            succeeded=len(states), failed=0,
-            skipped=(len(bars) - len(states)),
+            succeeded=len(states_to_upsert), failed=0,
+            skipped=(len(bars) - len(states_to_upsert)),
         )
 
     logger.info(
         "populate_stock_indicator_state_for_ticker "
-        "ticker_id=%d (%s:%s) tf=%s: emitted=%d skipped=%d bars=%d",
+        "ticker_id=%d (%s:%s) tf=%s mode=%s: "
+        "emitted=%d (of %d computed) skipped=%d bars=%d",
         ticker_id, ticker.ref.exchange, ticker.ref.symbol, timeframe,
-        len(states), len(bars) - len(states), len(bars),
+        mode, len(states_to_upsert), len(states),
+        len(bars) - len(states_to_upsert), len(bars),
     )
     return run_id
 
@@ -212,6 +246,8 @@ def populate_stock_indicator_state_for_exchange(
     timeframe: str,
     *,
     min_bars: int = 30,
+    mode: Literal["full", "incremental"] = "full",
+    n_weeks_to_upsert: int = 2,
 ) -> dict:
     """Bulk-compute V1 stock indicator state for every active ticker
     on `exchange`.
@@ -250,6 +286,8 @@ def populate_stock_indicator_state_for_exchange(
             run_id = populate_stock_indicator_state_for_ticker(
                 db_engine, ticker.ticker_id, timeframe,
                 min_bars=min_bars,
+                mode=mode,
+                n_weeks_to_upsert=n_weeks_to_upsert,
             )
             # Best-effort: read back the row count we just wrote. Not
             # strictly required for the report — using run_id as a
@@ -309,6 +347,8 @@ def populate_stock_indicator_enrichment_for_ticker(
     *,
     force: bool = False,
     min_bars: int = 30,
+    mode: Literal["full", "incremental"] = "full",
+    n_weeks_to_upsert: int = 2,
 ) -> int:
     """Compute V1 stock indicator enrichment for one (ticker, timeframe).
 
@@ -423,6 +463,12 @@ def populate_stock_indicator_enrichment_for_ticker(
         for p in primitives
     ]
 
+    # Incremental mode: slice the write set to the last
+    # n_weeks_to_upsert rows.
+    enrichments_to_upsert = _slice_for_mode(
+        enrichments, mode, n_weeks_to_upsert,
+    )
+
     # Atomic write.
     with transaction(db_engine) as conn:
         run_id = FundamentalsRunRepository(conn).open(
@@ -431,21 +477,25 @@ def populate_stock_indicator_enrichment_for_ticker(
             notes=(
                 f"v1_stock_indicator_enrichment for ticker_id={ticker_id} "
                 f"({ticker.ref.exchange}:{ticker.ref.symbol}) "
-                f"tf={timeframe}"
+                f"tf={timeframe} mode={mode}"
             ),
         )
-        StockIndicatorEnrichmentRepository(conn).upsert_many(enrichments)
+        StockIndicatorEnrichmentRepository(conn).upsert_many(
+            enrichments_to_upsert,
+        )
         FundamentalsRunRepository(conn).close(
             run_id, status="SUCCESS",
-            succeeded=len(enrichments), failed=0,
-            skipped=(len(bars) - len(enrichments)),
+            succeeded=len(enrichments_to_upsert), failed=0,
+            skipped=(len(bars) - len(enrichments_to_upsert)),
         )
 
     logger.info(
         "populate_stock_indicator_enrichment_for_ticker "
-        "ticker_id=%d (%s:%s) tf=%s: emitted=%d skipped=%d bars=%d",
+        "ticker_id=%d (%s:%s) tf=%s mode=%s: "
+        "emitted=%d (of %d computed) skipped=%d bars=%d",
         ticker_id, ticker.ref.exchange, ticker.ref.symbol, timeframe,
-        len(enrichments), len(bars) - len(enrichments), len(bars),
+        mode, len(enrichments_to_upsert), len(enrichments),
+        len(bars) - len(enrichments_to_upsert), len(bars),
     )
     return run_id
 
@@ -456,6 +506,8 @@ def populate_stock_indicator_enrichment_for_exchange(
     timeframe: str,
     *,
     min_bars: int = 30,
+    mode: Literal["full", "incremental"] = "full",
+    n_weeks_to_upsert: int = 2,
 ) -> dict:
     """Bulk-compute V1 stock indicator enrichment for every active
     ticker on `exchange`.
@@ -488,6 +540,8 @@ def populate_stock_indicator_enrichment_for_exchange(
             run_id = populate_stock_indicator_enrichment_for_ticker(
                 db_engine, ticker.ticker_id, timeframe,
                 min_bars=min_bars,
+                mode=mode,
+                n_weeks_to_upsert=n_weeks_to_upsert,
             )
             with db_engine.connect() as conn:
                 cnt = StockIndicatorEnrichmentRepository(
@@ -919,6 +973,8 @@ def populate_industry_indicator_state_for_industry(
     *,
     timeframe: str = "Weekly",
     min_bars: int = 30,
+    mode: Literal["full", "incremental"] = "full",
+    n_weeks_to_upsert: int = 2,
 ) -> int:
     """Compute V1 industry indicator state for one industry.
 
@@ -1030,6 +1086,12 @@ def populate_industry_indicator_state_for_industry(
         for p in primitives
     ]
 
+    # Incremental mode: slice the write set to the last
+    # n_weeks_to_upsert rows.
+    states_to_upsert = _slice_for_mode(
+        states, mode, n_weeks_to_upsert,
+    )
+
     # Atomic write: one transaction, all rows or none.
     with transaction(db_engine) as conn:
         run_id = FundamentalsRunRepository(conn).open(
@@ -1037,21 +1099,25 @@ def populate_industry_indicator_state_for_industry(
             exchange="ALL",
             notes=(
                 f"v1_industry_indicator_state for {industry_name} "
-                f"tf={timeframe}"
+                f"tf={timeframe} mode={mode}"
             ),
         )
-        IndustryIndicatorStateRepository(conn).upsert_many(states)
+        IndustryIndicatorStateRepository(conn).upsert_many(
+            states_to_upsert,
+        )
         FundamentalsRunRepository(conn).close(
             run_id, status="SUCCESS",
-            succeeded=len(states), failed=0,
-            skipped=(len(weekly_bars) - len(states)),
+            succeeded=len(states_to_upsert), failed=0,
+            skipped=(len(weekly_bars) - len(states_to_upsert)),
         )
 
     logger.info(
-        "populate_industry_indicator_state_for_industry %s tf=%s: "
-        "emitted=%d skipped=%d weekly_bars=%d daily_iiv_rows=%d",
-        industry_name, timeframe,
-        len(states), len(weekly_bars) - len(states),
+        "populate_industry_indicator_state_for_industry %s tf=%s "
+        "mode=%s: emitted=%d (of %d computed) skipped=%d "
+        "weekly_bars=%d daily_iiv_rows=%d",
+        industry_name, timeframe, mode,
+        len(states_to_upsert), len(states),
+        len(weekly_bars) - len(states_to_upsert),
         len(weekly_bars), len(history),
     )
     return run_id
@@ -1062,6 +1128,8 @@ def populate_industry_indicator_state_for_all(
     *,
     timeframe: str = "Weekly",
     min_bars: int = 30,
+    mode: Literal["full", "incremental"] = "full",
+    n_weeks_to_upsert: int = 2,
 ) -> dict:
     """Bulk-compute V1 industry indicator state for every ACTIVE
     industry.
@@ -1093,6 +1161,8 @@ def populate_industry_indicator_state_for_all(
             run_id = populate_industry_indicator_state_for_industry(
                 db_engine, idx.industry_name,
                 timeframe=timeframe, min_bars=min_bars,
+                mode=mode,
+                n_weeks_to_upsert=n_weeks_to_upsert,
             )
             with db_engine.connect() as conn:
                 cnt = IndustryIndicatorStateRepository(
@@ -1158,6 +1228,8 @@ def populate_industry_indicator_enrichment_for_industry(
     *,
     timeframe: str = "Weekly",
     min_bars: int = 30,
+    mode: Literal["full", "incremental"] = "full",
+    n_weeks_to_upsert: int = 2,
 ) -> int:
     """Compute V1 industry indicator enrichment for one industry.
 
@@ -1306,21 +1378,26 @@ def populate_industry_indicator_enrichment_for_industry(
                 f"{industry_name} tf={timeframe}"
             ),
         )
+        # Incremental mode: slice the write set.
+        enrichments_to_upsert = _slice_for_mode(
+            enrichments, mode, n_weeks_to_upsert,
+        )
         IndustryIndicatorEnrichmentRepository(conn).upsert_many(
-            enrichments,
+            enrichments_to_upsert,
         )
         FundamentalsRunRepository(conn).close(
             run_id, status="SUCCESS",
-            succeeded=len(enrichments), failed=0,
-            skipped=(len(weekly_bars) - len(enrichments)),
+            succeeded=len(enrichments_to_upsert), failed=0,
+            skipped=(len(weekly_bars) - len(enrichments_to_upsert)),
         )
 
     logger.info(
         "populate_industry_indicator_enrichment_for_industry %s "
-        "tf=%s: emitted=%d skipped=%d weekly_bars=%d "
-        "daily_iiv_rows=%d",
-        industry_name, timeframe,
-        len(enrichments), len(weekly_bars) - len(enrichments),
+        "tf=%s mode=%s: emitted=%d (of %d computed) skipped=%d "
+        "weekly_bars=%d daily_iiv_rows=%d",
+        industry_name, timeframe, mode,
+        len(enrichments_to_upsert), len(enrichments),
+        len(weekly_bars) - len(enrichments_to_upsert),
         len(weekly_bars), len(history),
     )
     return run_id
@@ -1331,6 +1408,8 @@ def populate_industry_indicator_enrichment_for_all(
     *,
     timeframe: str = "Weekly",
     min_bars: int = 30,
+    mode: Literal["full", "incremental"] = "full",
+    n_weeks_to_upsert: int = 2,
 ) -> dict:
     """Bulk-compute V1 industry indicator enrichment for every
     ACTIVE industry.
@@ -1363,6 +1442,8 @@ def populate_industry_indicator_enrichment_for_all(
                 populate_industry_indicator_enrichment_for_industry(
                     db_engine, idx.industry_name,
                     timeframe=timeframe, min_bars=min_bars,
+                    mode=mode,
+                    n_weeks_to_upsert=n_weeks_to_upsert,
                 )
             )
             with db_engine.connect() as conn:
