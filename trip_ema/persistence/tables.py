@@ -142,9 +142,22 @@ notification_log = Table(
         "subscriber_id", Integer,
         ForeignKey("subscribers.subscriber_id"), nullable=False,
     ),
+    # event_id is the LEGACY FK to signal_events. Made nullable in
+    # migration 0027 because V1 writes (via NotificationLogRepository)
+    # use the typed columns below instead. Step 14 drops it entirely.
     Column(
         "event_id", BigInteger,
-        ForeignKey("signal_events.event_id"), nullable=False,
+        ForeignKey("signal_events.event_id"), nullable=True,
     ),
     Column("notification_count", Integer, nullable=False, server_default="1"),
+    # V1 typed columns added in migration 0027. Nullable during the
+    # transition; Step 14 tightens to NOT NULL.
+    Column("signal_ticker_id", Integer, nullable=True),
+    Column("signal_timeframe", String(8), nullable=True),
+    Column(
+        "signal_bar_timestamp",
+        DateTime(timezone=True), nullable=True,
+    ),
+    Column("signal_type", String(16), nullable=True),
+    Column("signal_price", Float, nullable=True),
 )

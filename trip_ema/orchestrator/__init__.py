@@ -21,15 +21,20 @@ Public surface:
     recompute_market — one pass through the V1 cycle compute
         pipeline (8 stages, live mode only — backfill in Step 11).
 
-Later steps fill out the rest of this package:
-
-- `notify_subscribers` (Step 9): wires Step 7's composer + sender
+- `notify_subscribers` (Step 9):
+    notify_subscribers — V1 distribute stage. Iterates subscribers
+        due for notification, composes + sends emails via Step 7's
+        primitives, writes notification_log rows.
 """
 from __future__ import annotations
 
 from .derive_signals import (
     derive_signal_for_ticker_this_cycle,
     derive_signals_for_all_active_stocks,
+)
+from .notify_subscribers import (
+    NotifyResult,
+    notify_subscribers,
 )
 from .recompute_market import (
     RecomputeMarketResult,
@@ -38,9 +43,11 @@ from .recompute_market import (
 from .rotate_signals import rotate_current_to_historical
 
 __all__ = [
+    "NotifyResult",
     "RecomputeMarketResult",
     "derive_signal_for_ticker_this_cycle",
     "derive_signals_for_all_active_stocks",
+    "notify_subscribers",
     "recompute_market",
     "rotate_current_to_historical",
 ]
