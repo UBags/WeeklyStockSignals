@@ -1,81 +1,163 @@
-"""ETL Status & Control view (Tab A).
+"""ETL Status & Control view — Step 13b rewrite.
 
-Layout (Phase 14.6c):
-  ┌──────────────────────────────────────────────────────────────────┐
-  │ [Exchange: NSE ▼ — EoD 2026-05-19 ✓]   [Refresh Listings] [Run   │
-  │  EoD] [Run Intraday] [Recompute Tiers] [Unpark All]   [Refresh]  │
-  ├──────────────────────────────────────────────────────────────────┤
-  │ Exchange: NSE                                                    │
-  │ Initial load: started …  completed …                             │
-  │ Last EoD: … ✓ success (data 2026-05-19)                          │
-  │ Last intraday: …  Last listings: …  Last tiering: …              │
-  ├──────────────────────────────────┬───────────────────────────────┤
-  │ Current run / recent runs table  │ Parked tickers panel          │
-  │ (sortable, color-coded by        │ Symbol / parked_at /          │
-  │  outcome)                        │ last_error                    │
-  ├──────────────────────────────────┴───────────────────────────────┤
-  │ Tier counts: T1=200  T2=500  T3=1600   Parked: 7                 │
-  └──────────────────────────────────────────────────────────────────┘
+Replaces the Phase 14.6c/15c/15d action-bar layout with the Step 13
+sketch:
 
-QTimer polls /v1/admin/etl/status every 5s (configurable). Each
-poll spawns BackgroundWorkers so the UI never blocks.
+  ┌─ Exchange [▼]  [Refresh Listings] [Recompute Tiers] ────────┐
+  ├─ Activity Log Table  (scrollable, last 10-15 batch runs) ───┤
+  ├─ Backfill panel ───────────┬─ Intraday panel ───────────────┤
+  │  radio: Fetch / Don't      │  Stage list (✓/→/Queued)        │
+  │  From [date]  To [date]    │                                 │
+  │  Stocks [...]   [ADD]      │                                 │
+  │  [chip area]               │                                 │
+  │  [Backfill]    🔆          │  [Run Intraday]     🔆          │
+  ├────────────────────────────┴─────────────────────────────────┤
+  │ OVERALL MKT OVERVIEW                                         │
+  │ #Buys=. #Sells=. #ExitBuys=. #ExitSells=.                    │
+  │ #Green=. #Red=. #Neutral=.                       [See Trend] │
+  │ #Stocks > highest_ema=. ... in between=.         [See Trend] │
+  └──────────────────────────────────────────────────────────────┘
 
-Phase 14.6c additions:
-  - Exchange picker (QComboBox + summary label) at the top-left of
-    the action bar. Populated on first refresh from
-    /v1/admin/exchanges; persisted across launches via QSettings
-    (KEY_LAST_SELECTED_EXCHANGE). Action buttons target the picked
-    exchange. Tier counts scope to the picked exchange.
-  - Dedicated ExchangeStatePanel above the runs table showing the
-    full exchange_state row for the selected exchange.
+Scope by step:
+  13b (this bundle): layout + Activity Log (real data from
+    compute_runs) + Market Overview footer (real data from
+    market_overview_daily) + [See Trend] dialogs (real pyqtgraph
+    charts). Action buttons (Backfill, Run Intraday, Refresh
+    Listings, Recompute Tiers) exist but are no-ops with a
+    placeholder status label.
+  13c: wires the Backfill panel — autocomplete, chips, QProcess,
+    destructive-action modal.
+  13d: wires the Intraday panel — live cycle invocation, stage
+    progress updates. Plus Refresh Listings / Recompute Tiers
+    button wiring.
 
-What stays GLOBAL (intentional, per design Q5 Option C):
-  - The recent-runs table. Shows all runs across all exchanges so
-    operators see system-wide ETL activity. Exchange is visible via
-    the runner's notes field.
-  - The parked tickers list. Same reasoning.
+Mutex rules:
+  - "Something is running" iff EITHER compute_runs has a row
+    with finished_at IS NULL for the selected exchange OR
+    backfill_runs reports an active lock. Polled every 2s.
+  - When running: all four action buttons disabled; the
+    appropriate flashing-light indicator on. Backfill panel light
+    on if kind='backfill'; Intraday panel light on if
+    kind='intraday' or 'eod'.
 """
-
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtCore import Qt, QSortFilterProxyModel
+from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
-    QDialog, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QListWidget,
-    QListWidgetItem, QMessageBox, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QButtonGroup, QDateEdit, QFrame, QGroupBox, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QRadioButton, QSizePolicy, QTableView, QVBoxLayout, QWidget,
 )
 
 from ..db import GuiDbSession
 from ..http_client import TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
-from .exchange_state_panel import ExchangeStatePanel
+from .market_trend_dialog import MarketTrendDialog, TrendKind
 from .widgets.exchange_picker import ExchangePicker
+from .widgets.flashing_light import FlashingLight
+from .widgets.stage_progress import (
+    LIVE_CYCLE_STAGES, StageProgressList, StageStatus,
+)
+from .widgets.ticker_chip import TickerChipArea
 
 logger = logging.getLogger(__name__)
 
+IST = ZoneInfo("Asia/Kolkata")
 
-# Color codes for run outcomes — same palette as the circuit-breaker
-# states elsewhere in the system.
-OUTCOME_COLORS = {
-    "success": "#1f7a1f",   # green
-    "partial": "#b08000",   # amber
-    "failed":  "#a02020",   # red
+
+# ============================================================
+# Polling cadences
+# ============================================================
+# Activity log: most-visible feedback. 5s strikes a balance between
+# "noticeable freshness" and "DB load" for a small read.
+ACTIVITY_LOG_CADENCE_SECONDS = 5.0
+# Mutex driver: 2s gives quick UI reaction when a run starts or
+# finishes. Two cheap queries (in_flight on compute_runs + active
+# on backfill_runs).
+MUTEX_CADENCE_SECONDS = 2.0
+# Market overview footer: changes only on EoD ticks (once a day).
+# 30s is plenty for the operator to see "today's snapshot computed
+# at 16:30 IST" reflected within a minute.
+MARKET_OVERVIEW_CADENCE_SECONDS = 30.0
+
+# Activity log row limit. Sketch says "10-15 batch runs"; using 15.
+ACTIVITY_LOG_ROW_LIMIT = 15
+
+
+# ============================================================
+# Column indices for the activity log table
+# ============================================================
+COL_ACTIVITY = 0
+COL_STARTED = 1
+COL_DURATION = 2
+COL_TICKERS_ATTEMPTED = 3
+COL_TICKERS_FETCHED = 4
+COL_NOTES = 5
+
+ACTIVITY_HEADERS = [
+    "Activity", "Started", "Duration",
+    "Tickers Attempted", "Tickers Fetched", "Notes",
+]
+
+
+# Operator-facing labels for compute_runs.kind values.
+KIND_LABELS = {
+    "intraday": "Intraday Run",
+    "eod":      "EoD Run",
+    "backfill": "Backfill",
 }
 
 
-# Backward-compat re-export: existing tests import _EXCHANGE_LOADING
-# from etl_status. The sentinel now lives on the extracted picker
-# widget; we re-export the name here so tests don't have to know.
-from .widgets.exchange_picker import EXCHANGE_LOADING_SENTINEL as _EXCHANGE_LOADING  # noqa: E402
+def _format_started_at(started_at: datetime) -> str:
+    """If today (IST), show HH:MM:SS; otherwise YYYY-MM-DD HH:MM."""
+    started_ist = started_at.astimezone(IST)
+    today_ist = datetime.now(IST).date()
+    if started_ist.date() == today_ist:
+        return started_ist.strftime("%H:%M:%S")
+    return started_ist.strftime("%Y-%m-%d %H:%M")
 
+
+def _format_duration(seconds: float | None) -> str:
+    """Human-readable duration."""
+    if seconds is None:
+        return "(running)"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        m, s = divmod(int(seconds), 60)
+        return f"{m:02d}:{s:02d}m"
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:d}:{m:02d}:{s:02d}h"
+
+
+def _format_notes_or_error(row) -> str:
+    """If the run had a failure, show '❌ stage: error[:40]'.
+    Otherwise show the notes field, or empty string."""
+    if row.failed_stage is not None or row.error_message is not None:
+        stage = row.failed_stage or "?"
+        msg = (row.error_message or "")[:60]
+        return f"❌ {stage}: {msg}"
+    return row.notes or ""
+
+
+# ============================================================
+# The view
+# ============================================================
 
 class EtlStatusView(QWidget):
+    """Operator console's ETL Status tab.
 
-    REFRESH_CADENCE_SECONDS = 5.0
+    Constructor signature preserved from the previous (Phase 15d)
+    implementation so main_window.py doesn't need touching.
+    `http` is currently unused; 13d will use it to trigger live
+    ticks via /v1/admin/compute-now.
+    """
 
     def __init__(
         self,
@@ -89,597 +171,575 @@ class EtlStatusView(QWidget):
         self._db = db
         self._http = http
 
-        # Phase 15c: picker logic moved into ExchangePicker widget.
-        # `self._exchange_combo`, `self._picker_hint`,
-        # `self._selected_exchange`, and the populate/apply methods
-        # are kept as legacy attributes/methods that delegate to the
-        # picker so the 14.6c test suite continues to pass unchanged.
+        # Local mutex state — the GUI-side "just-clicked" flag,
+        # complements the persistent compute_runs / backfill_runs
+        # state for the immediate UI feedback window before the
+        # row hits the DB.
+        self._local_running: bool = False
+        # Most-recent in-flight kind (None / 'intraday' / 'eod' /
+        # 'backfill'). Drives which flashing light to turn on.
+        self._inflight_kind: str | None = None
 
+        # Build UI before wiring schedulers (handlers reference
+        # widget attributes set in _build_ui).
         self._build_ui()
-        self._scheduler = RefreshScheduler(
-            self.REFRESH_CADENCE_SECONDS, run_on_start=True,
-        )
-        self._scheduler.tick.connect(self._on_refresh_tick)
 
-        # Picker kicks off its own list_exchanges fetch automatically
-        # (auto_fetch=True is the default). No need to call it here.
+        # Three schedulers — different cadences for different data
+        self._activity_scheduler = RefreshScheduler(
+            ACTIVITY_LOG_CADENCE_SECONDS, run_on_start=True,
+        )
+        self._activity_scheduler.tick.connect(
+            self._on_activity_tick,
+        )
+
+        self._mutex_scheduler = RefreshScheduler(
+            MUTEX_CADENCE_SECONDS, run_on_start=True,
+        )
+        self._mutex_scheduler.tick.connect(self._on_mutex_tick)
+
+        self._overview_scheduler = RefreshScheduler(
+            MARKET_OVERVIEW_CADENCE_SECONDS, run_on_start=True,
+        )
+        self._overview_scheduler.tick.connect(self._on_overview_tick)
+
+        # Picker drives all three — refresh when the exchange changes
+        self._picker.selection_changed.connect(
+            self._on_exchange_changed,
+        )
 
         if start_refresh_on_init:
-            self._scheduler.start()
+            self._activity_scheduler.start()
+            self._mutex_scheduler.start()
+            self._overview_scheduler.start()
 
-    # ---------- UI construction ---------- #
+    # ============================================================
+    # UI construction
+    # ============================================================
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(10)
+        outer.setSpacing(8)
 
-        outer.addLayout(self._build_action_bar())
-        outer.addWidget(self._build_state_panel())
-        outer.addLayout(self._build_main_body(), 1)
-        outer.addWidget(self._build_counts_row())
+        # Top strip — no stretch (fixed height, content drives it)
+        outer.addLayout(self._build_top_strip())
+        # Activity log — stretch 5
+        outer.addWidget(self._build_activity_log(), 5)
+        # Backfill + Intraday side-by-side — stretch 10
+        outer.addLayout(self._build_panels_row(), 10)
+        # Market overview footer — stretch 4
+        outer.addWidget(self._build_market_overview_footer(), 4)
 
-    def _build_action_bar(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
+        # Status line at the very bottom — placeholder for action
+        # feedback messages until the buttons wire up in 13c/13d.
+        self._status_label = QLabel("")
+        self._status_label.setStyleSheet("color: #666; font-style: italic;")
+        outer.addWidget(self._status_label)
 
-        # ---- Picker (left) ---- #
-        # Phase 15c: extracted to ExchangePicker widget. We still
-        # expose `_exchange_combo`, `_picker_hint`, and
-        # `_selected_exchange` for back-compat with 14.6c tests that
-        # reach into those attributes directly.
+    # --- Top strip ----------------------------------------------
+
+    def _build_top_strip(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(12)
+
         self._picker = ExchangePicker(
             self._http, label_text="Exchange:", parent=self,
         )
-        # Legacy alias attrs — keep existing tests passing.
-        self._exchange_combo = self._picker.combo
-        self._picker_hint = self._picker.hint_label
+        row.addWidget(self._picker)
 
-        # Bold the label by re-styling the picker's first child (the
-        # internal QLabel "Exchange:"). The picker's internal layout
-        # is non-public, but the visual style was load-bearing in
-        # 14.6c — operators got used to the bold label. If this
-        # styling poking breaks in a future PySide6 rev, the worst
-        # case is a non-bold label, which is fine.
-        try:
-            internal_label = self._picker.findChild(QLabel)
-            if internal_label is not None:
-                internal_label.setStyleSheet("font-weight: 600;")
-        except Exception:
-            pass
+        row.addSpacing(20)
 
-        # Wire selection changes to our follow-up actions (button
-        # gating + scheduler trigger). The picker has already
-        # persisted to QSettings and updated its own state by the
-        # time we get here.
-        self._picker.selection_changed.connect(
-            self._on_picker_selection_changed
+        self._refresh_listings_btn = QPushButton("Refresh Listings")
+        self._refresh_listings_btn.clicked.connect(
+            self._on_refresh_listings_clicked,
         )
+        row.addWidget(self._refresh_listings_btn)
 
-        bar.addWidget(self._picker)
-
-        bar.addSpacing(20)
-
-        # ---- Action buttons (middle) ---- #
-        self._action_buttons: list[QPushButton] = []
-
-        def make_action_button(text: str, slot) -> QPushButton:
-            btn = QPushButton(text)
-            btn.clicked.connect(slot)
-            self._action_buttons.append(btn)
-            return btn
-
-        bar.addWidget(make_action_button(
-            "Refresh Listings", self._on_refresh_listings_clicked,
-        ))
-        bar.addWidget(make_action_button(
-            "Run EoD", self._on_run_eod_clicked,
-        ))
-        bar.addWidget(make_action_button(
-            "Run Intraday", self._on_run_intraday_clicked,
-        ))
-        bar.addWidget(make_action_button(
-            "Recompute Tiers", self._on_recompute_tiers_clicked,
-        ))
-        bar.addWidget(make_action_button(
-            "Unpark All", self._on_unpark_all_clicked,
-        ))
-        bar.addWidget(make_action_button(
-            "Backfill…", self._on_backfill_clicked,
-        ))
-        bar.addWidget(make_action_button(
-            "Backfill historical shares...",
-            self._on_backfill_shares_clicked,
-        ))
-
-        # Action buttons start disabled until BOTH conditions hold:
-        #   1. token is configured
-        #   2. picker has resolved to a real exchange
-        # _refresh_action_buttons_enabled() centralises the rule.
-        self._refresh_action_buttons_enabled()
-
-        bar.addStretch(1)
-
-        # ---- Refresh (right) ---- #
-        self._refresh_button = QPushButton("Refresh")
-        self._refresh_button.clicked.connect(self._on_refresh_button_clicked)
-        bar.addWidget(self._refresh_button)
-
-        return bar
-
-    def _build_state_panel(self) -> QWidget:
-        """The dedicated ExchangeStatePanel widget. Pure display;
-        EtlStatusView drives its data via set_state / set_not_yet_active /
-        set_load_failed."""
-        self._state_panel = ExchangeStatePanel(parent=self)
-        return self._state_panel
-
-    def _build_main_body(self) -> QHBoxLayout:
-        body = QHBoxLayout()
-        body.setSpacing(10)
-
-        # Left: recent runs table (kept global per design Q5).
-        runs_box = QGroupBox("Recent ETL runs (all exchanges)")
-        runs_layout = QVBoxLayout(runs_box)
-        self._runs_table = QTableWidget()
-        self._runs_table.setColumnCount(7)
-        self._runs_table.setHorizontalHeaderLabels([
-            "Started", "Kind", "Outcome", "Duration",
-            "Tickers (ok/fail)", "Bars", "Notes",
-        ])
-        self._runs_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeToContents,
+        self._recompute_tiers_btn = QPushButton("Recompute Tiers")
+        self._recompute_tiers_btn.clicked.connect(
+            self._on_recompute_tiers_clicked,
         )
-        self._runs_table.horizontalHeader().setStretchLastSection(True)
-        self._runs_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._runs_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._runs_table.verticalHeader().setVisible(False)
-        runs_layout.addWidget(self._runs_table)
-        body.addWidget(runs_box, 3)
+        row.addWidget(self._recompute_tiers_btn)
 
-        # Right: parked tickers panel (also global).
-        parked_box = QGroupBox("Parked tickers (all exchanges)")
-        parked_layout = QVBoxLayout(parked_box)
-        self._parked_count_label = QLabel("0 tickers parked")
-        self._parked_count_label.setStyleSheet("font-weight: 600;")
-        parked_layout.addWidget(self._parked_count_label)
-        self._parked_list = QListWidget()
-        self._parked_list.setAlternatingRowColors(True)
-        parked_layout.addWidget(self._parked_list, 1)
-        body.addWidget(parked_box, 1)
-
-        return body
-
-    def _build_counts_row(self) -> QWidget:
-        row_widget = QWidget()
-        row = QHBoxLayout(row_widget)
-        row.setContentsMargins(4, 4, 4, 4)
-        self._counts_label = QLabel("Tier counts: —")
-        self._counts_label.setStyleSheet("color: #666;")
-        row.addWidget(self._counts_label)
         row.addStretch(1)
-        self._last_refreshed_label = QLabel("Never refreshed")
-        self._last_refreshed_label.setStyleSheet("color: #888; font-style: italic;")
-        row.addWidget(self._last_refreshed_label)
-        return row_widget
+        return row
 
-    # ---------- exchange picker plumbing (15c: delegated to widget) ---------- #
+    # --- Activity log -------------------------------------------
 
-    @property
-    def _selected_exchange(self) -> str | None:
-        """Backward-compat: pre-15c code stored this as a plain
-        attribute. Now it's just whatever the picker reports."""
-        return self._picker.current_exchange() if hasattr(self, "_picker") else None
+    def _build_activity_log(self) -> QGroupBox:
+        box = QGroupBox("Activity Log")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(8, 12, 8, 8)
 
-    @_selected_exchange.setter
-    def _selected_exchange(self, value: str | None) -> None:
-        """No-op setter. The picker owns this state in 15c; the
-        property is read-only in practice. Kept as a setter to
-        absorb any legacy code that might still try to assign it
-        directly (e.g. tests that pre-set state before populate).
-        """
-        # If we don't yet have a picker (called during __init__ before
-        # _build_ui), silently swallow.
-        if not hasattr(self, "_picker"):
-            return
-        # Forward to the picker if it's a non-None real value. For
-        # None / sentinel, leave the picker alone.
-        if value is not None and value != _EXCHANGE_LOADING:
-            self._picker._apply_selection(value)
+        self._activity_model = QStandardItemModel(self)
+        self._activity_model.setHorizontalHeaderLabels(ACTIVITY_HEADERS)
 
-    @property
-    def _exchanges_loaded(self) -> bool:
-        """Backward-compat: was a flag set after first populate."""
-        return self._picker.is_loaded() if hasattr(self, "_picker") else False
-
-    @_exchanges_loaded.setter
-    def _exchanges_loaded(self, value: bool) -> None:
-        """No-op — the picker owns its own loaded state."""
-        pass
-
-    def _fetch_exchanges_list(self) -> None:
-        """Backward-compat shim — 14.6c tests may call this directly.
-        Forwards to the picker; safe to call multiple times since
-        the picker's fetch is idempotent (the worker just runs again)."""
-        self._picker._fetch_exchanges_list()
-
-    def _populate_exchange_picker(self, exchanges: list) -> None:
-        """Backward-compat shim for the 14.6c test
-        `_seed_picker(view, [...])` helper, which calls this on
-        EtlStatusView to bypass the network. Forwards to the picker."""
-        self._picker.populate_with_exchanges(exchanges)
-
-    def _on_picker_selection_changed(self, exchange: str) -> None:
-        """Slot for ExchangePicker.selection_changed. Picker has
-        already updated its own state and persisted to QSettings;
-        all we do here is refresh action buttons and trigger an
-        immediate panel refresh so tier counts + the
-        ExchangeStatePanel reflect the new selection.
-        """
-        self._refresh_action_buttons_enabled()
-        self._scheduler.trigger_now()
-
-    def _refresh_action_buttons_enabled(self) -> None:
-        """The single source of truth for action-button enable state.
-        Two conditions BOTH required:
-          1. The HTTP client has an admin token (otherwise the server
-             rejects with 401).
-          2. The picker has resolved to a real exchange (otherwise
-             we'd send `exchange=(loading…)` and get a 422).
-        """
-        has_token = self._http.token_configured
-        has_exchange = self._selected_exchange is not None
-        enabled = has_token and has_exchange
-        for btn in self._action_buttons:
-            btn.setEnabled(enabled)
-
-        # Tooltip explains *which* condition is blocking the click.
-        if not has_token:
-            tip = "Set TRIP_EMA_ADMIN_TOKEN env var to enable action buttons."
-        elif not has_exchange:
-            tip = "Waiting for the exchange list to load…"
-        else:
-            tip = ""
-        for btn in self._action_buttons:
-            btn.setToolTip(tip)
-
-    # ---------- refresh handling ---------- #
-
-    def _on_refresh_button_clicked(self) -> None:
-        self._scheduler.trigger_now()
-
-    def _on_refresh_tick(self) -> None:
-        """Periodic poll. Spawn one worker per fetch.
-
-        Phase 14.6c: tier counts are scoped to the currently-picked
-        exchange (server-side), and a separate worker fetches the
-        per-exchange state for the panel.
-        """
-        http = self._http
-        exchange = self._selected_exchange  # snapshot for closure stability
-
-        # Status — recent runs (global) + parked count (global) + tier
-        # counts (scoped to picker, or server default if picker not loaded).
-        submit(
-            lambda: http.get_etl_status(limit=20, exchange=exchange),
-            on_finished=self._on_status_received,
-            on_failed=self._on_status_failed,
+        self._activity_table = QTableView()
+        self._activity_table.setModel(self._activity_model)
+        self._activity_table.setEditTriggers(
+            QTableView.NoEditTriggers,
         )
-
-        # Parked detail list (global).
-        submit(
-            lambda: http.get_etl_parked(),
-            on_finished=self._on_parked_received,
-            on_failed=self._on_parked_failed,
+        self._activity_table.setSelectionBehavior(
+            QTableView.SelectRows,
         )
-
-        # Per-exchange state for the panel. Only fetched when the
-        # picker has a real value; pre-load we just leave the panel
-        # in its empty state.
-        if exchange is not None:
-            # We need the exchange code at failure time too, so wrap
-            # the callback. The closure pins `exchange` to the value
-            # that was active when the fetch was kicked off — the
-            # operator may have switched by the time the response
-            # lands, but the panel should still show coherent data
-            # for whichever exchange the WORKER was fetching.
-            submit(
-                lambda: http.get_exchange_state(exchange),
-                on_finished=self._on_exchange_state_received,
-                on_failed=(
-                    lambda msg, ex=exchange: self._on_exchange_state_failed(ex, msg)
-                ),
+        self._activity_table.setSelectionMode(
+            QTableView.SingleSelection,
+        )
+        self._activity_table.setAlternatingRowColors(True)
+        self._activity_table.verticalHeader().setVisible(False)
+        # Notes column stretches; others auto-size to content
+        header = self._activity_table.horizontalHeader()
+        for col in (
+            COL_ACTIVITY, COL_STARTED, COL_DURATION,
+            COL_TICKERS_ATTEMPTED, COL_TICKERS_FETCHED,
+        ):
+            header.setSectionResizeMode(
+                col, QHeaderView.ResizeToContents,
             )
-
-    def _on_status_received(self, payload: dict) -> None:
-        self._populate_runs_table(payload.get("recent_runs", []))
-        tc = payload.get("tier_counts", {})
-        parked_count = payload.get("parked_count", 0)
-        ex_label = self._selected_exchange or "—"
-        self._counts_label.setText(
-            f"{ex_label} tier counts: T1={tc.get('tier_1', 0)} "
-            f"T2={tc.get('tier_2', 0)} T3={tc.get('tier_3', 0)}   "
-            f"|   Parked (all): {parked_count}"
-        )
-        self._parked_count_label.setText(
-            f"{parked_count} ticker{'s' if parked_count != 1 else ''} parked"
-        )
-        self._last_refreshed_label.setText(
-            f"Refreshed at {datetime.now().strftime('%H:%M:%S')}"
+        header.setSectionResizeMode(
+            COL_NOTES, QHeaderView.Stretch,
         )
 
-    def _on_status_failed(self, message: str) -> None:
-        self._last_refreshed_label.setText(f"Refresh failed: {message}")
-        logger.warning("ETL status fetch failed: %s", message)
+        v.addWidget(self._activity_table)
+        return box
 
-    def _on_parked_received(self, payload: dict) -> None:
-        self._parked_list.clear()
-        for p in payload.get("parked", []):
-            text = f"{p['symbol']}"
-            if p.get("parked_at"):
-                text += f"  ({p['parked_at'][:10]})"
-            if p.get("last_error"):
-                text += f"\n  └─ {p['last_error'][:80]}"
-            item = QListWidgetItem(text)
-            item.setData(Qt.UserRole, p)
-            self._parked_list.addItem(item)
+    # --- Side-by-side panels (Backfill | Intraday) --------------
 
-    def _on_parked_failed(self, message: str) -> None:
-        # Don't pop up a dialog — failures during automatic refresh are
-        # noisy. The status-bar already reflects it via _on_status_failed.
-        logger.warning("ETL parked fetch failed: %s", message)
+    def _build_panels_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        row.addWidget(self._build_backfill_panel(), 1)
+        row.addWidget(self._build_intraday_panel(), 1)
+        return row
 
-    def _on_exchange_state_received(self, payload: dict) -> None:
-        """Per-exchange state response: feed it to the panel and
-        update the picker hint."""
-        self._state_panel.set_state(payload)
-        self._refresh_picker_hint_from_state(payload)
+    def _build_backfill_panel(self) -> QGroupBox:
+        box = QGroupBox("Backfill")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(10, 14, 10, 10)
+        v.setSpacing(8)
 
-    def _on_exchange_state_failed(self, exchange: str, message: str) -> None:
-        """The state fetch failed for `exchange`. Distinguish 404
-        (no activity yet — normal for never-touched exchanges) from
-        actual transport errors (server down, etc.)."""
-        if "404" in message or "not found" in message.lower():
-            self._state_panel.set_not_yet_active(exchange)
-            self._picker_hint.setText("(no activity yet)")
-        else:
-            self._state_panel.set_load_failed(exchange, message)
-            self._picker_hint.setText("(state offline)")
-        logger.warning(
-            "Exchange-state fetch failed for %s: %s", exchange, message,
+        # Header row with the flashing light
+        header_row = QHBoxLayout()
+        header_row.addStretch(1)
+        self._backfill_light = FlashingLight()
+        header_row.addWidget(QLabel("In progress:"))
+        header_row.addWidget(self._backfill_light)
+        v.addLayout(header_row)
+
+        # Radio group — "Do not fetch stock prices" is default
+        self._fetch_prices_radio = QRadioButton("Fetch Stock Prices")
+        self._no_fetch_radio = QRadioButton("Do not fetch stock prices")
+        self._no_fetch_radio.setChecked(True)
+        radio_group = QButtonGroup(self)
+        radio_group.addButton(self._fetch_prices_radio)
+        radio_group.addButton(self._no_fetch_radio)
+        v.addWidget(self._fetch_prices_radio)
+        v.addWidget(self._no_fetch_radio)
+
+        # From / To date pickers
+        date_row = QHBoxLayout()
+        date_row.addWidget(QLabel("From:"))
+        self._from_date = QDateEdit(calendarPopup=True)
+        self._from_date.setDisplayFormat("yyyy-MM-dd")
+        date_row.addWidget(self._from_date)
+        date_row.addSpacing(12)
+        date_row.addWidget(QLabel("To:"))
+        self._to_date = QDateEdit(calendarPopup=True)
+        self._to_date.setDisplayFormat("yyyy-MM-dd")
+        date_row.addWidget(self._to_date)
+        date_row.addStretch(1)
+        v.addLayout(date_row)
+
+        # Stocks input + ADD button
+        stocks_row = QHBoxLayout()
+        stocks_row.addWidget(QLabel("Stocks:"))
+        self._stocks_input = QLineEdit()
+        self._stocks_input.setPlaceholderText(
+            "type a symbol (autocomplete in 13c)",
+        )
+        stocks_row.addWidget(self._stocks_input, 1)
+        self._add_stock_btn = QPushButton("ADD")
+        self._add_stock_btn.clicked.connect(self._on_add_stock_clicked)
+        stocks_row.addWidget(self._add_stock_btn)
+        v.addLayout(stocks_row)
+
+        # Chip area for selected stocks
+        self._chip_area = TickerChipArea()
+        v.addWidget(self._chip_area)
+
+        v.addStretch(1)
+
+        # Backfill button
+        self._backfill_btn = QPushButton("Backfill")
+        self._backfill_btn.setStyleSheet(
+            "font-weight: 600; padding: 6px;"
+        )
+        self._backfill_btn.clicked.connect(self._on_backfill_clicked)
+        v.addWidget(self._backfill_btn)
+
+        return box
+
+    def _build_intraday_panel(self) -> QGroupBox:
+        box = QGroupBox("Intraday / EoD")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(10, 14, 10, 10)
+        v.setSpacing(8)
+
+        # Header row with the flashing light
+        header_row = QHBoxLayout()
+        header_row.addStretch(1)
+        self._intraday_light = FlashingLight()
+        header_row.addWidget(QLabel("In progress:"))
+        header_row.addWidget(self._intraday_light)
+        v.addLayout(header_row)
+
+        # Stage list — the 7 stages of the V1 live cycle
+        self._stage_list = StageProgressList(LIVE_CYCLE_STAGES)
+        v.addWidget(self._stage_list)
+
+        v.addStretch(1)
+
+        # Run Intraday button
+        self._run_intraday_btn = QPushButton("Run Intraday")
+        self._run_intraday_btn.setStyleSheet(
+            "font-weight: 600; padding: 6px;"
+        )
+        self._run_intraday_btn.clicked.connect(
+            self._on_run_intraday_clicked,
+        )
+        v.addWidget(self._run_intraday_btn)
+
+        return box
+
+    # --- Market overview footer ---------------------------------
+
+    def _build_market_overview_footer(self) -> QGroupBox:
+        box = QGroupBox("Overall Market Overview")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(10, 14, 10, 10)
+        v.setSpacing(6)
+
+        # Snapshot date label (top-right of the box)
+        self._snapshot_date_label = QLabel("(no snapshot)")
+        self._snapshot_date_label.setStyleSheet(
+            "color: #555; font-style: italic;"
+        )
+        v.addWidget(
+            self._snapshot_date_label,
+            alignment=Qt.AlignRight,
         )
 
-    def _refresh_picker_hint_from_state(self, payload: dict) -> None:
-        """Build the "(EoD 2026-05-19 ✓)"-style hint next to the
-        combo. Pulled from the same payload the state panel uses, so
-        no extra fetch — and it stays in sync with the panel by
-        construction."""
-        data_date = payload.get("last_eod_data_date")
-        outcome = payload.get("last_eod_outcome")
-        if not data_date:
-            self._picker_hint.setText("(no EoD yet)")
+        # Row 1: signal counts (no trend button — per sketch)
+        self._signals_label = QLabel(
+            "# Buys = —    # Sells = —    "
+            "# Exit Buys = —    # Exit Sells = —"
+        )
+        v.addWidget(self._signals_label)
+
+        # Row 2: regime counts + See Trend
+        row2 = QHBoxLayout()
+        self._regimes_label = QLabel(
+            "# Green Regimes = —    # Red Regimes = —    "
+            "# Neutral Regimes = —"
+        )
+        row2.addWidget(self._regimes_label, 1)
+        self._regime_trend_btn = QPushButton("See Trend")
+        self._regime_trend_btn.clicked.connect(
+            lambda: self._open_trend_dialog(TrendKind.REGIMES),
+        )
+        row2.addWidget(self._regime_trend_btn)
+        v.addLayout(row2)
+
+        # Row 3: EMA-envelope counts + See Trend
+        row3 = QHBoxLayout()
+        self._ema_label = QLabel(
+            "# Stocks > highest_ema = —    "
+            "# Stocks < lowest_ema = —    "
+            "# in between = —"
+        )
+        row3.addWidget(self._ema_label, 1)
+        self._ema_trend_btn = QPushButton("See Trend")
+        self._ema_trend_btn.clicked.connect(
+            lambda: self._open_trend_dialog(TrendKind.EMA_ENVELOPE),
+        )
+        row3.addWidget(self._ema_trend_btn)
+        v.addLayout(row3)
+
+        return box
+
+    # ============================================================
+    # Scheduler ticks — refresh data
+    # ============================================================
+
+    def _on_exchange_changed(self, exchange: str) -> None:
+        """Picker emitted selection_changed. Force-refresh all
+        three data streams so the operator sees the new exchange's
+        view immediately."""
+        # Trigger ticks now instead of waiting for the next cadence
+        self._activity_scheduler.trigger_now()
+        self._mutex_scheduler.trigger_now()
+        self._overview_scheduler.trigger_now()
+
+    def _on_activity_tick(self) -> None:
+        """Query compute_runs for the latest N rows. Runs on the
+        GUI thread (cheap query, no need to background)."""
+        exchange = self._picker.current_exchange()
+        if exchange is None:
             return
-        glyph = ""
-        if outcome == "success":
-            glyph = "✓"
-        elif outcome == "partial":
-            glyph = "⚠"
-        elif outcome == "failed":
-            glyph = "✗"
-        self._picker_hint.setText(f"(EoD {data_date[:10]} {glyph})".rstrip())
-
-    def _populate_runs_table(self, runs: list[dict]) -> None:
-        self._runs_table.setRowCount(len(runs))
-        for row_idx, r in enumerate(runs):
-            started = _parse_iso(r.get("started_at"))
-            finished = _parse_iso(r.get("finished_at"))
-            duration = ""
-            if started and finished:
-                d = (finished - started).total_seconds()
-                if d < 60:
-                    duration = f"{d:.1f}s"
-                elif d < 3600:
-                    duration = f"{d / 60:.1f}m"
-                else:
-                    duration = f"{d / 3600:.1f}h"
-            elif started and not finished:
-                duration = "in-flight"
-
-            cells = [
-                started.strftime("%Y-%m-%d %H:%M:%S") if started else "?",
-                r.get("kind", ""),
-                r.get("outcome") or "in-flight",
-                duration,
-                f"{r.get('tickers_succeeded', 0)}/{r.get('tickers_failed', 0)}",
-                str(r.get("bars_written", 0)),
-                (r.get("notes") or "")[:120],
-            ]
-            for col, val in enumerate(cells):
-                item = QTableWidgetItem(val)
-                if col == 2:  # outcome column
-                    color = OUTCOME_COLORS.get(r.get("outcome") or "")
-                    if color:
-                        item.setForeground(QBrush(QColor(color)))
-                self._runs_table.setItem(row_idx, col, item)
-
-    # ---------- action button handlers ---------- #
-
-    # Phase 14.6c: every action targets self._selected_exchange (set
-    # by the picker). The buttons are disabled when that value is None,
-    # so the helper below can assume a non-None exchange.
-
-    def _require_exchange(self) -> str | None:
-        """Defensive: return the current picker selection or None.
-        Action handlers call this first; None means "something has
-        gone wrong with button gating" — we just return without
-        firing rather than risk a 422."""
-        if self._selected_exchange is None:
+        try:
+            from ...persistence.compute_runs_repo import (
+                ComputeRunsRepository,
+            )
+            with self._db.connect() as conn:
+                rows = ComputeRunsRepository(conn).recent(
+                    n=ACTIVITY_LOG_ROW_LIMIT, exchange=exchange,
+                )
+        except Exception:
             logger.warning(
-                "Action fired without a selected exchange — gating bug?",
+                "activity log refresh failed", exc_info=True,
             )
-            return None
-        return self._selected_exchange
+            return
+        self._populate_activity_table(rows)
+
+    def _on_mutex_tick(self) -> None:
+        """Update button-enabled state + flashing lights based on
+        DB state (compute_runs in_flight + backfill_runs active).
+
+        Cheap two-query check. Both queries return at most a tiny
+        result set."""
+        exchange = self._picker.current_exchange()
+        if exchange is None:
+            return
+        try:
+            from ...persistence.compute_runs_repo import (
+                ComputeRunsRepository,
+            )
+            with self._db.connect() as conn:
+                in_flight = ComputeRunsRepository(conn).in_flight(
+                    exchange=exchange,
+                )
+        except Exception:
+            logger.warning(
+                "mutex check failed", exc_info=True,
+            )
+            return
+
+        # Determine if anything is running + what kind
+        kinds = {r.kind for r in in_flight}
+        is_running = bool(kinds) or self._local_running
+
+        if "backfill" in kinds:
+            inflight_kind = "backfill"
+        elif "eod" in kinds:
+            inflight_kind = "eod"
+        elif "intraday" in kinds:
+            inflight_kind = "intraday"
+        else:
+            inflight_kind = None
+
+        self._apply_mutex_state(is_running, inflight_kind)
+
+    def _on_overview_tick(self) -> None:
+        """Read the most-recent market_overview_daily row for the
+        selected exchange + paint the footer labels."""
+        exchange = self._picker.current_exchange()
+        if exchange is None:
+            return
+        try:
+            from ...persistence.market_overview_repo import (
+                MarketOverviewRepository,
+            )
+            with self._db.connect() as conn:
+                row = MarketOverviewRepository(conn).latest(
+                    exchange=exchange,
+                )
+        except Exception:
+            logger.warning(
+                "market overview refresh failed", exc_info=True,
+            )
+            return
+        self._paint_market_overview(row)
+
+    # ============================================================
+    # Painters
+    # ============================================================
+
+    def _populate_activity_table(self, rows) -> None:
+        """Repaint the activity log table from a list of
+        ComputeRunRow."""
+        model = self._activity_model
+        model.removeRows(0, model.rowCount())
+
+        for row in rows:
+            activity = KIND_LABELS.get(row.kind, row.kind)
+            started = _format_started_at(row.started_at)
+            duration = _format_duration(row.duration_seconds)
+            attempted = (
+                str(row.tickers_attempted)
+                if row.tickers_attempted is not None else "—"
+            )
+            fetched = (
+                str(row.tickers_fetched)
+                if row.tickers_fetched is not None else "—"
+            )
+            notes = _format_notes_or_error(row)
+
+            items = [
+                QStandardItem(activity),
+                QStandardItem(started),
+                QStandardItem(duration),
+                QStandardItem(attempted),
+                QStandardItem(fetched),
+                QStandardItem(notes),
+            ]
+            # Right-align numeric columns
+            for col in (
+                COL_TICKERS_ATTEMPTED, COL_TICKERS_FETCHED,
+            ):
+                items[col].setTextAlignment(
+                    Qt.AlignRight | Qt.AlignVCenter,
+                )
+            # Italics on in-flight rows for visual hint
+            if row.is_in_flight:
+                for item in items:
+                    f = item.font()
+                    f.setItalic(True)
+                    item.setFont(f)
+            model.appendRow(items)
+
+    def _apply_mutex_state(
+        self, is_running: bool, inflight_kind: str | None,
+    ) -> None:
+        """Enable/disable the four action buttons + flip the
+        flashing lights based on running state."""
+        self._refresh_listings_btn.setEnabled(not is_running)
+        self._recompute_tiers_btn.setEnabled(not is_running)
+        self._backfill_btn.setEnabled(not is_running)
+        self._run_intraday_btn.setEnabled(not is_running)
+
+        # Flashing lights: backfill kind → backfill panel light;
+        # intraday/eod kind → intraday panel light. Local-running
+        # without a known kind: turn ON neither (we don't know
+        # which panel the click was on at this layer; the click
+        # handlers set their own light).
+        self._backfill_light.set_active(inflight_kind == "backfill")
+        self._intraday_light.set_active(
+            inflight_kind in ("intraday", "eod"),
+        )
+
+    def _paint_market_overview(self, row) -> None:
+        if row is None:
+            self._snapshot_date_label.setText("(no snapshot yet)")
+            self._signals_label.setText(
+                "# Buys = —    # Sells = —    "
+                "# Exit Buys = —    # Exit Sells = —"
+            )
+            self._regimes_label.setText(
+                "# Green Regimes = —    # Red Regimes = —    "
+                "# Neutral Regimes = —"
+            )
+            self._ema_label.setText(
+                "# Stocks > highest_ema = —    "
+                "# Stocks < lowest_ema = —    "
+                "# in between = —"
+            )
+            return
+
+        self._snapshot_date_label.setText(
+            f"Snapshot date: {row.snapshot_date.isoformat()}"
+        )
+        self._signals_label.setText(
+            f"# Buys = {row.n_buys}    "
+            f"# Sells = {row.n_sells}    "
+            f"# Exit Buys = {row.n_exit_buys}    "
+            f"# Exit Sells = {row.n_exit_sells}"
+        )
+        self._regimes_label.setText(
+            f"# Green Regimes = {row.n_green_regime}    "
+            f"# Red Regimes = {row.n_red_regime}    "
+            f"# Neutral Regimes = {row.n_neutral_regime}"
+        )
+        self._ema_label.setText(
+            f"# Stocks > highest_ema = {row.n_above_highest_ema}    "
+            f"# Stocks < lowest_ema = {row.n_below_lowest_ema}    "
+            f"# in between = {row.n_between_emas}"
+        )
+
+    # ============================================================
+    # Action button handlers — STUBS for 13b
+    # ============================================================
+    # Each one just shows a status message + (for the panel-based
+    # actions) toggles the local flashing light for a few seconds.
+    # 13c/13d will replace these with real wiring.
 
     def _on_refresh_listings_clicked(self) -> None:
-        exchange = self._require_exchange()
-        if exchange is None:
-            return
-        self._fire_action(
-            f"Refresh listings ({exchange})",
-            lambda: self._http.refresh_listings(exchange=exchange),
-        )
-
-    def _on_run_eod_clicked(self) -> None:
-        exchange = self._require_exchange()
-        if exchange is None:
-            return
-        self._fire_action(
-            f"Run EoD ({exchange})",
-            lambda: self._http.run_eod(exchange=exchange, lookback_days=7),
-        )
-
-    def _on_run_intraday_clicked(self) -> None:
-        exchange = self._require_exchange()
-        if exchange is None:
-            return
-        self._fire_action(
-            f"Run intraday ({exchange})",
-            lambda: self._http.run_intraday(exchange=exchange),
+        self._set_status(
+            "Refresh Listings — wiring lands in Step 13d."
         )
 
     def _on_recompute_tiers_clicked(self) -> None:
-        exchange = self._require_exchange()
-        if exchange is None:
-            return
-        self._fire_action(
-            f"Recompute tiers ({exchange})",
-            lambda: self._http.recompute_tiers(exchange=exchange),
+        self._set_status(
+            "Recompute Tiers — wiring lands in Step 13d."
         )
 
-    def _on_unpark_all_clicked(self) -> None:
-        exchange = self._require_exchange()
-        if exchange is None:
+    def _on_add_stock_clicked(self) -> None:
+        """Add typed text to the chip list. In 13b this works as a
+        plain-text-to-chip; 13c adds autocomplete + validation."""
+        text = self._stocks_input.text().strip().upper()
+        if not text:
             return
-        result = QMessageBox.question(
-            self, f"Unpark all {exchange} tickers?",
-            f"Clear the parked flag for every parked {exchange} ticker?\n"
-            f"They will retry on the next EoD run.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if result != QMessageBox.Yes:
-            return
-        self._fire_action(
-            f"Unpark all ({exchange})",
-            lambda: self._http.unpark_all(exchange=exchange),
-        )
+        self._chip_area.add_chip(text)
+        self._stocks_input.clear()
 
     def _on_backfill_clicked(self) -> None:
-        """Open the modal BackfillDialog to collect start_date +
-        optional tier; if the operator confirms, POST to /backfill
-        through the shared `_fire_action` machinery (button gating,
-        worker, outcome modal).
+        # 13c will pull date_from, date_to, stocks list + spawn
+        # the CLI subprocess. For now: placeholder + log to status.
+        chips = self._chip_area.chips()
+        date_from = self._from_date.date().toString("yyyy-MM-dd")
+        date_to = self._to_date.date().toString("yyyy-MM-dd")
+        refetch = self._fetch_prices_radio.isChecked()
+        self._set_status(
+            f"Backfill (placeholder) — from={date_from} "
+            f"to={date_to} stocks={len(chips)} refetch={refetch}. "
+            "Wiring lands in Step 13c."
+        )
 
-        Phase 15d: deliberately no extra confirmation modal here.
-        The dialog itself is the gating step — the operator picks
-        a start date and clicks OK. A double-confirm would feel
-        bureaucratic for an operation that's bounded by start_date.
-        """
-        exchange = self._require_exchange()
+    def _on_run_intraday_clicked(self) -> None:
+        self._set_status(
+            "Run Intraday — wiring lands in Step 13d."
+        )
+
+    def _open_trend_dialog(self, kind: TrendKind) -> None:
+        """Open the 90-day trend chart for the selected metric."""
+        exchange = self._picker.current_exchange()
         if exchange is None:
-            return
-        # Lazy import — avoid loading the dialog module at view
-        # construction time so test imports don't have to pay for it.
-        from .widgets.backfill_dialog import BackfillDialog
-        dialog = BackfillDialog(exchange=exchange, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        start_date, tier = dialog.values()
-        label = (
-            f"Backfill ({exchange}, from {start_date.isoformat()}"
-            f"{f', tier={tier}' if tier is not None else ''})"
-        )
-        self._fire_action(
-            label,
-            lambda: self._http.backfill(
-                exchange=exchange, start_date=start_date, tier=tier,
-            ),
-        )
-
-    def _on_backfill_shares_clicked(self) -> None:
-        """Open the BackfillSharesDialog to collect start_date + force,
-        then POST to /v1/admin/etl/backfill-shares via _fire_action.
-
-        Same pattern as _on_backfill_clicked — the dialog is the
-        gating step; no double-confirm modal here.
-        """
-        exchange = self._require_exchange()
-        if exchange is None:
-            return
-        # Lazy import — same pattern as the existing backfill button.
-        from .widgets.backfill_shares_dialog import BackfillSharesDialog
-        dialog = BackfillSharesDialog(exchange=exchange, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        start_date, force = dialog.values()
-        label = (
-            f"Backfill historical shares ({exchange}, from "
-            f"{start_date.isoformat()}{', force' if force else ''})"
-        )
-        self._fire_action(
-            label,
-            lambda: self._http.backfill_historical_shares(
-                exchange=exchange,
-                start_date=start_date,
-                force=force,
-            ),
-        )
-
-    def _fire_action(self, label: str, fn) -> None:
-        """Disable all action buttons until the response arrives;
-        spawn a worker; show the outcome via QMessageBox + status bar.
-
-        Note: while an action is in flight we disable buttons globally
-        rather than per-button — concurrent actions on the same
-        exchange are usually undesirable (e.g. two EoDs fighting),
-        and the user shouldn't be encouraged to fire-and-forget.
-        Re-enable returns to whatever the gating rule
-        (_refresh_action_buttons_enabled) says.
-        """
-        for btn in self._action_buttons:
-            btn.setEnabled(False)
-        def on_done(payload: dict):
-            self._refresh_action_buttons_enabled()
-            notes = payload.get("notes", "Submitted.")
-            QMessageBox.information(self, f"{label} accepted", notes)
-            # Trigger an immediate refresh so the user sees the new
-            # in-flight row appear in the table.
-            self._scheduler.trigger_now()
-        def on_fail(message: str):
-            self._refresh_action_buttons_enabled()
-            QMessageBox.warning(
-                self, f"{label} failed",
-                f"The action could not be submitted:\n\n{message}",
+            QMessageBox.information(
+                self, "Trend",
+                "Select an exchange first.",
             )
-        submit(fn, on_finished=on_done, on_failed=on_fail)
+            return
+        dlg = MarketTrendDialog(
+            db=self._db, exchange=exchange, kind=kind, parent=self,
+        )
+        dlg.exec()
 
-    # ---------- lifecycle ---------- #
+    def _set_status(self, message: str) -> None:
+        self._status_label.setText(message)
+        logger.info("EtlStatusView status: %s", message)
+
+    # ============================================================
+    # Lifecycle
+    # ============================================================
 
     def on_close(self) -> None:
-        """Called by MainWindow.closeEvent. Stop the refresh timer
-        cleanly so the worker pool can drain."""
-        try:
-            if self._scheduler.is_running:
-                self._scheduler.stop()
-        except RuntimeError:
-            # Qt object may have been destroyed already during test
-            # teardown; ignore.
-            pass
-
-
-def _parse_iso(s: str | None) -> datetime | None:
-    if not s:
-        return None
-    try:
-        # FastAPI emits with timezone; fromisoformat handles it from 3.11+.
-        return datetime.fromisoformat(s)
-    except (ValueError, TypeError):
-        return None
+        """Called by MainWindow on app shutdown. Stop schedulers
+        so QTimers don't fire post-destruction."""
+        for sch in (
+            self._activity_scheduler,
+            self._mutex_scheduler,
+            self._overview_scheduler,
+        ):
+            try:
+                sch.stop()
+            except Exception:
+                pass
