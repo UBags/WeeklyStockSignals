@@ -461,31 +461,11 @@ def _build_orchestrator_components(
                 config=config,
                 exchange=exchange,
             )
-            # After bars are fetched, run the fundamentals daily
-            # pipeline so the industry index chart has fresh data.
-            # Steps 1-3 (refresh-industry/shares/financials) have
-            # 80-day skip guards and won't make yfinance API calls
-            # on daily runs. Steps 4-8 (compute-market-cap,
-            # build-industry-indices, compute-index-values,
-            # compute-indicator-state, compute-signals) are all
-            # local compute and run in ~30-60s.
-            try:
-                from .fundamentals.eod_pipeline import run_eod_pipeline  # noqa: PLC0415
-                pipeline_result = run_eod_pipeline(
-                    db_engine, exchange,
-                    include_tickers=False,  # industry-level only
-                )
-                logger.info(
-                    "Post-fetch fundamentals pipeline for %s: %s (%.1fs)",
-                    exchange, pipeline_result.overall_status,
-                    pipeline_result.duration_seconds or 0.0,
-                )
-            except Exception:
-                logger.warning(
-                    "Post-fetch fundamentals pipeline failed for %s; "
-                    "industry charts may be stale",
-                    exchange, exc_info=True,
-                )
+            # === STEP 14A-FIXUP: legacy eod_pipeline call removed ===
+            # The post-fetch fundamentals pipeline call has been
+            # demolished as part of the V1 cutover — recompute_market
+            # (invoked separately by the orchestrator as
+            # compute_run_once) now handles all indicators.
             return result
         return _fetch
 

@@ -64,10 +64,32 @@ from ..observability.tracing import (
     set_span_attribute_if_active,
 )
 from ..persistence.tickers_repo import TickerRecord, TickersRepository
-from ..signals.generate_signals_in_live_production import (
-    LiveTickResult,
-    generate_live_signal_for_ticker,
-)
+# === STEP 14A-FIXUP2: legacy module imports stubbed ===
+# generate_signals_in_live_production.py was deleted in Step 14a.
+# ComputeScheduler is constructed but never .start()'d in production
+# (orchestrator pool owns compute cadence since Phase 14). Tier 2
+# of Step 14 will demolish ComputeScheduler entirely. Until then,
+# stub the symbols so the module loads.
+from dataclasses import dataclass
+
+
+@dataclass
+class LiveTickResult:  # type: ignore[no-redef]
+    """Stub for the deleted live-tick result type. Keeps the
+    type annotation in ComputeScheduler.run_once() syntactically
+    valid; never actually instantiated."""
+    event_id: int | None = None
+
+
+def generate_live_signal_for_ticker(*args, **kwargs):  # type: ignore[no-redef]
+    """Stub. If this is ever called in production, it indicates the
+    legacy compute path is being invoked despite ComputeScheduler
+    being inactive — migrate the caller to recompute_market (V1)."""
+    raise RuntimeError(
+        "ComputeScheduler.run_once() invoked but the legacy compute "
+        "path was demolished in Step 14a. Migrate the caller to "
+        "trip_ema.orchestrator.recompute_market (V1)."
+    )
 
 logger = logging.getLogger(__name__)
 

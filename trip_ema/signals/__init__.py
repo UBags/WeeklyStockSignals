@@ -33,34 +33,20 @@ Rules (per spec):
   F) SELL takes precedence over EXIT_FROM_BUY   (BUY →SELL in one step)
 """
 
-# Step 11b2: legacy backfill imports removed —
-# trip_ema.backfill.pipeline replaces generate_and_backfill_signals.
-from trip_ema.signals.generate_signals import (
-    PositionState,
-    SignalDecision,
-    generate_signal,
-)
-from trip_ema.signals.generate_signals_in_live_production import (
-    LiveTickResult,
-    generate_live_signal_for_ticker,
-)
+# === STEP 14A-FIXUP: legacy signal imports stripped ===
+# Step 14a deleted:
+#   - generate_signals.py (legacy rules-based generator)
+#   - generate_signals_in_live_production.py (legacy live tick)
+# The V1 pipeline uses trip_ema.orchestrator.derive_signals instead.
+# persist_signals is kept (no public deletion of that file yet);
+# Tier 2 will revisit.
 from trip_ema.signals.persist_signals import (
     SignalCacheWriter,
     persist_signal_events,
 )
 
 __all__ = [
-    # Pure rules
-    "PositionState",
-    "SignalDecision",
-    "generate_signal",
-    # Persistence
+    # Persistence (V1 still uses these for cache write-through)
     "SignalCacheWriter",
     "persist_signal_events",
-    # Backfill — V1 backfill is in trip_ema.backfill.pipeline;
-    # the legacy generate_and_backfill_signals module was removed
-    # in Step 11b2.
-    # Live
-    "LiveTickResult",
-    "generate_live_signal_for_ticker",
 ]
