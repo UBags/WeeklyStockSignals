@@ -21,10 +21,9 @@ from datetime import date, datetime, timedelta, UTC
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Engine, text
 
+# === STEP 15-B8-import: query_cached_* imports stripped ===
 from ....api import (
     TickerNotPrimedError,
-    query_cached_terse,
-    query_cached_verbose,
 )
 from ....cache import SignalCache
 from ....domain import TickerRef, Timeframe
@@ -223,50 +222,10 @@ def get_signal_history(
             years_back=years,
         )
 
-@router.get(
-    "/{exchange}/{symbol}",
-    response_model=TerseResponsePayload | VerboseResponsePayload,
-)
-def get_signal(
-    exchange: str,
-    symbol: str,
-    instrument: str = Query(default="EQ", max_length=16),
-    timeframe: Timeframe = Query(default=Timeframe.WEEKLY),
-    verbose: bool = Query(default=False),
-    cache: SignalCache = Depends(get_cache),
-):
-    """Return the latest cached signal for this ticker × timeframe."""
-    ref = TickerRef(exchange=exchange, symbol=symbol, instrument=instrument)
-    try:
-        # Step 8 reshaped the cache to key by ticker_id. Walk the
-        # cache to resolve ticker_id from ref — cheap (one snapshot
-        # per active ticker × timeframe) and avoids a DB round-trip
-        # on the request path.
-        ticker_id = None
-        for snap in cache.all_snapshots():
-            if snap.ticker_ref == ref and snap.timeframe == timeframe:
-                ticker_id = snap.ticker_id
-                break
-        if ticker_id is None:
-            raise TickerNotPrimedError(
-                f"No cached state for {ref} @ {timeframe.value}"
-            )
-        if verbose:
-            # Step 8: cache holds one snapshot per ticker. Consumers
-            # needing history use /v1/signals/{ex}/{sym}/history.
-            internal = query_cached_verbose(
-                ticker_id=ticker_id, timeframe=timeframe,
-                cache=cache,
-            )
-            return VerboseResponsePayload.from_domain(internal)
-        internal_terse = query_cached_terse(
-            ticker_id=ticker_id, timeframe=timeframe, cache=cache,
-        )
-        return TerseResponsePayload.from_domain(internal_terse)
-    except TickerNotPrimedError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(e),
-        ) from e
+# === STEP 15-B8-endpoint: get_signal endpoint removed ===
+# The cached read path depended on the legacy SignalCache.latest_signal_event
+# field which has been demolished. Consumers needing the latest signal can
+# either query /v1/signals/{ex}/{sym}/history or use V1 endpoints.
 
 
 def _finite_or_none(v: float) -> float | None:

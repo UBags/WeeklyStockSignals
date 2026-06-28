@@ -24,10 +24,10 @@ from datetime import datetime, UTC
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Engine
 
+# === STEP 15-B10-import: _load_latest_signal_events removed ===
 from ....api.lifecycle import (
     PrimeCacheResult,
     _load_latest_indicator_states,
-    _load_latest_signal_events,
     prime_cache_from_db,
 )
 # === STEP 14B-FIXUP1-admin-import: CurrentSignalsCache added ===
@@ -210,17 +210,13 @@ def admin_reprime_ticker(
             detail=f"Ticker not found: {ref}",
         )
 
-    # Re-read just this ticker's slice of indicator_state +
-    # signal_events. The shape is the same as prime_cache_from_db
-    # but filtered.
+    # === STEP 15-B10-body: all_sig + sig_snap removed (indicator-only) ===
     with db_engine.connect() as conn:
         all_ind = _load_latest_indicator_states(conn, timeframe=timeframe)
-        all_sig = _load_latest_signal_events(conn, timeframe=timeframe)
 
     ind_snap = all_ind.get(ticker.ticker_id)
-    sig_snap = all_sig.get(ticker.ticker_id)
 
-    if ind_snap is None and sig_snap is None:
+    if ind_snap is None:
         return RepriumeResultPayload(
             ticker=TickerRefPayload.from_domain(ref),
             timeframe=timeframe.value,
@@ -238,7 +234,7 @@ def admin_reprime_ticker(
         ticker_ref=ref,
         timeframe=timeframe,
         latest_indicator_state=ind_snap,
-        latest_signal_event=sig_snap,
+        # STEP 15-B10-snapshot: latest_signal_event arg removed
         snapshot_taken_at=datetime.now(UTC),
         stale_since=None,  # explicit clear on reprime
     ))

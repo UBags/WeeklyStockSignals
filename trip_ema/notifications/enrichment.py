@@ -241,13 +241,14 @@ def _fetch_sector_zones(conn, industries: list[str]) -> dict[str, int]:
     """
     if not industries:
         return {}
+    # === STEP 15-C1: rewired indicator_state -> industry_indicator_state ===
     sql = text("""
         SELECT DISTINCT ON (industry_name)
             industry_name,
             display_regime
-        FROM indicator_state
+        FROM industry_indicator_state
         WHERE industry_name = ANY(:industries)
-        ORDER BY industry_name, trade_date DESC
+        ORDER BY industry_name, bar_timestamp DESC
     """)
     rows = conn.execute(sql, {"industries": industries}).all()
     return {r.industry_name: int(r.display_regime) for r in rows}
@@ -307,6 +308,7 @@ def _fetch_recent_signals(
     """
     if not ticker_ids:
         return {}
+    # === STEP 15-C2: rewired signal_events -> historical_signals ===
     sql = text("""
         WITH numbered AS (
             SELECT
@@ -318,7 +320,7 @@ def _fetch_recent_signals(
                     PARTITION BY ticker_id
                     ORDER BY computed_at DESC
                 ) AS rn
-            FROM signal_events
+            FROM historical_signals
             WHERE ticker_id = ANY(:tids)
         )
         SELECT ticker_id, computed_at, signal_type, price_at_signal

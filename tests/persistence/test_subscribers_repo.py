@@ -129,35 +129,8 @@ def test_add_and_list_subscriptions(db_engine, now):
 
 # ---------- Notification log ---------- #
 
-def test_record_notification_creates_row(db_engine, now):
-    """Notification log requires a real event_id (foreign key). For this
-    test we insert a minimal signal_event directly."""
-    from trip_ema.persistence import SignalsRepository, TickersRepository
-    from trip_ema.domain import ChangeSignal, SignalEvent, TickerRef, Timeframe
-
-    with transaction(db_engine) as conn:
-        sid = SubscribersRepository(conn).create_subscriber(
-            transport="email", address="x", notify_cadence_minutes=15, created_at=now,
-        )
-        tid = TickersRepository(conn).insert(
-            TickerRef("NSE", "X", "EQ"), created_at=now,
-        )
-        eid = SignalsRepository(conn).insert_event(tid, SignalEvent(
-            ticker=TickerRef("NSE", "X", "EQ"),
-            timeframe=Timeframe.WEEKLY,
-            bar_timestamp=now, signal=ChangeSignal.BUY,
-            price_at_signal=100, computed_at=now,
-        ))
-        SubscribersRepository(conn).record_notification(
-            subscriber_id=sid, event_id=eid, sent_at=now,
-        )
-
-    # Verify with raw SQL — repo doesn't expose a read API for the log,
-    # by design (the SignalsRepository handles the join).
-    from sqlalchemy import text
-    with db_engine.connect() as conn:
-        count = conn.execute(text(
-            "SELECT COUNT(*) FROM notification_log "
-            "WHERE subscriber_id = :sid AND event_id = :eid"
-        ), {"sid": sid, "eid": eid}).scalar_one()
-    assert count == 1
+# === STEP 15-V2-FIXUP2: test_record_notification_creates_row removed ===
+# It exercised the legacy notification_log.event_id FK to
+# signal_events.event_id — both demolished in Step 15. V1 uses
+# NotificationLogRepository (denormalized columns, no FK) via
+# orchestrator/notify_subscribers.py.

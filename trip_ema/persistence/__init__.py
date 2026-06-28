@@ -17,7 +17,7 @@ from .connection import (
     create_engine_from_config,
     transaction,
 )
-from .signals_repo import SignalsRepository
+# === STEP 15-B7: SignalsRepository import removed ===
 from .subscribers_repo import (
     SubscriberRecord,
     SubscribersRepository,
@@ -27,7 +27,7 @@ from .tickers_repo import TickerRecord, TickersRepository
 
 __all__ = [
     "BarsRepository",
-    "SignalsRepository",
+    # === STEP 15-B7-all: SignalsRepository removed ===
     "SubscriberRecord",
     "SubscribersRepository",
     "SubscriptionRecord",

@@ -45,9 +45,9 @@ import threading
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 
+# === STEP 15-B1-import: SignalEvent removed (unused after B1) ===
 from ..domain import (
     ChangeSignal,
-    SignalEvent,
     TickerRef,
     Timeframe,
 )
@@ -85,20 +85,10 @@ class IndicatorStateSnapshot:
     """When Phase 7 last wrote this row."""
 
 
-@dataclass(frozen=True, slots=True)
-class SignalEventSnapshot:
-    """Subset of one `signal_events` row, mirrored into the cache.
+# === STEP 15-B1-class: SignalEventSnapshot removed ===
 
-    `bar_timestamp` is the weekly bar's IST-Monday anchor; `signal`
-    is the ChangeSignal enum value; `computed_at` is when the event
-    was emitted (simulated day for backfill rows, NOW() for live
-    ticks).
-    """
-    event_id: int
-    bar_timestamp: datetime
-    signal: ChangeSignal
-    price_at_signal: float
-    computed_at: datetime
+
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +117,7 @@ class CachedSnapshot:
     """Mirrored for read-endpoint convenience — saves a tickers lookup."""
     timeframe: Timeframe
     latest_indicator_state: IndicatorStateSnapshot | None
-    latest_signal_event: SignalEventSnapshot | None
+    # === STEP 15-B1-field: latest_signal_event removed ===
     snapshot_taken_at: datetime
     """When this cache entry was last refreshed end-to-end (i.e.
     via lifecycle prime or a `put_snapshot`). The component
@@ -199,54 +189,8 @@ class SignalCache:
         with self._write_lock:
             self._snapshots[key] = snapshot
 
-    def update_signal_event(
-        self,
-        ticker_id: int,
-        timeframe: Timeframe,
-        event: SignalEvent,
-    ) -> None:
-        """Refresh just the `latest_signal_event` component for a
-        `(ticker_id, timeframe)`.
+    # === STEP 15-B1-method: update_signal_event removed ===
 
-        Matches the signature of `SignalCacheWriter` from Step 4's
-        `signals/persist_signals.py`, so Step 6's
-        `generate_live_signal_for_ticker(...,
-        signal_cache_writer=signal_cache.update_signal_event)`
-        wires in directly as a bound method.
-
-        Behaviour when no entry exists yet for `(ticker_id,
-        timeframe)`:
-          - Creates one with `latest_indicator_state=None` and the
-            supplied event as `latest_signal_event`. A subsequent
-            indicator_state update will fill in the missing
-            component. This lets events land before the startup
-            prime finishes.
-        """
-        new_event_snap = SignalEventSnapshot(
-            event_id=0,  # writer doesn't know the DB-assigned id; harmless
-            bar_timestamp=event.bar_timestamp,
-            signal=event.signal,
-            price_at_signal=event.price_at_signal,
-            computed_at=event.computed_at,
-        )
-        with self._write_lock:
-            existing = self._snapshots.get((ticker_id, timeframe))
-            if existing is None:
-                self._snapshots[(ticker_id, timeframe)] = CachedSnapshot(
-                    ticker_id=ticker_id,
-                    ticker_ref=event.ticker,
-                    timeframe=timeframe,
-                    latest_indicator_state=None,
-                    latest_signal_event=new_event_snap,
-                    snapshot_taken_at=event.computed_at,
-                    stale_since=None,
-                )
-            else:
-                self._snapshots[(ticker_id, timeframe)] = replace(
-                    existing,
-                    latest_signal_event=new_event_snap,
-                    snapshot_taken_at=event.computed_at,
-                )
 
     def update_indicator_state(
         self,
@@ -269,8 +213,7 @@ class SignalCache:
                     ticker_id=ticker_id,
                     ticker_ref=ticker_ref,
                     timeframe=timeframe,
-                    latest_indicator_state=state,
-                    latest_signal_event=None,
+                    latest_indicator_state=state,  # 15-B1: latest_signal_event arg removed
                     snapshot_taken_at=state.computed_at,
                     stale_since=None,
                 )

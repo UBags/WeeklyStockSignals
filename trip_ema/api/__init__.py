@@ -7,8 +7,7 @@
 Plus the response types and error classes used by all three.
 """
 
-from .cached import query_cached_terse, query_cached_verbose
-# trip_ema/api/__init__.py — drop legacy names, add the new one
+# === STEP 15-B3: query_cached_verbose/terse exports removed ===
 from .lifecycle import prime_cache_from_db, PrimeCacheResult
 from .responses import (
     InsufficientHistoryError,
@@ -27,6 +26,5 @@ __all__ = [
     "compute_full_terse",
     "compute_full_verbose",
     "prime_cache_from_db",
-    "query_cached_terse",
-    "query_cached_verbose",
+    # === STEP 15-B3-all: query_cached_* names removed from __all__ ===
 ]

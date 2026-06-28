@@ -79,8 +79,7 @@ def health_snapshot(
     # 7. Subscriber stats
     cards.append(_subscribers_card(db_engine))
 
-    # 8. Recent signal-event volume
-    cards.append(_recent_events_card(db_engine))
+    # === STEP 15-B9-call: _recent_events_card removed ===
 
     overall = _aggregate_overall_status(cards)
     return HealthSnapshotPayload(
@@ -391,25 +390,9 @@ def _subscribers_card(db_engine: Engine) -> HealthCardPayload:
         )
 
 
-def _recent_events_card(db_engine: Engine) -> HealthCardPayload:
-    """Signal events in the last 7 days. 'ok' regardless of count —
-    this is informational."""
-    try:
-        with db_engine.connect() as conn:
-            count = conn.execute(text("""
-                SELECT COUNT(*) FROM signal_events
-                WHERE computed_at >= NOW() - INTERVAL '7 days'
-            """)).scalar() or 0
-        return HealthCardPayload(
-            name="Signal events (7d)", status="ok",
-            headline=f"{count:,} events",
-            detail="Generated in the last 7 days.",
-        )
-    except Exception as e:
-        return HealthCardPayload(
-            name="Signal events (7d)", status="unknown",
-            headline="Query failed", detail=str(e),
-        )
+# === STEP 15-B9-fn: _recent_events_card removed ===
+
+
 
 
 def _aggregate_overall_status(cards: list[HealthCardPayload]) -> str:

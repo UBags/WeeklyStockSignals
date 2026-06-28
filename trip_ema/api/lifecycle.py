@@ -29,11 +29,11 @@ from datetime import datetime, UTC
 
 from sqlalchemy import Engine, text
 
+# === STEP 15-B2-import: SignalEventSnapshot import stripped ===
 from ..cache.signal_cache import (
     CachedSnapshot,
     IndicatorStateSnapshot,
     SignalCache,
-    SignalEventSnapshot,
 )
 from ..domain import ChangeSignal, TickerRef, Timeframe
 
@@ -117,26 +117,20 @@ def prime_cache_from_db(
         indicator_rows = _load_latest_indicator_states(
             conn, timeframe=timeframe,
         )
-        signal_rows = _load_latest_signal_events(
-            conn, timeframe=timeframe,
-        )
+        # === STEP 15-B2-load: signal_rows loading removed ===
         ticker_refs = _load_ticker_refs(
-            conn, ticker_ids=set(indicator_rows.keys()) | set(signal_rows.keys()),
+            conn, ticker_ids=set(indicator_rows.keys()),
         )
 
+    # === STEP 15-B2-loop: signal_event branch removed (indicator-only) ===
     snapshot_taken_at = datetime.now(UTC)
-    tickers_seen = set(indicator_rows.keys()) | set(signal_rows.keys())
+    tickers_seen = set(indicator_rows.keys())
 
-    indicator_only = 0
-    signal_event_only = 0
-    both = 0
     populated = 0
 
     for ticker_id in tickers_seen:
         ref = ticker_refs.get(ticker_id)
         if ref is None:
-            # Snapshot rows exist but no tickers entry — corrupted
-            # state, skip defensively.
             logger.warning(
                 "ticker_id %d has snapshot rows but no tickers entry; skipping",
                 ticker_id,
@@ -144,35 +138,25 @@ def prime_cache_from_db(
             continue
 
         ind_snap = indicator_rows.get(ticker_id)
-        sig_snap = signal_rows.get(ticker_id)
-        if ind_snap is not None and sig_snap is not None:
-            both += 1
-        elif ind_snap is not None:
-            indicator_only += 1
-        else:
-            signal_event_only += 1
-
         cache.put_snapshot(CachedSnapshot(
             ticker_id=ticker_id,
             ticker_ref=ref,
             timeframe=timeframe,
             latest_indicator_state=ind_snap,
-            latest_signal_event=sig_snap,
             snapshot_taken_at=snapshot_taken_at,
         ))
         populated += 1
 
     logger.info(
-        "prime_cache_from_db: %d tickers seen, %d snapshots populated "
-        "(%d both, %d indicator-only, %d signal-only)",
-        len(tickers_seen), populated, both, indicator_only, signal_event_only,
+        "prime_cache_from_db: %d tickers seen, %d snapshots populated",
+        len(tickers_seen), populated,
     )
     return PrimeCacheResult(
         tickers_seen=len(tickers_seen),
         snapshots_populated=populated,
-        indicator_only=indicator_only,
-        signal_event_only=signal_event_only,
-        both=both,
+        indicator_only=populated,
+        signal_event_only=0,
+        both=0,
     )
 
 
@@ -217,38 +201,8 @@ def _load_latest_indicator_states(
     }
 
 
-def _load_latest_signal_events(
-    conn, *, timeframe: Timeframe,
-) -> dict[int, SignalEventSnapshot]:
-    """One SELECT: latest signal_events row per ticker_id."""
-    sql = text("""
-        SELECT DISTINCT ON (ticker_id)
-               ticker_id, event_id, bar_timestamp,
-               signal_type, price_at_signal, computed_at
-          FROM signal_events
-         WHERE ticker_id IS NOT NULL
-           AND timeframe = :tf
-      ORDER BY ticker_id, computed_at DESC, event_id DESC
-    """)
-    rows = conn.execute(sql, {"tf": timeframe.value}).fetchall()
-    out: dict[int, SignalEventSnapshot] = {}
-    for r in rows:
-        sig = _STR_TO_SIGNAL.get(r.signal_type)
-        if sig is None:
-            logger.warning(
-                "signal_events.signal_type=%r is not in the wire vocabulary; "
-                "skipping ticker_id=%d event_id=%d",
-                r.signal_type, r.ticker_id, r.event_id,
-            )
-            continue
-        out[r.ticker_id] = SignalEventSnapshot(
-            event_id=r.event_id,
-            bar_timestamp=r.bar_timestamp,
-            signal=sig,
-            price_at_signal=r.price_at_signal,
-            computed_at=r.computed_at,
-        )
-    return out
+# === STEP 15-B2-loader: _load_latest_signal_events removed ===
+
 
 
 def _load_ticker_refs(
