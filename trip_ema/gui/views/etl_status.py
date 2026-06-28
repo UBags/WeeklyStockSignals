@@ -1399,6 +1399,60 @@ class EtlStatusView(QWidget):
             if line.strip():
                 logger.info("backfill stderr: %s", line)
 
+    # === ORPHAN-CLEANUP: idempotent post-exit DB sweep ===
+    def _cleanup_orphan_runs(self, *, kind: str, exchange: str) -> None:
+        """Mark any orphan in-flight rows for (kind, exchange) finished.
+
+        Called on every QProcess exit (clean or otherwise). If the CLI
+        process finished its DB rows normally, this UPDATE matches no
+        rows (no-op). If the process was killed/crashed before its
+        finally block ran, this finishes the rows with an explicit
+        audit trail so the next GUI mutex tick stops gating.
+
+        Updates BOTH tables:
+          - compute_runs: filtered by kind + exchange (no pid column).
+          - backfill_runs: filtered by exchange (only relevant when
+            kind=='backfill'; the unique partial index ensures at most
+            one active row per exchange anyway).
+        """
+        from sqlalchemy import text
+        try:
+            with self._db.begin() as conn:
+                conn.execute(
+                    text("""
+                        UPDATE compute_runs
+                           SET finished_at = NOW(),
+                               failed_stage = COALESCE(
+                                   failed_stage, 'gui_orphan_cleanup'
+                               ),
+                               error_message = COALESCE(
+                                   error_message,
+                                   'Marked finished by GUI on QProcess exit '
+                                   '(cancelled or crashed; CLI finally block '
+                                   'did not run)'
+                               )
+                         WHERE finished_at IS NULL
+                           AND kind = :kind
+                           AND exchange = :exchange
+                    """),
+                    {"kind": kind, "exchange": exchange},
+                )
+                if kind == "backfill":
+                    conn.execute(
+                        text("""
+                            UPDATE backfill_runs
+                               SET finished_at = NOW()
+                             WHERE finished_at IS NULL
+                               AND exchange = :exchange
+                        """),
+                        {"exchange": exchange},
+                    )
+        except Exception:
+            logger.warning(
+                "orphan cleanup failed for kind=%s exchange=%s",
+                kind, exchange, exc_info=True,
+            )
+
     def _on_backfill_finished(
         self, exit_code: int, exit_status,
     ) -> None:
@@ -1407,6 +1461,13 @@ class EtlStatusView(QWidget):
         self._backfill_process = None
         self._local_running = False
         self._inflight_kind = None
+
+        # === ORPHAN-CLEANUP-BACKFILL: defensive DB sweep ===
+        # Runs unconditionally — no-op on clean exit (CLI already
+        # finished its rows), recovers state on kill/crash.
+        exchange = self._picker.current_exchange()
+        if exchange is not None:
+            self._cleanup_orphan_runs(kind="backfill", exchange=exchange)
 
         # Force activity log + mutex refresh so the row's
         # finished_at gets reflected without waiting 5s
@@ -1579,6 +1640,13 @@ class EtlStatusView(QWidget):
         self._local_running = False
         self._inflight_kind = None
 
+        # === ORPHAN-CLEANUP-INTRADAY: defensive DB sweep ===
+        # cmd_cycle's finally block updates compute_runs on clean exit
+        # or graceful signal; SIGKILL bypasses it. This is the safety net.
+        exchange = self._picker.current_exchange()
+        if exchange is not None:
+            self._cleanup_orphan_runs(kind="intraday", exchange=exchange)
+
         # Force activity log + mutex refresh so the compute_runs
         # row's finished_at gets reflected without waiting 5s
         self._activity_scheduler.trigger_now()
@@ -1654,13 +1722,14 @@ class EtlStatusView(QWidget):
         if self._intraday_process.state() == QProcess.NotRunning:
             return
 
+        # === CANCEL-DIALOG-INTRADAY: updated for auto-cleanup ===
         reply = QMessageBox.question(
             self, "Cancel intraday cycle?",
-            "This will interrupt the running cycle. The "
-            "pipeline rolls back any in-progress transaction "
-            "and the compute_runs row stays as-is (cmd_cycle's "
-            "finally block updates it with failed_stage='unknown')."
-            "\n\n"
+            "This will interrupt the running cycle. The pipeline "
+            "rolls back any in-progress transaction. On process exit "
+            "the GUI marks the compute_runs row finished automatically "
+            "(belt-and-suspenders: cmd_cycle's finally block normally "
+            "does this, the GUI cleanup is the safety net for SIGKILL).\n\n"
             "Cancel anyway?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -1700,13 +1769,14 @@ class EtlStatusView(QWidget):
         if self._backfill_process.state() == QProcess.NotRunning:
             return
 
+        # === CANCEL-DIALOG-BACKFILL: updated for auto-cleanup ===
         reply = QMessageBox.question(
             self, "Cancel backfill?",
-            "This will interrupt the running backfill. The "
-            "pipeline rolls back its current transaction but "
-            "leaves a stale backfill_runs marker. Use "
-            "`trip-ema-etl backfill --release-lock` afterward to "
-            "clear it before re-running.\n\n"
+            "This will interrupt the running backfill. The pipeline "
+            "rolls back its current transaction. On process exit the "
+            "GUI automatically marks any orphan backfill_runs / "
+            "compute_runs rows finished, so you can re-trigger "
+            "immediately — no manual cleanup needed.\n\n"
             "Cancel anyway?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
