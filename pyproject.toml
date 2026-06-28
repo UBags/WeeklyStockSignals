@@ -129,7 +129,7 @@ test = [
 
 [project.scripts]
 trip-ema = "trip_ema.app:main"
-trip-ema-notifier = "trip_ema.notifier_worker:main"
+# === STEP 14B-E8: trip-ema-notifier entrypoint removed ===
 trip-ema-etl = "trip_ema.etl.cli:main"
 trip-ema-console = "trip_ema.gui.console:main"
 

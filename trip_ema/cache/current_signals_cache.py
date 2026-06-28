@@ -11,7 +11,7 @@ Coexistence note:
   - The legacy `trip_ema.cache.signal_cache.SignalCache` continues to
     live alongside this for now. It stores rich CachedSnapshot objects
     (indicator_state + signal_event + stale flags) and is still wired
-    into the vestigial `trip_ema.scheduler.compute_scheduler` which
+    into the (now-demolished) `trip_ema.scheduler.compute_scheduler` which
     never calls `.start()` in V1. Step 10 of the V1 cutover deletes
     ComputeScheduler and the legacy cache together.
 

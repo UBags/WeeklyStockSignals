@@ -49,12 +49,11 @@ from .persistence import (
 )
 from .persistence.backfill_runs_repo import BackfillRunsRepository
 from .persistence.current_signals_repo import CurrentSignalsRepository
+# === STEP 14B-E6-import: ComputeScheduler + SubscriberDistributor imports stripped ===
 from .scheduler import (
-    ComputeScheduler,
     MarketHoursService,
     OrchestratorPool,
     OrchestratorSettings,
-    SubscriberDistributor,
     build_pool_from_configs,
 )
 from .transports.http import AppState, create_app, set_state
@@ -148,38 +147,16 @@ def _build_app_state(config_path: Path) -> AppState:
         "V1 cache primed: %d signals", v1_cache.signal_count(),
     )
 
-    compute_scheduler = ComputeScheduler(
-        db_engine=db_engine,
-        cache=cache,
-        cadence_minutes=config.scheduling.compute_cadence_minutes,
-    )
-    # Phase 14: when the orchestrator is enabled, it drives the
-    # fetch → compute → distribute pipeline at per-market wall-clock
-    # ticks. The orchestrator calls `compute_scheduler.run_once()`
-    # from inside its pipeline — so the ComputeScheduler instance is
-    # still needed — but its self-driving cadence thread MUST NOT
-    # start. Two clocks running the same compute would either
-    # collide on the reentrancy lock (wasting cycles) or, worse,
-    # produce duplicate signal events if the lock implementation
-    # ever drifts.
-    if config.scheduling.orchestrator.enabled:
-        logger.info(
-            "ComputeScheduler constructed but loop thread NOT started — "
-            "orchestrator owns the cadence",
-        )
-    else:
-        logger.info(
-            "Starting ComputeScheduler (cadence=%d min)",
-            config.scheduling.compute_cadence_minutes,
-        )
-        compute_scheduler.start()
-
+    # === STEP 14B-E6-cs_build: ComputeScheduler construction removed ===
+    # The orchestrator pool (Phase 14) owns all compute cadence in V1.
     market_hours = MarketHoursService(config.market_hours)
 
-    # Phase 7: branch on whether Redis is configured.
-    # If `config.redis` is set, the distributor operates in queue mode —
-    # it enqueues to Redis instead of dispatching transports directly.
-    # The actual sends happen in the notifier worker process.
+    # === STEP 14B-E6-dist_build: SubscriberDistributor construction removed ===
+    # V1 uses notify_subscribers (invoked by the orchestrator pool as
+    # distribute_run_once) for the send path. The legacy in-process
+    # distributor + Redis-queue distributor are both gone.
+    # Redis queue is still built when configured — it now feeds the
+    # notifier worker (if anyone runs it) but isn't required for V1.
     redis_queue = None
     if config.redis is not None:
         redis_queue = _build_redis_queue(config.redis)
@@ -187,42 +164,6 @@ def _build_app_state(config_path: Path) -> AppState:
             "Redis queue configured at %s (queue=%s)",
             config.redis.url_without_password(), config.redis.queue_name,
         )
-        distributor = SubscriberDistributor(
-            db_engine=db_engine,
-            market_hours=market_hours,
-            queue=redis_queue,
-            cadence_minutes=config.scheduling.subscriber_cadence_minutes,
-        )
-    else:
-        # Legacy in-process mode: transports dispatched from the
-        # distributor thread itself. Suitable for dev and small deployments.
-        # Build an enrichment provider closure for the email transport so
-        # outgoing mails carry the HTML table (grouped by signal type,
-        # per-ticker mcap / sector / last-5 signals). DB-down conditions
-        # fall back to text-only inside EmailTransport.send().
-        from .notifications.enrichment import enrich_batch
-        def _email_enrichment_provider(batch):
-            return enrich_batch(db_engine, batch)
-        transports = {
-            "email": _build_email_transport_or_null(
-                config, enrichment_provider=_email_enrichment_provider, db_engine=db_engine,
-            ),
-            "webhook": WebhookTransport(),
-        }
-        transports = _wrap_transports_with_breakers(transports, config)
-        distributor = SubscriberDistributor(
-            db_engine=db_engine,
-            market_hours=market_hours,
-            transports=transports,
-            cadence_minutes=config.scheduling.subscriber_cadence_minutes,
-        )
-
-    distributor.start()
-    logger.info(
-        "Started SubscriberDistributor (cadence=%d min, mode=%s)",
-        config.scheduling.subscriber_cadence_minutes,
-        "queue" if redis_queue else "legacy",
-    )
 
     # Phase 10: start Prometheus /metrics server (separate port).
     # Disabled if `config.observability.metrics_port is None`.
@@ -247,20 +188,19 @@ def _build_app_state(config_path: Path) -> AppState:
     # already running when the first orchestrator publishes (PulseState
     # needs the loop for SSE fan-out). When the orchestrator is
     # disabled, both are None and the new endpoints return 503.
+    # === STEP 14B-E6-boc_call: _build_orchestrator_components no longer takes scheduler/distributor ===
     pulse_state, orchestrator_pool = _build_orchestrator_components(
         config=config,
         db_engine=db_engine,
-        compute_scheduler=compute_scheduler,
-        distributor=distributor,
         v1_cache=v1_cache,
     )
 
+    # === STEP 14B-FIXUP1-app-appstate: v1_cache plumbed through ===
     return AppState(
         config=config,
         db_engine=db_engine,
         cache=cache,
-        compute_scheduler=compute_scheduler,
-        distributor=distributor,
+        v1_cache=v1_cache,
         redis_queue=redis_queue,
         metrics_server=metrics_server,
         etl_executor=etl_executor,
@@ -374,12 +314,11 @@ def _make_logged_compute(
     return _logged
 
 
+# === STEP 14B-E6-boc_sig: scheduler/distributor params removed ===
 def _build_orchestrator_components(
     *,
     config,
     db_engine,
-    compute_scheduler: ComputeScheduler,
-    distributor: SubscriberDistributor,
     v1_cache: CurrentSignalsCache,
 ) -> tuple[PulseState | None, OrchestratorPool | None]:
     """Phase 14: build (PulseState, OrchestratorPool) if enabled in config.
@@ -904,15 +843,7 @@ def _build_shutdown_callback(state: AppState, notifier_proc=None):
                 )
         except Exception:
             logger.exception("Error stopping orchestrator_pool")
-        try:
-            if state.distributor is not None:
-                state.distributor.stop()
-        except Exception:
-            logger.exception("Error stopping distributor")
-        try:
-            state.compute_scheduler.stop()
-        except Exception:
-            logger.exception("Error stopping compute_scheduler")
+        # === STEP 14B-E6-shutdown: distributor + compute_scheduler stops removed ===
         if notifier_proc is not None and notifier_proc.is_alive():
             logger.info("Terminating notifier worker (pid=%d)", notifier_proc.pid)
             try:
@@ -1038,31 +969,7 @@ def _install_signal_handlers(shutdown_callback) -> None:
     signal.signal(signal.SIGTERM, _shutdown)
 
 
-def _spawn_notifier_process(config_path: Path, log_level: str):
-    """Spawn the notifier worker as a child process. Returns the
-    multiprocessing.Process so the caller can manage its lifecycle.
-
-    The child re-loads the same config file and connects to the same
-    Redis. In production, prefer running the notifier as a separate
-    systemd unit (`python -m trip_ema.notifier_worker --config ...`);
-    this in-process spawn is the dev convenience path.
-    """
-    import multiprocessing
-
-    def _worker_entry(cfg_path: str, lvl: str):
-        # The child process re-imports and re-parses — no state shared.
-        from .notifier_worker import main as worker_main
-        worker_main(["--config", cfg_path, "--log-level", lvl])
-
-    proc = multiprocessing.Process(
-        target=_worker_entry,
-        args=(str(config_path), log_level),
-        name="trip_ema_notifier",
-        daemon=False,  # daemon=True would kill it abruptly on parent exit
-    )
-    proc.start()
-    logger.info("Spawned notifier worker process (pid=%d)", proc.pid)
-    return proc
+# === STEP 14B-E6-spawn_fn: _spawn_notifier_process removed (notifier_worker.py deleted) ===
 
 
 def main(argv: list[str] | None = None) -> NoReturn:
@@ -1075,13 +982,7 @@ def main(argv: list[str] | None = None) -> NoReturn:
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
-    parser.add_argument(
-        "--spawn-notifier", action="store_true",
-        help="Spawn the notifier worker as a child process. Convenient "
-             "for dev; in production, run the notifier separately via "
-             "`python -m trip_ema.notifier_worker --config ...` so it "
-             "can be managed and scaled independently of the main app.",
-    )
+    # === STEP 14B-E6-spawn_arg: --spawn-notifier removed ===
     args = parser.parse_args(argv)
 
     # Bootstrap logging in text mode so the early boot lines are
@@ -1096,19 +997,11 @@ def main(argv: list[str] | None = None) -> NoReturn:
     _configure_logging(args.log_level, json_output=state.config.observability.log_json)
     set_state(state)
 
-    notifier_proc = None
-    if args.spawn_notifier:
-        if state.redis_queue is None:
-            logger.error(
-                "--spawn-notifier requires a `redis` section in the config"
-            )
-            sys.exit(2)
-        notifier_proc = _spawn_notifier_process(args.config, args.log_level)
-
+    # === STEP 14B-E6-spawn_use: notifier subprocess spawn removed ===
     # Build the graceful-shutdown callback ONCE; share it between the
     # ASGI lifespan (the path uvicorn uses on SIGTERM/SIGINT) and the
     # explicit signal handlers (the fallback for non-uvicorn paths).
-    shutdown_callback = _build_shutdown_callback(state, notifier_proc=notifier_proc)
+    shutdown_callback = _build_shutdown_callback(state, notifier_proc=None)
     _install_signal_handlers(shutdown_callback)
 
     # Phase 14: build the startup callback that binds PulseState to

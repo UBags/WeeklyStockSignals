@@ -18,9 +18,11 @@ from typing import Annotated, Any
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import Engine
 
+# === STEP 14B-FIXUP1-deps-import: CurrentSignalsCache added ===
 from ...cache import SignalCache
+from ...cache.current_signals_cache import CurrentSignalsCache
 from ...config import Config
-from ...scheduler import ComputeScheduler, SubscriberDistributor
+# === STEP 14B-E3-import: ComputeScheduler + SubscriberDistributor imports stripped ===
 
 # Phase 7: optional Redis queue. Imported under TYPE_CHECKING to avoid a
 # hard dependency on `redis` at import time for code that doesn't use it.
@@ -41,11 +43,12 @@ class AppState:
     Held as a single instance on the FastAPI app's state attribute so it
     survives across requests but doesn't leak into route code directly.
     """
+    # === STEP 14B-E3-fields: compute_scheduler + distributor fields removed ===
+    # === STEP 14B-FIXUP1-deps-appstate: v1_cache field added ===
     config: Config
     db_engine: Engine
     cache: SignalCache
-    compute_scheduler: ComputeScheduler
-    distributor: SubscriberDistributor | None = None
+    v1_cache: CurrentSignalsCache | None = None
     redis_queue: RedisQueue | None = None
     metrics_server: Any | None = None
     """Phase 10: handle to the Prometheus /metrics HTTP server (separate
@@ -113,13 +116,22 @@ def get_cache() -> SignalCache:
     return _require_state().cache
 
 
-def get_compute_scheduler() -> ComputeScheduler:
-    return _require_state().compute_scheduler
+# === STEP 14B-FIXUP1-deps-getter: get_v1_cache added ===
+def get_v1_cache() -> CurrentSignalsCache:
+    """Return the V1 CurrentSignalsCache, the read-through cache for
+    `current_signals`. Used by /compute-now and other V1-path admin
+    endpoints. Raises 503 if AppState was constructed without one
+    (legacy test fixtures may do this)."""
+    state = _require_state()
+    if state.v1_cache is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="v1_cache not configured on AppState",
+        )
+    return state.v1_cache
 
 
-def get_distributor() -> SubscriberDistributor | None:
-    return _require_state().distributor
-
+# === STEP 14B-E3-getters: get_compute_scheduler + get_distributor removed ===
 
 def get_redis_queue():
     """May be None if Redis isn't configured."""

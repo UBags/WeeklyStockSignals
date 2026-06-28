@@ -30,18 +30,23 @@ from ....api.lifecycle import (
     _load_latest_signal_events,
     prime_cache_from_db,
 )
+# === STEP 14B-FIXUP1-admin-import: CurrentSignalsCache added ===
 from ....cache import SignalCache
+from ....cache.current_signals_cache import CurrentSignalsCache
 from ....cache.signal_cache import CachedSnapshot
 from ....config import Config
 from ....domain import CoreRegime, TickerRef, Timeframe
 from ....notifications.circuit_breaker import CircuitBreakingTransport
-from ....scheduler import ComputeScheduler, SubscriberDistributor
+# === STEP 14B-E4-import: ComputeScheduler + SubscriberDistributor imports stripped ===
+from ....orchestrator import recompute_market
+# === STEP 14B-FIXUP1-admin-deps: get_v1_cache added ===
 from ..dependencies import (
     get_cache,
-    get_compute_scheduler,
+    get_v1_cache,
+    # === STEP 14B-E4-dep_cs: get_compute_scheduler removed ===
     get_config,
     get_db_engine,
-    get_distributor,
+    # === STEP 14B-E4-dep_dist: get_distributor removed ===
     require_admin_token,
 )
 from ..schemas import (
@@ -85,24 +90,39 @@ def admin_prime_all(
     )
 
 
+# === STEP 14B-E4-compute_now: /compute-now rewired to V1 recompute_market ===
 @router.post("/compute-now", response_model=ComputeRunSummaryPayload)
 def admin_compute_now(
-    scheduler: ComputeScheduler = Depends(get_compute_scheduler),
+    db_engine: Engine = Depends(get_db_engine),
+    v1_cache: CurrentSignalsCache = Depends(get_v1_cache),
 ) -> ComputeRunSummaryPayload:
-    """Trigger an immediate `ComputeScheduler.run_once()`.
+    """Trigger an immediate V1 `recompute_market()` cycle.
 
-    Same code path as the background thread — cache is updated,
-    events are persisted, summary is returned."""
-    logger.info("Admin: compute-now requested")
-    summary = scheduler.run_once()
+    Same code path the orchestrator pool fires once per tick. NSE-only
+    for now (V1 cycle is NSE-only; multi-exchange is Phase 14.7+ work).
+    """
+    from datetime import datetime, UTC
+    started_at = datetime.now(UTC)
+    logger.info("Admin: compute-now requested (V1 recompute_market)")
+    result = recompute_market(
+        db_engine,
+        mode="live",
+        cache=v1_cache,
+        exchange="NSE",
+    )
+    finished_at = datetime.now(UTC)
+    # RecomputeMarketResult fields → ComputeRunSummaryPayload mapping.
+    # The V1 result shape differs from the legacy summary, so we map
+    # what we can and zero the rest. Tier 3 may revisit the payload
+    # shape itself.
     return ComputeRunSummaryPayload(
-        started_at=summary.started_at,
-        finished_at=summary.finished_at,
-        tickers_examined=summary.tickers_examined,
-        tickers_with_new_bars=summary.tickers_with_new_event,
+        started_at=started_at,
+        finished_at=finished_at,
+        tickers_examined=getattr(result, "tickers_examined", 0),
+        tickers_with_new_bars=getattr(result, "signals_emitted", 0),
         bars_ingested=0,
-        events_fired=len(summary.events_fired),
-        errors=summary.errors,
+        events_fired=getattr(result, "signals_emitted", 0),
+        errors=getattr(result, "errors", []),
     )
 
 
@@ -233,13 +253,13 @@ def admin_reprime_ticker(
     )
 
 
+# === STEP 14B-E4-cb_sig: /circuit-breakers no longer takes a distributor ===
 @router.get(
     "/circuit-breakers",
     response_model=CircuitBreakersPayload,
 )
 def admin_circuit_breakers(
     config: Config = Depends(get_config),
-    distributor: SubscriberDistributor | None = Depends(get_distributor),
 ) -> CircuitBreakersPayload:
     """Return the current circuit-breaker state for each transport."""
     now = datetime.now(UTC)
@@ -264,30 +284,21 @@ def admin_circuit_breakers(
                   "to inspect transport_circuit_state{transport,state}.",
         )
 
-    if distributor is None:
-        return CircuitBreakersPayload(
-            mode="legacy",
-            breakers=[],
-            snapshot_taken_at=now,
-            notes="No distributor configured.",
-        )
-
-    entries: list[CircuitBreakerEntry] = []
-    for _name, transport in distributor.transports.items():
-        if not isinstance(transport, CircuitBreakingTransport):
-            continue
-        snap = transport.snapshot()
-        entries.append(CircuitBreakerEntry(
-            name=snap["name"],
-            state=snap["state"],
-            consecutive_failures=snap["consecutive_failures"],
-            opened_at_monotonic=snap["opened_at_monotonic"],
-            config=CircuitBreakerConfigPayload(**snap["config"]),
-        ))
-
+    # === STEP 14B-E4-cb_body: in-process distributor removed ===
+    # The legacy SubscriberDistributor was demolished in Step 14b.
+    # When Redis is configured, breakers live in the notifier worker
+    # process (handled above). When Redis is not configured, V1
+    # email sends go through notify_subscribers without circuit
+    # breakers — that's an explicit V1 design choice (Brevo's own
+    # rate-limiting + retry handles transient failures).
     return CircuitBreakersPayload(
-        mode="legacy",
-        breakers=entries,
+        mode="legacy_removed",
+        breakers=[],
         snapshot_taken_at=now,
-        notes=f"Reporting {len(entries)} breaker(s) from in-process distributor.",
+        notes=(
+            "In-process distributor was demolished in V1 cutover. "
+            "When Redis is configured, breakers live in the notifier "
+            "worker process — scrape Prometheus directly to inspect "
+            "transport_circuit_state{transport,state}."
+        ),
     )

@@ -64,8 +64,7 @@ class TestOrchestratorDisabled:
         ps, pool = _build_orchestrator_components(
             config=cfg,
             db_engine=MagicMock(),
-            compute_scheduler=MagicMock(),
-            distributor=MagicMock(),
+            # === STEP 14B-FIXUP6: scheduler/distributor kwargs removed ===
             v1_cache=MagicMock(),
         )
         assert ps is None
@@ -77,8 +76,7 @@ class TestOrchestratorDisabled:
         ps, pool = _build_orchestrator_components(
             config=cfg,
             db_engine=MagicMock(),
-            compute_scheduler=MagicMock(),
-            distributor=MagicMock(),
+            # === STEP 14B-FIXUP6: scheduler/distributor kwargs removed ===
             v1_cache=MagicMock(),
         )
         assert ps is None and pool is None
@@ -98,8 +96,7 @@ class TestOrchestratorEnabled:
         ps, pool = _build_orchestrator_components(
             config=cfg,
             db_engine=MagicMock(),
-            compute_scheduler=MagicMock(),
-            distributor=MagicMock(),
+            # === STEP 14B-FIXUP6: scheduler/distributor kwargs removed ===
             v1_cache=MagicMock(),
         )
         assert ps is not None
@@ -117,8 +114,7 @@ class TestOrchestratorEnabled:
         ps, pool = _build_orchestrator_components(
             config=cfg,
             db_engine=MagicMock(),
-            compute_scheduler=MagicMock(),
-            distributor=MagicMock(),
+            # === STEP 14B-FIXUP6: scheduler/distributor kwargs removed ===
             v1_cache=MagicMock(),
         )
         assert pool.exchanges() == ["BSE", "NSE"]
@@ -131,8 +127,7 @@ class TestOrchestratorEnabled:
         ps, pool = _build_orchestrator_components(
             config=cfg,
             db_engine=MagicMock(),
-            compute_scheduler=MagicMock(),
-            distributor=MagicMock(),
+            # === STEP 14B-FIXUP6: scheduler/distributor kwargs removed ===
             v1_cache=MagicMock(),
         )
         assert ps is not None
@@ -150,8 +145,7 @@ class TestOrchestratorEnabled:
         ps, pool = _build_orchestrator_components(
             config=cfg,
             db_engine=MagicMock(),
-            compute_scheduler=MagicMock(),
-            distributor=MagicMock(),
+            # === STEP 14B-FIXUP6: scheduler/distributor kwargs removed ===
             v1_cache=MagicMock(),
         )
         # The pool's internal pulse_hook is what receives
@@ -179,8 +173,7 @@ class TestOrchestratorEnabled:
         ps, pool = _build_orchestrator_components(
             config=cfg,
             db_engine=MagicMock(),
-            compute_scheduler=MagicMock(),
-            distributor=MagicMock(),
+            # === STEP 14B-FIXUP6: scheduler/distributor kwargs removed ===
             v1_cache=MagicMock(),
         )
         orch = pool.get("NSE")

@@ -28,11 +28,10 @@ from datetime import datetime, UTC
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ....cache import SignalCache
-from ....scheduler import ComputeScheduler, SubscriberDistributor
+# === STEP 14B-E5: scheduler type imports stripped ===
 from ..dependencies import (
     get_cache,
-    get_compute_scheduler,
-    get_distributor,
+    # === STEP 14B-FIXUP3-deps: scheduler/distributor getters stripped ===
     get_orchestrator_pool,
     get_redis_queue,
 )
@@ -57,8 +56,7 @@ def healthz(
 @router.get("/readyz", response_model=HealthPayload)
 def readyz(
     cache: SignalCache = Depends(get_cache),
-    compute_scheduler: ComputeScheduler = Depends(get_compute_scheduler),
-    distributor: SubscriberDistributor | None = Depends(get_distributor),
+    # === STEP 14B-E5: compute_scheduler + distributor deps removed ===
     redis_queue=Depends(get_redis_queue),
     orchestrator_pool=Depends(get_orchestrator_pool),
 ) -> HealthPayload:
@@ -101,8 +99,9 @@ def readyz(
         orchestrator_pool_alive = None
         orchestrator_pool_last_tick_at = None
 
-    if distributor is not None:
-        dist_problem = distributor.is_unhealthy(now)
+    # === STEP 14B-E5: distributor demolished in Tier 2 ===
+    if False:  # distributor demolished
+        dist_problem = None
         if dist_problem:
             issues.append(dist_problem)
 
@@ -120,11 +119,9 @@ def readyz(
         registry_size=n_snapshots,   # legacy wire field
         cache_size=n_snapshots,
         compute_scheduler_alive=compute_scheduler_alive,
-        distributor_alive=distributor.is_alive() if distributor else None,
+        distributor_alive=None,  # 14B-E5: distributor demolished
         compute_last_completed_at=compute_last_completed_at,
-        distributor_last_completed_at=(
-            distributor.last_run_completed_at if distributor else None
-        ),
+        distributor_last_completed_at=None,  # 14B-E5
         redis_reachable=redis_reachable,
         orchestrator_pool_alive=orchestrator_pool_alive,
         orchestrator_pool_last_tick_at=orchestrator_pool_last_tick_at,

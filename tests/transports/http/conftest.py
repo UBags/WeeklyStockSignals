@@ -36,12 +36,11 @@ from trip_ema.config.schema import (
     SchedulingConfig,
 )
 from trip_ema.transports.http import create_app
+# === STEP 14B-FIXUP4-conftest-import: scheduler/distributor getters stripped ===
 from trip_ema.transports.http.dependencies import (
     get_cache,
-    get_compute_scheduler,
     get_config,
     get_db_engine,
-    get_distributor,
     get_redis_queue,
 )
 
@@ -80,13 +79,13 @@ def _build_test_config(admin_token_env: str = "TRIP_EMA_ADMIN_TOKEN") -> Config:
     )
 
 
+# === STEP 14B-FIXUP4-conftest-fixture: compute_scheduler field removed ===
 @dataclass
 class HttpFixture:
     """Bundle of objects most HTTP tests need."""
     client: TestClient
     cache: SignalCache
     config: Config
-    compute_scheduler: object   # ComputeScheduler-like (may be stubbed)
 
 
 @pytest.fixture
@@ -98,23 +97,13 @@ def http_app() -> Iterator[HttpFixture]:
     reports 'never started, never completed' — this is healthy from
     /readyz's perspective (in tests we don't actually run schedulers).
     """
+    # === STEP 14B-FIXUP4-conftest-body: scheduler stub + overrides removed ===
     cache = SignalCache()
     config = _build_test_config()
-
-    # Stub scheduler — never started, looks healthy.
-    class _StubScheduler:
-        last_run_completed_at = None
-        def is_alive(self):
-            return False
-        def is_unhealthy(self, now, stale_after_multiplier=2.0):
-            return None   # never started → healthy
-    stub_scheduler = _StubScheduler()
 
     app = create_app()
     app.dependency_overrides[get_cache] = lambda: cache
     app.dependency_overrides[get_config] = lambda: config
-    app.dependency_overrides[get_compute_scheduler] = lambda: stub_scheduler
-    app.dependency_overrides[get_distributor] = lambda: None
     app.dependency_overrides[get_redis_queue] = lambda: None
     # db_engine is NOT overridden by default; tests that need it set
     # their own overrides.
@@ -122,6 +111,5 @@ def http_app() -> Iterator[HttpFixture]:
     with TestClient(app) as client:
         yield HttpFixture(
             client=client, cache=cache, config=config,
-            compute_scheduler=stub_scheduler,
         )
     app.dependency_overrides.clear()

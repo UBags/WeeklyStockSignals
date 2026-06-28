@@ -21,10 +21,10 @@ from datetime import datetime, UTC
 from fastapi import APIRouter, Depends
 from sqlalchemy import Engine, text
 
+# === STEP 14B-FIXUP2-imports: scheduler types + getters stripped ===
 from ....cache import SignalCache
-from ....scheduler import ComputeScheduler, SubscriberDistributor
 from ..dependencies import (
-    get_cache, get_compute_scheduler, get_db_engine, get_distributor,
+    get_cache, get_db_engine,
     get_orchestrator_pool, get_redis_queue,
     require_admin_token,
 )
@@ -44,12 +44,11 @@ router = APIRouter(
 _STATUS_RANK = {"crit": 3, "warn": 2, "ok": 1, "unknown": 0}
 
 
+# === STEP 14B-FIXUP2-signature: scheduler/distributor params removed ===
 @router.get("", response_model=HealthSnapshotPayload)
 def health_snapshot(
     db_engine: Engine = Depends(get_db_engine),
     cache: SignalCache = Depends(get_cache),
-    compute_scheduler: ComputeScheduler = Depends(get_compute_scheduler),
-    distributor: SubscriberDistributor | None = Depends(get_distributor),
     redis_queue=Depends(get_redis_queue),
     orchestrator_pool=Depends(get_orchestrator_pool),
 ) -> HealthSnapshotPayload:
@@ -64,17 +63,18 @@ def health_snapshot(
     # 2. ETL freshness (any active run, last successful EoD age)
     cards.append(_etl_freshness_card(db_engine))
 
-    # 3. Compute scheduler / orchestrator compute-step
-    cards.append(_compute_scheduler_card(compute_scheduler, orchestrator_pool))
+    # === STEP 14B-FIXUP2-callsites: scheduler/distributor args removed ===
+    # 3. Compute step health (orchestrator-only now)
+    cards.append(_compute_scheduler_card(orchestrator_pool))
 
     # 4. Cache — populated entry count vs registered ticker count
     cards.append(_cache_card(cache))
 
-    # 5. Circuit breakers — pulled from the distributor in legacy mode
-    cards.append(_circuit_breakers_card(distributor, redis_queue))
+    # 5. Circuit breakers — legacy in-process distributor was demolished
+    cards.append(_circuit_breakers_card(redis_queue))
 
     # 6. Notification queue depth (Redis mode) / pending notifications
-    cards.append(_notification_queue_card(distributor, redis_queue))
+    cards.append(_notification_queue_card(redis_queue))
 
     # 7. Subscriber stats
     cards.append(_subscribers_card(db_engine))
@@ -181,22 +181,15 @@ def _etl_freshness_card(db_engine: Engine) -> HealthCardPayload:
         )
 
 
+# === STEP 14B-FIXUP2-cs_card: scheduler arg + legacy branch removed ===
 def _compute_scheduler_card(
-    scheduler: ComputeScheduler,
     orchestrator_pool,
 ) -> HealthCardPayload:
-    """Compute step health.
+    """Compute step health (orchestrator-only post Step 14b).
 
-    Two execution modes, in priority order:
-      1. Orchestrator mode (production): each market's
-         OrchestratorPool runs the compute step on its own cadence.
-         We look at every managed market's last_run_summary, take
-         the most recent finished pass, and report the compute
-         step's succeeded/failed/skipped status.
-      2. Legacy mode: standalone ComputeScheduler thread. Fall back
-         to scheduler.last_run_completed_at (the original logic).
+    The legacy standalone ComputeScheduler thread mode was demolished
+    in Step 14b — orchestrator pool is the sole compute driver.
     """
-    # ----- Orchestrator mode ----- #
     if orchestrator_pool is not None:
         try:
             # Find the most-recent compute step across all markets.
@@ -264,31 +257,17 @@ def _compute_scheduler_card(
                 headline="Pool inspection failed", detail=str(e),
             )
 
-    # ----- Legacy mode ----- #
-    try:
-        last = getattr(scheduler, "last_run_completed_at", None)
-        if last is None:
-            return HealthCardPayload(
-                name="Compute scheduler", status="unknown",
-                headline="Never run",
-                detail="Scheduler hasn't completed a cycle yet.",
-            )
-        age_seconds = (datetime.now(UTC) - last).total_seconds()
-        if age_seconds > 3600:
-            return HealthCardPayload(
-                name="Compute scheduler", status="warn",
-                headline=f"Last cycle: {age_seconds / 60:.0f} min ago",
-                detail="Expected within 60 min.",
-            )
-        return HealthCardPayload(
-            name="Compute scheduler", status="ok",
-            headline=f"Last cycle: {age_seconds / 60:.1f} min ago",
-        )
-    except Exception as e:
-        return HealthCardPayload(
-            name="Compute scheduler", status="unknown",
-            headline="State unavailable", detail=str(e),
-        )
+    # === STEP 14B-FIXUP2-cs_card_legacy: legacy branch removed ===
+    # Orchestrator pool is None → orchestrator disabled in config.
+    return HealthCardPayload(
+        name="Compute scheduler", status="unknown",
+        headline="Orchestrator disabled",
+        detail=(
+            "scheduling.orchestrator.enabled=False in config; no "
+            "compute pipeline is running. (Legacy ComputeScheduler "
+            "was demolished in Step 14b.)"
+        ),
+    )
 
 def _cache_card(cache: SignalCache) -> HealthCardPayload:
     """Cache should hold one snapshot per active ticker. Empty cache
@@ -317,53 +296,32 @@ def _cache_card(cache: SignalCache) -> HealthCardPayload:
             headline="State unavailable", detail=str(e),
         )
 
-def _circuit_breakers_card(distributor, redis_queue) -> HealthCardPayload:
+# === STEP 14B-FIXUP2-cb_card: distributor arg + in-process branch removed ===
+def _circuit_breakers_card(redis_queue) -> HealthCardPayload:
     """Open breakers = some transport is failing repeatedly.
-    Queue mode: we can't see breakers from this process; report unknown."""
+    Queue mode (Redis): breakers live in the notifier worker process.
+    In-process distributor was demolished in Step 14b — V1 sends go
+    through notify_subscribers without breakers (Brevo's own
+    rate-limiting + retry handles transient failures).
+    """
     if redis_queue is not None:
         return HealthCardPayload(
             name="Circuit breakers", status="unknown",
             headline="Queue mode — breakers in notifier worker",
             detail="Inspect via the notifier worker's metrics.",
         )
-    if distributor is None:
-        return HealthCardPayload(
-            name="Circuit breakers", status="unknown",
-            headline="Distributor not present",
-        )
-    try:
-        breakers = getattr(distributor, "transports", {}) or {}
-        # Each transport may be a CircuitBreakingTransport — call .state
-        # if it exists.
-        open_count = 0
-        states = []
-        for name, t in breakers.items():
-            state_attr = getattr(t, "state", None)
-            if state_attr:
-                state_val = state_attr() if callable(state_attr) else state_attr
-                states.append(f"{name}: {state_val}")
-                if str(state_val).lower() == "open":
-                    open_count += 1
-        if open_count > 0:
-            return HealthCardPayload(
-                name="Circuit breakers", status="crit",
-                headline=f"{open_count} open breaker(s)",
-                detail=", ".join(states) or "see /v1/admin/circuit-breakers",
-            )
-        return HealthCardPayload(
-            name="Circuit breakers", status="ok",
-            headline=(f"{len(breakers)} transport(s), all closed"
-                      if breakers else "No transports configured"),
-            detail=", ".join(states) if states else None,
-        )
-    except Exception as e:
-        return HealthCardPayload(
-            name="Circuit breakers", status="unknown",
-            headline="Inspection failed", detail=str(e),
-        )
+    return HealthCardPayload(
+        name="Circuit breakers", status="ok",
+        headline="V1 in-process sends (no breakers)",
+        detail=(
+            "Legacy in-process distributor was demolished in Step "
+            "14b. V1 notify_subscribers uses Brevo's own retry."
+        ),
+    )
 
 
-def _notification_queue_card(distributor, redis_queue) -> HealthCardPayload:
+# === STEP 14B-FIXUP2-nq_card: distributor arg removed ===
+def _notification_queue_card(redis_queue) -> HealthCardPayload:
     """Queue mode: depth of the redis list. Legacy: nothing to show."""
     if redis_queue is None:
         return HealthCardPayload(
