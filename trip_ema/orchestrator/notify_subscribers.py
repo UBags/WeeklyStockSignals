@@ -30,6 +30,8 @@ Hooks (not implemented in V1, but called out in code for P2-A):
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
@@ -73,6 +75,25 @@ class NotifyResult:
     errors: list[tuple[int, str]] = field(default_factory=list)
 
 
+
+# === STEP 13D1: progress_cb ===
+def _emit_notify_progress(
+    cb,
+    msg: str,
+) -> None:
+    """Stage-progress emit for the notify stage. No-op when cb is
+    None. Stage name is always 'notify'.
+    """
+    if cb is not None:
+        try:
+            cb("notify", msg)
+        except Exception:
+            logger.exception(
+                "progress_cb raised in notify_subscribers; "
+                "continuing",
+            )
+
+
 def notify_subscribers(
     db_engine: Engine,
     *,
@@ -81,6 +102,7 @@ def notify_subscribers(
     brevo_from_name: str = "WeeklyStockSignals",
     cycle_id: str,
     now: datetime,
+    progress_cb: "Callable[[str, str], None] | None" = None,
 ) -> NotifyResult:
     """V1 distribute stage. See module docstring for the flow.
 
@@ -106,6 +128,7 @@ def notify_subscribers(
         "notify_subscribers[%s] starting (now=%s)",
         cycle_id, now.isoformat(),
     )
+    _emit_notify_progress(progress_cb, "running")
 
     # ---- Early exit: any signals to send? ----
     with db_engine.connect() as conn:
@@ -116,6 +139,7 @@ def notify_subscribers(
             cycle_id,
         )
         finished_at = datetime.now(UTC)
+        _emit_notify_progress(progress_cb, "done: skipped (no signals)")
         return NotifyResult(
             cycle_id=cycle_id,
             started_at=started_at, finished_at=finished_at,
@@ -135,6 +159,7 @@ def notify_subscribers(
             cycle_id, signal_count,
         )
         finished_at = datetime.now(UTC)
+        _emit_notify_progress(progress_cb, "done: skipped (no subscribers due)")
         return NotifyResult(
             cycle_id=cycle_id,
             started_at=started_at, finished_at=finished_at,
@@ -205,6 +230,7 @@ def notify_subscribers(
         log_rows_written, len(errors),
     )
 
+    _emit_notify_progress(progress_cb, "done")
     return NotifyResult(
         cycle_id=cycle_id,
         started_at=started_at, finished_at=finished_at,

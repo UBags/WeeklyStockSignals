@@ -65,6 +65,22 @@ class SubscribersRepository:
 
     # ---------- Subscribers ---------- #
 
+    # === STEP 13D1: count_active ===
+    def count_active(self) -> int:
+        """Number of active subscribers (`is_active = TRUE`).
+
+        Used by the ETL Status GUI's Run Intraday confirmation
+        modal to surface "this will email N subscribers" before
+        the operator confirms the cycle.
+        """
+        result = self._conn.execute(
+            select(func.count()).select_from(subscribers).where(
+                subscribers.c.is_active.is_(True),
+            )
+        )
+        return int(result.scalar_one())
+
+
     def create_subscriber(
         self,
         *,

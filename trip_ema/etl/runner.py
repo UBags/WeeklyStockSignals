@@ -31,6 +31,8 @@ per-pass with `exchange=` so its symbol formatter is correct.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -596,6 +598,25 @@ def run_backfill(
     )
 
 
+
+# === STEP 13D1: progress_cb ===
+def _emit_fetch_progress(
+    cb,
+    msg: str,
+) -> None:
+    """Stage-progress emit for the fetch_bars stage. No-op when
+    cb is None. Stage name is always 'fetch_bars'.
+    """
+    if cb is not None:
+        try:
+            cb("fetch_bars", msg)
+        except Exception:
+            logger.exception(
+                "progress_cb raised in _run_fetch_pass; "
+                "continuing",
+            )
+
+
 def _run_fetch_pass(
     db_engine: Engine,
     config: Config,
@@ -608,6 +629,7 @@ def _run_fetch_pass(
     start_date: date | None = None,
     days_lookback: int = 7,
     intraday: bool = False,
+    progress_cb: "Callable[[str, str], None] | None" = None,
 ) -> int:
     """Shared spine for backfill / eod / intraday. Differences:
 
@@ -641,6 +663,8 @@ def _run_fetch_pass(
         )
 
     with correlation_id(cid):
+        # === STEP 13D1-FIXUP: emit relocated ===
+        _emit_fetch_progress(progress_cb, "running")
         # Step 0: close any orphaned etl_runs rows for this exchange
         # left behind by an earlier mid-run process death. Idempotent;
         # cheap (single UPDATE). Runs at the start of every fetch
@@ -701,6 +725,7 @@ def _run_fetch_pass(
                     outcome=RunOutcome.SUCCESS, run_id=run_id,
                     data_date=None,  # no bars touched
                 )
+            _emit_fetch_progress(progress_cb, "done")
             return run_id
 
         logger.info(
@@ -744,6 +769,7 @@ def _run_fetch_pass(
             kind=kind.value,
         ).observe(time.monotonic() - t_start)
 
+        _emit_fetch_progress(progress_cb, "done")
         return run_id
 
 

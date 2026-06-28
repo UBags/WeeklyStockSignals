@@ -44,6 +44,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, UTC
+from collections.abc import Callable
 from typing import Literal
 
 from sqlalchemy.engine import Engine
@@ -244,6 +245,30 @@ def _stage_rebuild_cache(
     return True
 
 
+
+# === STEP 13D1: progress_cb ===
+def _emit_progress(
+    cb,
+    stage: str,
+    msg: str,
+) -> None:
+    """Stage-progress emit. No-op when cb is None.
+
+    Three message shapes the cycle CLI parses:
+      - "running"
+      - "done: <summary>"  (e.g. "done: succeeded=10 failed=0 skipped=0")
+      - "failed: <error>"
+    """
+    if cb is not None:
+        try:
+            cb(stage, msg)
+        except Exception:
+            # Never let a faulty cb take down the cycle
+            logger.exception(
+                "progress_cb raised; continuing pipeline",
+            )
+
+
 # ====================================================================
 # Public entry point
 # ====================================================================
@@ -256,6 +281,7 @@ def recompute_market(
     n_weeks_to_upsert: int = 2,
     cache: CurrentSignalsCache | None = None,
     exchange: str = "NSE",
+    progress_cb: "Callable[[str, str], None] | None" = None,
 ) -> RecomputeMarketResult:
     """Run one pass through the V1 cycle compute pipeline.
 
@@ -315,6 +341,7 @@ def recompute_market(
 
     # ---- Stage 1: stock state ----
     try:
+        _emit_progress(progress_cb, "stock_state", "running")
         stock_state = _stage_stock_state(
             db_engine, exchange, n_weeks_to_upsert,
         )
@@ -323,14 +350,17 @@ def recompute_market(
             "succeeded=%d failed=%d skipped=%d",
             exchange, *stock_state,
         )
+        _emit_progress(progress_cb, "stock_state", "done")
     except Exception as e:
         msg = f"stock_state stage halted: {e}"
         logger.exception("recompute_market[%s] %s", exchange, msg)
         stage_errors.append(("stock_state", str(e)))
+        _emit_progress(progress_cb, "stock_state", f"failed: {e}")
 
     # ---- Stage 2: stock enrichment ----
     if not stage_errors:
         try:
+            _emit_progress(progress_cb, "stock_enrichment", "running")
             stock_enrichment = _stage_stock_enrichment(
                 db_engine, exchange, n_weeks_to_upsert,
             )
@@ -339,27 +369,33 @@ def recompute_market(
                 "succeeded=%d failed=%d skipped=%d",
                 exchange, *stock_enrichment,
             )
+            _emit_progress(progress_cb, "stock_enrichment", "done")
         except Exception as e:
             msg = f"stock_enrichment stage halted: {e}"
             logger.exception("recompute_market[%s] %s", exchange, msg)
             stage_errors.append(("stock_enrichment", str(e)))
+            _emit_progress(progress_cb, "stock_enrichment", f"failed: {e}")
 
     # ---- Stage 3: rotate signals ----
     if not stage_errors:
         try:
+            _emit_progress(progress_cb, "rotation", "running")
             signals_rotated = _stage_rotate_signals(db_engine)
             logger.info(
                 "recompute_market[%s] stage 3 rotation: "
                 "rows_moved=%d", exchange, signals_rotated,
             )
+            _emit_progress(progress_cb, "rotation", "done")
         except Exception as e:
             msg = f"rotation stage halted: {e}"
             logger.exception("recompute_market[%s] %s", exchange, msg)
             stage_errors.append(("rotation", str(e)))
+            _emit_progress(progress_cb, "rotation", f"failed: {e}")
 
     # ---- Stage 4: derive signals + insert into current ----
     if not stage_errors:
         try:
+            _emit_progress(progress_cb, "derive", "running")
             signals_emitted = _stage_derive_and_insert(
                 db_engine, as_of,
             )
@@ -367,27 +403,33 @@ def recompute_market(
                 "recompute_market[%s] stage 4 derive: emitted=%d",
                 exchange, signals_emitted,
             )
+            _emit_progress(progress_cb, "derive", "done")
         except Exception as e:
             msg = f"derive stage halted: {e}"
             logger.exception("recompute_market[%s] %s", exchange, msg)
             stage_errors.append(("derive", str(e)))
+            _emit_progress(progress_cb, "derive", f"failed: {e}")
 
     # ---- Stage 5: cache rebuild ----
     if not stage_errors and cache is not None:
         try:
+            _emit_progress(progress_cb, "cache_rebuild", "running")
             cache_rebuilt = _stage_rebuild_cache(db_engine, cache)
             logger.info(
                 "recompute_market[%s] stage 5 cache_rebuild: "
                 "entries=%d", exchange, cache.signal_count(),
             )
+            _emit_progress(progress_cb, "cache_rebuild", "done")
         except Exception as e:
             msg = f"cache_rebuild stage halted: {e}"
             logger.exception("recompute_market[%s] %s", exchange, msg)
             stage_errors.append(("cache_rebuild", str(e)))
+            _emit_progress(progress_cb, "cache_rebuild", f"failed: {e}")
 
     # ---- Stage 6: IIV refresh ----
     if not stage_errors:
         try:
+            _emit_progress(progress_cb, "iiv", "running")
             iiv = _stage_iiv_refresh(
                 db_engine, as_of, n_weeks_to_upsert,
             )
@@ -396,14 +438,17 @@ def recompute_market(
                 "succeeded=%d failed=%d skipped=%d",
                 exchange, *iiv,
             )
+            _emit_progress(progress_cb, "iiv", "done")
         except Exception as e:
             msg = f"iiv stage halted: {e}"
             logger.exception("recompute_market[%s] %s", exchange, msg)
             stage_errors.append(("iiv", str(e)))
+            _emit_progress(progress_cb, "iiv", f"failed: {e}")
 
     # ---- Stage 7: industry state ----
     if not stage_errors:
         try:
+            _emit_progress(progress_cb, "industry_state", "running")
             industry_state = _stage_industry_state(
                 db_engine, n_weeks_to_upsert,
             )
@@ -412,14 +457,17 @@ def recompute_market(
                 "succeeded=%d failed=%d skipped=%d",
                 exchange, *industry_state,
             )
+            _emit_progress(progress_cb, "industry_state", "done")
         except Exception as e:
             msg = f"industry_state stage halted: {e}"
             logger.exception("recompute_market[%s] %s", exchange, msg)
             stage_errors.append(("industry_state", str(e)))
+            _emit_progress(progress_cb, "industry_state", f"failed: {e}")
 
     # ---- Stage 8: industry enrichment ----
     if not stage_errors:
         try:
+            _emit_progress(progress_cb, "industry_enrichment", "running")
             industry_enrichment = _stage_industry_enrichment(
                 db_engine, n_weeks_to_upsert,
             )
@@ -428,10 +476,12 @@ def recompute_market(
                 "succeeded=%d failed=%d skipped=%d",
                 exchange, *industry_enrichment,
             )
+            _emit_progress(progress_cb, "industry_enrichment", "done")
         except Exception as e:
             msg = f"industry_enrichment stage halted: {e}"
             logger.exception("recompute_market[%s] %s", exchange, msg)
             stage_errors.append(("industry_enrichment", str(e)))
+            _emit_progress(progress_cb, "industry_enrichment", f"failed: {e}")
 
     finished_at = datetime.now(UTC)
     duration_s = (finished_at - started_at).total_seconds()

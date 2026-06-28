@@ -596,6 +596,200 @@ def cmd_approve_action(args, config: Config) -> int:
     return 0
 
 
+
+
+# === STEP 13D1: cmd_cycle ===
+def cmd_cycle(args, config: Config) -> int:
+    """Run the full V1 live cycle: fetch + recompute_market + notify.
+
+    Mirrors what `MarketOrchestrator.run_once()` does on a scheduled
+    tick, but invoked synchronously from the CLI. Used by the
+    ETL Status GUI's [Run Intraday] button (via QProcess subprocess).
+
+    Stage progress is emitted to stdout as:
+        [stage_name] running
+        [stage_name] done
+        [stage_name] failed: <err>
+
+    The GUI's stdout parser turns these into StageProgressList
+    updates. The stages emitted match those declared in
+    `trip_ema.gui.views.widgets.stage_progress.LIVE_CYCLE_STAGES`.
+
+    `kind` for the compute_runs row is determined by
+    MarketHoursService.is_open: True → 'intraday', False → 'eod'.
+
+    Returns:
+        0 on success, 1 on any stage failure.
+    """
+    import sys
+    from datetime import UTC, datetime
+
+    from ..config.brevo_secrets import load_brevo_api_key
+    from ..domain import Timeframe
+    from ..orchestrator.notify_subscribers import notify_subscribers
+    from ..orchestrator.recompute_market import recompute_market
+    from ..persistence import transaction
+    from ..persistence.compute_runs_repo import ComputeRunsRepository
+    from ..scheduler.market_hours import MarketHoursService
+    from .runner import _run_fetch_pass
+    from .types import RunKind, Tier
+
+    exchange = args.exchange
+    now = datetime.now(UTC)
+
+    # ---- 1. Determine kind via MarketHoursService (F2 lock) ----
+    try:
+        market_hours = MarketHoursService(config.market_hours)
+        is_open = market_hours.is_open(exchange, now)
+    except KeyError:
+        print(
+            f"error: exchange {exchange!r} has no market_hours "
+            f"configured in config.yaml — cannot determine "
+            f"intraday vs eod",
+            file=sys.stderr,
+        )
+        return 2
+    kind = "intraday" if is_open else "eod"
+
+    print(
+        f"V1 cycle starting: exchange={exchange} kind={kind} "
+        f"market_open={is_open}",
+        flush=True,
+    )
+
+    # ---- 2. Open DB engine + start compute_runs row ----
+    db_engine = create_engine_from_config(config)
+
+    try:
+        with transaction(db_engine) as conn:
+            run_id = ComputeRunsRepository(conn).start(
+                kind=kind, exchange=exchange,
+                notes="operator-triggered via cli cycle",
+            )
+        print(f"compute_runs row: run_id={run_id}", flush=True)
+
+        # Counters for compute_runs.finish()
+        failed_stage: str | None = None
+        error_message: str | None = None
+        tickers_attempted: int | None = None
+        tickers_fetched: int | None = None
+
+        # Stdout progress emitter — the shape the GUI parses
+        def _progress(stage: str, msg: str) -> None:
+            print(f"  [{stage}] {msg}", flush=True)
+
+        try:
+            # ---- Stage 1: Fetch ----
+            tickers_fetched = _run_fetch_pass(
+                db_engine, config,
+                exchange=exchange,
+                kind=(
+                    RunKind.INTRADAY if kind == "intraday"
+                    else RunKind.EOD
+                ),
+                tier_filter=(
+                    {Tier.TIER_1} if kind == "intraday" else None
+                ),
+                timeframe=Timeframe.DAILY,
+                source=None,
+                intraday=(kind == "intraday"),
+                progress_cb=_progress,
+            )
+
+            # ---- Stages 2-9: recompute_market ----
+            recompute_result = recompute_market(
+                db_engine,
+                mode="live",
+                as_of=now,
+                exchange=exchange,
+                progress_cb=_progress,
+            )
+            if recompute_result.stage_errors:
+                # Stage-level halt inside recompute_market.
+                # The progress_cb already emitted "failed:" for
+                # the offending stage.
+                first_stage, first_err = (
+                    recompute_result.stage_errors[0]
+                )
+                failed_stage = first_stage
+                error_message = first_err
+                raise RuntimeError(
+                    f"recompute_market halted in "
+                    f"{first_stage}: {first_err}"
+                )
+
+            tickers_attempted = (
+                recompute_result.stock_state_succeeded
+                + recompute_result.stock_state_failed
+                + recompute_result.stock_state_skipped
+            )
+
+            # ---- Stage 10: notify_subscribers ----
+            brevo_config = getattr(
+                getattr(config, "transports", None), "brevo", None,
+            )
+            if brevo_config is None:
+                _progress("notify", "skipped: brevo not configured")
+                print(
+                    "notify_subscribers: brevo not configured — "
+                    "stage skipped",
+                    flush=True,
+                )
+            else:
+                api_key = load_brevo_api_key(
+                    brevo_config.secrets_file,
+                )
+                cycle_id = now.strftime("%Y%m%d-%H%M%S")
+                notify_subscribers(
+                    db_engine,
+                    brevo_api_key=api_key,
+                    brevo_from_address=brevo_config.sender_email,
+                    brevo_from_name=brevo_config.sender_name,
+                    cycle_id=cycle_id,
+                    now=now,
+                    progress_cb=_progress,
+                )
+
+        except Exception as e:
+            if failed_stage is None:
+                # Exception came from _run_fetch_pass, notify, or
+                # some other path — try to attribute via the last
+                # progress emit.
+                failed_stage = "unknown"
+                error_message = str(e)
+            # Print summary line that the GUI's stdout parser
+            # picks up to populate the failure dialog.
+            print(
+                f"cycle FAILED in {failed_stage}: {error_message}",
+                file=sys.stderr,
+                flush=True,
+            )
+            exit_code = 1
+        else:
+            print(
+                f"cycle complete (exchange={exchange}, "
+                f"kind={kind}, run_id={run_id})",
+                flush=True,
+            )
+            exit_code = 0
+
+        # ---- 3. Finish compute_runs row ----
+        with transaction(db_engine) as conn:
+            ComputeRunsRepository(conn).finish(
+                run_id,
+                tickers_attempted=tickers_attempted,
+                tickers_fetched=tickers_fetched,
+                failed_stage=failed_stage,
+                error_message=error_message,
+            )
+
+        return exit_code
+
+    finally:
+        db_engine.dispose()
+
+
+
 # ---------- argparse setup ---------- #
 
 
@@ -726,6 +920,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_exchange_arg(unpark)
 
+
+    # === STEP 13D1: cmd_cycle ===
+    cyc = sub.add_parser(
+        "cycle",
+        help=(
+            "Run the full V1 live cycle: fetch + recompute_market "
+            "+ notify. Operator-triggered equivalent of the "
+            "scheduled MarketOrchestrator tick."
+        ),
+    )
+    _add_exchange_arg(cyc)
+
     snap = sub.add_parser(
         "snapshot",
         help=(
@@ -801,6 +1007,7 @@ def main(argv: list[str] | None = None) -> int:
         "unpark":               cmd_unpark,
         "approve-action":       cmd_approve_action,
         "snapshot":             cmd_snapshot,
+        "cycle":                cmd_cycle,
     }
     # Merge Phase 1 fundamentals handlers (registered by
     # _build_parser via fundamentals.cli.register_subparsers).
