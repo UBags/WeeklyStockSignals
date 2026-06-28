@@ -28,6 +28,8 @@ no-ops; they land in 13d.
 """
 from __future__ import annotations
 
+# === STEP 13D2-FIXUP: stage_status enum ===
+
 import logging
 import sys
 from datetime import datetime, timedelta
@@ -58,6 +60,13 @@ from .widgets.exchange_picker import ExchangePicker
 from .widgets.flashing_light import FlashingLight
 from .widgets.stage_progress import (
     LIVE_CYCLE_STAGES, StageProgressList, StageStatus,
+)
+from .widgets.intraday_confirmation_modal import (
+    IntradayConfirmationModal,
+)
+from .widgets.cycle_stdout_parser import (
+    is_cycle_complete_line, labels_before,
+    parse_cycle_failure_summary, parse_stage_line,
 )
 from .widgets.ticker_chip import TickerChipArea
 
@@ -191,6 +200,12 @@ class EtlStatusView(QWidget):
         self._backfill_process: QProcess | None = None
         self._backfill_stdout_buffer: str = ""
         self._backfill_stderr_buffer: str = ""
+
+        # === STEP 13D2: intraday wiring ===
+        # Intraday subprocess state (mirror of backfill)
+        self._intraday_process: QProcess | None = None
+        self._intraday_stdout_buffer: str = ""
+        self._intraday_stderr_buffer: str = ""
 
         # Active-ticker universe for autocomplete + validation
         self._active_tickers: list[str] = []
@@ -441,6 +456,19 @@ class EtlStatusView(QWidget):
 
         v.addStretch(1)
 
+        # === STEP 13D2: intraday wiring ===
+        # Progress label: shows current stage marker text from
+        # cmd_cycle's stdout (e.g. "  [iiv] running").
+        # Detail-level mirror of the StageProgressList above.
+        self._intraday_progress_label = QLabel("")
+        self._intraday_progress_label.setStyleSheet(
+            "color: #888; font-size: 11px; padding: 2px;"
+        )
+        self._intraday_progress_label.setWordWrap(True)
+        v.addWidget(self._intraday_progress_label)
+
+        # Run + Cancel button row
+        btn_row = QHBoxLayout()
         self._run_intraday_btn = QPushButton("Run Intraday")
         self._run_intraday_btn.setStyleSheet(
             "font-weight: 600; padding: 6px;"
@@ -448,7 +476,18 @@ class EtlStatusView(QWidget):
         self._run_intraday_btn.clicked.connect(
             self._on_run_intraday_clicked,
         )
-        v.addWidget(self._run_intraday_btn)
+        btn_row.addWidget(self._run_intraday_btn, 1)
+
+        self._cancel_intraday_btn = QPushButton("Cancel")
+        self._cancel_intraday_btn.setStyleSheet(
+            "padding: 6px; color: #d33;"
+        )
+        self._cancel_intraday_btn.clicked.connect(
+            self._on_cancel_intraday_clicked,
+        )
+        self._cancel_intraday_btn.setVisible(False)
+        btn_row.addWidget(self._cancel_intraday_btn)
+        v.addLayout(btn_row)
 
         return box
 
@@ -716,6 +755,13 @@ class EtlStatusView(QWidget):
         )
         self._cancel_backfill_btn.setVisible(backfill_owned)
 
+        # === STEP 13D2: intraday wiring ===
+        intraday_owned = (
+            self._intraday_process is not None
+            and self._intraday_process.state() != QProcess.NotRunning
+        )
+        self._cancel_intraday_btn.setVisible(intraday_owned)
+
         self._backfill_light.set_active(inflight_kind == "backfill")
         self._intraday_light.set_active(
             inflight_kind in ("intraday", "eod"),
@@ -774,9 +820,71 @@ class EtlStatusView(QWidget):
         )
 
     def _on_run_intraday_clicked(self) -> None:
-        self._set_status(
-            "Run Intraday — wiring lands in Step 13d."
+        """Validate → modal → spawn QProcess invoking
+        `trip-ema-etl cycle --exchange X`. The CLI determines
+        intraday-vs-eod kind at runtime via MarketHoursService."""
+        # === STEP 13D2: intraday wiring ===
+        if self._intraday_process is not None:
+            self._set_status("Intraday cycle already running.")
+            return
+        if self._local_running:
+            self._set_status(
+                f"Another operation ({self._inflight_kind}) is "
+                f"running locally."
+            )
+            return
+
+        exchange = self._picker.current_exchange()
+        if exchange is None:
+            QMessageBox.warning(
+                self, "Run Intraday blocked",
+                "Select an exchange first.",
+            )
+            return
+
+        # ---- Count active subscribers for the modal ----
+        try:
+            from ...persistence.subscribers_repo import (
+                SubscribersRepository,
+            )
+            with self._db.connect() as conn:
+                n_active = SubscribersRepository(
+                    conn,
+                ).count_active()
+        except Exception as e:
+            logger.exception(
+                "Could not count active subscribers; "
+                "defaulting to 0 in modal"
+            )
+            n_active = 0
+
+        # ---- Modal ----
+        # The actual intraday-vs-eod determination happens in the
+        # CLI's cmd_cycle (which has the full MarketHoursService).
+        # The modal's kind_hint is advisory; we pass "intraday"
+        # by default and market_open=False so the modal text
+        # nudges toward "determined at runtime".
+        modal = IntradayConfirmationModal(
+            exchange=exchange,
+            kind_hint="determined at runtime",
+            market_open=False,
+            n_active_subscribers=n_active,
+            parent=self,
         )
+        from PySide6.QtWidgets import QDialog
+        result = modal.exec()
+        if result != QDialog.Accepted:
+            self._set_status("Intraday cycle cancelled.")
+            return
+
+        # ---- Reset stage progress before spawn ----
+        for label in LIVE_CYCLE_STAGES:
+            self._stage_list.set_stage_status(
+                label, StageStatus.PENDING,
+            )
+
+        self._start_intraday_process(exchange=exchange)
+
 
     def _on_add_stock_clicked(self) -> None:
         """Add a symbol to the chip list. 13c additions: strict
@@ -1058,6 +1166,242 @@ class EtlStatusView(QWidget):
         logger.error("Backfill QProcess errorOccurred: %s", msg)
         # Don't try to surface here — finished() will fire too,
         # and the failure dialog covers the same ground.
+
+    # === STEP 13D2: intraday wiring ===
+    def _start_intraday_process(
+        self, *, exchange: str,
+    ) -> None:
+        """Spawn `trip-ema-etl cycle --exchange X` as a QProcess
+        and wire its stdout/stderr/finished signals to the
+        in-panel UI."""
+        args = [
+            "-m", "trip_ema.etl.cli",
+            "cycle", "--exchange", exchange,
+        ]
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.SeparateChannels)
+        proc.readyReadStandardOutput.connect(
+            self._on_intraday_stdout,
+        )
+        proc.readyReadStandardError.connect(
+            self._on_intraday_stderr,
+        )
+        proc.finished.connect(self._on_intraday_finished)
+        proc.errorOccurred.connect(self._on_intraday_proc_error)
+
+        self._intraday_process = proc
+        self._intraday_stdout_buffer = ""
+        self._intraday_stderr_buffer = ""
+
+        # Flip mutex BEFORE start() so the next mutex tick sees
+        # the running state immediately. inflight_kind starts as
+        # "intraday" — if the CLI determines kind=eod, we keep
+        # the UI hint as intraday since "Run Intraday" is the
+        # operator button label.
+        self._local_running = True
+        self._inflight_kind = "intraday"
+        self._apply_mutex_state(True, "intraday")
+
+        self._intraday_progress_label.setText(
+            f"Starting cycle ({exchange})…"
+        )
+        self._set_status(
+            f"Cycle spawned: {sys.executable} -m "
+            f"trip_ema.etl.cli cycle --exchange {exchange}"
+        )
+        logger.info("Intraday QProcess starting: argv=%r", args)
+        proc.start(sys.executable, args)
+
+    def _on_intraday_stdout(self) -> None:
+        if self._intraday_process is None:
+            return
+        data = bytes(
+            self._intraday_process.readAllStandardOutput(),
+        ).decode("utf-8", errors="replace")
+        if not data:
+            return
+        self._intraday_stdout_buffer += data
+
+        for line in data.splitlines():
+            parsed = parse_stage_line(line)
+            if parsed is not None:
+                label, status, raw_msg = parsed
+                # Mark all earlier stages as done — protects
+                # against a stage that emitted "running" but
+                # never emitted "done" before the next stage's
+                # "running" arrived (e.g. cache_rebuild skipped).
+                for earlier in labels_before(label):
+                    self._stage_list.set_stage_status(
+                        earlier, StageStatus.DONE,
+                    )
+                if status == "running":
+                    self._stage_list.set_stage_status(
+                        label, StageStatus.IN_PROGRESS,
+                    )
+                elif status == "done":
+                    self._stage_list.set_stage_status(
+                        label, StageStatus.DONE,
+                    )
+                elif status == "failed":
+                    self._stage_list.set_stage_status(
+                        label, StageStatus.FAILED,
+                    )
+                # Always update the detail label
+                self._intraday_progress_label.setText(
+                    f"[{label}] {raw_msg}"
+                )
+            elif is_cycle_complete_line(line):
+                # On success summary, sweep all stages to DONE
+                # (covers the "Notify Subscribers" stage which
+                # only has a single emit pair, and any other
+                # stages whose "done" emit we may have missed).
+                for label in LIVE_CYCLE_STAGES:
+                    self._stage_list.set_stage_status(
+                        label, StageStatus.DONE,
+                    )
+                self._intraday_progress_label.setText(
+                    "Cycle complete."
+                )
+            # Other lines (e.g. "V1 cycle starting:",
+            # "compute_runs row:") are informational; don't
+            # surface them in the stage progress UI.
+
+    def _on_intraday_stderr(self) -> None:
+        if self._intraday_process is None:
+            return
+        data = bytes(
+            self._intraday_process.readAllStandardError(),
+        ).decode("utf-8", errors="replace")
+        if not data:
+            return
+        self._intraday_stderr_buffer += data
+        for line in data.splitlines():
+            if line.strip():
+                logger.info("intraday stderr: %s", line)
+
+    def _on_intraday_finished(
+        self, exit_code: int, exit_status,
+    ) -> None:
+        """QProcess.finished → clean up + show success/failure."""
+        proc = self._intraday_process
+        self._intraday_process = None
+        self._local_running = False
+        self._inflight_kind = None
+
+        # Force activity log + mutex refresh so the compute_runs
+        # row's finished_at gets reflected without waiting 5s
+        self._activity_scheduler.trigger_now()
+        self._mutex_scheduler.trigger_now()
+
+        if exit_code == 0:
+            # Sweep all stages to DONE (covers any missed "done"
+            # emits — e.g. Notify Subscribers fires "done"
+            # exactly once, no chance to oscillate)
+            for label in LIVE_CYCLE_STAGES:
+                self._stage_list.set_stage_status(
+                    label, StageStatus.DONE,
+                )
+            self._intraday_progress_label.setText("Cycle complete.")
+            self._set_status(
+                "Intraday cycle complete (exit 0). Activity "
+                "log updated."
+            )
+            QMessageBox.information(
+                self, "Cycle complete",
+                "V1 cycle finished successfully.",
+            )
+        else:
+            # Parse failure summary from stderr (or stdout —
+            # cmd_cycle writes the summary to stderr but
+            # graceful handling either way)
+            failed_internal, error_msg = parse_cycle_failure_summary(
+                self._intraday_stderr_buffer,
+            )
+            stderr_tail = "\n".join(
+                self._intraday_stderr_buffer
+                .splitlines()[-10:]
+            )
+            self._intraday_progress_label.setText(
+                f"FAILED in {failed_internal or 'unknown'}: "
+                f"{error_msg or 'see stderr'}"
+            )
+            self._set_status(
+                f"Intraday cycle FAILED (exit {exit_code})."
+                + (f" Failed stage: {failed_internal}"
+                   if failed_internal else "")
+            )
+            from .widgets.backfill_failure_dialog import (
+                BackfillFailureDialog,
+            )
+            BackfillFailureDialog(
+                exit_code=exit_code,
+                failed_stage=failed_internal,
+                error_message=error_msg,
+                stderr_tail=stderr_tail,
+                full_stderr=self._intraday_stderr_buffer,
+                parent=self,
+            ).exec()
+
+    def _on_intraday_proc_error(self, error) -> None:
+        """QProcess.errorOccurred — e.g. executable not found.
+        finished() will fire too; the failure dialog covers
+        the same ground."""
+        if self._intraday_process is None:
+            return
+        msg = (
+            self._intraday_process.errorString()
+            if self._intraday_process else str(error)
+        )
+        logger.error(
+            "Intraday QProcess errorOccurred: %s", msg,
+        )
+
+    def _on_cancel_intraday_clicked(self) -> None:
+        """Terminate the QProcess: SIGTERM → 5s grace → SIGKILL."""
+        if self._intraday_process is None:
+            return
+        if self._intraday_process.state() == QProcess.NotRunning:
+            return
+
+        reply = QMessageBox.question(
+            self, "Cancel intraday cycle?",
+            "This will interrupt the running cycle. The "
+            "pipeline rolls back any in-progress transaction "
+            "and the compute_runs row stays as-is (cmd_cycle's "
+            "finally block updates it with failed_stage='unknown')."
+            "\n\n"
+            "Cancel anyway?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        logger.warning("Sending SIGTERM to intraday QProcess")
+        self._set_status("Cancelling intraday cycle (SIGTERM)…")
+        self._intraday_progress_label.setText(
+            "Cancelling… SIGTERM sent."
+        )
+        self._intraday_process.terminate()
+
+        def _kill_if_still_alive():
+            if self._intraday_process is None:
+                return
+            if (
+                self._intraday_process.state()
+                != QProcess.NotRunning
+            ):
+                logger.warning(
+                    "Intraday QProcess didn't exit after %dms; "
+                    "sending SIGKILL", CANCEL_GRACE_MS,
+                )
+                self._intraday_progress_label.setText(
+                    "Cancelling… SIGKILL sent."
+                )
+                self._intraday_process.kill()
+
+        QTimer.singleShot(CANCEL_GRACE_MS, _kill_if_still_alive)
 
     def _on_cancel_backfill_clicked(self) -> None:
         """Terminate the QProcess: SIGTERM → 5s grace → SIGKILL."""
