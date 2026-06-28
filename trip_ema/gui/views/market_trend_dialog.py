@@ -35,6 +35,7 @@ TREND_WINDOW_DAYS = 90
 class TrendKind(Enum):
     REGIMES = "regimes"
     EMA_ENVELOPE = "ema_envelope"
+    SIGNALS = "signals"  # === STEP 13D3: TrendKind.SIGNALS ===
 
 
 _TITLES = {
@@ -42,6 +43,7 @@ _TITLES = {
     TrendKind.EMA_ENVELOPE: (
         "EMA Envelope Position — last 90 days"
     ),
+    TrendKind.SIGNALS: "Signal Counts — last 90 days",
 }
 
 # Line color mapping. Aligned with the rest of the GUI's regime
@@ -53,6 +55,11 @@ _PEN_KW = {
     "above":   {"color": "#2ecc71", "width": 2},
     "below":   {"color": "#e74c3c", "width": 2},
     "between": {"color": "#3498db", "width": 2},
+    # Step 13d-3 — bar fills for SIGNALS trend
+    "sig_buys":       "#66bb6a",
+    "sig_sells":      "#ef5350",
+    "sig_exit_buys":  "#1976d2",
+    "sig_exit_sells": "#9e9e9e",
 }
 
 
@@ -158,7 +165,9 @@ class MarketTrendDialog(QDialog):
         x0 = rows[0].snapshot_date
         xs = [(r.snapshot_date - x0).days for r in rows]
 
-        if self._kind == TrendKind.REGIMES:
+        if self._kind == TrendKind.SIGNALS:
+            self._render_signals_stacked_bars(xs, rows)
+        elif self._kind == TrendKind.REGIMES:
             self._plot.plot(
                 xs, [r.n_green_regime for r in rows],
                 name="Green", pen=pg.mkPen(**_PEN_KW["green"]),
@@ -195,3 +204,75 @@ class MarketTrendDialog(QDialog):
         self._plot.setLabel(
             "bottom", f"Days since {x0.isoformat()}",
         )
+
+    def _render_signals_stacked_bars(
+        self, xs: list, rows: list,
+    ) -> None:
+        """Render 4 stacked bars per snapshot date for SIGNALS kind.
+
+        Q7 lock — bars stacked: Buys, Sells, Exit Buys, Exit Sells.
+        Colors from the 13d-3 palette (sig_buys / sig_sells /
+        sig_exit_buys / sig_exit_sells).
+        """
+        n_buys = [r.n_buys for r in rows]
+        n_sells = [r.n_sells for r in rows]
+        n_exit_buys = [r.n_exit_buys for r in rows]
+        n_exit_sells = [r.n_exit_sells for r in rows]
+
+        # Stacking offsets: y0 = 0, y0 + buys, y0 + buys + sells, ...
+        zero = [0] * len(xs)
+        off_sells = list(n_buys)
+        off_exit_buys = [
+            a + b for a, b in zip(n_buys, n_sells)
+        ]
+        off_exit_sells = [
+            a + b + c
+            for a, b, c in zip(n_buys, n_sells, n_exit_buys)
+        ]
+
+        width = 0.8
+
+        # Buys (bottom)
+        bg_buys = pg.BarGraphItem(
+            x=xs, height=n_buys, y0=zero, width=width,
+            brush=_PEN_KW["sig_buys"], pen=_PEN_KW["sig_buys"],
+            name="Buys",
+        )
+        self._plot.addItem(bg_buys)
+
+        bg_sells = pg.BarGraphItem(
+            x=xs, height=n_sells, y0=off_sells, width=width,
+            brush=_PEN_KW["sig_sells"], pen=_PEN_KW["sig_sells"],
+            name="Sells",
+        )
+        self._plot.addItem(bg_sells)
+
+        bg_exit_buys = pg.BarGraphItem(
+            x=xs, height=n_exit_buys, y0=off_exit_buys, width=width,
+            brush=_PEN_KW["sig_exit_buys"],
+            pen=_PEN_KW["sig_exit_buys"],
+            name="Exit Buys",
+        )
+        self._plot.addItem(bg_exit_buys)
+
+        bg_exit_sells = pg.BarGraphItem(
+            x=xs, height=n_exit_sells, y0=off_exit_sells,
+            width=width,
+            brush=_PEN_KW["sig_exit_sells"],
+            pen=_PEN_KW["sig_exit_sells"],
+            name="Exit Sells",
+        )
+        self._plot.addItem(bg_exit_sells)
+
+        # pyqtgraph BarGraphItems don't auto-register with the
+        # built-in addLegend() — re-add manually so the user can
+        # tell the colors apart.
+        legend = self._plot.getPlotItem().legend
+        if legend is not None:
+            legend.addItem(bg_buys, "Buys")
+            legend.addItem(bg_sells, "Sells")
+            legend.addItem(bg_exit_buys, "Exit Buys")
+            legend.addItem(bg_exit_sells, "Exit Sells")
+
+        self._plot.setLabel("left", "Signal count")
+

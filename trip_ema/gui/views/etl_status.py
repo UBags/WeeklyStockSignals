@@ -195,6 +195,10 @@ class EtlStatusView(QWidget):
         # Mutex state
         self._local_running: bool = False
         self._inflight_kind: str | None = None
+        # === STEP 13D3 ===
+        self._singlestage_process = None
+        self._singlestage_stdout_buffer: str = ""
+        self._singlestage_stderr_buffer: str = ""
 
         # Backfill subprocess state
         self._backfill_process: QProcess | None = None
@@ -250,6 +254,12 @@ class EtlStatusView(QWidget):
         outer.addLayout(self._build_top_strip())
         outer.addWidget(self._build_activity_log(), 5)
         outer.addLayout(self._build_panels_row(), 10)
+        # === STEP 13D3 ===
+        from .widgets.operation_status_banner import (
+            OperationStatusBanner,
+        )
+        self._operation_banner = OperationStatusBanner(self)
+        outer.addWidget(self._operation_banner)
         outer.addWidget(self._build_market_overview_footer(), 4)
 
         self._status_label = QLabel("")
@@ -505,17 +515,28 @@ class EtlStatusView(QWidget):
             self._snapshot_date_label, alignment=Qt.AlignRight,
         )
 
+        # === STEP 13D3 ===
+        row_sig = QHBoxLayout()
         self._signals_label = QLabel(
             "# Buys = —    # Sells = —    "
             "# Exit Buys = —    # Exit Sells = —"
         )
-        v.addWidget(self._signals_label)
+        self._signals_label.setTextFormat(Qt.RichText)
+        row_sig.addWidget(self._signals_label, 1)
+        self._signals_trend_btn = QPushButton("See Trend")
+        self._signals_trend_btn.clicked.connect(
+            lambda: self._open_trend_dialog(TrendKind.SIGNALS),
+        )
+        row_sig.addWidget(self._signals_trend_btn)
+        v.addLayout(row_sig)
 
         row2 = QHBoxLayout()
         self._regimes_label = QLabel(
             "# Green Regimes = —    # Red Regimes = —    "
             "# Neutral Regimes = —"
         )
+        # === STEP 13D3 ===
+        self._regimes_label.setTextFormat(Qt.RichText)
         row2.addWidget(self._regimes_label, 1)
         self._regime_trend_btn = QPushButton("See Trend")
         self._regime_trend_btn.clicked.connect(
@@ -530,6 +551,8 @@ class EtlStatusView(QWidget):
             "# Stocks < lowest_ema = —    "
             "# in between = —"
         )
+        # === STEP 13D3 ===
+        self._ema_label.setTextFormat(Qt.RichText)
         row3.addWidget(self._ema_label, 1)
         self._ema_trend_btn = QPushButton("See Trend")
         self._ema_trend_btn.clicked.connect(
@@ -767,9 +790,30 @@ class EtlStatusView(QWidget):
             inflight_kind in ("intraday", "eod"),
         )
 
+    # === STEP 13D3 — color scheme for market overview footer ===
+    # Locked palette per 13d-3:
+    #   Buys / Green Regimes / >highest_ema  → green     #66bb6a
+    #   Sells / Red Regimes / <lowest_ema    → red       #ef5350
+    #   Neutral Regimes / in between         → blue      #42a5f5
+    #   Exit Buys                            → dark blue #1976d2
+    #   Exit Sells                           → gray      #9e9e9e
+    _OVERVIEW_GREEN = "#66bb6a"
+    _OVERVIEW_RED = "#ef5350"
+    _OVERVIEW_BLUE = "#42a5f5"
+    _OVERVIEW_DARK_BLUE = "#1976d2"
+    _OVERVIEW_GRAY = "#9e9e9e"
+
+    @staticmethod
+    def _color_span(text: str, color: str) -> str:
+        return (
+            f"<span style='color: {color}; "
+            f"font-weight: 600;'>{text}</span>"
+        )
+
     def _paint_market_overview(self, row) -> None:
         if row is None:
             self._snapshot_date_label.setText("(no snapshot yet)")
+            # Empty state — use plain dashes (no colors)
             self._signals_label.setText(
                 "# Buys = —    # Sells = —    "
                 "# Exit Buys = —    # Exit Sells = —"
@@ -788,36 +832,282 @@ class EtlStatusView(QWidget):
         self._snapshot_date_label.setText(
             f"Snapshot date: {row.snapshot_date.isoformat()}"
         )
+
+        cs = self._color_span
+        sep = " &nbsp;&nbsp;&nbsp; "
+
+        # Signals row
         self._signals_label.setText(
-            f"# Buys = {row.n_buys}    "
-            f"# Sells = {row.n_sells}    "
-            f"# Exit Buys = {row.n_exit_buys}    "
-            f"# Exit Sells = {row.n_exit_sells}"
+            cs(f"# Buys = {row.n_buys}", self._OVERVIEW_GREEN)
+            + sep
+            + cs(f"# Sells = {row.n_sells}", self._OVERVIEW_RED)
+            + sep
+            + cs(
+                f"# Exit Buys = {row.n_exit_buys}",
+                self._OVERVIEW_DARK_BLUE,
+            )
+            + sep
+            + cs(
+                f"# Exit Sells = {row.n_exit_sells}",
+                self._OVERVIEW_GRAY,
+            )
         )
+
+        # Regimes row
         self._regimes_label.setText(
-            f"# Green Regimes = {row.n_green_regime}    "
-            f"# Red Regimes = {row.n_red_regime}    "
-            f"# Neutral Regimes = {row.n_neutral_regime}"
+            cs(
+                f"# Green Regimes = {row.n_green_regime}",
+                self._OVERVIEW_GREEN,
+            )
+            + sep
+            + cs(
+                f"# Red Regimes = {row.n_red_regime}",
+                self._OVERVIEW_RED,
+            )
+            + sep
+            + cs(
+                f"# Neutral Regimes = {row.n_neutral_regime}",
+                self._OVERVIEW_BLUE,
+            )
         )
+
+        # EMA envelope row
         self._ema_label.setText(
-            f"# Stocks > highest_ema = {row.n_above_highest_ema}    "
-            f"# Stocks < lowest_ema = {row.n_below_lowest_ema}    "
-            f"# in between = {row.n_between_emas}"
+            cs(
+                f"# Stocks &gt; highest_ema = "
+                f"{row.n_above_highest_ema}",
+                self._OVERVIEW_GREEN,
+            )
+            + sep
+            + cs(
+                f"# Stocks &lt; lowest_ema = "
+                f"{row.n_below_lowest_ema}",
+                self._OVERVIEW_RED,
+            )
+            + sep
+            + cs(
+                f"# in between = {row.n_between_emas}",
+                self._OVERVIEW_BLUE,
+            )
         )
 
     # ============================================================
     # Action button handlers
     # ============================================================
 
+    # === STEP 13D3 — Refresh Listings + Recompute Tiers wiring ===
+
     def _on_refresh_listings_clicked(self) -> None:
-        self._set_status(
-            "Refresh Listings — wiring lands in Step 13d."
+        from .widgets.refresh_listings_confirmation_modal import (
+            RefreshListingsConfirmationModal,
+        )
+        exchange = self._picker.current_exchange()
+        if exchange is None:
+            self._set_status("No exchange selected.")
+            return
+        if self._local_running:
+            self._set_status(
+                "Another operation is in progress; please wait.",
+            )
+            return
+
+        modal = RefreshListingsConfirmationModal(
+            exchange=exchange, parent=self,
+        )
+        if modal.exec() != modal.DialogCode.Accepted:
+            return
+
+        self._start_singlestage_process(
+            kind="refresh_listings",
+            cli_subcommand="refresh-listings",
+            exchange=exchange,
+            banner_label=f"Refresh Listings ({exchange}) running…",
         )
 
     def _on_recompute_tiers_clicked(self) -> None:
-        self._set_status(
-            "Recompute Tiers — wiring lands in Step 13d."
+        from .widgets.recompute_tiers_confirmation_modal import (
+            RecomputeTiersConfirmationModal,
         )
+        exchange = self._picker.current_exchange()
+        if exchange is None:
+            self._set_status("No exchange selected.")
+            return
+        if self._local_running:
+            self._set_status(
+                "Another operation is in progress; please wait.",
+            )
+            return
+
+        modal = RecomputeTiersConfirmationModal(
+            exchange=exchange, parent=self,
+        )
+        if modal.exec() != modal.DialogCode.Accepted:
+            return
+
+        self._start_singlestage_process(
+            kind="recompute_tiers",
+            cli_subcommand="recompute-tiers",
+            exchange=exchange,
+            banner_label=f"Recompute Tiers ({exchange}) running…",
+        )
+
+    def _start_singlestage_process(
+        self, *,
+        kind: str,
+        cli_subcommand: str,
+        exchange: str,
+        banner_label: str,
+    ) -> None:
+        """Shared QProcess launcher for Refresh Listings + Recompute
+        Tiers. Acquires the mutex, spawns the process, wires
+        stdout/finished/error slots, shows the OperationStatusBanner.
+        """
+        import sys
+        from PySide6.QtCore import QProcess
+
+        self._local_running = True
+        self._inflight_kind = kind
+        self._apply_mutex_state(True, kind)
+
+        self._operation_banner.start(banner_label)
+        self._set_status(banner_label)
+
+        proc = QProcess(self)
+        # Buffer stdout/stderr separately so we can surface failure
+        # text on the banner
+        proc.setProcessChannelMode(QProcess.SeparateChannels)
+        proc.readyReadStandardOutput.connect(
+            lambda: self._on_singlestage_stdout(proc),
+        )
+        proc.readyReadStandardError.connect(
+            lambda: self._on_singlestage_stderr(proc),
+        )
+        proc.finished.connect(
+            lambda code, status: self._on_singlestage_finished(
+                proc, code, status, kind=kind, exchange=exchange,
+            ),
+        )
+        proc.errorOccurred.connect(
+            lambda err: self._on_singlestage_error(
+                proc, err, kind=kind,
+            ),
+        )
+
+        # Buffer the captured output for failure-mode display
+        self._singlestage_stdout_buffer = ""
+        self._singlestage_stderr_buffer = ""
+        self._singlestage_process = proc
+
+        program = sys.executable
+        args = [
+            "-m", "trip_ema.etl.cli",
+            cli_subcommand,
+            "--exchange", exchange,
+        ]
+        proc.start(program, args)
+
+    def _on_singlestage_stdout(self, proc) -> None:
+        if proc is None:
+            return
+        data = bytes(
+            proc.readAllStandardOutput(),
+        ).decode("utf-8", errors="replace")
+        if data:
+            self._singlestage_stdout_buffer += data
+
+    def _on_singlestage_stderr(self, proc) -> None:
+        if proc is None:
+            return
+        data = bytes(
+            proc.readAllStandardError(),
+        ).decode("utf-8", errors="replace")
+        if data:
+            self._singlestage_stderr_buffer += data
+
+    def _on_singlestage_finished(
+        self, proc, code: int, status,
+        *, kind: str, exchange: str,
+    ) -> None:
+        """Slot for QProcess.finished. Releases mutex; shows banner
+        success / failure; triggers autocomplete refresh on Refresh
+        Listings (any exit code, per F5 lock)."""
+        # Release mutex
+        self._local_running = False
+        self._inflight_kind = None
+        self._apply_mutex_state(False, None)
+
+        if code == 0:
+            self._operation_banner.finish_success(
+                f"{kind.replace('_', ' ').title()} complete "
+                f"({exchange})."
+            )
+            self._set_status(
+                f"{kind.replace('_', ' ').title()} complete.",
+            )
+        else:
+            # Surface stderr (truncated) on the banner
+            err_text = (
+                self._singlestage_stderr_buffer.strip()
+                or self._singlestage_stdout_buffer.strip()
+                or f"exit code {code}"
+            )
+            err_short = err_text.splitlines()[-1][:200]
+            self._operation_banner.finish_failure(err_short)
+            self._set_status(
+                f"{kind.replace('_', ' ').title()} FAILED "
+                f"(exit {code}). See banner for detail.",
+            )
+
+        # F5 lock: refresh autocomplete on Refresh Listings completion
+        # (any exit code — even on failure, listings may be partially
+        # mutated and the GUI should reflect current state).
+        if kind == "refresh_listings":
+            self._refresh_autocomplete()
+
+        # Always refresh the activity log + tickers tab counts
+        self._activity_scheduler.trigger_now()
+        self._mutex_scheduler.trigger_now()
+
+        self._singlestage_process = None
+        self._singlestage_stdout_buffer = ""
+        self._singlestage_stderr_buffer = ""
+
+    def _on_singlestage_error(self, proc, err, *, kind: str) -> None:
+        """QProcess.errorOccurred handler — covers failure-to-start
+        and other process-level errors that don't come via finished.
+        """
+        # If finished is also going to fire, let that path handle it.
+        # If the process didn't start at all (FailedToStart), finish
+        # won't fire — handle here.
+        from PySide6.QtCore import QProcess
+        if err == QProcess.ProcessError.FailedToStart:
+            self._local_running = False
+            self._inflight_kind = None
+            self._apply_mutex_state(False, None)
+            self._operation_banner.finish_failure(
+                f"Failed to start process for {kind}",
+            )
+            self._set_status(
+                f"{kind.replace('_', ' ').title()} failed to "
+                f"start.",
+            )
+            self._singlestage_process = None
+
+    def _refresh_autocomplete(self) -> None:
+        """Re-load the active-ticker universe so the autocomplete
+        picks up newly-listed tickers (F5 lock).
+
+        Calls the same method the picker's exchange-change path
+        uses (`_refresh_active_tickers`).
+        """
+        try:
+            self._refresh_active_tickers()
+        except Exception as e:
+            # Don't propagate; autocomplete is a polish feature
+            # and a stale list is acceptable.
+            self._set_status(
+                f"Autocomplete refresh failed: {e}",
+            )
 
     def _on_run_intraday_clicked(self) -> None:
         """Validate → modal → spawn QProcess invoking
