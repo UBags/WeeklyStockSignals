@@ -117,10 +117,7 @@ class TestPopulateStockIndicatorStateForTicker:
                 conn, "stock_indicator_enrichment",
                 "ticker_id = :tid", tid=ticker_id,
             )
-            baseline_signal_events = _count(
-                conn, "signal_events",
-                "ticker_id = :tid", tid=ticker_id,
-            )
+            # === STEP 15B-FIXUP2-r1-baseline: signal_events baseline removed ===
             baseline_current = _count(
                 conn, "current_signals",
                 "ticker_id = :tid", tid=ticker_id,
@@ -180,10 +177,7 @@ class TestPopulateStockIndicatorStateForTicker:
                 "V1 stock-state runner must not write to enrichment "
                 "table (that's Step 5)"
             )
-            assert _count(
-                conn, "signal_events",
-                "ticker_id = :tid", tid=ticker_id,
-            ) == baseline_signal_events
+            # === STEP 15B-FIXUP2-r1-assert: signal_events assert removed ===
             assert _count(
                 conn, "current_signals",
                 "ticker_id = :tid", tid=ticker_id,

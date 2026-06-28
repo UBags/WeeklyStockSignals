@@ -456,7 +456,7 @@ class TestPopulateIndustryIndexValueSideEffects:
             baseline_industry_enrich = _count(
                 conn, "industry_indicator_enrichment",
             )
-            baseline_signals = _count(conn, "signal_events")
+            # === STEP 15B-FIXUP2-r3-baseline: signal_events baseline removed ===
             baseline_current = _count(conn, "current_signals")
             baseline_historical = _count(conn, "historical_signals")
             baseline_legacy = _count(conn, "indicator_state")
@@ -478,7 +478,7 @@ class TestPopulateIndustryIndexValueSideEffects:
             assert _count(
                 conn, "industry_indicator_enrichment",
             ) == baseline_industry_enrich
-            assert _count(conn, "signal_events") == baseline_signals
+            # === STEP 15B-FIXUP2-r3-assert: signal_events assert removed ===
             assert _count(conn, "current_signals") == baseline_current
             assert _count(
                 conn, "historical_signals",

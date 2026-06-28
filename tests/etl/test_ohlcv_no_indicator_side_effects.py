@@ -23,7 +23,7 @@ What we DO NOT expect run_eod to write to (indicator / signal concern):
   - industry_indicator_state           (V1)
   - stock_indicator_enrichment         (V1)
   - industry_indicator_enrichment      (V1)
-  - signal_events                      (legacy + V1)
+  # 15B-FIXUP1: signal_events row removed (table dropped in migration 0030)
   - current_signals                    (V1)
   - historical_signals                 (V1)
   - benchmark_stats / stock_benchmark_stats
@@ -53,11 +53,11 @@ from trip_ema.etl.yfinance_source import YFinanceSource
 # Tables that must remain at zero rows for the test ticker after the
 # OHLCV runner finishes. Each entry is (table_name, ticker-filter SQL).
 # A None filter means "any row in this table is a violation."
+# === STEP 15B-FIXUP1: signal_events removed (table dropped in 0030) ===
 INDICATOR_SIGNAL_TABLES_TICKER_SCOPED = [
     ("indicator_state",                 "ticker_id = :tid"),
     ("stock_indicator_state",           "ticker_id = :tid"),
     ("stock_indicator_enrichment",      "ticker_id = :tid"),
-    ("signal_events",                   "ticker_id = :tid"),
     ("current_signals",                 "ticker_id = :tid"),
     ("historical_signals",              "ticker_id = :tid"),
 ]
@@ -198,7 +198,7 @@ def test_run_eod_writes_ohlcv_only_no_indicator_side_effects(
 ):
     """run_eod writes OHLCV bars + ETL audit/quality rows ONLY. It
     must NEVER write to indicator_state, stock_indicator_state,
-    stock_indicator_enrichment, signal_events, current_signals,
+    stock_indicator_enrichment, current_signals,
     historical_signals, industry_indicator_state, or
     industry_indicator_enrichment.
 

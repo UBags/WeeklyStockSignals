@@ -238,7 +238,7 @@ class TestSideEffects:
                     _count(conn, "industry_indicator_enrichment"),
                 "industry_index_value":
                     _count(conn, "industry_index_value"),
-                "signal_events": _count(conn, "signal_events"),
+                # === STEP 15B-FIXUP2-r5-dict: signal_events dict entry removed ===
                 "current_signals": _count(conn, "current_signals"),
                 "historical_signals": _count(conn, "historical_signals"),
                 "indicator_state": _count(conn, "indicator_state"),

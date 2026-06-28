@@ -59,9 +59,9 @@ def test_applying_migrations_twice_is_idempotent(db_engine):
 def test_expected_tables_exist(db_engine):
     """Sanity-check that the expected tables came out of the migrations.
     Note: ticker_signal_state was dropped in migration 005."""
+    # === STEP 15B-FIXUP2-migrator: signal_events removed from expected set ===
     expected_tables = {
         "tickers", "ohlcv_bars",
-        "signal_events",
         "subscribers", "subscriptions",
         "notification_log",
         "schema_migrations",

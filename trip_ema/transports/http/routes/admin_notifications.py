@@ -65,16 +65,21 @@ def list_recent_notifications(
         sub_filter_sql = " AND nl.subscriber_id = :sid"
         params["sid"] = subscriber_id
 
+    # === STEP 15B: rewired off signal_events to V1 denormalized columns ===
+    # Pre-V1 rows in notification_log have NULL for the signal_* columns
+    # (those were added in migration 0027 alongside the V1 cutover). Their
+    # signal info is no longer recoverable post-15b (signal_events is gone).
+    # V1 rows have full denormalized identity in notification_log itself.
     sql = f"""
         SELECT nl.log_id, nl.last_sent_at, nl.subscriber_id,
                nl.event_id, nl.notification_count,
                s.address AS sub_address, s.transport AS sub_transport,
-               e.signal_type AS event_signal, e.bar_timestamp AS event_bar_timestamp,
+               nl.signal_type AS event_signal,
+               nl.signal_bar_timestamp AS event_bar_timestamp,
                t.symbol AS ticker_symbol, t.exchange AS ticker_exchange
         FROM notification_log nl
         JOIN subscribers s ON nl.subscriber_id = s.subscriber_id
-        JOIN signal_events e ON nl.event_id = e.event_id
-        LEFT JOIN tickers t ON e.ticker_id = t.ticker_id
+        LEFT JOIN tickers t ON nl.signal_ticker_id = t.ticker_id
         WHERE nl.last_sent_at >= :since {sub_filter_sql}
         ORDER BY nl.last_sent_at DESC
         LIMIT :lim
