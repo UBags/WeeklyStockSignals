@@ -1,63 +1,59 @@
-"""ETL Status & Control view — Step 13b rewrite.
+"""ETL Status & Control view — Step 13c: Backfill panel wired.
 
-Replaces the Phase 14.6c/15c/15d action-bar layout with the Step 13
-sketch:
+Builds on the 13b layout (top strip + Activity Log + Backfill
+panel + Intraday panel + Market Overview footer). 13c fills in
+the Backfill panel:
 
-  ┌─ Exchange [▼]  [Refresh Listings] [Recompute Tiers] ────────┐
-  ├─ Activity Log Table  (scrollable, last 10-15 batch runs) ───┤
-  ├─ Backfill panel ───────────┬─ Intraday panel ───────────────┤
-  │  radio: Fetch / Don't      │  Stage list (✓/→/Queued)        │
-  │  From [date]  To [date]    │                                 │
-  │  Stocks [...]   [ADD]      │                                 │
-  │  [chip area]               │                                 │
-  │  [Backfill]    🔆          │  [Run Intraday]     🔆          │
-  ├────────────────────────────┴─────────────────────────────────┤
-  │ OVERALL MKT OVERVIEW                                         │
-  │ #Buys=. #Sells=. #ExitBuys=. #ExitSells=.                    │
-  │ #Green=. #Red=. #Neutral=.                       [See Trend] │
-  │ #Stocks > highest_ema=. ... in between=.         [See Trend] │
-  └──────────────────────────────────────────────────────────────┘
+  - Stocks input: QCompleter against active tickers (refreshed
+    on exchange change; 13d hook for refresh-after-RefreshListings)
+  - ADD button: validates symbol against the active-ticker set
+    BEFORE adding to the chip area (in-GUI error message; matches
+    CLI behavior)
+  - From-date picker: auto-fills with MIN(ohlcv_bars.bar_timestamp)
+    on view init + exchange change; falls back to today-minus-
+    15-years if no bars present (fresh install)
+  - [Backfill] button: shows destructive-confirmation modal with
+    pre-flight counts; on confirm, spawns QProcess invoking
+    `sys.executable -m trip_ema.etl.cli backfill ...`; live stage
+    progress streams to an in-panel label below the button
+  - [Cancel] button: visible only while a backfill is running.
+    SIGTERM → 5s grace → SIGKILL.
+  - On exit: success toast (status_label) or failure dialog
+    (exit code + failed_stage + stderr tail, with --release-lock
+    hint when applicable). Form state is preserved (chips +
+    radio + dates kept as-is per the Q3 lock).
 
-Scope by step:
-  13b (this bundle): layout + Activity Log (real data from
-    compute_runs) + Market Overview footer (real data from
-    market_overview_daily) + [See Trend] dialogs (real pyqtgraph
-    charts). Action buttons (Backfill, Run Intraday, Refresh
-    Listings, Recompute Tiers) exist but are no-ops with a
-    placeholder status label.
-  13c: wires the Backfill panel — autocomplete, chips, QProcess,
-    destructive-action modal.
-  13d: wires the Intraday panel — live cycle invocation, stage
-    progress updates. Plus Refresh Listings / Recompute Tiers
-    button wiring.
-
-Mutex rules:
-  - "Something is running" iff EITHER compute_runs has a row
-    with finished_at IS NULL for the selected exchange OR
-    backfill_runs reports an active lock. Polled every 2s.
-  - When running: all four action buttons disabled; the
-    appropriate flashing-light indicator on. Backfill panel light
-    on if kind='backfill'; Intraday panel light on if
-    kind='intraday' or 'eod'.
+Intraday panel + Refresh Listings + Recompute Tiers remain
+no-ops; they land in 13d.
 """
 from __future__ import annotations
 
 import logging
+import sys
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import Qt, QSortFilterProxyModel
+from PySide6.QtCore import (
+    Qt, QDate, QProcess, QStringListModel, QTimer,
+)
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
-    QButtonGroup, QDateEdit, QFrame, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QRadioButton, QSizePolicy, QTableView, QVBoxLayout, QWidget,
+    QButtonGroup, QCompleter, QDateEdit, QFrame, QGroupBox,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QPushButton, QRadioButton, QSizePolicy, QTableView,
+    QVBoxLayout, QWidget,
 )
 
 from ..db import GuiDbSession
 from ..http_client import TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
 from .market_trend_dialog import MarketTrendDialog, TrendKind
+from .widgets.backfill_destructive_modal import (
+    BackfillDestructiveModal, estimate_runtime_minutes,
+)
+from .widgets.backfill_failure_dialog import (
+    BackfillFailureDialog, parse_failure_summary,
+)
 from .widgets.exchange_picker import ExchangePicker
 from .widgets.flashing_light import FlashingLight
 from .widgets.stage_progress import (
@@ -71,21 +67,11 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 # ============================================================
-# Polling cadences
+# Polling cadences (unchanged from 13b)
 # ============================================================
-# Activity log: most-visible feedback. 5s strikes a balance between
-# "noticeable freshness" and "DB load" for a small read.
 ACTIVITY_LOG_CADENCE_SECONDS = 5.0
-# Mutex driver: 2s gives quick UI reaction when a run starts or
-# finishes. Two cheap queries (in_flight on compute_runs + active
-# on backfill_runs).
 MUTEX_CADENCE_SECONDS = 2.0
-# Market overview footer: changes only on EoD ticks (once a day).
-# 30s is plenty for the operator to see "today's snapshot computed
-# at 16:30 IST" reflected within a minute.
 MARKET_OVERVIEW_CADENCE_SECONDS = 30.0
-
-# Activity log row limit. Sketch says "10-15 batch runs"; using 15.
 ACTIVITY_LOG_ROW_LIMIT = 15
 
 
@@ -105,7 +91,6 @@ ACTIVITY_HEADERS = [
 ]
 
 
-# Operator-facing labels for compute_runs.kind values.
 KIND_LABELS = {
     "intraday": "Intraday Run",
     "eod":      "EoD Run",
@@ -113,8 +98,11 @@ KIND_LABELS = {
 }
 
 
+# QProcess cancel grace period before SIGKILL (per Q2 lock)
+CANCEL_GRACE_MS = 5000
+
+
 def _format_started_at(started_at: datetime) -> str:
-    """If today (IST), show HH:MM:SS; otherwise YYYY-MM-DD HH:MM."""
     started_ist = started_at.astimezone(IST)
     today_ist = datetime.now(IST).date()
     if started_ist.date() == today_ist:
@@ -123,7 +111,6 @@ def _format_started_at(started_at: datetime) -> str:
 
 
 def _format_duration(seconds: float | None) -> str:
-    """Human-readable duration."""
     if seconds is None:
         return "(running)"
     if seconds < 60:
@@ -137,8 +124,6 @@ def _format_duration(seconds: float | None) -> str:
 
 
 def _format_notes_or_error(row) -> str:
-    """If the run had a failure, show '❌ stage: error[:40]'.
-    Otherwise show the notes field, or empty string."""
     if row.failed_stage is not None or row.error_message is not None:
         stage = row.failed_stage or "?"
         msg = (row.error_message or "")[:60]
@@ -146,18 +131,45 @@ def _format_notes_or_error(row) -> str:
     return row.notes or ""
 
 
+def build_backfill_argv(
+    *,
+    exchange: str,
+    date_from,
+    date_to,
+    stocks: list[str],
+    refetch_bars: bool,
+) -> list[str]:
+    """Build the argv (after sys.executable) for the backfill
+    QProcess invocation. Extracted as a module-level helper so the
+    argv-construction logic is testable without spinning up Qt.
+
+    Output shape:
+        ['-m', 'trip_ema.etl.cli', 'backfill',
+         '--exchange', '<ex>',
+         '--date_from', 'YYYY-MM-DD',
+         '--date_to', 'YYYY-MM-DD',
+         ('--no_fetch_bars',)?,
+         ('--stocks', 'A,B,C')?]
+    """
+    args = [
+        "-m", "trip_ema.etl.cli", "backfill",
+        "--exchange", exchange,
+        "--date_from", date_from.isoformat(),
+        "--date_to", date_to.isoformat(),
+    ]
+    if not refetch_bars:
+        args.append("--no_fetch_bars")
+    if stocks:
+        args.extend(["--stocks", ",".join(stocks)])
+    return args
+
+
 # ============================================================
 # The view
 # ============================================================
 
 class EtlStatusView(QWidget):
-    """Operator console's ETL Status tab.
-
-    Constructor signature preserved from the previous (Phase 15d)
-    implementation so main_window.py doesn't need touching.
-    `http` is currently unused; 13d will use it to trigger live
-    ticks via /v1/admin/compute-now.
-    """
+    """Operator console's ETL Status tab. Step 13c."""
 
     def __init__(
         self,
@@ -171,38 +183,37 @@ class EtlStatusView(QWidget):
         self._db = db
         self._http = http
 
-        # Local mutex state — the GUI-side "just-clicked" flag,
-        # complements the persistent compute_runs / backfill_runs
-        # state for the immediate UI feedback window before the
-        # row hits the DB.
+        # Mutex state
         self._local_running: bool = False
-        # Most-recent in-flight kind (None / 'intraday' / 'eod' /
-        # 'backfill'). Drives which flashing light to turn on.
         self._inflight_kind: str | None = None
 
-        # Build UI before wiring schedulers (handlers reference
-        # widget attributes set in _build_ui).
+        # Backfill subprocess state
+        self._backfill_process: QProcess | None = None
+        self._backfill_stdout_buffer: str = ""
+        self._backfill_stderr_buffer: str = ""
+
+        # Active-ticker universe for autocomplete + validation
+        self._active_tickers: list[str] = []
+        self._active_ticker_set: frozenset[str] = frozenset()
+        self._completer_model = QStringListModel(self)
+
         self._build_ui()
 
-        # Three schedulers — different cadences for different data
         self._activity_scheduler = RefreshScheduler(
             ACTIVITY_LOG_CADENCE_SECONDS, run_on_start=True,
         )
         self._activity_scheduler.tick.connect(
             self._on_activity_tick,
         )
-
         self._mutex_scheduler = RefreshScheduler(
             MUTEX_CADENCE_SECONDS, run_on_start=True,
         )
         self._mutex_scheduler.tick.connect(self._on_mutex_tick)
-
         self._overview_scheduler = RefreshScheduler(
             MARKET_OVERVIEW_CADENCE_SECONDS, run_on_start=True,
         )
         self._overview_scheduler.tick.connect(self._on_overview_tick)
 
-        # Picker drives all three — refresh when the exchange changes
         self._picker.selection_changed.connect(
             self._on_exchange_changed,
         )
@@ -221,22 +232,16 @@ class EtlStatusView(QWidget):
         outer.setContentsMargins(12, 12, 12, 12)
         outer.setSpacing(8)
 
-        # Top strip — no stretch (fixed height, content drives it)
         outer.addLayout(self._build_top_strip())
-        # Activity log — stretch 5
         outer.addWidget(self._build_activity_log(), 5)
-        # Backfill + Intraday side-by-side — stretch 10
         outer.addLayout(self._build_panels_row(), 10)
-        # Market overview footer — stretch 4
         outer.addWidget(self._build_market_overview_footer(), 4)
 
-        # Status line at the very bottom — placeholder for action
-        # feedback messages until the buttons wire up in 13c/13d.
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet("color: #666; font-style: italic;")
+        self._status_label.setStyleSheet(
+            "color: #666; font-style: italic;"
+        )
         outer.addWidget(self._status_label)
-
-    # --- Top strip ----------------------------------------------
 
     def _build_top_strip(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -264,15 +269,15 @@ class EtlStatusView(QWidget):
         row.addStretch(1)
         return row
 
-    # --- Activity log -------------------------------------------
-
     def _build_activity_log(self) -> QGroupBox:
         box = QGroupBox("Activity Log")
         v = QVBoxLayout(box)
         v.setContentsMargins(8, 12, 8, 8)
 
         self._activity_model = QStandardItemModel(self)
-        self._activity_model.setHorizontalHeaderLabels(ACTIVITY_HEADERS)
+        self._activity_model.setHorizontalHeaderLabels(
+            ACTIVITY_HEADERS,
+        )
 
         self._activity_table = QTableView()
         self._activity_table.setModel(self._activity_model)
@@ -287,7 +292,6 @@ class EtlStatusView(QWidget):
         )
         self._activity_table.setAlternatingRowColors(True)
         self._activity_table.verticalHeader().setVisible(False)
-        # Notes column stretches; others auto-size to content
         header = self._activity_table.horizontalHeader()
         for col in (
             COL_ACTIVITY, COL_STARTED, COL_DURATION,
@@ -303,8 +307,6 @@ class EtlStatusView(QWidget):
         v.addWidget(self._activity_table)
         return box
 
-    # --- Side-by-side panels (Backfill | Intraday) --------------
-
     def _build_panels_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(12)
@@ -318,7 +320,7 @@ class EtlStatusView(QWidget):
         v.setContentsMargins(10, 14, 10, 10)
         v.setSpacing(8)
 
-        # Header row with the flashing light
+        # Header row with flashing light
         header_row = QHBoxLayout()
         header_row.addStretch(1)
         self._backfill_light = FlashingLight()
@@ -326,9 +328,11 @@ class EtlStatusView(QWidget):
         header_row.addWidget(self._backfill_light)
         v.addLayout(header_row)
 
-        # Radio group — "Do not fetch stock prices" is default
+        # Radio group
         self._fetch_prices_radio = QRadioButton("Fetch Stock Prices")
-        self._no_fetch_radio = QRadioButton("Do not fetch stock prices")
+        self._no_fetch_radio = QRadioButton(
+            "Do not fetch stock prices",
+        )
         self._no_fetch_radio.setChecked(True)
         radio_group = QButtonGroup(self)
         radio_group.addButton(self._fetch_prices_radio)
@@ -336,46 +340,86 @@ class EtlStatusView(QWidget):
         v.addWidget(self._fetch_prices_radio)
         v.addWidget(self._no_fetch_radio)
 
-        # From / To date pickers
+        # Date pickers
         date_row = QHBoxLayout()
         date_row.addWidget(QLabel("From:"))
         self._from_date = QDateEdit(calendarPopup=True)
         self._from_date.setDisplayFormat("yyyy-MM-dd")
+        self._from_date.setDate(
+            QDate.currentDate().addYears(-15),
+        )
         date_row.addWidget(self._from_date)
         date_row.addSpacing(12)
         date_row.addWidget(QLabel("To:"))
         self._to_date = QDateEdit(calendarPopup=True)
         self._to_date.setDisplayFormat("yyyy-MM-dd")
+        self._to_date.setDate(QDate.currentDate())
         date_row.addWidget(self._to_date)
         date_row.addStretch(1)
         v.addLayout(date_row)
 
-        # Stocks input + ADD button
+        # Stocks input + ADD (with autocomplete)
         stocks_row = QHBoxLayout()
         stocks_row.addWidget(QLabel("Stocks:"))
         self._stocks_input = QLineEdit()
         self._stocks_input.setPlaceholderText(
-            "type a symbol (autocomplete in 13c)",
+            "type a symbol (autocomplete)…",
+        )
+        # QCompleter: case-insensitive prefix match
+        self._completer = QCompleter(self._completer_model, self)
+        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._completer.setFilterMode(Qt.MatchStartsWith)
+        self._completer.setCompletionMode(
+            QCompleter.PopupCompletion,
+        )
+        self._stocks_input.setCompleter(self._completer)
+        # Enter in the input triggers ADD (UX nicety)
+        self._stocks_input.returnPressed.connect(
+            self._on_add_stock_clicked,
         )
         stocks_row.addWidget(self._stocks_input, 1)
         self._add_stock_btn = QPushButton("ADD")
-        self._add_stock_btn.clicked.connect(self._on_add_stock_clicked)
+        self._add_stock_btn.clicked.connect(
+            self._on_add_stock_clicked,
+        )
         stocks_row.addWidget(self._add_stock_btn)
         v.addLayout(stocks_row)
 
-        # Chip area for selected stocks
+        # Chip area
         self._chip_area = TickerChipArea()
         v.addWidget(self._chip_area)
 
         v.addStretch(1)
 
-        # Backfill button
+        # Progress label (in-panel stage feedback — Q1 lock)
+        self._backfill_progress_label = QLabel("")
+        self._backfill_progress_label.setWordWrap(True)
+        self._backfill_progress_label.setStyleSheet(
+            "color: #5cb6e8; font-family: Monospace; "
+            "font-size: 11px; padding: 4px;"
+        )
+        v.addWidget(self._backfill_progress_label)
+
+        # Backfill + Cancel buttons (Cancel hidden when idle)
+        btn_row = QHBoxLayout()
         self._backfill_btn = QPushButton("Backfill")
         self._backfill_btn.setStyleSheet(
             "font-weight: 600; padding: 6px;"
         )
         self._backfill_btn.clicked.connect(self._on_backfill_clicked)
-        v.addWidget(self._backfill_btn)
+        btn_row.addWidget(self._backfill_btn, 1)
+
+        self._cancel_backfill_btn = QPushButton("Cancel")
+        self._cancel_backfill_btn.setStyleSheet(
+            "font-weight: 600; padding: 6px; "
+            "background-color: #6a1f1f; color: white;"
+        )
+        self._cancel_backfill_btn.clicked.connect(
+            self._on_cancel_backfill_clicked,
+        )
+        self._cancel_backfill_btn.hide()
+        btn_row.addWidget(self._cancel_backfill_btn)
+        v.addLayout(btn_row)
 
         return box
 
@@ -385,7 +429,6 @@ class EtlStatusView(QWidget):
         v.setContentsMargins(10, 14, 10, 10)
         v.setSpacing(8)
 
-        # Header row with the flashing light
         header_row = QHBoxLayout()
         header_row.addStretch(1)
         self._intraday_light = FlashingLight()
@@ -393,13 +436,11 @@ class EtlStatusView(QWidget):
         header_row.addWidget(self._intraday_light)
         v.addLayout(header_row)
 
-        # Stage list — the 7 stages of the V1 live cycle
         self._stage_list = StageProgressList(LIVE_CYCLE_STAGES)
         v.addWidget(self._stage_list)
 
         v.addStretch(1)
 
-        # Run Intraday button
         self._run_intraday_btn = QPushButton("Run Intraday")
         self._run_intraday_btn.setStyleSheet(
             "font-weight: 600; padding: 6px;"
@@ -411,32 +452,26 @@ class EtlStatusView(QWidget):
 
         return box
 
-    # --- Market overview footer ---------------------------------
-
     def _build_market_overview_footer(self) -> QGroupBox:
         box = QGroupBox("Overall Market Overview")
         v = QVBoxLayout(box)
         v.setContentsMargins(10, 14, 10, 10)
         v.setSpacing(6)
 
-        # Snapshot date label (top-right of the box)
         self._snapshot_date_label = QLabel("(no snapshot)")
         self._snapshot_date_label.setStyleSheet(
             "color: #555; font-style: italic;"
         )
         v.addWidget(
-            self._snapshot_date_label,
-            alignment=Qt.AlignRight,
+            self._snapshot_date_label, alignment=Qt.AlignRight,
         )
 
-        # Row 1: signal counts (no trend button — per sketch)
         self._signals_label = QLabel(
             "# Buys = —    # Sells = —    "
             "# Exit Buys = —    # Exit Sells = —"
         )
         v.addWidget(self._signals_label)
 
-        # Row 2: regime counts + See Trend
         row2 = QHBoxLayout()
         self._regimes_label = QLabel(
             "# Green Regimes = —    # Red Regimes = —    "
@@ -450,7 +485,6 @@ class EtlStatusView(QWidget):
         row2.addWidget(self._regime_trend_btn)
         v.addLayout(row2)
 
-        # Row 3: EMA-envelope counts + See Trend
         row3 = QHBoxLayout()
         self._ema_label = QLabel(
             "# Stocks > highest_ema = —    "
@@ -468,21 +502,20 @@ class EtlStatusView(QWidget):
         return box
 
     # ============================================================
-    # Scheduler ticks — refresh data
+    # Scheduler ticks
     # ============================================================
 
     def _on_exchange_changed(self, exchange: str) -> None:
-        """Picker emitted selection_changed. Force-refresh all
-        three data streams so the operator sees the new exchange's
-        view immediately."""
-        # Trigger ticks now instead of waiting for the next cadence
+        """Picker emitted selection_changed. Refresh everything for
+        the new exchange: schedulers fire NOW, autocomplete + From-
+        date auto-fill (13c additions)."""
         self._activity_scheduler.trigger_now()
         self._mutex_scheduler.trigger_now()
         self._overview_scheduler.trigger_now()
+        self._refresh_active_tickers()
+        self._autofill_from_date()
 
     def _on_activity_tick(self) -> None:
-        """Query compute_runs for the latest N rows. Runs on the
-        GUI thread (cheap query, no need to background)."""
         exchange = self._picker.current_exchange()
         if exchange is None:
             return
@@ -502,11 +535,6 @@ class EtlStatusView(QWidget):
         self._populate_activity_table(rows)
 
     def _on_mutex_tick(self) -> None:
-        """Update button-enabled state + flashing lights based on
-        DB state (compute_runs in_flight + backfill_runs active).
-
-        Cheap two-query check. Both queries return at most a tiny
-        result set."""
         exchange = self._picker.current_exchange()
         if exchange is None:
             return
@@ -524,8 +552,10 @@ class EtlStatusView(QWidget):
             )
             return
 
-        # Determine if anything is running + what kind
         kinds = {r.kind for r in in_flight}
+
+        # OR in the local flag (Q8 lock — covers the post-click,
+        # pre-DB-row window so the buttons disable immediately)
         is_running = bool(kinds) or self._local_running
 
         if "backfill" in kinds:
@@ -535,13 +565,16 @@ class EtlStatusView(QWidget):
         elif "intraday" in kinds:
             inflight_kind = "intraday"
         else:
-            inflight_kind = None
+            # No DB row in flight. If local flag is on (just-clicked
+            # window), keep the inflight_kind we set at click time.
+            inflight_kind = (
+                self._inflight_kind if self._local_running
+                else None
+            )
 
         self._apply_mutex_state(is_running, inflight_kind)
 
     def _on_overview_tick(self) -> None:
-        """Read the most-recent market_overview_daily row for the
-        selected exchange + paint the footer labels."""
         exchange = self._picker.current_exchange()
         if exchange is None:
             return
@@ -561,12 +594,72 @@ class EtlStatusView(QWidget):
         self._paint_market_overview(row)
 
     # ============================================================
+    # 13c — Active tickers + From-date auto-fill
+    # ============================================================
+
+    def _refresh_active_tickers(self) -> None:
+        """Populate `_active_tickers` from the DB. Drives both the
+        QCompleter and the ADD-button validation set."""
+        exchange = self._picker.current_exchange()
+        if exchange is None:
+            self._active_tickers = []
+            self._active_ticker_set = frozenset()
+            self._completer_model.setStringList([])
+            return
+        try:
+            from ...persistence.backfill_queries import active_symbols
+            with self._db.connect() as conn:
+                symbols = active_symbols(conn, exchange=exchange)
+        except Exception:
+            logger.warning(
+                "active-ticker refresh failed", exc_info=True,
+            )
+            return
+        self._active_tickers = symbols
+        self._active_ticker_set = frozenset(symbols)
+        self._completer_model.setStringList(symbols)
+        logger.info(
+            "Loaded %d active tickers for %s",
+            len(symbols), exchange,
+        )
+
+    def _autofill_from_date(self) -> None:
+        """Set the From-date picker to MIN(ohlcv_bars.bar_timestamp)
+        for the selected exchange. Fall back to today minus 15
+        years if no bars exist."""
+        exchange = self._picker.current_exchange()
+        if exchange is None:
+            return
+        try:
+            from ...persistence.backfill_queries import min_bar_date
+            with self._db.connect() as conn:
+                min_d = min_bar_date(conn, exchange=exchange)
+        except Exception:
+            logger.warning(
+                "min bar date query failed", exc_info=True,
+            )
+            min_d = None
+
+        if min_d is None:
+            target = QDate.currentDate().addYears(-15)
+            logger.info(
+                "No daily bars for %s — defaulting From-date to "
+                "%s (today minus 15 years)",
+                exchange, target.toString("yyyy-MM-dd"),
+            )
+        else:
+            target = QDate(min_d.year, min_d.month, min_d.day)
+            logger.info(
+                "From-date auto-filled with MIN(ohlcv_bars) = %s",
+                target.toString("yyyy-MM-dd"),
+            )
+        self._from_date.setDate(target)
+
+    # ============================================================
     # Painters
     # ============================================================
 
     def _populate_activity_table(self, rows) -> None:
-        """Repaint the activity log table from a list of
-        ComputeRunRow."""
         model = self._activity_model
         model.removeRows(0, model.rowCount())
 
@@ -592,14 +685,12 @@ class EtlStatusView(QWidget):
                 QStandardItem(fetched),
                 QStandardItem(notes),
             ]
-            # Right-align numeric columns
             for col in (
                 COL_TICKERS_ATTEMPTED, COL_TICKERS_FETCHED,
             ):
                 items[col].setTextAlignment(
                     Qt.AlignRight | Qt.AlignVCenter,
                 )
-            # Italics on in-flight rows for visual hint
             if row.is_in_flight:
                 for item in items:
                     f = item.font()
@@ -610,18 +701,21 @@ class EtlStatusView(QWidget):
     def _apply_mutex_state(
         self, is_running: bool, inflight_kind: str | None,
     ) -> None:
-        """Enable/disable the four action buttons + flip the
-        flashing lights based on running state."""
         self._refresh_listings_btn.setEnabled(not is_running)
         self._recompute_tiers_btn.setEnabled(not is_running)
         self._backfill_btn.setEnabled(not is_running)
         self._run_intraday_btn.setEnabled(not is_running)
 
-        # Flashing lights: backfill kind → backfill panel light;
-        # intraday/eod kind → intraday panel light. Local-running
-        # without a known kind: turn ON neither (we don't know
-        # which panel the click was on at this layer; the click
-        # handlers set their own light).
+        # Show/hide Cancel based on backfill running and locally
+        # owned. We only show Cancel for backfills WE started — if
+        # another GUI instance started one, our QProcess is None
+        # and Cancel wouldn't work.
+        backfill_owned = (
+            self._backfill_process is not None
+            and self._backfill_process.state() != QProcess.NotRunning
+        )
+        self._cancel_backfill_btn.setVisible(backfill_owned)
+
         self._backfill_light.set_active(inflight_kind == "backfill")
         self._intraday_light.set_active(
             inflight_kind in ("intraday", "eod"),
@@ -666,11 +760,8 @@ class EtlStatusView(QWidget):
         )
 
     # ============================================================
-    # Action button handlers — STUBS for 13b
+    # Action button handlers
     # ============================================================
-    # Each one just shows a status message + (for the panel-based
-    # actions) toggles the local flashing light for a few seconds.
-    # 13c/13d will replace these with real wiring.
 
     def _on_refresh_listings_clicked(self) -> None:
         self._set_status(
@@ -682,40 +773,346 @@ class EtlStatusView(QWidget):
             "Recompute Tiers — wiring lands in Step 13d."
         )
 
-    def _on_add_stock_clicked(self) -> None:
-        """Add typed text to the chip list. In 13b this works as a
-        plain-text-to-chip; 13c adds autocomplete + validation."""
-        text = self._stocks_input.text().strip().upper()
-        if not text:
-            return
-        self._chip_area.add_chip(text)
-        self._stocks_input.clear()
-
-    def _on_backfill_clicked(self) -> None:
-        # 13c will pull date_from, date_to, stocks list + spawn
-        # the CLI subprocess. For now: placeholder + log to status.
-        chips = self._chip_area.chips()
-        date_from = self._from_date.date().toString("yyyy-MM-dd")
-        date_to = self._to_date.date().toString("yyyy-MM-dd")
-        refetch = self._fetch_prices_radio.isChecked()
-        self._set_status(
-            f"Backfill (placeholder) — from={date_from} "
-            f"to={date_to} stocks={len(chips)} refetch={refetch}. "
-            "Wiring lands in Step 13c."
-        )
-
     def _on_run_intraday_clicked(self) -> None:
         self._set_status(
             "Run Intraday — wiring lands in Step 13d."
         )
 
+    def _on_add_stock_clicked(self) -> None:
+        """Add a symbol to the chip list. 13c additions: strict
+        validation against the active-ticker set; rejection
+        feedback in the status line."""
+        text = self._stocks_input.text().strip().upper()
+        if not text:
+            return
+        if not self._active_ticker_set:
+            # Universe not loaded yet — refuse rather than allow
+            # arbitrary text through
+            QMessageBox.warning(
+                self, "ADD blocked",
+                "Active-ticker list isn't loaded yet. Select an "
+                "exchange first.",
+            )
+            return
+        if text not in self._active_ticker_set:
+            QMessageBox.warning(
+                self, "Unknown symbol",
+                f"'{text}' is not in the active-ticker universe "
+                f"for {self._picker.current_exchange()}. "
+                f"Backfill would fail at the CLI's symbol "
+                f"resolution step.",
+            )
+            return
+        added = self._chip_area.add_chip(text)
+        if added:
+            self._stocks_input.clear()
+
+    # ============================================================
+    # Backfill subprocess flow (13c — the big one)
+    # ============================================================
+
+    def _on_backfill_clicked(self) -> None:
+        """Validate form → preflight DB queries → destructive
+        modal → if confirmed, spawn QProcess."""
+        if self._backfill_process is not None:
+            self._set_status(
+                "Backfill already running."
+            )
+            return
+
+        exchange = self._picker.current_exchange()
+        if exchange is None:
+            QMessageBox.warning(
+                self, "Backfill blocked",
+                "Select an exchange first.",
+            )
+            return
+
+        # ---- 1. Form validation ----
+        date_from = self._from_date.date().toPython()
+        date_to = self._to_date.date().toPython()
+        if date_from > date_to:
+            QMessageBox.warning(
+                self, "Invalid dates",
+                f"From date ({date_from}) must be on or before "
+                f"To date ({date_to}).",
+            )
+            return
+
+        chips = self._chip_area.chips()
+        # Empty chips → backfill ALL active tickers (matches CLI's
+        # no-`--stocks` behavior)
+        is_all_tickers = (len(chips) == 0)
+
+        # ---- 2. Pre-flight DB queries ----
+        try:
+            from ...persistence.backfill_queries import (
+                historical_signals_delete_count_for_range,
+                market_overview_stale_count_for_range,
+                resolve_ticker_ids_by_symbol,
+            )
+            with self._db.connect() as conn:
+                if is_all_tickers:
+                    ticker_ids: list[int] | None = None
+                    n_tickers = sum(
+                        1 for _ in self._active_tickers
+                    )
+                else:
+                    resolved, unresolved = (
+                        resolve_ticker_ids_by_symbol(
+                            conn,
+                            exchange=exchange, symbols=chips,
+                        )
+                    )
+                    if unresolved:
+                        QMessageBox.warning(
+                            self, "Symbol resolution failed",
+                            f"These chips no longer match active "
+                            f"tickers (universe may have changed): "
+                            f"{', '.join(unresolved)}",
+                        )
+                        return
+                    ticker_ids = resolved
+                    n_tickers = len(resolved)
+
+                n_hist = historical_signals_delete_count_for_range(
+                    conn,
+                    exchange=exchange,
+                    date_from=date_from,
+                    ticker_ids=ticker_ids,
+                )
+                n_overview = market_overview_stale_count_for_range(
+                    conn,
+                    exchange=exchange,
+                    date_from=date_from,
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Pre-flight query failed",
+                f"Could not compute deletion counts: {e}",
+            )
+            logger.exception("backfill preflight failed")
+            return
+
+        # ---- 3. Destructive confirmation modal ----
+        refetch = self._fetch_prices_radio.isChecked()
+        eta_min = estimate_runtime_minutes(
+            n_tickers=n_tickers, refetch_bars=refetch,
+        )
+        modal = BackfillDestructiveModal(
+            exchange=exchange,
+            date_from=date_from,
+            date_to=date_to,
+            n_stocks=len(chips),
+            stocks_preview=chips if chips else None,
+            n_historical_to_delete=n_hist,
+            n_overview_to_stale=n_overview,
+            refetch_bars=refetch,
+            runtime_estimate_minutes=eta_min,
+            parent=self,
+        )
+        if modal.exec() != BackfillDestructiveModal.Accepted:
+            self._set_status("Backfill cancelled.")
+            return
+
+        # ---- 4. Spawn QProcess ----
+        self._start_backfill_process(
+            exchange=exchange,
+            date_from=date_from, date_to=date_to,
+            stocks=chips, refetch_bars=refetch,
+        )
+
+    def _start_backfill_process(
+        self,
+        *,
+        exchange: str,
+        date_from,
+        date_to,
+        stocks: list[str],
+        refetch_bars: bool,
+    ) -> None:
+        args = build_backfill_argv(
+            exchange=exchange,
+            date_from=date_from, date_to=date_to,
+            stocks=stocks, refetch_bars=refetch_bars,
+        )
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.SeparateChannels)
+        proc.readyReadStandardOutput.connect(
+            self._on_backfill_stdout,
+        )
+        proc.readyReadStandardError.connect(
+            self._on_backfill_stderr,
+        )
+        proc.finished.connect(self._on_backfill_finished)
+        proc.errorOccurred.connect(self._on_backfill_proc_error)
+
+        self._backfill_process = proc
+        self._backfill_stdout_buffer = ""
+        self._backfill_stderr_buffer = ""
+
+        # Flip local mutex flags BEFORE start() so mutex tick sees
+        # the running state immediately
+        self._local_running = True
+        self._inflight_kind = "backfill"
+        self._apply_mutex_state(True, "backfill")
+        self._backfill_progress_label.setText(
+            f"Starting backfill ({exchange}, "
+            f"{date_from.isoformat()} → {date_to.isoformat()}, "
+            f"{len(stocks) if stocks else 'ALL'} tickers, "
+            f"refetch={refetch_bars})…"
+        )
+        self._set_status(
+            f"Backfill spawned: {sys.executable} -m "
+            f"trip_ema.etl.cli backfill ..."
+        )
+        logger.info("Backfill QProcess starting: argv=%r", args)
+        proc.start(sys.executable, args)
+
+    def _on_backfill_stdout(self) -> None:
+        if self._backfill_process is None:
+            return
+        data = bytes(
+            self._backfill_process.readAllStandardOutput(),
+        ).decode("utf-8", errors="replace")
+        if not data:
+            return
+        self._backfill_stdout_buffer += data
+        # Parse per-line for `  [stage] message` markers
+        for line in data.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("[") and "]" in stripped:
+                # "[stage_name] message" → display verbatim
+                self._backfill_progress_label.setText(stripped)
+            elif stripped:
+                logger.debug("backfill stdout: %s", stripped)
+
+    def _on_backfill_stderr(self) -> None:
+        if self._backfill_process is None:
+            return
+        data = bytes(
+            self._backfill_process.readAllStandardError(),
+        ).decode("utf-8", errors="replace")
+        if not data:
+            return
+        self._backfill_stderr_buffer += data
+        for line in data.splitlines():
+            if line.strip():
+                logger.info("backfill stderr: %s", line)
+
+    def _on_backfill_finished(
+        self, exit_code: int, exit_status,
+    ) -> None:
+        """QProcess.finished → clean up + show success/failure."""
+        proc = self._backfill_process
+        self._backfill_process = None
+        self._local_running = False
+        self._inflight_kind = None
+
+        # Force activity log + mutex refresh so the row's
+        # finished_at gets reflected without waiting 5s
+        self._activity_scheduler.trigger_now()
+        self._mutex_scheduler.trigger_now()
+
+        self._backfill_progress_label.setText("")
+
+        if exit_code == 0:
+            self._set_status(
+                "Backfill complete (exit 0). Activity log "
+                "updated."
+            )
+            QMessageBox.information(
+                self, "Backfill complete",
+                "Backfill finished successfully.",
+            )
+        else:
+            failed_stage, error_msg = parse_failure_summary(
+                self._backfill_stdout_buffer,
+            )
+            stderr_tail = "\n".join(
+                self._backfill_stderr_buffer.splitlines()[-5:]
+            )
+            self._set_status(
+                f"Backfill FAILED (exit {exit_code})."
+                + (f" Failed stage: {failed_stage}"
+                   if failed_stage else "")
+            )
+            BackfillFailureDialog(
+                exit_code=exit_code,
+                failed_stage=failed_stage,
+                error_message=error_msg,
+                stderr_tail=stderr_tail,
+                full_stderr=self._backfill_stderr_buffer,
+                parent=self,
+            ).exec()
+
+    def _on_backfill_proc_error(self, error) -> None:
+        """QProcess.errorOccurred — e.g. executable not found."""
+        if self._backfill_process is None:
+            return
+        msg = (
+            self._backfill_process.errorString()
+            if self._backfill_process else str(error)
+        )
+        logger.error("Backfill QProcess errorOccurred: %s", msg)
+        # Don't try to surface here — finished() will fire too,
+        # and the failure dialog covers the same ground.
+
+    def _on_cancel_backfill_clicked(self) -> None:
+        """Terminate the QProcess: SIGTERM → 5s grace → SIGKILL."""
+        if self._backfill_process is None:
+            return
+        if self._backfill_process.state() == QProcess.NotRunning:
+            return
+
+        reply = QMessageBox.question(
+            self, "Cancel backfill?",
+            "This will interrupt the running backfill. The "
+            "pipeline rolls back its current transaction but "
+            "leaves a stale backfill_runs marker. Use "
+            "`trip-ema-etl backfill --release-lock` afterward to "
+            "clear it before re-running.\n\n"
+            "Cancel anyway?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        logger.warning("Sending SIGTERM to backfill QProcess")
+        self._set_status("Cancelling backfill (SIGTERM)…")
+        self._backfill_progress_label.setText(
+            "Cancelling… SIGTERM sent."
+        )
+        self._backfill_process.terminate()
+
+        # Grace period: if still running after CANCEL_GRACE_MS,
+        # SIGKILL it.
+        def _kill_if_still_alive():
+            if self._backfill_process is None:
+                return
+            if self._backfill_process.state() != QProcess.NotRunning:
+                logger.warning(
+                    "Backfill QProcess didn't exit after %dms; "
+                    "sending SIGKILL", CANCEL_GRACE_MS,
+                )
+                self._backfill_progress_label.setText(
+                    "Cancelling… SIGKILL sent."
+                )
+                self._backfill_process.kill()
+
+        QTimer.singleShot(CANCEL_GRACE_MS, _kill_if_still_alive)
+
+    # ============================================================
+    # Trend dialog
+    # ============================================================
+
     def _open_trend_dialog(self, kind: TrendKind) -> None:
-        """Open the 90-day trend chart for the selected metric."""
         exchange = self._picker.current_exchange()
         if exchange is None:
             QMessageBox.information(
-                self, "Trend",
-                "Select an exchange first.",
+                self, "Trend", "Select an exchange first.",
             )
             return
         dlg = MarketTrendDialog(
@@ -732,8 +1129,16 @@ class EtlStatusView(QWidget):
     # ============================================================
 
     def on_close(self) -> None:
-        """Called by MainWindow on app shutdown. Stop schedulers
-        so QTimers don't fire post-destruction."""
+        """Stop schedulers + kill any in-flight QProcess before
+        widget destruction."""
+        if (self._backfill_process is not None
+                and self._backfill_process.state()
+                != QProcess.NotRunning):
+            logger.warning(
+                "GUI closing while backfill still running — "
+                "SIGTERM"
+            )
+            self._backfill_process.terminate()
         for sch in (
             self._activity_scheduler,
             self._mutex_scheduler,
