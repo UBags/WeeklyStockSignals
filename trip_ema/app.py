@@ -269,6 +269,111 @@ def _build_app_state(config_path: Path) -> AppState:
     )
 
 
+def _is_eod_now_nse() -> bool:
+    """Step 13a: is the current wall-clock time PAST NSE close?
+
+    NSE closes at 15:30 IST. The orchestrator's scheduled ticks
+    fall at 09:30 / 12:15 / 15:00 / 16:30 IST — only the 16:30
+    tick fires after close, so this returns True ONLY for that
+    tick. Pre-close ticks → False (intraday); the post-close tick
+    → True (EoD).
+
+    Hardcoded for NSE because the V1 cycle is NSE-only today
+    (per _make_v1_compute_run_once which also hardcodes
+    exchange="NSE"). When BSE/NYSE wiring lands (queued Phase
+    14.7+ work), both this helper AND _make_v1_compute_run_once
+    get parameterized by exchange together.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+    # Tuple compare — (HH, MM) > (15, 30) iff strictly later
+    return (now_ist.hour, now_ist.minute) > (15, 30)
+
+
+def _make_logged_compute(
+    base_callable,
+    *,
+    db_engine,
+    exchange: str,
+    is_eod_fn,
+    snapshotter,
+):
+    """Step 13a: wrap the compute_run_once callable to:
+      1. Record one compute_runs row per tick (kind=intraday/eod).
+      2. After a successful EoD tick, write a market_overview_daily
+         snapshot for the IST-current date.
+
+    Failures in (1) or (2) are logged but never propagated — the
+    orchestrator's downstream consumers (distribute step, pulse
+    publish) must not be blocked by an activity-log write failing.
+
+    The wrapper layers on TOP of Step 11a's deferring layer:
+      base (no log) → deferring (skips if backfill active) →
+      logged (this layer) → orchestrator pool
+    """
+    from .persistence.compute_runs_repo import ComputeRunsRepository
+
+    def _logged():
+        kind = "eod" if is_eod_fn() else "intraday"
+        run_id: int | None = None
+        try:
+            with db_engine.begin() as conn:
+                run_id = ComputeRunsRepository(conn).start(
+                    kind=kind, exchange=exchange,
+                )
+        except Exception as log_err:
+            # Activity-log write failure must not block the
+            # compute pass. Log and proceed.
+            logger.warning(
+                "compute_runs.start failed (kind=%s, exchange=%s): "
+                "%s — continuing without an activity-log row",
+                kind, exchange, log_err, exc_info=True,
+            )
+
+        result = None
+        error_message: str | None = None
+        try:
+            result = base_callable()
+            return result
+        except Exception as e:
+            error_message = repr(e)
+            raise
+        finally:
+            # Update the compute_runs row (best-effort)
+            if run_id is not None:
+                try:
+                    with db_engine.begin() as conn:
+                        ComputeRunsRepository(conn).finish(
+                            run_id,
+                            error_message=error_message,
+                        )
+                except Exception as log_err:
+                    logger.warning(
+                        "compute_runs.finish failed "
+                        "(run_id=%d): %s — row will show as "
+                        "in-flight on next read",
+                        run_id, log_err, exc_info=True,
+                    )
+
+            # EoD snapshot: only fire when the compute pass
+            # succeeded (snapshot reads what compute wrote)
+            if kind == "eod" and error_message is None:
+                try:
+                    snapshotter.snapshot_for_today(
+                        exchange=exchange,
+                    )
+                except Exception as snap_err:
+                    logger.warning(
+                        "EoD market_overview snapshot failed "
+                        "(exchange=%s): %s",
+                        exchange, snap_err, exc_info=True,
+                    )
+
+    return _logged
+
+
 def _build_orchestrator_components(
     *,
     config,
@@ -410,6 +515,21 @@ def _build_orchestrator_components(
     distribute_run_once = _make_deferring_distribute(
         base_callable=base_distribute_run_once,
         db_engine=db_engine,
+    )
+
+    # Step 13a: log every compute tick into compute_runs + write
+    # an EoD market_overview_daily snapshot. Wraps the deferring
+    # layer's output so deferring still applies (when a backfill
+    # holds the lock, the tick no-ops BEFORE we'd log it — that's
+    # correct, deferred ticks shouldn't pollute the activity log).
+    from .snapshots.market_overview import MarketOverviewSnapshotter
+    _snapshotter = MarketOverviewSnapshotter(db_engine)
+    compute_run_once = _make_logged_compute(
+        compute_run_once,
+        db_engine=db_engine,
+        exchange="NSE",
+        is_eod_fn=_is_eod_now_nse,
+        snapshotter=_snapshotter,
     )
 
     pool = build_pool_from_configs(

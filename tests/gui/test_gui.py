@@ -59,9 +59,13 @@ class TestTickerTableModel:
         assert model.rowCount() == 2
 
     def test_column_count_matches_headers(self, qtbot):
+        # Step 12c fixup: reference len(HEADERS) directly so this
+        # test stays valid through future column additions. The
+        # earlier `== 8` hardcode broke when 12c added Industry.
+        from trip_ema.gui.views.tickers import HEADERS
+
         model = TickerTableModel()
-        # We have 8 columns based on HEADERS in tickers.py
-        assert model.columnCount() == 8
+        assert model.columnCount() == len(HEADERS)
 
     def test_display_symbol_column(self, qtbot):
         model = TickerTableModel()

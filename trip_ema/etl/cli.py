@@ -228,6 +228,37 @@ def cmd_backfill(args, config: Config) -> int:
         def _progress(stage: str, message: str) -> None:
             print(f"  [{stage}] {message}", flush=True)
 
+        # Step 13a: log this backfill into compute_runs so it
+        # appears in the ETL GUI's activity log alongside
+        # intraday/eod ticks. The backfill_runs row (with its
+        # destructive-lock semantics) is still written by the
+        # pipeline itself; this is the operator-facing "what
+        # ran" record.
+        from ..persistence.compute_runs_repo import (
+            ComputeRunsRepository,
+        )
+        from ..persistence import transaction
+        backfill_run_id: int | None = None
+        try:
+            with transaction(db_engine) as conn:
+                backfill_run_id = ComputeRunsRepository(conn).start(
+                    kind="backfill",
+                    exchange=args.exchange,
+                    notes=(
+                        f"date_from={date_from} "
+                        f"date_to={date_to or 'today'} "
+                        f"stocks={'ALL' if stocks is None else len(stocks)} "
+                        f"refetch_bars={refetch}"
+                    ),
+                )
+        except Exception as log_err:
+            print(
+                f"warning: compute_runs.start failed: {log_err} "
+                f"(backfill will proceed without an activity-log row)",
+                file=sys.stderr,
+            )
+
+        bf_error: str | None = None
         try:
             result = backfill(
                 db_engine, config,
@@ -239,6 +270,17 @@ def cmd_backfill(args, config: Config) -> int:
                 progress_cb=_progress,
             )
         except IntegrityError:
+            bf_error = "concurrent backfill (backfill_runs.uq_one_active fired)"
+            if backfill_run_id is not None:
+                try:
+                    with transaction(db_engine) as conn:
+                        ComputeRunsRepository(conn).finish(
+                            backfill_run_id,
+                            failed_stage="concurrent_start",
+                            error_message=bf_error,
+                        )
+                except Exception:
+                    pass  # best-effort
             print(
                 "error: another backfill appears to be active "
                 "(backfill_runs.uq_one_active fired). If a previous "
@@ -248,6 +290,26 @@ def cmd_backfill(args, config: Config) -> int:
                 file=sys.stderr,
             )
             return 1
+
+        # Step 13a: close out the compute_runs row before
+        # reporting. tickers_attempted = scope size (the universe
+        # the backfill covered); tickers_fetched left None because
+        # the pipeline doesn't surface a separate fetch count.
+        if backfill_run_id is not None:
+            try:
+                with transaction(db_engine) as conn:
+                    ComputeRunsRepository(conn).finish(
+                        backfill_run_id,
+                        tickers_attempted=result.ticker_scope_size,
+                        failed_stage=result.failed_stage,
+                        error_message=result.error_message,
+                    )
+            except Exception as log_err:
+                print(
+                    f"warning: compute_runs.finish failed: "
+                    f"{log_err}",
+                    file=sys.stderr,
+                )
 
         # ---- 6. Report ----
         return _report_backfill_result(result)
@@ -373,6 +435,67 @@ def _report_backfill_result(result) -> int:
         f"deleted={result.current_signals_deleted}"
     )
     return 0 if result.failed_stage is None else 1
+
+
+def cmd_snapshot(args, config: Config) -> int:
+    """V1 cutover Step 13a: trigger a market_overview_daily
+    snapshot from the CLI. Useful for filling gaps when an EoD
+    tick was missed (system was down at 16:30 IST), or for
+    operator-initiated re-snapshots after a manual data fix.
+
+    Idempotent — UPSERT semantics, multiple invocations for the
+    same (date, exchange) yield the latest counts.
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from ..snapshots.market_overview import MarketOverviewSnapshotter
+
+    db_engine = create_engine_from_config(config)
+    try:
+        snap_date = None
+        if args.date is not None:
+            snap_date = _parse_date(args.date)
+            if snap_date is None:
+                print(
+                    f"error: --date must be YYYY-MM-DD, got "
+                    f"{args.date!r}",
+                    file=sys.stderr,
+                )
+                return 2
+
+        snapper = MarketOverviewSnapshotter(db_engine)
+        counts = snapper.snapshot_for_today(
+            exchange=args.exchange, snapshot_date=snap_date,
+        )
+
+        # Operator-facing output
+        when = (
+            snap_date.isoformat() if snap_date is not None
+            else f"today IST ({datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat()})"
+        )
+        print(f"market_overview snapshot — {args.exchange} — {when}")
+        print(
+            f"  signals: BUY={counts.n_buys} "
+            f"SELL={counts.n_sells} "
+            f"EXIT_BUY={counts.n_exit_buys} "
+            f"EXIT_SELL={counts.n_exit_sells} "
+            f"(total {counts.total_signals})"
+        )
+        print(
+            f"  regimes: green={counts.n_green_regime} "
+            f"red={counts.n_red_regime} "
+            f"neutral={counts.n_neutral_regime} "
+            f"(total {counts.total_regimes})"
+        )
+        print(
+            f"  EMA env: above_highest={counts.n_above_highest_ema} "
+            f"below_lowest={counts.n_below_lowest_ema} "
+            f"between={counts.n_between_emas}"
+        )
+        return 0
+    finally:
+        db_engine.dispose()
 
 
 def cmd_incremental_eod(args, config: Config) -> int:
@@ -603,6 +726,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_exchange_arg(unpark)
 
+    snap = sub.add_parser(
+        "snapshot",
+        help=(
+            "Compute market_overview_daily snapshot for one date "
+            "(operator gap-fill / manual re-snap; live EoD tick "
+            "auto-runs this)."
+        ),
+    )
+    _add_exchange_arg(snap)
+    snap.add_argument(
+        "--date",
+        help=(
+            "Snapshot date YYYY-MM-DD (defaults to today IST). "
+            "UPSERT semantics — re-running for the same date "
+            "overwrites the prior row."
+        ),
+    )
+
     appr = sub.add_parser(
         "approve-action", help="Approve a pending corporate_action",
     )
@@ -659,6 +800,7 @@ def main(argv: list[str] | None = None) -> int:
         "status":               cmd_status,
         "unpark":               cmd_unpark,
         "approve-action":       cmd_approve_action,
+        "snapshot":             cmd_snapshot,
     }
     # Merge Phase 1 fundamentals handlers (registered by
     # _build_parser via fundamentals.cli.register_subparsers).
