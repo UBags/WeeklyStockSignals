@@ -84,6 +84,7 @@ from ..benchmark_rerank_client import fetch_rank_scores
 from fuzzywuzzy import fuzz   # Step 12b
 from ..signals_helpers import (
     industry_rank_alpha_sort_key,
+    signal_group_industry_rank_sort_key,  # Step 12c — Tickers tab sort
     signal_industry_mcap_sort_key,
 )
 from ..workers import RefreshScheduler, submit
@@ -114,11 +115,14 @@ HEADERS = [
 # Qt.BackgroundRole — sits below the row's Qt.ForegroundRole (which is
 # used for parked/delisted text color), so a parked ticker with a
 # fresh BUY will show light-green background with red text.
+# Step 12c: EXIT_FROM_BUY and EXIT_FROM_SELL now use distinct
+# backgrounds so operators can tell "was long, now flat" from
+# "was short, now flat" at a glance without reading the signal column.
 SIGNAL_BACKGROUND_COLORS = {
     "BUY":            "#c8e6c9",   # light green
     "SELL":           "#ffcdd2",   # light red
-    "EXIT_FROM_BUY":  "#bbdefb",   # light blue (change to neutral from BUY)
-    "EXIT_FROM_SELL": "#bbdefb",   # light blue (change to neutral from SELL)
+    "EXIT_FROM_BUY":  "#fff9c4",   # light yellow (was long, now flat)
+    "EXIT_FROM_SELL": "#e0e0e0",   # light gray   (was short, now flat)
 }
 
 
@@ -383,12 +387,14 @@ class TickerSortFilterProxy(QSortFilterProxyModel):
             # but if someone does in a test, fall through to default.
             return super().lessThan(left, right)
 
-        # Step 12b: single industry-grouped sort key for ALL rows
-        # (signaled + unsignaled). Industry primary, then within
-        # industry: signaled-rank-DESC then unsignaled-symbol-ASC.
-        # See industry_rank_alpha_sort_key for the full ordering
-        # contract. The shared helper means the Tickers tab and the
-        # Signals dropdown order rows identically.
+        # Step 12c: signal-type-primary sort. BUY block first, then
+        # SELL, then EXIT_FROM_BUY, then EXIT_FROM_SELL, then the
+        # unsignaled remainder. Within each signaled block: industry
+        # ASC, rank_score DESC, symbol ASC. Within the unsignaled
+        # block: industry ASC, symbol ASC. See
+        # signal_group_industry_rank_sort_key for the ordering contract.
+        # The Signals-tab dropdown still uses industry_rank_alpha_sort_key
+        # (industry-primary) — the two views deliberately differ.
         left_row = src.row_at(left.row())
         right_row = src.row_at(right.row())
         if left_row is None or right_row is None:
@@ -400,9 +406,9 @@ class TickerSortFilterProxy(QSortFilterProxyModel):
         right_sig = signals.get(right_row.ticker_id)
         left_rank = ranks.get(left_row.ticker_id)
         right_rank = ranks.get(right_row.ticker_id)
-        return industry_rank_alpha_sort_key(
+        return signal_group_industry_rank_sort_key(
             left_row, left_sig, left_rank,
-        ) < industry_rank_alpha_sort_key(
+        ) < signal_group_industry_rank_sort_key(
             right_row, right_sig, right_rank,
         )
 

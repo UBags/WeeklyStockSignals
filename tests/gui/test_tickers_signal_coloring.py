@@ -96,8 +96,8 @@ class TestSignalBackgroundColors:
     @pytest.mark.parametrize("signal,expected_hex", [
         ("BUY",            "#c8e6c9"),
         ("SELL",           "#ffcdd2"),
-        ("EXIT_FROM_BUY",  "#bbdefb"),
-        ("EXIT_FROM_SELL", "#bbdefb"),
+        ("EXIT_FROM_BUY",  "#fff9c4"),  # Step 12c: light yellow
+        ("EXIT_FROM_SELL", "#e0e0e0"),  # Step 12c: light gray
     ])
     def test_known_signal_returns_expected_color(
         self, qtbot, signal, expected_hex,
@@ -157,17 +157,27 @@ class TestColorMapConstant:
         c = QColor(SIGNAL_BACKGROUND_COLORS["SELL"])
         assert c.red() > c.green() and c.red() > c.blue()
 
-    def test_exit_signals_share_the_same_blue(self):
-        # Both EXIT kinds use the same "change to neutral" color.
+    def test_exit_signals_use_distinct_backgrounds(self):
+        # Step 12c: EXIT_FROM_BUY (yellow) and EXIT_FROM_SELL (gray)
+        # deliberately differ so the visual encodes prior direction.
         assert (
             SIGNAL_BACKGROUND_COLORS["EXIT_FROM_BUY"]
-            == SIGNAL_BACKGROUND_COLORS["EXIT_FROM_SELL"]
+            != SIGNAL_BACKGROUND_COLORS["EXIT_FROM_SELL"]
         )
 
-    def test_exit_is_blue_family(self):
+    def test_exit_from_buy_is_yellow_family(self):
+        # Step 12c: yellow = R and G high, B low.
         from PySide6.QtGui import QColor
         c = QColor(SIGNAL_BACKGROUND_COLORS["EXIT_FROM_BUY"])
-        assert c.blue() > c.red() and c.blue() > c.green()
+        assert c.red() > c.blue() and c.green() > c.blue()
+
+    def test_exit_from_sell_is_gray_family(self):
+        # Step 12c: gray = R ≈ G ≈ B (all channels roughly equal).
+        from PySide6.QtGui import QColor
+        c = QColor(SIGNAL_BACKGROUND_COLORS["EXIT_FROM_SELL"])
+        assert abs(c.red() - c.green()) < 20
+        assert abs(c.green() - c.blue()) < 20
+        assert abs(c.red() - c.blue()) < 20
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +233,10 @@ class TestForegroundBackgroundInteraction:
         # Green BG → green dominant.
         assert bg.color().green() > bg.color().red()
 
-    def test_delisted_ticker_with_fresh_exit_signal_has_gray_text_on_blue_bg(self, qtbot):
+    def test_delisted_ticker_with_fresh_exit_from_buy_has_gray_text_on_yellow_bg(self, qtbot):
+        # Step 12c: EXIT_FROM_BUY paints yellow (was long, now flat);
+        # delisted still paints gray text on top. Yellow bg + gray text
+        # stays readable (contrast is fine).
         m = TickerTableModel()
         m.set_rows(
             [_ticker(1, "X", delisted_at=datetime(2025, 1, 1, tzinfo=UTC))],
@@ -236,8 +249,9 @@ class TestForegroundBackgroundInteraction:
         # Gray text — RGB roughly equal.
         c = fg.color()
         assert abs(c.red() - c.green()) < 20
-        # Blue BG — blue dominant.
-        assert bg.color().blue() > bg.color().red()
+        # Yellow BG — red + green high, blue low.
+        assert bg.color().red() > bg.color().blue()
+        assert bg.color().green() > bg.color().blue()
 
     def test_non_signalled_parked_ticker_keeps_existing_behavior(self, qtbot):
         # Regression guard against accidentally removing the existing
@@ -296,10 +310,12 @@ class TestSignalGroupedSort:
         visible = _proxy_visible_symbols(proxy, model)
         assert visible == ["ALPHA", "Mike", "zulu"]
 
-    def test_exit_from_buy_and_exit_from_sell_share_a_rank(self, qtbot):
+    def test_exit_from_buy_ranks_before_exit_from_sell(self, qtbot):
+        # Step 12c: EXIT_FROM_BUY (yellow, rank 2) comes before
+        # EXIT_FROM_SELL (gray, rank 3). Within each group, no industry
+        # is set on the stubs so symbol drives the tiebreak.
         from PySide6.QtCore import Qt
 
-        # Within the blue group both kinds intermix purely on symbol.
         rows = [_t(1, "DELTA"), _t(2, "CHARLIE"), _t(3, "ALPHA")]
         signals = {
             1: "EXIT_FROM_BUY",
@@ -314,9 +330,9 @@ class TestSignalGroupedSort:
         proxy.sort(COL_TIER, Qt.AscendingOrder)
 
         visible = _proxy_visible_symbols(proxy, model)
-        # Pure alphabetical — neither EXIT_FROM_BUY nor EXIT_FROM_SELL
-        # sorts before the other.
-        assert visible == ["ALPHA", "CHARLIE", "DELTA"]
+        # ALPHA + DELTA (EXIT_FROM_BUY block, symbol ASC) then
+        # CHARLIE (EXIT_FROM_SELL block).
+        assert visible == ["ALPHA", "DELTA", "CHARLIE"]
 
     def test_unknown_signal_string_treated_as_unsignalled(self, qtbot):
         # Defensive: an unknown signal_type (e.g. a future DB CHECK
