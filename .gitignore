@@ -37,3 +37,6 @@ Code packaged into MDs for LLMs/
 # but guard against accidental `git add -A` capture
 commit*_bundle/
 *.bak.*
+
+# Refactor tracking scratchpads — not for the tree
+CLEAN_PIPELINE_REFACTOR_*.md
