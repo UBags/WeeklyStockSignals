@@ -471,8 +471,15 @@ class EtlStatusView(QWidget):
         # in update_run_in_progress (checked on each mutex tick's
         # HTTP queue-snapshot fetch). See _apply_queue_snapshot.
         self._force_reset_btn = QPushButton("Force Reset")
+        # PHASE-1B-VISIBILITY-FIX: stylesheet must include :disabled
+        # state or Qt's default palette-based greying is overridden
+        # by the unconditional color:, and disabled buttons look
+        # identical to enabled ones.
         self._force_reset_btn.setStyleSheet(
-            "color: #a00; padding: 4px 10px; font-weight: 600;"
+            "QPushButton { color: #a00; padding: 4px 10px; "
+            "font-weight: 600; } "
+            "QPushButton:disabled { color: #999; "
+            "background-color: #f0f0f0; font-weight: 400; }"
         )
         self._force_reset_btn.setEnabled(False)
         self._force_reset_btn.setToolTip(
@@ -840,8 +847,16 @@ class EtlStatusView(QWidget):
         in-progress kind for the picked exchange from the cached
         queue snapshot, shows the confirmation modal, and on Accept
         fires POST /v1/admin/etl/reset-in-progress."""
+        # PHASE-1B-VISIBILITY-FIX: WARNING-level so this is visible
+        # in default log config. Silent handlers make Force Reset
+        # bugs invisible.
+        logger.warning("Force Reset button clicked (handler entered)")
+
         exchange = self._picker.current_exchange()
         if exchange is None:
+            logger.warning(
+                "Force Reset: no exchange currently picked; no-op",
+            )
             return
 
         snapshot = self._last_queue_snapshot or {}
@@ -854,10 +869,14 @@ class EtlStatusView(QWidget):
             # Button state was stale between mutex ticks — the
             # in-progress row cleared before the operator clicked.
             # No-op; the next mutex tick will re-disable the button.
-            logger.info(
-                "Force Reset clicked but no in-progress row for %s; "
-                "run probably completed. Doing nothing.",
-                exchange,
+            # PHASE-1B-VISIBILITY-FIX: WARNING so this shows up.
+            logger.warning(
+                "Force Reset clicked but no in-progress row for %s "
+                "in _last_queue_snapshot (has %d in-progress rows "
+                "for exchanges: %s); run probably completed or "
+                "picker changed since last mutex tick.",
+                exchange, len(in_progress),
+                [r.get("exchange") for r in in_progress],
             )
             return
 
@@ -868,7 +887,13 @@ class EtlStatusView(QWidget):
             exchange=exchange, kind=row.get("kind", ""),
             parent=self,
         )
-        if modal.exec() != modal.Accepted:
+        # PHASE-1B-MODAL-ACCEPTED-FIX: `modal.Accepted` fails at
+        # runtime with AttributeError because PySide6's Signal
+        # descriptor for `accepted` (lowercase) shadows the
+        # class-level `Accepted` enum at instance level. Use the
+        # QDialog class-level enum explicitly.
+        from PySide6.QtWidgets import QDialog as _QDialog
+        if modal.exec() != _QDialog.Accepted:
             return
 
         try:
