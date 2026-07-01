@@ -158,16 +158,29 @@ def _ist_week_anchors(conn: Connection) -> tuple[datetime, datetime]:
     (renders as Monday 05:30:00 IST) — anchored to a Monday but
     using UTC midnight as the time-of-day. The helper returns the
     same shape so direct equality comparison works.
+
+    Session-TZ independence: the SQL uses `AT TIME ZONE 'UTC'` on
+    a naive timestamp (not `::timestamptz` cast against a date),
+    which is deterministic regardless of the Postgres session TZ.
+    An earlier version used the ::timestamptz cast, which returned
+    Monday 00:00 in the SESSION TZ — silently empty on any session
+    with TZ != UTC. See STEP-12C-POSTMORTEM comment inside the SQL.
     """
     row = conn.execute(text("""
         SELECT
+            -- STEP-12C-POSTMORTEM: explicit AT TIME ZONE 'UTC' so the
+            -- returned timestamptz is Monday 00:00 UTC regardless of
+            -- session TZ. Previously ::timestamptz cast against a
+            -- ::date returned Monday 00:00 in the SESSION TZ, which
+            -- silently returned empty when session TZ was Asia/Kolkata.
             (date_trunc('week',
-                        (NOW() AT TIME ZONE 'Asia/Kolkata'))::date
-            )::timestamptz                       AS current_monday_ts,
-            (date_trunc('week',
-                        (NOW() AT TIME ZONE 'Asia/Kolkata'))::date
-             - INTERVAL '7 days'
-            )::timestamptz                       AS previous_monday_ts
+                        (NOW() AT TIME ZONE 'Asia/Kolkata'))::date::timestamp
+                AT TIME ZONE 'UTC')              AS current_monday_ts,
+            ((date_trunc('week',
+                         (NOW() AT TIME ZONE 'Asia/Kolkata'))::date
+              - INTERVAL '7 days'
+             )::timestamp
+                AT TIME ZONE 'UTC')              AS previous_monday_ts
     """)).first()
     return row.current_monday_ts, row.previous_monday_ts
 
