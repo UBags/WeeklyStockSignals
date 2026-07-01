@@ -461,6 +461,25 @@ class EtlStatusView(QWidget):
         header_row.addWidget(self._intraday_light)
         v.addLayout(header_row)
 
+        # Step 12d: notice shown when a scheduled (service-process)
+        # run is in progress. The GUI's stage list is fed by parsing
+        # OUR QProcess's stdout; scheduled runs execute in the service
+        # process and produce no stdout the GUI can see. See
+        # _apply_mutex_state for the toggle logic.
+        self._scheduled_run_notice = QLabel(
+            "⏱  Scheduled run in progress — per-stage detail "
+            "is not tracked for auto-scheduled runs. Watch the "
+            "Activity Log for completion."
+        )
+        self._scheduled_run_notice.setStyleSheet(
+            "color: #b8730b; font-size: 11px; font-style: italic; "
+            "padding: 6px 8px; background-color: #fef5e7; "
+            "border: 1px solid #f0c17a; border-radius: 3px;"
+        )
+        self._scheduled_run_notice.setWordWrap(True)
+        self._scheduled_run_notice.setVisible(False)
+        v.addWidget(self._scheduled_run_notice)
+
         self._stage_list = StageProgressList(LIVE_CYCLE_STAGES)
         v.addWidget(self._stage_list)
 
@@ -789,6 +808,22 @@ class EtlStatusView(QWidget):
         self._intraday_light.set_active(
             inflight_kind in ("intraday", "eod"),
         )
+
+        # Step 12d: scheduled-run detection. If an intraday/eod run
+        # is in flight AND we don't own the QProcess, it was started
+        # by the service process (MarketOrchestrator). The GUI has no
+        # stdout to parse for stage progress, so the stage list stays
+        # at "Queued" — which is misleading. Show a notice + dim the
+        # stage list. Reset the stages so stale statuses from a prior
+        # GUI-initiated run don't linger under the dim.
+        is_scheduled_intraday = (
+            inflight_kind in ("intraday", "eod")
+            and not intraday_owned
+        )
+        self._scheduled_run_notice.setVisible(is_scheduled_intraday)
+        self._stage_list.setEnabled(not is_scheduled_intraday)
+        if is_scheduled_intraday:
+            self._stage_list.reset_all()
 
     # === STEP 13D3 — color scheme for market overview footer ===
     # Locked palette per 13d-3:
