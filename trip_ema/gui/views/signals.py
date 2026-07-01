@@ -185,7 +185,9 @@ class SignalsView(QWidget):
         self._ticker_combo = QComboBox()
         self._ticker_combo.setEditable(True)
         self._ticker_combo.setInsertPolicy(QComboBox.NoInsert)
-        self._ticker_combo.setMinimumWidth(240)
+        # Step 12c label expansion: fits {Symbol} — {FullName} — {Industry}
+        # without cropping. Range buttons below narrowed to compensate.
+        self._ticker_combo.setMinimumWidth(380)
         self._ticker_combo.setMaxVisibleItems(20)
         self._ticker_combo.activated.connect(self._on_ticker_combo_activated)
         row.addWidget(self._ticker_combo)
@@ -211,6 +213,9 @@ class SignalsView(QWidget):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setProperty("years", years)
+            # Step 12c: cap width so the widened ticker dropdown above
+            # has room. 44px fits "10Y" comfortably with default padding.
+            btn.setMaximumWidth(44)
             if years == 3:
                 btn.setChecked(True)
             self._range_buttons.addButton(btn)
@@ -401,9 +406,15 @@ class SignalsView(QWidget):
             return None
 
         def _make_item(row) -> QStandardItem:
+            # Step 12c: label = {Symbol} — {FullName[:60]} — {Industry}.
+            # Missing FullName / Industry are gracefully skipped so a
+            # row without an industry tag still shows Symbol + FullName.
             display = row.symbol
             if row.full_name:
-                display = f"{row.symbol}  —  {row.full_name[:60]}"
+                display = f"{display}  —  {row.full_name[:60]}"
+            industry = getattr(row, 'industry', None)
+            if industry:
+                display = f"{display}  —  {industry}"
             item = QStandardItem(display)
             item.setEditable(False)
             item.setData(
