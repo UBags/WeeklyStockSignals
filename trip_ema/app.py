@@ -38,6 +38,14 @@ from typing import NoReturn, TYPE_CHECKING
 if TYPE_CHECKING:
     from .transports.http.pulse_state import PulseState
 
+# PHASE-1A-DISPATCHER-BUILD: new batch-run subsystem imports.
+from .persistence.update_run_in_progress_repo import (
+    UpdateRunInProgressRepository,
+)
+from .persistence import transaction as _txn_for_phase1a
+from .scheduler.run_dispatcher import RunDispatcher
+from .scheduler.run_queue import RunQueue
+
 from .cache import SignalCache
 from .cache.current_signals_cache import CurrentSignalsCache
 from .config import load_config
@@ -195,6 +203,13 @@ def _build_app_state(config_path: Path) -> AppState:
         v1_cache=v1_cache,
     )
 
+    # PHASE-1A-BATCH-CALLSITE: build the run-queue + dispatcher
+    # (dispatcher thread is not started here — that happens in the
+    # lifespan startup callback, same pattern as orchestrator_pool).
+    run_queue, run_dispatcher = _build_phase1a_batch_subsystem(
+        db_engine=db_engine,
+    )
+
     # === STEP 14B-FIXUP1-app-appstate: v1_cache plumbed through ===
     return AppState(
         config=config,
@@ -206,6 +221,8 @@ def _build_app_state(config_path: Path) -> AppState:
         etl_executor=etl_executor,
         orchestrator_pool=orchestrator_pool,
         pulse_state=pulse_state,
+        run_queue=run_queue,             # PHASE-1A-BATCH-CALLSITE
+        run_dispatcher=run_dispatcher,   # PHASE-1A-BATCH-CALLSITE
     )
 
 
@@ -464,6 +481,37 @@ def _build_orchestrator_components(
         len(pool), pool.exchanges(),
     )
     return (pulse_state, pool)
+
+
+def _build_phase1a_batch_subsystem(*, db_engine):
+    """PHASE-1A-DISPATCHER-BUILD: construct RunQueue + RunDispatcher.
+
+    Idempotent-ish: constructing is cheap; the dispatcher thread
+    is not started here (caller does that in the lifespan startup).
+
+    Also clears any stale update_run_in_progress rows left by a
+    crashed prior process — see the Q8 rationale in the design
+    thread.
+    """
+    # PHASE-1A-CLEAR-INPROG-AT-BOOT: startup cleanup.
+    with _txn_for_phase1a(db_engine) as conn:
+        n = UpdateRunInProgressRepository(conn).clear_all()
+    if n:
+        logger.warning(
+            "Phase 1a boot: cleared %d stale update_run_in_progress "
+            "row(s) from a prior process crash", n,
+        )
+    else:
+        logger.info(
+            "Phase 1a boot: update_run_in_progress table already empty",
+        )
+
+    queue = RunQueue()
+    dispatcher = RunDispatcher(db_engine=db_engine, queue=queue)
+    logger.info(
+        "Phase 1a batch subsystem constructed (dispatcher not started yet)",
+    )
+    return queue, dispatcher
 
 
 def _build_redis_queue(redis_config):
@@ -932,6 +980,14 @@ def _build_startup_callback(state: AppState):
             )
         except Exception:
             logger.exception("Error starting orchestrator_pool")
+
+        # PHASE-1A-DISPATCHER-START: start the batch-run dispatcher.
+        if getattr(state, "run_dispatcher", None) is not None:
+            try:
+                state.run_dispatcher.start()
+                logger.info("Phase 1a RunDispatcher started")
+            except Exception:
+                logger.exception("Error starting RunDispatcher")
     return _startup
 
 

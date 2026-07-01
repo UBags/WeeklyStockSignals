@@ -74,6 +74,16 @@ class AppState:
     when there's an orchestrator producing events.
     Typed via TYPE_CHECKING import for the same reason as orchestrator_pool."""
 
+    # PHASE-1A: new batch-run dispatcher singletons.
+    run_queue: object | None = None
+    """Phase 1a: RunQueue (in-memory FIFO with per-exchange dedup).
+    Typed as `object` to avoid a scheduler->transports import cycle;
+    routes cast at use site."""
+
+    run_dispatcher: object | None = None
+    """Phase 1a: RunDispatcher (subprocess-launcher thread that drains
+    run_queue). Owns the SIGTERM/SIGKILL path for force-reset."""
+
 
 # Module-level singleton — set by app.py's create_app(), read by deps.
 # Tests don't touch this directly; they use app.dependency_overrides.
@@ -90,6 +100,31 @@ def clear_state() -> None:
     """Clear the state — used in tests to ensure isolation between runs."""
     global _state
     _state = None
+
+
+# PHASE-1A: DI accessors for the batch-run subsystem.
+def get_run_queue():
+    """Return the RunQueue singleton, or 503 if Phase 1a subsystem
+    is not initialized. Route handlers depend on this."""
+    s = _require_state()
+    if s.run_queue is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="run_queue not initialized",
+        )
+    return s.run_queue
+
+
+def get_run_dispatcher():
+    """Return the RunDispatcher singleton, or 503 if Phase 1a
+    subsystem is not initialized."""
+    s = _require_state()
+    if s.run_dispatcher is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="run_dispatcher not initialized",
+        )
+    return s.run_dispatcher
 
 
 def _require_state() -> AppState:

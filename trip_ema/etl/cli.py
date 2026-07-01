@@ -649,7 +649,12 @@ def cmd_cycle(args, config: Config) -> int:
             file=sys.stderr,
         )
         return 2
-    kind = "intraday" if is_open else "eod"
+    # PHASE-1A-KIND-OVERRIDE: if the caller (dispatcher) passed --kind
+    # explicitly, honor it. Otherwise fall back to market-hours-derived.
+    if getattr(args, "kind", None) is not None:
+        kind = args.kind
+    else:
+        kind = "intraday" if is_open else "eod"
 
     print(
         f"V1 cycle starting: exchange={exchange} kind={kind} "
@@ -931,6 +936,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_exchange_arg(cyc)
+    cyc.add_argument("--kind", choices=("intraday", "eod"), default=None,
+                     help="Override the market-open-derived kind. When set, "
+                          "the cycle records this kind explicitly. Used by "
+                          "the dispatcher (Phase 1a) to enqueue runs whose "
+                          "kind was decided by the scheduler, not by "
+                          "wall-clock market hours.")
 
     snap = sub.add_parser(
         "snapshot",

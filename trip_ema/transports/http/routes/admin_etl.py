@@ -155,6 +155,144 @@ def admin_etl_run_eod(
     )
 
 
+# ============================================================
+# PHASE-1A-ADMIN-ROUTES: enqueue-run, reset-in-progress, queue-snapshot
+# ============================================================
+from pydantic import BaseModel, Field       # noqa: E402
+
+
+class EnqueueRunRequest(BaseModel):
+    exchange: str = Field(min_length=2, max_length=10)
+    kind: str = Field(pattern="^(intraday|eod)$")
+
+
+class EnqueueRunResponse(BaseModel):
+    result: str   # 'inserted' | 'kind_upgraded' | 'noop_duplicate'
+    exchange: str
+    kind: str
+
+
+class ResetInProgressRequest(BaseModel):
+    exchange: str = Field(min_length=2, max_length=10)
+
+
+class ResetInProgressResponse(BaseModel):
+    killed: bool
+    marker_deleted: bool
+    exchange: str
+
+
+class QueueSnapshotItem(BaseModel):
+    exchange: str
+    kind: str
+
+
+class InProgressItem(BaseModel):
+    exchange: str
+    kind: str
+    pid: int | None
+    started_at: str
+
+
+class QueueSnapshotResponse(BaseModel):
+    queue: list[QueueSnapshotItem]
+    in_progress: list[InProgressItem]
+
+
+@router.post("/enqueue-run", response_model=EnqueueRunResponse)
+def admin_etl_enqueue_run(
+    body: EnqueueRunRequest,
+    config: Config = Depends(get_config),
+) -> EnqueueRunResponse:
+    """Enqueue an intraday or eod run for the given exchange onto
+    the in-memory RunQueue. The dispatcher picks it up on its next
+    poll (typically within 30 seconds, or immediately via the
+    queue's wait event)."""
+    from ..dependencies import get_run_queue
+    _validate_exchange_or_400(body.exchange, config)
+    queue = get_run_queue()
+    result = queue.enqueue(body.exchange, body.kind)   # type: ignore[attr-defined]
+    logger.info(
+        "Phase 1a: enqueue-run result=%s exchange=%s kind=%s",
+        result, body.exchange, body.kind,
+    )
+    return EnqueueRunResponse(
+        result=result, exchange=body.exchange, kind=body.kind,
+    )
+
+
+@router.post("/reset-in-progress", response_model=ResetInProgressResponse)
+def admin_etl_reset_in_progress(
+    body: ResetInProgressRequest,
+    db_engine: Engine = Depends(get_db_engine),
+    config: Config = Depends(get_config),
+) -> ResetInProgressResponse:
+    """Force-terminate the currently running batch for `exchange`
+    (if any) and delete its update_run_in_progress row.
+
+    Sequence:
+      1. Send SIGTERM to the subprocess. Wait up to 10 seconds.
+      2. Escalate to SIGKILL if still alive.
+      3. Delete the marker row (belt-and-suspenders — dispatcher's
+         finally also deletes it).
+    """
+    from ..dependencies import get_run_dispatcher
+    from ....persistence import transaction
+    from ....persistence.update_run_in_progress_repo import (
+        UpdateRunInProgressRepository,
+    )
+    _validate_exchange_or_400(body.exchange, config)
+
+    dispatcher = get_run_dispatcher()
+    killed = dispatcher.cancel_current()   # type: ignore[attr-defined]
+
+    with transaction(db_engine) as conn:
+        n = UpdateRunInProgressRepository(conn).delete(body.exchange)
+
+    logger.warning(
+        "Phase 1a: reset-in-progress exchange=%s killed=%s "
+        "marker_deleted=%d",
+        body.exchange, killed, n,
+    )
+    return ResetInProgressResponse(
+        killed=killed, marker_deleted=(n > 0),
+        exchange=body.exchange,
+    )
+
+
+@router.get("/queue-snapshot", response_model=QueueSnapshotResponse)
+def admin_etl_queue_snapshot(
+    db_engine: Engine = Depends(get_db_engine),
+) -> QueueSnapshotResponse:
+    """Return the current RunQueue snapshot + all in-progress rows.
+    Used by the GUI to display "Queued: NYSE:eod, BSE:intraday" +
+    the current run."""
+    from ..dependencies import get_run_queue
+    from ....persistence.update_run_in_progress_repo import (
+        UpdateRunInProgressRepository,
+    )
+
+    queue = get_run_queue()
+    q_items = queue.snapshot()   # type: ignore[attr-defined]
+
+    with db_engine.connect() as conn:
+        in_progress = UpdateRunInProgressRepository(conn).list_all()
+
+    return QueueSnapshotResponse(
+        queue=[
+            QueueSnapshotItem(exchange=i.exchange, kind=i.kind)
+            for i in q_items
+        ],
+        in_progress=[
+            InProgressItem(
+                exchange=r.exchange, kind=r.kind, pid=r.pid,
+                started_at=r.started_at.isoformat(),
+            )
+            for r in in_progress
+        ],
+    )
+
+
 @router.post("/run-intraday", response_model=EtlActionAcceptedPayload)
 def admin_etl_run_intraday(
     exchange: str = Query(..., min_length=2, max_length=10),
