@@ -46,15 +46,24 @@ def week_anchors(db_engine):
     the query computes internally. Tests use these to seed at
     exact bar boundaries."""
     with db_engine.connect() as conn:
+        # STEP-12C-POSTMORTEM: this fixture MUST match the SQL in
+        # `_ist_week_anchors` in trip_ema/persistence/queries.py.
+        # The OLD `::timestamptz` cast against a `::date` returns
+        # Monday 00:00 in the SESSION TZ (Asia/Kolkata in Uddi's env),
+        # not UTC. That made the fixture value 5.5h off from what
+        # the production query filter computes, so signals seeded at
+        # the fixture value never matched. Any change to the SQL below
+        # must be mirrored in `_ist_week_anchors` and vice versa.
         row = conn.execute(text("""
             SELECT
                 (date_trunc('week',
-                            (NOW() AT TIME ZONE 'Asia/Kolkata'))::date
-                )::timestamptz                       AS current_monday_ts,
-                (date_trunc('week',
-                            (NOW() AT TIME ZONE 'Asia/Kolkata'))::date
-                 - INTERVAL '7 days'
-                )::timestamptz                       AS previous_monday_ts
+                            (NOW() AT TIME ZONE 'Asia/Kolkata'))::date::timestamp
+                    AT TIME ZONE 'UTC')              AS current_monday_ts,
+                ((date_trunc('week',
+                             (NOW() AT TIME ZONE 'Asia/Kolkata'))::date
+                  - INTERVAL '7 days'
+                 )::timestamp
+                    AT TIME ZONE 'UTC')              AS previous_monday_ts
         """)).first()
     return row.current_monday_ts, row.previous_monday_ts
 
