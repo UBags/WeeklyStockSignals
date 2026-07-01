@@ -45,6 +45,10 @@ from .persistence.update_run_in_progress_repo import (
 from .persistence import transaction as _txn_for_phase1a
 from .scheduler.run_dispatcher import RunDispatcher
 from .scheduler.run_queue import RunQueue
+# PHASE-3A: RunScheduler + calendar imports for the tick planner.
+from .scheduler.run_scheduler import RunScheduler
+from .scheduler.market_calendar import TradingCalendar
+from sqlalchemy import text as _sa_text
 
 from .cache import SignalCache
 from .cache.current_signals_cache import CurrentSignalsCache
@@ -203,11 +207,16 @@ def _build_app_state(config_path: Path) -> AppState:
         v1_cache=v1_cache,
     )
 
-    # PHASE-1A-BATCH-CALLSITE: build the run-queue + dispatcher
-    # (dispatcher thread is not started here — that happens in the
-    # lifespan startup callback, same pattern as orchestrator_pool).
-    run_queue, run_dispatcher = _build_phase1a_batch_subsystem(
-        db_engine=db_engine,
+    # PHASE-1A + PHASE-3A: build queue + dispatcher + scheduler.
+    # Threads are not started here — the lifespan startup callback
+    # does that, gated by config.scheduling.dispatcher_enabled for
+    # the scheduler specifically.
+    run_queue, run_dispatcher, run_scheduler = (
+        _build_phase1a_batch_subsystem(
+            db_engine=db_engine,
+            config=config,           # PHASE-3A-BATCH-CALLSITE
+            config_path=config_path, # PHASE-3A-BATCH-CALLSITE
+        )
     )
 
     # === STEP 14B-FIXUP1-app-appstate: v1_cache plumbed through ===
@@ -221,8 +230,9 @@ def _build_app_state(config_path: Path) -> AppState:
         etl_executor=etl_executor,
         orchestrator_pool=orchestrator_pool,
         pulse_state=pulse_state,
-        run_queue=run_queue,             # PHASE-1A-BATCH-CALLSITE
-        run_dispatcher=run_dispatcher,   # PHASE-1A-BATCH-CALLSITE
+        run_queue=run_queue,               # PHASE-1A-BATCH-CALLSITE
+        run_dispatcher=run_dispatcher,     # PHASE-1A-BATCH-CALLSITE
+        run_scheduler=run_scheduler,       # PHASE-3A-BATCH-CALLSITE
     )
 
 
@@ -483,15 +493,26 @@ def _build_orchestrator_components(
     return (pulse_state, pool)
 
 
-def _build_phase1a_batch_subsystem(*, db_engine):
-    """PHASE-1A-DISPATCHER-BUILD: construct RunQueue + RunDispatcher.
+def _build_phase1a_batch_subsystem(*, db_engine, config=None, config_path=None):
+    """PHASE-1A + PHASE-3A: construct RunQueue + RunDispatcher + RunScheduler.
 
-    Idempotent-ish: constructing is cheap; the dispatcher thread
-    is not started here (caller does that in the lifespan startup).
+    Phase 1a: builds the queue + dispatcher, clears stale
+    update_run_in_progress markers from prior crashes.
 
-    Also clears any stale update_run_in_progress rows left by a
-    crashed prior process — see the Q8 rationale in the design
-    thread.
+    Phase 3a additions:
+      - Also clears orphan compute_runs rows (finished_at IS NULL)
+        from processes that died before Phase 2's SIGTERM handler
+        could clean up. Applies unconditionally so the UI doesn't
+        get wedged into thinking a dead run is still active.
+      - Constructs RunScheduler (wall-clock tick planner). Not
+        .start()'d — the lifespan startup callback starts it only
+        if config.scheduling.dispatcher_enabled is True. When
+        config/config_path are None (legacy callers), the scheduler
+        is None — caller gets a 2-tuple for backward compat.
+
+    The signature accepts config + config_path as optional kwargs so
+    older test callers that only pass db_engine keep working (they
+    just don't get a RunScheduler).
     """
     # PHASE-1A-CLEAR-INPROG-AT-BOOT: startup cleanup.
     with _txn_for_phase1a(db_engine) as conn:
@@ -506,12 +527,77 @@ def _build_phase1a_batch_subsystem(*, db_engine):
             "Phase 1a boot: update_run_in_progress table already empty",
         )
 
+    # PHASE-3A-CLEAR-ORPHAN-COMPUTE-RUNS: mark orphan compute_runs
+    # rows (finished_at IS NULL from crashed processes) as cancelled.
+    # Column names verified against DDL.txt: compute_run_id, exchange,
+    # kind, failed_stage (varchar 64), error_message (text).
+    with _txn_for_phase1a(db_engine) as conn:
+        result = conn.execute(_sa_text("""
+            UPDATE compute_runs
+               SET finished_at = NOW(),
+                   failed_stage = 'boot_orphan_cleanup',
+                   error_message = 'process died without SIGTERM handler (pre-Phase-2 or crash)'
+             WHERE finished_at IS NULL
+         RETURNING compute_run_id, exchange, kind
+        """))
+        orphans = list(result)
+    if orphans:
+        logger.warning(
+            "Phase 3a boot: cleaned up %d orphan compute_runs rows: %s",
+            len(orphans),
+            [
+                (r.compute_run_id, r.exchange, r.kind)
+                for r in orphans
+            ],
+        )
+    else:
+        logger.info(
+            "Phase 3a boot: no orphan compute_runs rows to clean up",
+        )
+
     queue = RunQueue()
     dispatcher = RunDispatcher(db_engine=db_engine, queue=queue)
+
+    # PHASE-3A: build RunScheduler if we have config to derive calendars
+    # from. Calendars are built once at boot (a dict keyed by exchange).
+    # Adding a new exchange to config.yaml at runtime will NOT be picked
+    # up until service restart — logged in the factory closure.
+    scheduler = None
+    if config is not None and config_path is not None:
+        calendars: dict[str, TradingCalendar] = {
+            mh.exchange: TradingCalendar(mh.to_calendar_config())
+            for mh in config.market_hours
+        }
+
+        def _calendar_factory(exchange: str) -> TradingCalendar:
+            if exchange not in calendars:
+                raise KeyError(
+                    f"No calendar for exchange {exchange!r}; "
+                    f"configured exchanges: {sorted(calendars.keys())}. "
+                    f"Restart service to pick up new exchanges."
+                )
+            return calendars[exchange]
+
+        scheduler = RunScheduler(
+            queue=queue,
+            config_path=config_path,
+            calendar_factory=_calendar_factory,
+        )
+        logger.info(
+            "Phase 3a RunScheduler constructed for %d exchange(s): %s",
+            len(calendars), sorted(calendars.keys()),
+        )
+    else:
+        logger.info(
+            "Phase 3a: RunScheduler skipped (no config/config_path passed; "
+            "test caller or legacy path)",
+        )
+
     logger.info(
-        "Phase 1a batch subsystem constructed (dispatcher not started yet)",
+        "Phase 1a+3a batch subsystem constructed "
+        "(dispatcher + scheduler not started yet)",
     )
-    return queue, dispatcher
+    return queue, dispatcher, scheduler
 
 
 def _build_redis_queue(redis_config):
@@ -988,6 +1074,30 @@ def _build_startup_callback(state: AppState):
                 logger.info("Phase 1a RunDispatcher started")
             except Exception:
                 logger.exception("Error starting RunDispatcher")
+
+        # PHASE-3A-SCHEDULER-START: start the wall-clock RunScheduler
+        # ONLY when the operator has flipped the dispatcher_enabled
+        # flag. Otherwise RunScheduler stays dark and MarketOrchestrator
+        # owns scheduled ticks (current behavior).
+        if (
+            getattr(state, "run_scheduler", None) is not None
+            and getattr(
+                state.config.scheduling, "dispatcher_enabled", False,
+            )
+        ):
+            try:
+                state.run_scheduler.start()
+                logger.info(
+                    "Phase 3a RunScheduler started (dispatcher_enabled=True)",
+                )
+            except Exception:
+                logger.exception("Error starting RunScheduler")
+        elif getattr(state, "run_scheduler", None) is not None:
+            logger.info(
+                "Phase 3a RunScheduler NOT started "
+                "(dispatcher_enabled=False in config; "
+                "MarketOrchestrator still owns scheduling)",
+            )
     return _startup
 
 

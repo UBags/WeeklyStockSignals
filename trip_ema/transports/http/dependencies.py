@@ -84,6 +84,12 @@ class AppState:
     """Phase 1a: RunDispatcher (subprocess-launcher thread that drains
     run_queue). Owns the SIGTERM/SIGKILL path for force-reset."""
 
+    run_scheduler: object | None = None
+    """Phase 3a: RunScheduler (wall-clock tick planner thread).
+    Constructed always; started only when
+    config.scheduling.dispatcher_enabled is True. Typed as `object`
+    to avoid a scheduler->transports import cycle."""
+
 
 # Module-level singleton — set by app.py's create_app(), read by deps.
 # Tests don't touch this directly; they use app.dependency_overrides.

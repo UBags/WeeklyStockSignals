@@ -408,3 +408,70 @@ def _compute_legacy(d: date, market: MarketTickConfig) -> list[datetime]:
 
     # Convert all to UTC for the orchestrator's wall-clock loop.
     return [t.astimezone(UTC) for t in ticks]
+
+
+# ---------------------------------------------------------------------------
+# PHASE-3A: name-carrying variant used by RunScheduler to identify tick
+# roles (post_open / mid_session / pre_close / post_close / legacy) so
+# it can decide kind=intraday vs kind=eod when enqueueing.
+# ---------------------------------------------------------------------------
+
+
+def compute_tick_entries_for_day(
+    d: date,
+    market: MarketTickConfig,
+    *,
+    close_override: time | None = None,
+) -> list[tuple[datetime, str]]:
+    """Return (UTC instant, entry name) pairs for `d`'s tick schedule.
+
+    Same content as `compute_tick_times_for_day` but with each tick
+    tagged by its schedule entry's `name` field. Used by RunScheduler
+    to distinguish 'post_close' (kind=eod) from other roles (intraday).
+
+    In legacy mode (tick_schedule is None), all entries are tagged
+    'legacy' (since the hourly-cadence schedule has no named roles).
+    Sorted ascending by instant.
+    """
+    if market.tick_schedule is None:
+        return [(t, "legacy") for t in _compute_legacy(d, market)]
+
+    schedule = market.tick_schedule
+    tz = market.tz
+    open_local = datetime.combine(d, market.open, tzinfo=tz)
+    effective_close = (
+        close_override if close_override is not None else market.close
+    )
+    close_local = datetime.combine(d, effective_close, tzinfo=tz)
+
+    by_name: dict[str, datetime] = {}
+    open_anchored: list[datetime] = []
+    close_anchored: list[datetime] = []
+    midpoint_names: list[str] = []
+
+    for entry in schedule:
+        if entry.anchor == "open":
+            instant = open_local + timedelta(minutes=entry.offset_minutes)
+            by_name[entry.name] = instant
+            open_anchored.append(instant)
+        elif entry.anchor == "close":
+            instant = close_local + timedelta(minutes=entry.offset_minutes)
+            by_name[entry.name] = instant
+            close_anchored.append(instant)
+        elif entry.anchor == "midpoint":
+            midpoint_names.append(entry.name)
+
+    if midpoint_names:
+        latest_open = max(open_anchored)
+        earliest_close = min(close_anchored)
+        midpoint_raw = latest_open + (earliest_close - latest_open) / 2
+        midpoint_rounded = _round_to_nearest_minute(midpoint_raw)
+        for name in midpoint_names:
+            by_name[name] = midpoint_rounded
+
+    entries = [
+        (instant.astimezone(UTC), name)
+        for name, instant in by_name.items()
+    ]
+    entries.sort(key=lambda t: t[0])
+    return entries
