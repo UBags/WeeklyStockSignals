@@ -634,6 +634,29 @@ def cmd_cycle(args, config: Config) -> int:
     from .runner import _run_fetch_pass
     from .types import RunKind, Tier
 
+    # PHASE-2-SIGTERM: install SIGTERM handler so dispatcher-
+    # triggered force-termination cleans up the compute_runs row.
+    # Python's default SIGTERM handler is to terminate WITHOUT
+    # running finally clauses; raising SystemExit(130) makes the
+    # finally at the bottom of this function run so we can mark
+    # the row as cancelled instead of leaving finished_at NULL.
+    import signal as _signal
+
+    def _sigterm_handler(signum, frame):
+        print(
+            "cycle: SIGTERM received, cleaning up",
+            file=sys.stderr, flush=True,
+        )
+        raise SystemExit(130)
+
+    _signal.signal(_signal.SIGTERM, _sigterm_handler)
+
+    # PHASE-2-SIGTERM: init upfront so the emergency-cleanup path
+    # in the outer finally can safely check them regardless of
+    # where an early exception fires.
+    run_id: int | None = None
+    _finished: bool = False
+
     exchange = args.exchange
     now = datetime.now(UTC)
 
@@ -787,10 +810,40 @@ def cmd_cycle(args, config: Config) -> int:
                 failed_stage=failed_stage,
                 error_message=error_message,
             )
+        _finished = True   # PHASE-2-SIGTERM
 
         return exit_code
 
     finally:
+        # PHASE-2-SIGTERM: emergency-finish path. If the compute_runs
+        # row was started but never finished (SIGTERM, KeyboardInterrupt,
+        # crash before finish()), mark it as cancelled so it doesn't
+        # linger with finished_at IS NULL forever. Best-effort — if
+        # the DB itself is unreachable at this point, we log and move on.
+        if run_id is not None and not _finished:
+            try:
+                with transaction(db_engine) as conn:
+                    ComputeRunsRepository(conn).finish(
+                        run_id,
+                        tickers_attempted=tickers_attempted,
+                        tickers_fetched=tickers_fetched,
+                        failed_stage=(failed_stage or "cancelled"),
+                        error_message=(
+                            error_message
+                            or "cycle terminated (likely SIGTERM)"
+                        ),
+                    )
+                print(
+                    f"cycle: emergency-finish for run_id={run_id} "
+                    f"(cancelled)",
+                    file=sys.stderr, flush=True,
+                )
+            except Exception:
+                logger.warning(
+                    "PHASE-2-SIGTERM: emergency compute_runs.finish "
+                    "failed for run_id=%s — row will remain "
+                    "in-flight in the DB", run_id, exc_info=True,
+                )
         db_engine.dispose()
 
 
