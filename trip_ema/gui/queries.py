@@ -360,11 +360,15 @@ def ticker_universe_summary(
 class TickerComboRow:
     """One row in the Signals tab's ticker dropdown.
 
-    The dropdown groups tickers into two sections: those with a
-    signal event in the last 2 weeks (top, colored by signal type)
-    and those without (below, grey background).
-    `has_recent_signal` drives the partition; `latest_signal`
-    drives the color (BUY=green, SELL=red, EXIT_*=blue).
+    Step 12c: dropdown is a flat single-list sort. Every row is
+    ordered by signal_group_industry_rank_sort_key — signal-type
+    primary (BUY < SELL < EXIT_FROM_BUY < EXIT_FROM_SELL <
+    unsignaled), then industry ASC, then rank DESC (signaled) or
+    symbol ASC (unsignaled). `latest_signal` drives the row
+    background color: BUY=green, SELL=red, EXIT_FROM_BUY=yellow,
+    EXIT_FROM_SELL=gray, None=default. `has_recent_signal` is kept
+    on the row for downstream consumers but no longer partitions
+    the dropdown display.
     """
     # Phase 6-3: surfaced so the Signals tab dropdown can map rows
     # to rank_scores for sorting + tooltip rendering.

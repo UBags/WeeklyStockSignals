@@ -50,8 +50,7 @@ from ..queries import latest_mcap_for_ticker
 from .._format_mcap import format_mcap_cr
 from ..benchmark_rerank_client import fetch_rank_scores
 from ..signals_helpers import (
-    industry_rank_alpha_sort_key,
-    partition_ticker_rows,
+    signal_group_industry_rank_sort_key,   # Step 12c — dropdown sort
 )
 from ..workers import submit
 from .backtest_dialog import BacktestDialog
@@ -61,10 +60,17 @@ from .signal_generation_panel import SignalGenerationPanel
 logger = logging.getLogger(__name__)
 
 
-_DROPDOWN_GREY_BG = "#f0f0f0"
-_DROPDOWN_BUY_BG = "#c8e6c9"       # light green
-_DROPDOWN_SELL_BG = "#ffcdd2"      # light red
-_DROPDOWN_EXIT_BG = "#bbdefb"      # light blue
+# Step 12c: EXIT_FROM_BUY and EXIT_FROM_SELL now use distinct
+# backgrounds so operators can tell "was long, now flat" from
+# "was short, now flat" at a glance. Matches the Tickers-tab
+# SIGNAL_BACKGROUND_COLORS map exactly.
+_DROPDOWN_GREY_BG = "#f0f0f0"                 # unused after Step 12c; kept
+                                              # in case the recent/other
+                                              # split is ever restored.
+_DROPDOWN_BUY_BG = "#c8e6c9"                  # light green
+_DROPDOWN_SELL_BG = "#ffcdd2"                 # light red
+_DROPDOWN_EXIT_FROM_BUY_BG = "#fff9c4"        # light yellow
+_DROPDOWN_EXIT_FROM_SELL_BG = "#e0e0e0"       # light gray
 
 _QSETTINGS_ORG = "trip_ema"
 _QSETTINGS_APP = "gui"
@@ -357,51 +363,44 @@ class SignalsView(QWidget):
         )
 
     def _on_combo_rows_received(self, payload) -> None:
-        # Phase 6-3: payload is (rows, rank_scores). Recent-signal
-        # section is sorted by rank_score DESC; the 'other' section
-        # stays alphabetical so operators browsing by name aren't
-        # surprised.
+        # Step 12c: flat single-list sort matching the Tickers-tab
+        # spec — signal-type primary (BUY < SELL < EXIT_FROM_BUY <
+        # EXIT_FROM_SELL < unsignaled), then industry ASC, then within
+        # signaled: rank_score DESC, symbol ASC; within unsignaled:
+        # symbol ASC. Colors: BUY green, SELL red, EXIT_FROM_BUY
+        # yellow, EXIT_FROM_SELL gray, unsignaled default. See
+        # signal_group_industry_rank_sort_key for the full contract.
+        # Removes the pre-12c recent/other partition + separator +
+        # grey background for unsignaled rows.
         rows, rank_scores = payload
-        recent, other = partition_ticker_rows(rows)
 
-        # Step 12b: industry-grouped + rank dropdown sort.
-        # Both recent and "other" partitions are sorted by
-        # industry_rank_alpha_sort_key — industry primary, signaled
-        # rows before unsignaled within each industry, signaled
-        # rows by rank_score DESC, unsignaled by symbol ASC. The
-        # Tickers tab proxy uses the identical sort, so the two
-        # views are aligned.
-        recent = sorted(
-            recent,
-            key=lambda r: industry_rank_alpha_sort_key(
+        sorted_rows = sorted(
+            rows,
+            key=lambda r: signal_group_industry_rank_sort_key(
                 r,
                 getattr(r, 'latest_signal', None),
                 rank_scores.get(r.ticker_id),
             ),
         )
-        other = sorted(
-            other,
-            key=lambda r: industry_rank_alpha_sort_key(
-                r, None,
-                rank_scores.get(r.ticker_id),
-            ),
-        )
+
         model = QStandardItemModel(self)
-        grey_brush = QBrush(QColor(_DROPDOWN_GREY_BG))
         buy_brush = QBrush(QColor(_DROPDOWN_BUY_BG))
         sell_brush = QBrush(QColor(_DROPDOWN_SELL_BG))
-        exit_brush = QBrush(QColor(_DROPDOWN_EXIT_BG))
+        exit_from_buy_brush = QBrush(QColor(_DROPDOWN_EXIT_FROM_BUY_BG))
+        exit_from_sell_brush = QBrush(QColor(_DROPDOWN_EXIT_FROM_SELL_BG))
 
         def _signal_brush(sig: str | None) -> QBrush | None:
             if sig == "BUY":
                 return buy_brush
             if sig == "SELL":
                 return sell_brush
-            if sig in ("EXIT_FROM_BUY", "EXIT_FROM_SELL"):
-                return exit_brush
+            if sig == "EXIT_FROM_BUY":
+                return exit_from_buy_brush
+            if sig == "EXIT_FROM_SELL":
+                return exit_from_sell_brush
             return None
 
-        def _make_item(row, *, grey: bool) -> QStandardItem:
+        def _make_item(row) -> QStandardItem:
             display = row.symbol
             if row.full_name:
                 display = f"{row.symbol}  —  {row.full_name[:60]}"
@@ -412,28 +411,20 @@ class SignalsView(QWidget):
                 Qt.UserRole,
             )
             # Phase 6-3: hover-tooltip exposes the rank_score so the
-            # operator can see WHY the row sits where it does in the
-            # ranked recent-signal section.
+            # operator can see WHY the row sits where it does.
             tid = getattr(row, "ticker_id", None)
             if tid is not None and tid in rank_scores:
                 item.setToolTip(
                     f"{row.symbol}  rank_score = {rank_scores[tid]:+.4f}"
                 )
-            if grey:
-                item.setData(grey_brush, Qt.BackgroundRole)
-            else:
-                sig_brush = _signal_brush(getattr(row, 'latest_signal', None))
-                if sig_brush is not None:
-                    item.setData(sig_brush, Qt.BackgroundRole)
+            sig_brush = _signal_brush(getattr(row, 'latest_signal', None))
+            if sig_brush is not None:
+                item.setData(sig_brush, Qt.BackgroundRole)
             return item
 
-        for r in recent:
-            model.appendRow(_make_item(r, grey=False))
-        for r in other:
-            model.appendRow(_make_item(r, grey=True))
+        for r in sorted_rows:
+            model.appendRow(_make_item(r))
         self._ticker_combo.setModel(model)
-        if recent and other:
-            self._ticker_combo.insertSeparator(len(recent))
         self._ticker_combo.setCurrentIndex(-1)
 
     def _on_combo_rows_failed(self, message: str) -> None:
