@@ -145,6 +145,32 @@ class TripEmaHttpClient:
     def get_etl_parked(self) -> dict:
         return self._get("/v1/admin/etl/parked")
 
+    # ---------- PHASE-1B: batch-run dispatcher endpoints ---------- #
+
+    def reset_in_progress(self, *, exchange: str) -> dict:
+        """POST /v1/admin/etl/reset-in-progress.
+
+        Force-terminates the currently running batch for `exchange`
+        (if any) and clears the update_run_in_progress marker.
+        Returns {"killed": bool, "marker_deleted": bool,
+        "exchange": str}.
+        """
+        return self._post_json(
+            "/v1/admin/etl/reset-in-progress",
+            body={"exchange": exchange},
+        )
+
+    def queue_snapshot(self) -> dict:
+        """GET /v1/admin/etl/queue-snapshot.
+
+        Returns the current RunQueue contents + all in-progress
+        rows across all exchanges:
+          {"queue": [{"exchange": str, "kind": str}, ...],
+           "in_progress": [{"exchange": str, "kind": str,
+                            "pid": int, "started_at": str}, ...]}
+        """
+        return self._get("/v1/admin/etl/queue-snapshot")
+
     # ---------- Exchange registry + state (Phase 14.6c) ---------- #
 
     def list_exchanges(self) -> dict:

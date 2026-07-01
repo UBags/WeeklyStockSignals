@@ -237,6 +237,12 @@ class EtlStatusView(QWidget):
             self._on_exchange_changed,
         )
 
+        # PHASE-1B: cross-exchange queue snapshot cache.
+        # Populated by _apply_queue_snapshot on each mutex tick's
+        # HTTP fetch; consumed by _on_force_reset_clicked to look
+        # up the current kind for the picked exchange.
+        self._last_queue_snapshot: dict | None = None
+
         if start_refresh_on_init:
             self._activity_scheduler.start()
             self._mutex_scheduler.start()
@@ -459,7 +465,39 @@ class EtlStatusView(QWidget):
         self._intraday_light = FlashingLight()
         header_row.addWidget(QLabel("In progress:"))
         header_row.addWidget(self._intraday_light)
+
+        # PHASE-1B: Force Reset button for the picked exchange.
+        # Enabled iff the picked exchange has an in-progress row
+        # in update_run_in_progress (checked on each mutex tick's
+        # HTTP queue-snapshot fetch). See _apply_queue_snapshot.
+        self._force_reset_btn = QPushButton("Force Reset")
+        self._force_reset_btn.setStyleSheet(
+            "color: #a00; padding: 4px 10px; font-weight: 600;"
+        )
+        self._force_reset_btn.setEnabled(False)
+        self._force_reset_btn.setToolTip(
+            "Terminate the in-progress run for the selected "
+            "exchange (SIGTERM → 10s grace → SIGKILL)."
+        )
+        self._force_reset_btn.clicked.connect(
+            self._on_force_reset_clicked,
+        )
+        header_row.addWidget(self._force_reset_btn)
+
         v.addLayout(header_row)
+
+        # PHASE-1B: cross-exchange queue snapshot label.
+        # Shows all in-progress + queued runs across exchanges so
+        # the operator sees the whole batch-run state at a glance,
+        # not just the picked exchange's.
+        self._queue_snapshot_label = QLabel(
+            "In progress: (none)  │  Queue: (empty)"
+        )
+        self._queue_snapshot_label.setStyleSheet(
+            "color: #666; font-size: 10px; "
+            "padding: 2px 0px 4px 8px;"
+        )
+        v.addWidget(self._queue_snapshot_label)
 
         # Step 12d: notice shown when a scheduled (service-process)
         # run is in progress. The GUI's stage list is fed by parsing
@@ -655,6 +693,20 @@ class EtlStatusView(QWidget):
 
         self._apply_mutex_state(is_running, inflight_kind)
 
+        # PHASE-1B: also fetch queue snapshot over HTTP. Queue is
+        # in-memory in the service process, so HTTP is the only
+        # channel. Best-effort — HTTP failure leaves the label
+        # and Force Reset button in their previous state (with a
+        # log warning).
+        try:
+            snapshot = self._http.queue_snapshot()
+        except Exception:
+            logger.warning(
+                "queue-snapshot fetch failed", exc_info=True,
+            )
+            return
+        self._apply_queue_snapshot(snapshot)
+
     def _on_overview_tick(self) -> None:
         exchange = self._picker.current_exchange()
         if exchange is None:
@@ -778,6 +830,103 @@ class EtlStatusView(QWidget):
                     f.setItalic(True)
                     item.setFont(f)
             model.appendRow(items)
+
+    # ============================================================
+    # PHASE-1B: Force Reset + queue snapshot painters
+    # ============================================================
+
+    def _on_force_reset_clicked(self) -> None:
+        """Handler for the Force Reset button. Looks up the current
+        in-progress kind for the picked exchange from the cached
+        queue snapshot, shows the confirmation modal, and on Accept
+        fires POST /v1/admin/etl/reset-in-progress."""
+        exchange = self._picker.current_exchange()
+        if exchange is None:
+            return
+
+        snapshot = self._last_queue_snapshot or {}
+        in_progress = snapshot.get("in_progress", [])
+        row = next(
+            (r for r in in_progress if r.get("exchange") == exchange),
+            None,
+        )
+        if row is None:
+            # Button state was stale between mutex ticks — the
+            # in-progress row cleared before the operator clicked.
+            # No-op; the next mutex tick will re-disable the button.
+            logger.info(
+                "Force Reset clicked but no in-progress row for %s; "
+                "run probably completed. Doing nothing.",
+                exchange,
+            )
+            return
+
+        from .widgets.terminate_confirmation_modal import (
+            TerminateInProgressConfirmationModal,
+        )
+        modal = TerminateInProgressConfirmationModal(
+            exchange=exchange, kind=row.get("kind", ""),
+            parent=self,
+        )
+        if modal.exec() != modal.Accepted:
+            return
+
+        try:
+            resp = self._http.reset_in_progress(exchange=exchange)
+        except Exception:
+            logger.exception(
+                "Force Reset HTTP call failed for %s", exchange,
+            )
+            return
+
+        logger.warning(
+            "Force Reset: killed=%s marker_deleted=%s exchange=%s",
+            resp.get("killed"), resp.get("marker_deleted"), exchange,
+        )
+        # Nudge the scheduler so the label + button update
+        # immediately instead of waiting for the next 5s tick.
+        self._mutex_scheduler.trigger_now()
+
+    def _apply_queue_snapshot(self, snapshot: dict) -> None:
+        """Update the cross-exchange queue snapshot label + Force
+        Reset button enable state from a fresh /queue-snapshot
+        HTTP response.
+
+        Also caches the snapshot in self._last_queue_snapshot so
+        _on_force_reset_clicked can look up the current kind
+        without re-fetching."""
+        self._last_queue_snapshot = snapshot
+
+        in_progress = snapshot.get("in_progress", []) or []
+        queue = snapshot.get("queue", []) or []
+
+        if in_progress:
+            ip_str = ", ".join(
+                f"{r.get('exchange', '?')}:{r.get('kind', '?')}"
+                for r in in_progress
+            )
+        else:
+            ip_str = "(none)"
+
+        if queue:
+            q_str = ", ".join(
+                f"{r.get('exchange', '?')}:{r.get('kind', '?')}"
+                for r in queue
+            )
+        else:
+            q_str = "(empty)"
+
+        self._queue_snapshot_label.setText(
+            f"In progress: {ip_str}  │  Queue: {q_str}"
+        )
+
+        # Force Reset button enabled iff picked exchange has an
+        # in-progress row.
+        exchange = self._picker.current_exchange()
+        has_in_progress_for_picked = any(
+            r.get("exchange") == exchange for r in in_progress
+        )
+        self._force_reset_btn.setEnabled(has_in_progress_for_picked)
 
     def _apply_mutex_state(
         self, is_running: bool, inflight_kind: str | None,
