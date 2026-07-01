@@ -1152,6 +1152,23 @@ def _install_signal_handlers(shutdown_callback) -> None:
 
 
 def main(argv: list[str] | None = None) -> NoReturn:
+    # PHASE-3A-STDERR-LINEBUF: force line-buffered stderr + stdout so
+    # log records emitted during _build_app_state land in the redirected
+    # log file promptly. restart_service.sh runs us under nohup with
+    # `> /tmp/trip-ema.log 2>&1`, which on some environments makes
+    # Python's stderr block-buffered — boot lines would sit in the
+    # buffer until uvicorn's later output filled it, so restart_service.sh's
+    # log overwrite (next restart) lost them. Line buffering guarantees
+    # each log record flushes on '\n'.
+    try:
+        sys.stderr.reconfigure(line_buffering=True)
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        # Older Python without reconfigure, or streams already
+        # torn down. Best-effort — the log-visibility gain is
+        # nice-to-have, not load-bearing.
+        pass
+
     parser = argparse.ArgumentParser(prog="trip_ema")
     parser.add_argument(
         "--config", "-c", type=Path, required=True,
@@ -1169,6 +1186,14 @@ def main(argv: list[str] | None = None) -> NoReturn:
     # user's preference (log_json), which is idempotent.
     _configure_logging(args.log_level, json_output=False)
     state = _build_app_state(args.config)
+    # PHASE-3A-STDERR-FLUSH: belt-and-suspenders — force any queued
+    # boot log lines to disk before uvicorn takes over. Line buffering
+    # (set at top of main) should already have done this per-record,
+    # but a redundant flush costs nothing and is diagnostic-friendly.
+    try:
+        sys.stderr.flush()
+    except Exception:
+        pass
     # Apply the user's preferred log format (json vs text). The
     # observability.configure_logging is idempotent: repeated calls
     # leave one handler at the end, with the most recent settings.

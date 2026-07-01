@@ -615,16 +615,24 @@ class TestNotificationResultPayload(BaseModel):
 
 class NotificationLogEntry(BaseModel):
     """One row from notification_log joined with subscribers + events
-    + tickers for human-readable display."""
+    + tickers for human-readable display.
+
+    POST-STEP-15B-NULLABLE-EVENT-ID: notification_log.event_id is
+    nullable in the DB (signal_events was dropped in migration 0030;
+    the FK went with it and the column stayed nullable so pre-V1
+    rows are preserved). Pre-V1 rows also have NULL event_bar_timestamp
+    since that column arrived in migration 0027 alongside the V1
+    cutover. Marking both optional so the GUI's poll doesn't 500.
+    """
     model_config = ConfigDict(frozen=True)
     log_id: int
     last_sent_at: datetime
     subscriber_id: int
     subscriber_address: str
     subscriber_transport: str
-    event_id: int
+    event_id: int | None = None
     event_signal: str
-    event_bar_timestamp: datetime
+    event_bar_timestamp: datetime | None = None
     ticker_symbol: str | None
     ticker_exchange: str | None
     notification_count: int
