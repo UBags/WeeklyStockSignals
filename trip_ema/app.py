@@ -1040,32 +1040,45 @@ def _build_startup_callback(state: AppState):
     import asyncio  # local to keep import graph tidy
 
     def _startup() -> None:
-        if state.pulse_state is None or state.orchestrator_pool is None:
+        # PHASE-3A-STARTUP-FIX: no umbrella early return. Each
+        # subsystem is guarded independently so RunDispatcher +
+        # RunScheduler can start even when orchestrator is disabled
+        # (which is the Phase 3a cutover state).
+        if state.pulse_state is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                state.pulse_state.bind_loop(loop)
+                logger.info("PulseState bound to asyncio event loop")
+            except RuntimeError:
+                # No running loop — shouldn't happen during lifespan
+                # startup, but defensive: log and continue. SSE fan-out
+                # will be a no-op; snapshot still works.
+                logger.exception(
+                    "PulseState could not bind event loop; SSE fan-out "
+                    "will be disabled (snapshot endpoint still works).",
+                )
+        else:
             logger.info(
-                "Phase 14 startup: orchestrator disabled; skipping",
+                "PulseState is None; SSE fan-out disabled (this is "
+                "expected when orchestrator.enabled=false)."
             )
-            return
-        try:
-            loop = asyncio.get_running_loop()
-            state.pulse_state.bind_loop(loop)
-            logger.info("PulseState bound to asyncio event loop")
-        except RuntimeError:
-            # No running loop — shouldn't happen during lifespan
-            # startup, but defensive: log and continue. SSE fan-out
-            # will be a no-op; snapshot still works.
-            logger.exception(
-                "PulseState could not bind event loop; SSE fan-out "
-                "will be disabled (snapshot endpoint still works).",
-            )
-        try:
-            state.orchestrator_pool.start_all()
+
+        if state.orchestrator_pool is not None:
+            try:
+                state.orchestrator_pool.start_all()
+                logger.info(
+                    "OrchestratorPool started with %d market(s): %s",
+                    len(state.orchestrator_pool),
+                    state.orchestrator_pool.exchanges(),
+                )
+            except Exception:
+                logger.exception("Error starting orchestrator_pool")
+        else:
             logger.info(
-                "OrchestratorPool started with %d market(s): %s",
-                len(state.orchestrator_pool),
-                state.orchestrator_pool.exchanges(),
+                "OrchestratorPool is None; MarketOrchestrator disabled "
+                "(this is expected when orchestrator.enabled=false — "
+                "RunScheduler owns scheduling instead)."
             )
-        except Exception:
-            logger.exception("Error starting orchestrator_pool")
 
         # PHASE-1A-DISPATCHER-START: start the batch-run dispatcher.
         if getattr(state, "run_dispatcher", None) is not None:
