@@ -1357,16 +1357,35 @@ class EtlStatusView(QWidget):
             )
             n_active = 0
 
+        # ---- Query current market state (Issue A2 fix) ----
+        # Previously the modal hardcoded market_open=False, making
+        # the popup always claim "market currently closed" even
+        # during trading hours. We now consult the server's
+        # MarketHoursService via HTTP so the modal shows the truth.
+        # kind_hint is derived from the same signal.
+        try:
+            _mstatus = self._http.get_exchange_market_status(exchange)
+            market_open = bool(_mstatus["is_open"])
+        except Exception:
+            logger.exception(
+                "Could not fetch market status for %s; "
+                "falling back to market_open=False in modal",
+                exchange,
+            )
+            market_open = False
+
+        kind_hint = "intraday" if market_open else "eod"
+
         # ---- Modal ----
-        # The actual intraday-vs-eod determination happens in the
-        # CLI's cmd_cycle (which has the full MarketHoursService).
-        # The modal's kind_hint is advisory; we pass "intraday"
-        # by default and market_open=False so the modal text
-        # nudges toward "determined at runtime".
+        # The final intraday-vs-eod determination still happens in
+        # the CLI's cmd_cycle (which re-checks via MarketHoursService
+        # at run time, immediately before opening the compute_runs
+        # row). The modal's kind_hint / market_open are advisory —
+        # they can be stale by a few seconds vs the CLI's own check.
         modal = IntradayConfirmationModal(
             exchange=exchange,
-            kind_hint="determined at runtime",
-            market_open=False,
+            kind_hint=kind_hint,
+            market_open=market_open,
             n_active_subscribers=n_active,
             parent=self,
         )
@@ -1379,7 +1398,7 @@ class EtlStatusView(QWidget):
         # ---- Reset stage progress before spawn ----
         for label in LIVE_CYCLE_STAGES:
             self._stage_list.set_stage_status(
-                label, StageStatus.PENDING,
+                label, StageStatus.QUEUED,
             )
 
         self._start_intraday_process(exchange=exchange)
