@@ -65,7 +65,7 @@ from .widgets.intraday_confirmation_modal import (
     IntradayConfirmationModal,
 )
 from .widgets.cycle_stdout_parser import (
-    is_cycle_complete_line, labels_before,
+    STAGE_NAME_TO_LABEL, is_cycle_complete_line, labels_before,
     parse_cycle_failure_summary, parse_stage_line,
 )
 from .widgets.ticker_chip import TickerChipArea
@@ -195,6 +195,10 @@ class EtlStatusView(QWidget):
         # Mutex state
         self._local_running: bool = False
         self._inflight_kind: str | None = None
+        # PHASE-3F: compute_run_id of the scheduler-driven (auto) cycle
+        # whose stage progress we're currently mirroring into the stage
+        # panel. None when no auto run is being tracked.
+        self._remote_stage_run_id: int | None = None
         # === STEP 13D3 ===
         self._singlestage_process = None
         self._singlestage_stdout_buffer: str = ""
@@ -700,6 +704,9 @@ class EtlStatusView(QWidget):
 
         self._apply_mutex_state(is_running, inflight_kind)
 
+        # PHASE-3F: mirror auto-run stage progress into the panel.
+        self._update_remote_stage_progress(in_flight)
+
         # PHASE-1B: also fetch queue snapshot over HTTP. Queue is
         # in-memory in the service process, so HTTP is the only
         # channel. Best-effort — HTTP failure leaves the label
@@ -713,6 +720,83 @@ class EtlStatusView(QWidget):
             )
             return
         self._apply_queue_snapshot(snapshot)
+
+    def _update_remote_stage_progress(self, in_flight) -> None:
+        """PHASE-3F: drive the stage panel for scheduler-driven (auto)
+        cycle runs.
+
+        Manual (GUI-spawned) runs already drive the panel from the
+        QProcess stdout parser, so we skip entirely while a local run
+        is active — otherwise the two would fight. Auto runs Popen the
+        identical cycle subprocess from inside the service process;
+        their stdout is unreachable here, so we mirror the stage from
+        compute_runs.current_stage (published by cmd_cycle) instead.
+
+        `in_flight` is the list of ComputeRunRow already fetched by
+        _on_mutex_tick this tick.
+        """
+        if self._local_running:
+            return
+
+        remote = next(
+            (r for r in in_flight if r.kind in ("intraday", "eod")),
+            None,
+        )
+        if remote is not None:
+            if remote.compute_run_id != self._remote_stage_run_id:
+                # New auto run — reset the panel to a clean slate.
+                self._remote_stage_run_id = remote.compute_run_id
+                self._stage_list.reset_all(StageStatus.QUEUED)
+            token = remote.current_stage
+            label = (
+                STAGE_NAME_TO_LABEL.get(token) if token else None
+            )
+            if label is not None:
+                for earlier in labels_before(label):
+                    self._stage_list.set_stage_status(
+                        earlier, StageStatus.DONE,
+                    )
+                self._stage_list.set_stage_status(
+                    label, StageStatus.IN_PROGRESS,
+                )
+            return
+
+        # No auto cycle in flight. If we were tracking one, it just
+        # finished — paint the terminal state from its final row.
+        if self._remote_stage_run_id is None:
+            return
+        finished_id = self._remote_stage_run_id
+        self._remote_stage_run_id = None
+        try:
+            from ...persistence.compute_runs_repo import (
+                ComputeRunsRepository,
+            )
+            with self._db.connect() as conn:
+                row = ComputeRunsRepository(conn).get(finished_id)
+        except Exception:
+            logger.warning(
+                "remote-stage terminal lookup failed", exc_info=True,
+            )
+            return
+        if row is None:
+            return
+        fail_label = (
+            STAGE_NAME_TO_LABEL.get(row.failed_stage)
+            if row.failed_stage else None
+        )
+        if fail_label is not None:
+            for earlier in labels_before(fail_label):
+                self._stage_list.set_stage_status(
+                    earlier, StageStatus.DONE,
+                )
+            self._stage_list.set_stage_status(
+                fail_label, StageStatus.FAILED,
+            )
+        elif row.is_success:
+            self._stage_list.reset_all(StageStatus.DONE)
+        # else: a non-mapping failure (e.g. 'cancelled'/'unknown') —
+        # leave the panel at its last-known state rather than falsely
+        # sweeping to DONE.
 
     def _on_overview_tick(self) -> None:
         exchange = self._picker.current_exchange()
