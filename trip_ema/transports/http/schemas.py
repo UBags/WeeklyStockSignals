@@ -210,18 +210,20 @@ class HealthPayload(BaseModel):
     status: str
     registry_size: int
     cache_size: int
-    compute_scheduler_alive: bool | None = None
-    distributor_alive: bool | None = None
-    compute_last_completed_at: datetime | None = None
-    distributor_last_completed_at: datetime | None = None
     redis_reachable: bool | None = None
-    orchestrator_pool_alive: bool | None = None
-    """Phase 14: True iff every per-market orchestrator's loop
-    thread is alive. None when orchestrator pool is disabled (then
-    legacy compute_scheduler_alive carries the signal)."""
-    orchestrator_pool_last_tick_at: datetime | None = None
-    """Most-recent `last_run_completed_at` across all orchestrators.
-    None when pool is disabled or no orchestrator has ticked yet."""
+    # PHASE-3C: Phase 14 fields (compute_scheduler_alive, distributor_alive,
+    # orchestrator_pool_alive, and their matching *_completed_at datetimes)
+    # were removed here — all six had been permanently None since Phase 3b
+    # deleted MarketOrchestrator + PulseState + the legacy schedulers. The
+    # two new fields below reflect the Phase 1a/3a subsystems that ACTUALLY
+    # own scheduling now.
+    run_scheduler_alive: bool | None = None
+    """Phase 3c: True iff the RunScheduler thread (wall-clock tick planner)
+    is alive. None when AppState hasn't been wired yet (e.g. very early
+    startup, or in HTTP-only test fixtures)."""
+    run_dispatcher_alive: bool | None = None
+    """Phase 3c: True iff the RunDispatcher thread (subprocess launcher)
+    is alive. None when AppState hasn't been wired yet."""
     stale_tickers_count: int = 0
     """Phase 9 A2: number of tickers currently flagged as stale due to
     data gaps (ETL hasn't filled all expected closed weekly buckets).

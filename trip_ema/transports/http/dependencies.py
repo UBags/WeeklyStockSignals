@@ -122,6 +122,27 @@ def get_run_dispatcher():
     return s.run_dispatcher
 
 
+# PHASE-3C: None-tolerant health-probe getters. Unlike the "raise 503"
+# accessors above, these MUST NOT raise for a missing subsystem — the
+# health endpoints are supposed to observe subsystem state, not have
+# their own responses hijacked by the DI layer when state is partially
+# wired.
+def get_run_scheduler_or_none():
+    """Return AppState.run_scheduler, or None if state / subsystem
+    is missing. Never raises. Used by /healthz + /readyz only."""
+    if _state is None:
+        return None
+    return _state.run_scheduler
+
+
+def get_run_dispatcher_or_none():
+    """Return AppState.run_dispatcher, or None if state / subsystem
+    is missing. Never raises. Used by /healthz + /readyz only."""
+    if _state is None:
+        return None
+    return _state.run_dispatcher
+
+
 def _require_state() -> AppState:
     if _state is None:
         raise HTTPException(
