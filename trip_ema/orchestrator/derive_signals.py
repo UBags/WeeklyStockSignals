@@ -46,6 +46,7 @@ from ..persistence.stock_indicator_state_repo import (
     StockIndicatorStateRepository,
 )
 from ..persistence.tickers_repo import TickersRepository
+from ..domain import DetermineSignal
 
 logger = logging.getLogger(__name__)
 
@@ -53,26 +54,22 @@ logger = logging.getLogger(__name__)
 def _classify_regime_change(
     regime_before: int, regime_after: int,
 ) -> str:
-    """Map a (before, after) regime pair to one of the four signal_types.
+    """Adapter to the single source of truth for the signal rule.
 
-    Callers must ensure regime_before != regime_after (a signal IS a
-    regime change by definition) and both values are in {-1, 0, +1}.
+    The BUY / SELL / EXIT_FROM_BUY / EXIT_FROM_SELL rule (with the
+    reversal tie-breaks) lives in
+    ``trip_ema.domain.DetermineSignal.determine_signal`` -- it is NOT
+    re-implemented here. This wrapper adapts the enum result to the DB
+    ``signal_type`` string used by ``current_signals`` /
+    ``historical_signals``.
+
+    Callers guarantee ``regime_before != regime_after`` (a signal IS a
+    regime change), so the result is always one of the four actionable
+    types. A degenerate pair maps to NO_CHANGE, whose DB string is
+    ``None`` -- no exception is raised.
     """
-    if regime_after == 1:
-        return "BUY"
-    if regime_after == -1:
-        return "SELL"
-    if regime_before == 1:
-        return "EXIT_FROM_BUY"
-    if regime_before == -1:
-        return "EXIT_FROM_SELL"
-    # Unreachable for valid inputs (the only case left is
-    # regime_before == 0 and regime_after == 0, which is not a
-    # regime change).
-    raise ValueError(
-        f"cannot classify regime change "
-        f"(before={regime_before}, after={regime_after}) — "
-        f"caller must ensure they differ and are in {{-1, 0, +1}}"
+    return DetermineSignal.to_db_str(
+        DetermineSignal.determine_signal(regime_before, regime_after)
     )
 
 

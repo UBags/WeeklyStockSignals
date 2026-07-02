@@ -52,6 +52,7 @@ from ..fundamentals.indicator_primitives import compute_indicator_series
 from ..regime import BarInputs, Regime, compute_regime
 from .responses import TerseResponse, VerboseResponse
 from ..fundamentals.indicator_primitives import EngineParams
+from ..domain import DetermineSignal
 
 
 # ============================================================
@@ -261,33 +262,16 @@ def _walk_bars(
 
 
 def _classify_regime_transition(states: list[BarState]) -> ChangeSignal:
-    """Map the regime delta between the last two states to a
-    ChangeSignal.
+    """Adapter to the single source of truth for the stateless compute
+    path. Extracts the last two display-regime values and routes them to
+    ``trip_ema.domain.DetermineSignal.determine_signal`` -- the rule is
+    NOT re-implemented here.
 
-    This is a debug-grade classifier — the production signal path
-    (Step 5 backfill, Step 6 live) uses `generate_signal` with proper
-    PositionState threading. Stateless compute has no prior state,
-    so we just classify by the regime transition:
-
-      - NEUTRAL → BULLISH (or BEARISH → BULLISH): BUY
-      - NEUTRAL → BEARISH (or BULLISH → BEARISH): SELL
-      - BULLISH → NEUTRAL: EXIT_FROM_BUY
-      - BEARISH → NEUTRAL: EXIT_FROM_SELL
-      - same → same: NO_CHANGE
+    Returns ``ChangeSignal.NO_CHANGE`` for fewer than two states or when
+    the two regimes are equal. Never raises.
     """
     if len(states) < 2:
         return ChangeSignal.NO_CHANGE
-    prev_bg = states[-2].display_bg
-    curr_bg = states[-1].display_bg
-    if prev_bg == curr_bg:
-        return ChangeSignal.NO_CHANGE
-    if curr_bg == CoreRegime.BULLISH:
-        return ChangeSignal.BUY
-    if curr_bg == CoreRegime.BEARISH:
-        return ChangeSignal.SELL
-    # curr is NEUTRAL — exit from whichever side prev was.
-    if prev_bg == CoreRegime.BULLISH:
-        return ChangeSignal.EXIT_FROM_BUY
-    if prev_bg == CoreRegime.BEARISH:
-        return ChangeSignal.EXIT_FROM_SELL
-    return ChangeSignal.NO_CHANGE
+    return DetermineSignal.determine_signal(
+        states[-2].display_bg, states[-1].display_bg,
+    )
