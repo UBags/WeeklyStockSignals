@@ -27,12 +27,12 @@ from ...config import Config
 # Phase 7: optional Redis queue. Imported under TYPE_CHECKING to avoid a
 # hard dependency on `redis` at import time for code that doesn't use it.
 from typing import TYPE_CHECKING
+# PHASE-3B: OrchestratorPool + PulseState TYPE_CHECKING imports removed
+# (both classes deleted alongside their modules).
 if TYPE_CHECKING:
     from concurrent.futures import ThreadPoolExecutor
 
     from ...notifications.redis_queue import RedisQueue
-    from ...scheduler import OrchestratorPool
-    from ..http.pulse_state import PulseState
 
 
 @dataclass
@@ -60,19 +60,8 @@ class AppState:
     the ETL admin endpoints are disabled (e.g., in tests that don't
     need them)."""
 
-    orchestrator_pool: OrchestratorPool | None = None
-    """Phase 14: the OrchestratorPool managing per-market MarketOrchestrators.
-    None when the orchestrator is disabled
-    (`scheduling.orchestrator.enabled=False`); in that case the
-    admin orchestrator endpoints return 503 and the legacy
-    ComputeScheduler thread remains in charge. Typed as Optional[object]
-    to avoid forward-reference cycles with the scheduler package."""
-
-    pulse_state: PulseState | None = None
-    """Phase 14: the in-memory PulseState pub/sub for GUI live updates.
-    None when no orchestrator is running — pulse is only meaningful
-    when there's an orchestrator producing events.
-    Typed via TYPE_CHECKING import for the same reason as orchestrator_pool."""
+    # PHASE-3B: orchestrator_pool + pulse_state fields deleted; the
+    # underlying OrchestratorPool + PulseState classes are gone.
 
     # PHASE-1A: new batch-run dispatcher singletons.
     run_queue: object | None = None
@@ -223,35 +212,7 @@ def get_etl_executor():
     return _require_state().etl_executor
 
 
-def get_orchestrator_pool():
-    """Return the AppState's OrchestratorPool, or None.
-
-    Returns None in two cases:
-      1. Orchestrator disabled in config (orchestrator.enabled=false) —
-         the AppState field is set but None.
-      2. Application not yet initialized (e.g., in HTTP tests that
-         build a minimal app without calling set_state()). Unlike
-         most getters, this one does NOT raise 503 when state is
-         missing — /readyz uses it and must not be blocked by an
-         uninitialized state in tests.
-
-    The admin orchestrator endpoints check `pool is None` themselves
-    and return 503 with a clearer "orchestrator not running" message;
-    the snapshot/stream pulse endpoints do the same for pulse_state."""
-    if _state is None:
-        return None
-    return _state.orchestrator_pool
-
-
-def get_pulse_state():
-    """Return the AppState's PulseState, or None.
-
-    Returns None in two cases:
-      1. Orchestrator disabled in config — the AppState field is None.
-      2. Application not yet initialized. Mirrors `get_orchestrator_pool`
-         in tolerating missing state rather than 503-ing; the
-         /v1/pulse and /v1/pulse/stream endpoints check `pulse_state
-         is None` and return 503 with a clearer message in that case."""
-    if _state is None:
-        return None
-    return _state.pulse_state
+# PHASE-3B: get_orchestrator_pool() + get_pulse_state() DI accessors
+# removed. Their consumer routes (admin_orchestrator.py, pulse.py) were
+# deleted with them. admin_health._compute_scheduler_card now reads
+# compute_runs directly instead of via orchestrator_pool.

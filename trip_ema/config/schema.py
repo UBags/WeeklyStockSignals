@@ -571,27 +571,11 @@ class SchedulingConfig(BaseModel):
                     "Must be a divisor of every subscriber's cadence.",
     )
     default_timeframe: Timeframe = Timeframe.WEEKLY
+    # PHASE-3B: dispatcher_enabled field removed (was Phase 3a rollout
+    # gate). RunScheduler is now unconditional. `orchestrator: OrchestratorConfig`
+    # kept as vestigial: config files carrying `scheduling.orchestrator:` blocks
+    # still parse; the fields are read by nothing.
     orchestrator: OrchestratorConfig = OrchestratorConfig()
-
-    # PHASE-3A: gate for RunScheduler (wall-clock tick planner).
-    # When False (default), RunScheduler is constructed but never
-    # .start()'d — MarketOrchestrator remains in charge of
-    # scheduled ticks. When True, RunScheduler owns tick timing
-    # and enqueues into RunQueue for RunDispatcher to consume.
-    # Both scheduler paths CAN run simultaneously, but that would
-    # double-fire scheduled runs — the flag exists so the operator
-    # can migrate one deployment at a time. Phase 3b will delete
-    # MarketOrchestrator entirely and this flag becomes always-on
-    # behavior.
-    dispatcher_enabled: bool = Field(
-        default=False,
-        description=(
-            "Phase 3a rollout flag. When True, RunScheduler thread "
-            "owns wall-clock scheduling and MarketOrchestrator "
-            "should be disabled via orchestrator.enabled=False. "
-            "Default False = safe / current behavior."
-        ),
-    )
 
 
 # ---------- Cache ---------- #

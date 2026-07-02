@@ -23,9 +23,10 @@ from sqlalchemy import Engine, text
 
 # === STEP 14B-FIXUP2-imports: scheduler types + getters stripped ===
 from ....cache import SignalCache
+# PHASE-3B: get_orchestrator_pool import removed.
 from ..dependencies import (
     get_cache, get_db_engine,
-    get_orchestrator_pool, get_redis_queue,
+    get_redis_queue,
     require_admin_token,
 )
 from ..schemas import HealthCardPayload, HealthSnapshotPayload
@@ -44,13 +45,12 @@ router = APIRouter(
 _STATUS_RANK = {"crit": 3, "warn": 2, "ok": 1, "unknown": 0}
 
 
-# === STEP 14B-FIXUP2-signature: scheduler/distributor params removed ===
+# PHASE-3B: orchestrator_pool dependency removed; card now reads compute_runs.
 @router.get("", response_model=HealthSnapshotPayload)
 def health_snapshot(
     db_engine: Engine = Depends(get_db_engine),
     cache: SignalCache = Depends(get_cache),
     redis_queue=Depends(get_redis_queue),
-    orchestrator_pool=Depends(get_orchestrator_pool),
 ) -> HealthSnapshotPayload:
     """One call returning every dashboard card. ~10ms — composed of
     several cheap reads (one SQL query, several in-process state
@@ -63,9 +63,8 @@ def health_snapshot(
     # 2. ETL freshness (any active run, last successful EoD age)
     cards.append(_etl_freshness_card(db_engine))
 
-    # === STEP 14B-FIXUP2-callsites: scheduler/distributor args removed ===
-    # 3. Compute step health (orchestrator-only now)
-    cards.append(_compute_scheduler_card(orchestrator_pool))
+    # PHASE-3B: compute step health now derives from compute_runs table.
+    cards.append(_compute_scheduler_card(db_engine))
 
     # 4. Cache — populated entry count vs registered ticker count
     cards.append(_cache_card(cache))
@@ -182,91 +181,74 @@ def _etl_freshness_card(db_engine: Engine) -> HealthCardPayload:
 
 # === STEP 14B-FIXUP2-cs_card: scheduler arg + legacy branch removed ===
 def _compute_scheduler_card(
-    orchestrator_pool,
+    db_engine: Engine,
 ) -> HealthCardPayload:
-    """Compute step health (orchestrator-only post Step 14b).
+    """Compute step health, derived from `compute_runs`.
 
-    The legacy standalone ComputeScheduler thread mode was demolished
-    in Step 14b — orchestrator pool is the sole compute driver.
+    PHASE-3B rewrite: MarketOrchestrator + its `last_run_summary` API
+    are gone. We derive the same card from the most-recent finished
+    row in `compute_runs`. Cheap: single indexed lookup by finished_at.
+
+    Status mapping:
+      finished_at IS NULL rows are in-flight — not counted here.
+      failed_stage IS NULL          -> ok    (clean success)
+      failed_stage = 'cancelled'    -> warn  (SIGTERM by operator)
+      failed_stage = 'boot_orphan_cleanup' -> warn (prior crash)
+      other non-null failed_stage   -> crit  (real failure)
     """
-    if orchestrator_pool is not None:
-        try:
-            # Find the most-recent compute step across all markets.
-            latest_finished = None
-            latest_market = None
-            latest_step = None
-            for orch in orchestrator_pool.all():
-                summary = orch.last_run_summary
-                if summary is None or summary.finished_at is None:
-                    continue
-                if latest_finished is None or summary.finished_at > latest_finished:
-                    latest_finished = summary.finished_at
-                    latest_market = orch.exchange
-                    latest_step = summary.compute
-
-            if latest_finished is None:
-                return HealthCardPayload(
-                    name="Compute scheduler", status="unknown",
-                    headline="Never run",
-                    detail="No orchestrator pipeline has completed yet.",
-                )
-
-            age_seconds = (datetime.now(UTC) - latest_finished).total_seconds()
-            age_str = (
-                f"{age_seconds / 60:.1f} min ago"
-                if age_seconds < 3600
-                else f"{age_seconds / 3600:.1f}h ago"
-            )
-
-            if latest_step is None:
-                # Pipeline ran but compute step didn't execute
-                # (concurrent-skipped, or fetch failed first).
-                return HealthCardPayload(
-                    name="Compute scheduler", status="warn",
-                    headline=f"Last run ({latest_market}): {age_str}",
-                    detail="Compute step did not execute (fetch failed or concurrent-skipped).",
-                )
-
-            if latest_step.succeeded:
-                return HealthCardPayload(
-                    name="Compute scheduler", status="ok",
-                    headline=f"Last cycle ({latest_market}): {age_str}",
-                    detail=(
-                        f"Compute step succeeded in {latest_step.duration_seconds:.1f}s."
-                        if latest_step.duration_seconds is not None
-                        else "Compute step succeeded."
-                    ),
-                )
-
-            if latest_step.skipped_reason:
-                return HealthCardPayload(
-                    name="Compute scheduler", status="warn",
-                    headline=f"Last cycle ({latest_market}): {age_str}",
-                    detail=f"Compute skipped: {latest_step.skipped_reason}",
-                )
-
-            return HealthCardPayload(
-                name="Compute scheduler", status="crit",
-                headline=f"Last cycle ({latest_market}): {age_str} — FAILED",
-                detail=latest_step.error_message or "Compute step failed (no detail).",
-            )
-        except Exception as e:
+    try:
+        with db_engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT exchange, kind, started_at, finished_at,
+                       failed_stage, error_message
+                  FROM compute_runs
+                 WHERE finished_at IS NOT NULL
+                 ORDER BY finished_at DESC
+                 LIMIT 1
+            """)).first()
+        if row is None:
             return HealthCardPayload(
                 name="Compute scheduler", status="unknown",
-                headline="Pool inspection failed", detail=str(e),
+                headline="Never run",
+                detail="No finished compute_runs rows yet.",
             )
 
-    # === STEP 14B-FIXUP2-cs_card_legacy: legacy branch removed ===
-    # Orchestrator pool is None → orchestrator disabled in config.
-    return HealthCardPayload(
-        name="Compute scheduler", status="unknown",
-        headline="Orchestrator disabled",
-        detail=(
-            "scheduling.orchestrator.enabled=False in config; no "
-            "compute pipeline is running. (Legacy ComputeScheduler "
-            "was demolished in Step 14b.)"
-        ),
-    )
+        age_seconds = (datetime.now(UTC) - row.finished_at).total_seconds()
+        age_str = (
+            f"{age_seconds / 60:.1f} min ago"
+            if age_seconds < 3600
+            else f"{age_seconds / 3600:.1f}h ago"
+        )
+        label = f"{row.exchange} {row.kind}"
+
+        if row.failed_stage is None:
+            duration = (row.finished_at - row.started_at).total_seconds()
+            return HealthCardPayload(
+                name="Compute scheduler", status="ok",
+                headline=f"Last cycle ({label}): {age_str}",
+                detail=f"Succeeded in {duration:.1f}s.",
+            )
+
+        if row.failed_stage in ("cancelled", "boot_orphan_cleanup"):
+            return HealthCardPayload(
+                name="Compute scheduler", status="warn",
+                headline=f"Last cycle ({label}): {age_str}",
+                detail=(
+                    row.error_message
+                    or f"Cycle ended with failed_stage={row.failed_stage!r}."
+                ),
+            )
+
+        return HealthCardPayload(
+            name="Compute scheduler", status="crit",
+            headline=f"Last cycle ({label}): {age_str} — FAILED",
+            detail=row.error_message or f"failed_stage={row.failed_stage!r}",
+        )
+    except Exception as e:
+        return HealthCardPayload(
+            name="Compute scheduler", status="unknown",
+            headline="compute_runs query failed", detail=str(e),
+        )
 
 def _cache_card(cache: SignalCache) -> HealthCardPayload:
     """Cache should hold one snapshot per active ticker. Empty cache

@@ -24,11 +24,12 @@ from collections.abc import Callable
 
 from fastapi import FastAPI
 
+# PHASE-3B: admin_orchestrator + pulse route imports removed (modules deleted).
 from .routes import (
     admin, admin_etl, admin_exchange_state, admin_exchanges, admin_health,
-    admin_notifications, admin_orchestrator, admin_signals, admin_subscribers,
+    admin_notifications, admin_signals, admin_subscribers,
     admin_v1pipeline,
-    compute, fundamentals, health, pulse, signals,
+    compute, fundamentals, health, signals,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,11 +114,8 @@ def create_app(
     app.include_router(admin_subscribers.router)
     app.include_router(admin_notifications.router)
     app.include_router(admin_health.router)
-    # Phase 14 — orchestrator pulse + admin routers. Endpoints return 503
-    # when AppState.pulse_state / AppState.orchestrator_pool are None
-    # (i.e., when `scheduling.orchestrator.enabled = False` in config).
-    app.include_router(pulse.router)
-    app.include_router(admin_orchestrator.router)
+    # PHASE-3B: pulse + admin_orchestrator router registrations removed;
+    # both routes were bound to the deleted MarketOrchestrator/PulseState.
     # Phase 1 fundamentals — industry classification + overrides + run
     # status. Reuses AppState.etl_executor for fire-and-forget refresh.
     app.include_router(fundamentals.router)

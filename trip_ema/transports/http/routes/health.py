@@ -29,10 +29,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from ....cache import SignalCache
 # === STEP 14B-E5: scheduler type imports stripped ===
+# PHASE-3B: get_orchestrator_pool import dropped (function deleted).
 from ..dependencies import (
     get_cache,
-    # === STEP 14B-FIXUP3-deps: scheduler/distributor getters stripped ===
-    get_orchestrator_pool,
     get_redis_queue,
 )
 from ..schemas import HealthPayload
@@ -56,54 +55,27 @@ def healthz(
 @router.get("/readyz", response_model=HealthPayload)
 def readyz(
     cache: SignalCache = Depends(get_cache),
-    # === STEP 14B-E5: compute_scheduler + distributor deps removed ===
     redis_queue=Depends(get_redis_queue),
-    orchestrator_pool=Depends(get_orchestrator_pool),
 ) -> HealthPayload:
     """Readiness probe. Returns 200 only if the service can do useful work.
 
-    Phase 14: when the orchestrator pool is enabled, compute runs on
-    each MarketOrchestrator's tick thread rather than on the legacy
-    ComputeScheduler's loop thread. In that mode the legacy
-    compute_scheduler_alive field is reported as None ("disabled, not
-    broken") and the orchestrator_pool_* fields carry the real signal.
+    PHASE-3B: orchestrator_pool dependency removed. MarketOrchestrator +
+    ComputeScheduler are gone; RunScheduler + RunDispatcher own scheduling
+    now. This endpoint still returns the same wire schema (HealthPayload)
+    for backward compat with external scrapes, but the compute_scheduler_alive
+    / orchestrator_pool_alive / distributor_alive fields are permanently
+    None. A follow-up (Phase 3c) will replace them with run_scheduler_alive
+    + run_dispatcher_alive fields that reflect the actual subsystem state.
+
+    Current readiness signals:
+      - Cache has at least one snapshot
+      - Redis reachable (if configured)
     """
-    now = datetime.now(UTC)
     issues: list[str] = []
 
     n_snapshots = cache.snapshot_count()
     if n_snapshots == 0:
         issues.append("Cache empty (never seeded)")
-
-    # Compute health is reported from whichever subsystem actually owns
-    # the compute cadence. When the orchestrator pool is the owner,
-    # check IT for liveness/unhealthy state; the legacy compute_scheduler
-    # instance lives on app state but its loop thread isn't started.
-    orchestrator_mode = orchestrator_pool is not None
-    if orchestrator_mode:
-        pool_problem = orchestrator_pool.is_unhealthy(now)
-        if pool_problem:
-            issues.append(pool_problem)
-        compute_scheduler_alive: bool | None = None
-        compute_last_completed_at = (
-            orchestrator_pool.last_tick_completed_at()
-        )
-        orchestrator_pool_alive: bool | None = orchestrator_pool.is_alive()
-        orchestrator_pool_last_tick_at = compute_last_completed_at
-    else:
-        compute_problem = compute_scheduler.is_unhealthy(now)
-        if compute_problem:
-            issues.append(compute_problem)
-        compute_scheduler_alive = compute_scheduler.is_alive()
-        compute_last_completed_at = compute_scheduler.last_run_completed_at
-        orchestrator_pool_alive = None
-        orchestrator_pool_last_tick_at = None
-
-    # === STEP 14B-E5: distributor demolished in Tier 2 ===
-    if False:  # distributor demolished
-        dist_problem = None
-        if dist_problem:
-            issues.append(dist_problem)
 
     redis_reachable: bool | None = None
     if redis_queue is not None:
@@ -118,13 +90,15 @@ def readyz(
         status="ready" if not issues else "not_ready",
         registry_size=n_snapshots,   # legacy wire field
         cache_size=n_snapshots,
-        compute_scheduler_alive=compute_scheduler_alive,
-        distributor_alive=None,  # 14B-E5: distributor demolished
-        compute_last_completed_at=compute_last_completed_at,
-        distributor_last_completed_at=None,  # 14B-E5
+        # Legacy fields — subsystems deleted in Phase 3b. Kept as None
+        # so the wire schema stays backward-compatible.
+        compute_scheduler_alive=None,
+        distributor_alive=None,
+        compute_last_completed_at=None,
+        distributor_last_completed_at=None,
         redis_reachable=redis_reachable,
-        orchestrator_pool_alive=orchestrator_pool_alive,
-        orchestrator_pool_last_tick_at=orchestrator_pool_last_tick_at,
+        orchestrator_pool_alive=None,
+        orchestrator_pool_last_tick_at=None,
         stale_tickers_count=len(stale),
         issues=issues,
     )

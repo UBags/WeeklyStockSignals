@@ -35,8 +35,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn, TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from .transports.http.pulse_state import PulseState
+# PHASE-3B: PulseState TYPE_CHECKING import removed (module deleted).
 
 # PHASE-1A-DISPATCHER-BUILD: new batch-run subsystem imports.
 from .persistence.update_run_in_progress_repo import (
@@ -62,12 +61,10 @@ from .persistence import (
 from .persistence.backfill_runs_repo import BackfillRunsRepository
 from .persistence.current_signals_repo import CurrentSignalsRepository
 # === STEP 14B-E6-import: ComputeScheduler + SubscriberDistributor imports stripped ===
-from .scheduler import (
-    MarketHoursService,
-    OrchestratorPool,
-    OrchestratorSettings,
-    build_pool_from_configs,
-)
+# PHASE-3B: OrchestratorPool + OrchestratorSettings + build_pool_from_configs
+# imports removed; the classes were deleted alongside market_orchestrator.py
+# and orchestrator_pool.py.
+from .scheduler import MarketHoursService
 from .transports.http import AppState, create_app, set_state
 
 logger = logging.getLogger(__name__)
@@ -194,18 +191,9 @@ def _build_app_state(config_path: Path) -> AppState:
         max_workers=2, thread_name_prefix="trip-ema-etl-",
     )
 
-    # Phase 14: build the per-market orchestrator pool + pulse state.
-    # The pool's threads are NOT started here — they're started during
-    # the FastAPI lifespan startup callback, so the asyncio loop is
-    # already running when the first orchestrator publishes (PulseState
-    # needs the loop for SSE fan-out). When the orchestrator is
-    # disabled, both are None and the new endpoints return 503.
-    # === STEP 14B-E6-boc_call: _build_orchestrator_components no longer takes scheduler/distributor ===
-    pulse_state, orchestrator_pool = _build_orchestrator_components(
-        config=config,
-        db_engine=db_engine,
-        v1_cache=v1_cache,
-    )
+    # PHASE-3B: _build_orchestrator_components call removed.
+    # MarketOrchestrator + OrchestratorPool + PulseState are gone;
+    # RunScheduler + RunDispatcher own scheduling entirely.
 
     # PHASE-1A + PHASE-3A: build queue + dispatcher + scheduler.
     # Threads are not started here — the lifespan startup callback
@@ -220,6 +208,8 @@ def _build_app_state(config_path: Path) -> AppState:
     )
 
     # === STEP 14B-FIXUP1-app-appstate: v1_cache plumbed through ===
+    # PHASE-3B-APPSTATE: orchestrator_pool + pulse_state kwargs removed
+    # (fields deleted from AppState alongside their subsystems).
     return AppState(
         config=config,
         db_engine=db_engine,
@@ -228,269 +218,17 @@ def _build_app_state(config_path: Path) -> AppState:
         redis_queue=redis_queue,
         metrics_server=metrics_server,
         etl_executor=etl_executor,
-        orchestrator_pool=orchestrator_pool,
-        pulse_state=pulse_state,
         run_queue=run_queue,               # PHASE-1A-BATCH-CALLSITE
         run_dispatcher=run_dispatcher,     # PHASE-1A-BATCH-CALLSITE
         run_scheduler=run_scheduler,       # PHASE-3A-BATCH-CALLSITE
     )
 
 
-def _is_eod_now_nse() -> bool:
-    """Step 13a: is the current wall-clock time PAST NSE close?
-
-    NSE closes at 15:30 IST. The orchestrator's scheduled ticks
-    fall at 09:30 / 12:15 / 15:00 / 16:30 IST — only the 16:30
-    tick fires after close, so this returns True ONLY for that
-    tick. Pre-close ticks → False (intraday); the post-close tick
-    → True (EoD).
-
-    Hardcoded for NSE because the V1 cycle is NSE-only today
-    (per _make_v1_compute_run_once which also hardcodes
-    exchange="NSE"). When BSE/NYSE wiring lands (queued Phase
-    14.7+ work), both this helper AND _make_v1_compute_run_once
-    get parameterized by exchange together.
-    """
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
-    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
-    # Tuple compare — (HH, MM) > (15, 30) iff strictly later
-    return (now_ist.hour, now_ist.minute) > (15, 30)
-
-
-def _make_logged_compute(
-    base_callable,
-    *,
-    db_engine,
-    exchange: str,
-    is_eod_fn,
-    snapshotter,
-):
-    """Step 13a: wrap the compute_run_once callable to:
-      1. Record one compute_runs row per tick (kind=intraday/eod).
-      2. After a successful EoD tick, write a market_overview_daily
-         snapshot for the IST-current date.
-
-    Failures in (1) or (2) are logged but never propagated — the
-    orchestrator's downstream consumers (distribute step, pulse
-    publish) must not be blocked by an activity-log write failing.
-
-    The wrapper layers on TOP of Step 11a's deferring layer:
-      base (no log) → deferring (skips if backfill active) →
-      logged (this layer) → orchestrator pool
-    """
-    from .persistence.compute_runs_repo import ComputeRunsRepository
-
-    def _logged():
-        kind = "eod" if is_eod_fn() else "intraday"
-        run_id: int | None = None
-        try:
-            with db_engine.begin() as conn:
-                run_id = ComputeRunsRepository(conn).start(
-                    kind=kind, exchange=exchange,
-                )
-        except Exception as log_err:
-            # Activity-log write failure must not block the
-            # compute pass. Log and proceed.
-            logger.warning(
-                "compute_runs.start failed (kind=%s, exchange=%s): "
-                "%s — continuing without an activity-log row",
-                kind, exchange, log_err, exc_info=True,
-            )
-
-        result = None
-        error_message: str | None = None
-        try:
-            result = base_callable()
-            return result
-        except Exception as e:
-            error_message = repr(e)
-            raise
-        finally:
-            # Update the compute_runs row (best-effort)
-            if run_id is not None:
-                try:
-                    with db_engine.begin() as conn:
-                        ComputeRunsRepository(conn).finish(
-                            run_id,
-                            error_message=error_message,
-                        )
-                except Exception as log_err:
-                    logger.warning(
-                        "compute_runs.finish failed "
-                        "(run_id=%d): %s — row will show as "
-                        "in-flight on next read",
-                        run_id, log_err, exc_info=True,
-                    )
-
-            # EoD snapshot: only fire when the compute pass
-            # succeeded (snapshot reads what compute wrote)
-            if kind == "eod" and error_message is None:
-                try:
-                    snapshotter.snapshot_for_today(
-                        exchange=exchange,
-                    )
-                except Exception as snap_err:
-                    logger.warning(
-                        "EoD market_overview snapshot failed "
-                        "(exchange=%s): %s",
-                        exchange, snap_err, exc_info=True,
-                    )
-
-    return _logged
-
-
-# === STEP 14B-E6-boc_sig: scheduler/distributor params removed ===
-def _build_orchestrator_components(
-    *,
-    config,
-    db_engine,
-    v1_cache: CurrentSignalsCache,
-) -> tuple[PulseState | None, OrchestratorPool | None]:
-    """Phase 14: build (PulseState, OrchestratorPool) if enabled in config.
-
-    Returns (None, None) when `scheduling.orchestrator.enabled = False` —
-    the legacy ComputeScheduler thread is in charge and the new HTTP
-    endpoints return 503. When enabled:
-
-      * `PulseState` is constructed (its asyncio loop binding happens
-        later, during FastAPI's lifespan startup, when the loop is
-        actually running).
-      * `OrchestratorPool` is built from `config.market_hours`. The
-        pool's threads are NOT started here — `start_all()` is called
-        from the lifespan startup callback for the same loop-binding
-        reason.
-      * The `fetch_fn` for each market closes over (db_engine, config)
-        and calls `run_eod(..., exchange=...)` — the natural fetch
-        primitive. If you need a different cadence (intraday, custom),
-        change the closure here.
-
-    Failure modes:
-      * Config validation (market_hours empty, tz invalid, etc.) raises
-        from `build_pool_from_configs`. Surfaced at startup with the
-        original Pydantic error.
-      * fetch_fn construction is lazy — the runner functions are
-        imported at call time so a broken yfinance install doesn't
-        block service startup for non-fetch tests.
-    """
-    if not config.scheduling.orchestrator.enabled:
-        logger.info("Orchestrator disabled in config; skipping pool build")
-        return (None, None)
-
-    if not config.market_hours:
-        logger.warning(
-            "Orchestrator enabled but config.market_hours is empty; "
-            "no per-market threads will run. Pool returned empty.",
-        )
-
-    # Local import: pulse_state lives under transports.http to keep the
-    # SSE-specific concerns close to the HTTP route that consumes them.
-    from .transports.http.pulse_state import PulseState
-
-    pulse_state = PulseState()
-
-    orch_cfg = config.scheduling.orchestrator
-    settings = OrchestratorSettings(
-        fetch_timeout=timedelta(seconds=orch_cfg.fetch_timeout_seconds),
-        fetch_retry_delay=timedelta(
-            minutes=orch_cfg.fetch_retry_delay_minutes,
-        ),
-        catch_up_on_startup=orch_cfg.catch_up_on_startup,
-        catch_up_skip_if_recent=timedelta(
-            minutes=orch_cfg.catch_up_skip_if_recent_minutes,
-        ),
-    )
-
-    def _fetch_fn_for(exchange: str):
-        """Closure: each market's orchestrator gets a thin wrapper
-        that calls `run_eod` with the right exchange code. Imported
-        lazily so the etl extras don't have to be installed for
-        non-fetch tests.
-
-        Phase 14.6a: the runner's first positional parameter is
-        `db_engine` (renamed from `engine` for codebase-wide
-        consistency); the call below uses kwargs throughout to be
-        explicit.
-        """
-        from .etl.runner import run_eod  # noqa: PLC0415
-
-        def _fetch(exchange_str: str):
-            # The orchestrator passes its own exchange string; we
-            # honor it (rather than the closure-captured one) so a
-            # future per-market refactor wouldn't silently misroute.
-            assert exchange_str == exchange, (
-                f"fetch_fn for {exchange} invoked with {exchange_str}"
-            )
-            result = run_eod(
-                db_engine=db_engine,
-                config=config,
-                exchange=exchange,
-            )
-            # === STEP 14A-FIXUP: legacy eod_pipeline call removed ===
-            # The post-fetch fundamentals pipeline call has been
-            # demolished as part of the V1 cutover — recompute_market
-            # (invoked separately by the orchestrator as
-            # compute_run_once) now handles all indicators.
-            return result
-        return _fetch
-
-    # Step 10 cutover: V1 lambdas. The legacy
-    # `compute_scheduler.run_once` and `distributor.run_once` are no
-    # longer reachable from the orchestrator — ComputeScheduler is
-    # constructed but neither `.start()`'d nor `.run_once()`'d.
-    # Step 14 demolishes both.
-    base_compute_run_once = _make_v1_compute_run_once(
-        db_engine=db_engine, v1_cache=v1_cache,
-    )
-    base_distribute_run_once = _make_v1_distribute_run_once(
-        db_engine=db_engine,
-        brevo_config=config.transports.brevo,
-    )
-
-    # Step 11a: deferring layer. When `backfill_runs.is_running()`
-    # returns True, ticks no-op and a background poller spawns to
-    # run one catch-up tick after backfill completes.
-    poller_state = _BackfillPollerState()
-    compute_run_once = _make_deferring_compute(
-        base_callable=base_compute_run_once,
-        db_engine=db_engine,
-        poller_state=poller_state,
-        catch_up_distribute=base_distribute_run_once,
-    )
-    distribute_run_once = _make_deferring_distribute(
-        base_callable=base_distribute_run_once,
-        db_engine=db_engine,
-    )
-
-    # Step 13a: log every compute tick into compute_runs + write
-    # an EoD market_overview_daily snapshot. Wraps the deferring
-    # layer's output so deferring still applies (when a backfill
-    # holds the lock, the tick no-ops BEFORE we'd log it — that's
-    # correct, deferred ticks shouldn't pollute the activity log).
-    from .snapshots.market_overview import MarketOverviewSnapshotter
-    _snapshotter = MarketOverviewSnapshotter(db_engine)
-    compute_run_once = _make_logged_compute(
-        compute_run_once,
-        db_engine=db_engine,
-        exchange="NSE",
-        is_eod_fn=_is_eod_now_nse,
-        snapshotter=_snapshotter,
-    )
-
-    pool = build_pool_from_configs(
-        market_configs=config.market_hours,
-        settings=settings,
-        fetch_fn_factory=_fetch_fn_for,
-        compute_run_once=compute_run_once,
-        distribute_run_once=distribute_run_once,
-        pulse=pulse_state,
-    )
-    logger.info(
-        "Built OrchestratorPool with %d market(s): %s",
-        len(pool), pool.exchanges(),
-    )
-    return (pulse_state, pool)
+# PHASE-3B: Deleted _is_eod_now_nse, _make_logged_compute, and
+# _build_orchestrator_components. All three were part of MarketOrchestrator's
+# in-process tick pipeline (Step 13a + Phase 14). RunScheduler + RunDispatcher
+# spawn cmd_cycle subprocesses now; the ETL CLI (trip_ema/etl/cli.py::cmd_cycle)
+# owns the fetch->compute->distribute pipeline directly.
 
 
 def _build_phase1a_batch_subsystem(*, db_engine, config=None, config_path=None):
@@ -654,243 +392,13 @@ def _wrap_transports_with_breakers(
     }
 
 
-def _make_v1_compute_run_once(
-    *,
-    db_engine,
-    v1_cache: CurrentSignalsCache,
-    exchange: str = "NSE",
-):
-    """Factory: build the V1 `compute_run_once` callable that the
-    orchestrator's pipeline invokes once per tick.
-
-    Closes over `db_engine` and `v1_cache`. `exchange` defaults to
-    'NSE' — the V1 cycle is NSE-only for now; BSE/NYSE wiring is
-    Phase 14.7+ work. Other callers (e.g. backfill in Step 11) can
-    pass a different exchange.
-
-    The returned callable takes no args and returns the
-    `RecomputeMarketResult` from `recompute_market`. The orchestrator's
-    pipeline machinery stores the result for `/admin/health` snapshots.
-    """
-    def _run():
-        return recompute_market(
-            db_engine,
-            mode="live",
-            cache=v1_cache,
-            exchange=exchange,
-        )
-    return _run
-
-
-def _make_v1_distribute_run_once(
-    *,
-    db_engine,
-    brevo_config,
-):
-    """Factory: build the V1 `distribute_run_once` callable that the
-    orchestrator's pipeline invokes once per tick (after the compute
-    step finishes).
-
-    When `brevo_config` is None (transports.brevo not configured),
-    returns a no-op lambda that returns None. This is the "Brevo
-    deliberately disabled" path — the cycle runs to completion, no
-    emails go out, no error is logged each tick.
-
-    When configured, the returned callable:
-      1. Generates a per-tick cycle_id from the current wall clock
-         (UTC-anchored YYYYMMDD-HHMM for deterministic ordering
-         across pods/markets).
-      2. Calls `notify_subscribers` with the Brevo credentials and
-         the current wall clock.
-      3. Returns the `NotifyResult` for the orchestrator's pipeline
-         to capture in its tick record.
-    """
-    if brevo_config is None:
-        logger.warning(
-            "V1 distribute: transports.brevo not configured — "
-            "notify_subscribers will be a no-op each tick. "
-            "Set transports.brevo in config to enable emails.",
-        )
-        def _noop():
-            return None
-        return _noop
-
-    # Re-load the API key the same way EmailTransport does. The key
-    # is short-lived in memory; we capture it into this closure
-    # rather than re-reading the file on every tick.
-    from .config.brevo_secrets import load_brevo_api_key
-    api_key = load_brevo_api_key(brevo_config.secrets_file)
-    from_address = brevo_config.sender_email
-    from_name = brevo_config.sender_name
-
-    logger.info(
-        "V1 distribute: wired with Brevo (sender=%s)",
-        from_address,
-    )
-
-    def _run():
-        now = datetime.now(UTC)
-        cycle_id = now.strftime("%Y%m%d-%H%M")
-        return notify_subscribers(
-            db_engine,
-            brevo_api_key=api_key,
-            brevo_from_address=from_address,
-            brevo_from_name=from_name,
-            cycle_id=cycle_id,
-            now=now,
-        )
-    return _run
-
-
-# =====================================================================
-# Backfill marker / deferred tick (V1 cutover Step 11a)
-# =====================================================================
-# When a backfill is active (a row in `backfill_runs` with
-# `finished_at IS NULL`), the orchestrator's tick must not race against
-# the backfill's writes to indicator_state / signals / cache. Instead,
-# tick stages no-op and a background polling thread (15-min cadence)
-# runs ONE catch-up tick after the backfill completes.
-#
-# Dedup invariant: only one polling thread exists at a time. The orches-
-# trator may fire multiple ticks during a multi-hour backfill (4x daily
-# NSE schedule); each tick checks `state.active` under the lock and
-# bails out if a poller is already running.
-
-_BACKFILL_POLL_INTERVAL_SECONDS: float = 15 * 60  # 15 min
-
-
-@dataclass
-class _BackfillPollerState:
-    """Per-orchestrator-pool poller dedup state. One instance lives
-    in the `_build_orchestrator_components` scope, shared between
-    the deferring compute + distribute wrappers."""
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    active: bool = False
-
-
-def _spawn_backfill_poller(
-    *,
-    db_engine,
-    state: _BackfillPollerState,
-    catch_up_compute,
-    catch_up_distribute,
-    poll_interval_seconds: float = _BACKFILL_POLL_INTERVAL_SECONDS,
-) -> threading.Thread | None:
-    """Spawn one polling thread (if none is active) that waits for
-    the active backfill to finish, then runs one catch-up
-    compute + distribute pair.
-
-    Returns the spawned Thread, or None if a poller was already
-    active (dedup case).
-    """
-    with state.lock:
-        if state.active:
-            return None
-        state.active = True
-
-    def _poll() -> None:
-        try:
-            while True:
-                time.sleep(poll_interval_seconds)
-                with db_engine.connect() as conn:
-                    still_running = BackfillRunsRepository(
-                        conn,
-                    ).is_running()
-                if not still_running:
-                    break
-                logger.info(
-                    "backfill-poller: backfill still active; "
-                    "sleeping %.0fs",
-                    poll_interval_seconds,
-                )
-            logger.info(
-                "backfill-poller: backfill finished; running "
-                "one catch-up tick (compute + distribute)",
-            )
-            try:
-                catch_up_compute()
-            except Exception:
-                logger.exception(
-                    "backfill-poller: catch-up compute failed",
-                )
-            try:
-                catch_up_distribute()
-            except Exception:
-                logger.exception(
-                    "backfill-poller: catch-up distribute failed",
-                )
-        finally:
-            with state.lock:
-                state.active = False
-
-    thread = threading.Thread(
-        target=_poll,
-        name="backfill-poller",
-        daemon=True,
-    )
-    thread.start()
-    return thread
-
-
-def _make_deferring_compute(
-    *,
-    base_callable,
-    db_engine,
-    poller_state: _BackfillPollerState,
-    catch_up_distribute,
-) -> "Callable[[], object]":
-    """Wraps the Step 10 V1 compute callable with a marker check.
-
-    On each invocation:
-      - If `backfill_runs.is_running()` is True: spawn the poller
-        (if one isn't already running) and return None
-      - Else: invoke `base_callable()` and return its result
-
-    The compute factory is the one responsible for spawning the
-    poller because the orchestrator's tick calls compute first;
-    distribute's deferring wrapper just no-ops on deferral.
-    """
-    def _run():
-        with db_engine.connect() as conn:
-            running = BackfillRunsRepository(conn).is_running()
-        if running:
-            _spawn_backfill_poller(
-                db_engine=db_engine,
-                state=poller_state,
-                catch_up_compute=base_callable,
-                catch_up_distribute=catch_up_distribute,
-            )
-            logger.info(
-                "compute tick deferred: backfill is running",
-            )
-            return None
-        return base_callable()
-    return _run
-
-
-def _make_deferring_distribute(
-    *,
-    base_callable,
-    db_engine,
-) -> "Callable[[], object]":
-    """Wraps the Step 10 V1 distribute callable with a marker check.
-
-    On each invocation:
-      - If `backfill_runs.is_running()` is True: return None
-      - Else: invoke `base_callable()` and return its result
-
-    No poller spawned here — the compute wrapper handles that.
-    """
-    def _run():
-        with db_engine.connect() as conn:
-            running = BackfillRunsRepository(conn).is_running()
-        if running:
-            logger.info(
-                "distribute tick deferred: backfill is running",
-            )
-            return None
-        return base_callable()
-    return _run
+# PHASE-3B: Deleted _make_v1_compute_run_once, _make_v1_distribute_run_once,
+# _BackfillPollerState, _make_deferring_compute, _make_deferring_distribute.
+# These were the injection callables MarketOrchestrator's per-market pipeline
+# consumed. All the actual work they wrapped (recompute_market, notify_subscribers,
+# BackfillRunsRepository.is_running checks) now happens inside cmd_cycle.
+# BackfillRunsRepository defers the same way there; recompute_market runs
+# directly in the subprocess.
 
 
 def _build_email_transport_or_null(config, *, enrichment_provider=None, db_engine=None):
@@ -963,20 +471,22 @@ def _build_shutdown_callback(state: AppState, notifier_proc=None):
     join_timeout = state.config.http.notifier_subprocess_shutdown_timeout_seconds
 
     def _shutdown() -> None:
+        # PHASE-3B-SHUTDOWN: orchestrator_pool.stop_all() block removed
+        # (subsystem deleted). RunDispatcher + RunScheduler handle their own
+        # stop paths below via their .stop() methods when we shut down their
+        # threads (currently daemon threads, so they die with the process,
+        # but explicit .stop() is nicer for tests + graceful shutdown).
         logger.info("Lifespan shutdown: stopping background threads")
-        # Phase 14: stop the orchestrator pool FIRST. If we stopped
-        # the distributor before the pool, an in-flight orchestrator
-        # tick could try to call distributor.run_once() on a stopped
-        # distributor and hit a confusing state. Stopping the pool
-        # also lets us emit `orchestrator_stopped` pulse events
-        # before the consumers go away.
         try:
-            if state.orchestrator_pool is not None:
-                state.orchestrator_pool.stop_all(
-                    timeout_per_orchestrator=10.0,
-                )
+            if getattr(state, "run_scheduler", None) is not None:
+                state.run_scheduler.stop()
         except Exception:
-            logger.exception("Error stopping orchestrator_pool")
+            logger.exception("Error stopping run_scheduler")
+        try:
+            if getattr(state, "run_dispatcher", None) is not None:
+                state.run_dispatcher.stop()
+        except Exception:
+            logger.exception("Error stopping run_dispatcher")
         # === STEP 14B-E6-shutdown: distributor + compute_scheduler stops removed ===
         if notifier_proc is not None and notifier_proc.is_alive():
             logger.info("Terminating notifier worker (pid=%d)", notifier_proc.pid)
@@ -1015,70 +525,25 @@ def _build_shutdown_callback(state: AppState, notifier_proc=None):
 
 
 def _build_startup_callback(state: AppState):
-    """Return a zero-arg callable that performs Phase 14 startup tasks
-    requiring a running asyncio event loop.
+    """Return a zero-arg callable that starts Phase 1a RunDispatcher +
+    Phase 3a RunScheduler during the ASGI lifespan startup.
 
-    Two things happen here, in order:
+    PHASE-3B: PulseState + OrchestratorPool startup was removed here;
+    both subsystems have been deleted. Threads that need the asyncio
+    loop to already exist are still started from this callback rather
+    than during _build_app_state, because the lifespan startup runs
+    inside the running loop while _build_app_state does not.
 
-      1. **Bind PulseState to the loop.** PulseState's `publish()` is
-         called from the orchestrator's worker thread; the fan-out to
-         async SSE subscribers needs `loop.call_soon_threadsafe(...)`,
-         which needs the loop reference. We capture it here, inside
-         the lifespan's startup phase, where `asyncio.get_running_loop()`
-         is meaningful.
-
-      2. **Start the OrchestratorPool.** Each MarketOrchestrator's
-         daemon thread is spawned via pool.start_all(). The pool
-         emits `orchestrator_started` pulse events; with the loop
-         already bound, those reach any GUI client that connects to
-         /v1/pulse/stream during the boot window.
-
-    When the orchestrator is disabled in config (pool=None, pulse=None),
-    this is a no-op. The callback is still wired so the lifespan
-    path is uniform across deployment modes.
+    Both start blocks are guarded on `is not None` and wrapped in
+    try/except so a broken thread doesn't abort startup — failures
+    are logged and the app continues with the healthy subsystem(s).
     """
-    import asyncio  # local to keep import graph tidy
-
     def _startup() -> None:
-        # PHASE-3A-STARTUP-FIX: no umbrella early return. Each
-        # subsystem is guarded independently so RunDispatcher +
-        # RunScheduler can start even when orchestrator is disabled
-        # (which is the Phase 3a cutover state).
-        if state.pulse_state is not None:
-            try:
-                loop = asyncio.get_running_loop()
-                state.pulse_state.bind_loop(loop)
-                logger.info("PulseState bound to asyncio event loop")
-            except RuntimeError:
-                # No running loop — shouldn't happen during lifespan
-                # startup, but defensive: log and continue. SSE fan-out
-                # will be a no-op; snapshot still works.
-                logger.exception(
-                    "PulseState could not bind event loop; SSE fan-out "
-                    "will be disabled (snapshot endpoint still works).",
-                )
-        else:
-            logger.info(
-                "PulseState is None; SSE fan-out disabled (this is "
-                "expected when orchestrator.enabled=false)."
-            )
-
-        if state.orchestrator_pool is not None:
-            try:
-                state.orchestrator_pool.start_all()
-                logger.info(
-                    "OrchestratorPool started with %d market(s): %s",
-                    len(state.orchestrator_pool),
-                    state.orchestrator_pool.exchanges(),
-                )
-            except Exception:
-                logger.exception("Error starting orchestrator_pool")
-        else:
-            logger.info(
-                "OrchestratorPool is None; MarketOrchestrator disabled "
-                "(this is expected when orchestrator.enabled=false — "
-                "RunScheduler owns scheduling instead)."
-            )
+        # PHASE-3B-STARTUP: PulseState + OrchestratorPool blocks removed.
+        # RunScheduler + RunDispatcher are the only scheduling subsystems
+        # now. Both start unconditionally — the dispatcher_enabled flag
+        # is gone (Phase 3a was a rollout gate; Phase 3b makes it the
+        # only behavior).
 
         # PHASE-1A-DISPATCHER-START: start the batch-run dispatcher.
         if getattr(state, "run_dispatcher", None) is not None:
@@ -1088,29 +553,14 @@ def _build_startup_callback(state: AppState):
             except Exception:
                 logger.exception("Error starting RunDispatcher")
 
-        # PHASE-3A-SCHEDULER-START: start the wall-clock RunScheduler
-        # ONLY when the operator has flipped the dispatcher_enabled
-        # flag. Otherwise RunScheduler stays dark and MarketOrchestrator
-        # owns scheduled ticks (current behavior).
-        if (
-            getattr(state, "run_scheduler", None) is not None
-            and getattr(
-                state.config.scheduling, "dispatcher_enabled", False,
-            )
-        ):
+        # PHASE-3B-SCHEDULER-START: start the wall-clock RunScheduler
+        # unconditionally (no more dispatcher_enabled gate).
+        if getattr(state, "run_scheduler", None) is not None:
             try:
                 state.run_scheduler.start()
-                logger.info(
-                    "Phase 3a RunScheduler started (dispatcher_enabled=True)",
-                )
+                logger.info("Phase 3b RunScheduler started")
             except Exception:
                 logger.exception("Error starting RunScheduler")
-        elif getattr(state, "run_scheduler", None) is not None:
-            logger.info(
-                "Phase 3a RunScheduler NOT started "
-                "(dispatcher_enabled=False in config; "
-                "MarketOrchestrator still owns scheduling)",
-            )
     return _startup
 
 

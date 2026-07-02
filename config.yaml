@@ -141,29 +141,31 @@ market_hours:
 #   - 2026-11-12   # Muhurat Trading on Diwali (Saturday, market open ~18:30)
 
 # ---------------------------------------------------------------------------
-# scheduling: new `orchestrator` block.
+# scheduling
+# ---------------------------------------------------------------------------
+# Phase 3b: RunScheduler (wall-clock tick planner) + RunDispatcher are the
+# only scheduling subsystems in this codebase. MarketOrchestrator +
+# OrchestratorPool + PulseState were deleted; there is no rollback path
+# on this branch.
+#
+# The `orchestrator:` block below is kept for backward config-file compat
+# only — SchedulingConfig still declares an `orchestrator` field that
+# accepts these keys, but nothing at runtime reads them. Delete the
+# block whenever you want; the service works with or without it.
 # ---------------------------------------------------------------------------
 
 scheduling:
-  compute_cadence_minutes: 60          # legacy thread cadence (ignored when
-                                        # orchestrator.enabled=true)
-  subscriber_cadence_minutes: 15       # distributor safety-net cadence
+  compute_cadence_minutes: 60          # legacy field, ignored at runtime
+  subscriber_cadence_minutes: 15       # only consulted by the notifier worker
+                                        # (Redis mode); ignored otherwise
   default_timeframe: "1W"
 
-  orchestrator:                        # NEW block, all fields optional
-    enabled: true                     # Default: keep using legacy thread
-                                        # until you've validated this in dev.
-                                        # Flip to true to activate the per-
-                                        # market orchestrators.
-    catch_up_on_startup: false         # Skip missed ticks on restart. Set to
-                                        # true if restarts often happen mid-day
-                                        # and you want one immediate catch-up.
-    catch_up_skip_if_recent_minutes: 30 # Even with catch_up_on_startup=true,
-                                        # don't fire if last successful pass
-                                        # was less than this many minutes ago.
-    fetch_timeout_seconds: 600         # Hard wall on a single fetch attempt.
-    fetch_retry_delay_minutes: 5       # Wait this long before the single
-                                        # in-flight retry of a failed fetch.
+  orchestrator:                        # vestigial — safe to delete later
+    enabled: false
+    catch_up_on_startup: false
+    catch_up_skip_if_recent_minutes: 30
+    fetch_timeout_seconds: 600
+    fetch_retry_delay_minutes: 5
 
 cache:
   max_history_bars: 1000            # bars loaded into each TickerEngine
