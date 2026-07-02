@@ -58,32 +58,9 @@ from ..domain import (
 # ============================================================
 
 
-@dataclass(frozen=True, slots=True)
-class IndicatorStateSnapshot:
-    """Subset of one `indicator_state` row, mirrored into the cache.
-
-    Carries exactly what the read endpoints and any "current state at
-    a glance" reader needs. The full row is still in Postgres; this
-    is the latest week's values for sub-millisecond reads.
-    """
-    trade_date: date
-    """The IST-Monday this row covers."""
-    med_ema: float
-    long_ema: float
-    longest_ema: float
-    atr: float
-    upper_inner_band: float
-    lower_inner_band: float
-    upper_mid_band: float
-    lower_mid_band: float
-    upper_outer_band: float
-    lower_outer_band: float
-    display_regime: int
-    """-1 BEARISH / 0 NEUTRAL / +1 BULLISH. Same encoding as the
-    indicator_state column."""
-    computed_at: datetime
-    """When Phase 7 last wrote this row."""
-
+# PHASE-3D: IndicatorStateSnapshot class removed. Legacy indicator_state
+# table was dropped in migration 0032; nothing produces or consumes this
+# snapshot shape any more.
 
 # === STEP 15-B1-class: SignalEventSnapshot removed ===
 
@@ -116,8 +93,8 @@ class CachedSnapshot:
     ticker_ref: TickerRef
     """Mirrored for read-endpoint convenience — saves a tickers lookup."""
     timeframe: Timeframe
-    latest_indicator_state: IndicatorStateSnapshot | None
-    # === STEP 15-B1-field: latest_signal_event removed ===
+    # PHASE-3D: latest_indicator_state field removed alongside the
+    # dropped `indicator_state` table + IndicatorStateSnapshot class.
     snapshot_taken_at: datetime
     """When this cache entry was last refreshed end-to-end (i.e.
     via lifecycle prime or a `put_snapshot`). The component
@@ -190,39 +167,10 @@ class SignalCache:
             self._snapshots[key] = snapshot
 
     # === STEP 15-B1-method: update_signal_event removed ===
+    # PHASE-3D: update_indicator_state method removed. Its only producer
+    # (Phase 7 wired via Step 9b) was demolished; nothing has called
+    # this in production for the last two milestones.
 
-
-    def update_indicator_state(
-        self,
-        ticker_id: int,
-        ticker_ref: TickerRef,
-        timeframe: Timeframe,
-        state: IndicatorStateSnapshot,
-    ) -> None:
-        """Refresh just the `latest_indicator_state` component.
-
-        Called by Phase 7 (wired in Step 9b) whenever a new weekly
-        indicator_state row is written. `ticker_ref` is required
-        because, in the first-write-for-this-ticker case, we have
-        to construct a new snapshot and need the readable identity.
-        """
-        with self._write_lock:
-            existing = self._snapshots.get((ticker_id, timeframe))
-            if existing is None:
-                self._snapshots[(ticker_id, timeframe)] = CachedSnapshot(
-                    ticker_id=ticker_id,
-                    ticker_ref=ticker_ref,
-                    timeframe=timeframe,
-                    latest_indicator_state=state,  # 15-B1: latest_signal_event arg removed
-                    snapshot_taken_at=state.computed_at,
-                    stale_since=None,
-                )
-            else:
-                self._snapshots[(ticker_id, timeframe)] = replace(
-                    existing,
-                    latest_indicator_state=state,
-                    snapshot_taken_at=state.computed_at,
-                )
 
     def mark_stale(
         self,

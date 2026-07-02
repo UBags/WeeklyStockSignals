@@ -1,7 +1,6 @@
 """Read-mostly per-ticker signal cache."""
 
-# === STEP 15-B11-import: SignalEventSnapshot re-export stripped ===
-from .signal_cache import (CachedSnapshot, IndicatorStateSnapshot, SignalCache)
+# PHASE-3D: IndicatorStateSnapshot re-export removed (class deleted).
+from .signal_cache import CachedSnapshot, SignalCache
 
-# === STEP 15-B11-all: SignalEventSnapshot dropped from __all__ ===
-__all__ = ["CachedSnapshot", "IndicatorStateSnapshot", "SignalCache"]
+__all__ = ["CachedSnapshot", "SignalCache"]

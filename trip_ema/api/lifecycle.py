@@ -1,82 +1,62 @@
 """Lifecycle — application startup orchestration.
 
-# Step 9a — legacy prime path removed
+# Phase 3d — legacy prime path removed
 
-`prime_all_tickers` (the engine-priming startup path) is gone along
-with the TickerRegistry / TickerEngine surface it sat on top of. The
-only startup prime now is `prime_cache_from_db`: two SELECTs against
-`indicator_state` and `signal_events`, plus a ticker-ref hydration
-query.
+`_load_latest_indicator_states` and `_load_ticker_refs` were the two
+SELECTs behind `prime_cache_from_db`. Both were removed alongside
+the `indicator_state` table drop in migration 0032.
 
-Wire it in `app.py` at startup:
+`prime_cache_from_db` is kept as a no-op stub — its callers
+(`app.py::_build_app_state` at boot, `admin.py::admin_prime_all`
+via POST) still invoke it, and they still expect a `PrimeCacheResult`
+back. The stub returns zero counts and logs a one-line "no-op".
 
-```python
-from trip_ema.api.lifecycle import prime_cache_from_db
-# ...
-result = prime_cache_from_db(db_engine=engine, cache=cache)
-logger.info("Prime: %d snapshots populated", result.snapshots_populated)
-```
+The `SignalCache` this used to populate is still built in `app.py`,
+but with `latest_indicator_state` removed from `CachedSnapshot`, the
+cache is a shell that only tracks `stale_since` per (ticker_id,
+timeframe) — and post-Phase-3b nothing calls `mark_stale` either.
+The cache exists so the read endpoints keep working, but it's
+structurally empty.
 
-Step 9c updates the admin `/v1/admin/prime-all` route to call this
-function in place of the deleted `prime_all_tickers`.
+A follow-up phase can remove the SignalCache class entirely once
+nothing reads it.
 """
-
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, UTC
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine
 
-# === STEP 15-B2-import: SignalEventSnapshot import stripped ===
-from ..cache.signal_cache import (
-    CachedSnapshot,
-    IndicatorStateSnapshot,
-    SignalCache,
-)
-from ..domain import ChangeSignal, TickerRef, Timeframe
+from ..cache.signal_cache import SignalCache
+from ..domain import Timeframe
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# Result type
+# Result type — kept for wire-compat with app.py + admin route
 # ============================================================
 
 
 @dataclass(frozen=True, slots=True)
 class PrimeCacheResult:
-    """Summary of one `prime_cache_from_db` invocation."""
-    tickers_seen: int
-    """Distinct ticker_ids produced from the two SELECTs."""
-    snapshots_populated: int
-    """Cache entries inserted via `put_snapshot`."""
-    indicator_only: int
-    """Tickers with an indicator_state row but no signal_event
-    yet."""
-    signal_event_only: int
-    """Tickers with a signal_event but no indicator_state. Unusual
-    but possible during regeneration."""
-    both: int
-    """Tickers with both components populated."""
+    """Summary of one `prime_cache_from_db` invocation.
+
+    Post-Phase-3d all fields are always 0 — the legacy prime path
+    no longer exists. Kept as a dataclass with defaults so callers
+    that unpack fields (LifecycleResultPayload builder in admin.py,
+    the log line in app.py) don't need conditionals.
+    """
+    tickers_seen: int = 0
+    snapshots_populated: int = 0
+    indicator_only: int = 0
+    signal_event_only: int = 0
+    both: int = 0
 
 
 # ============================================================
-# Wire-string → ChangeSignal map
-# ============================================================
-
-
-_STR_TO_SIGNAL: dict[str, ChangeSignal] = {
-    "BUY": ChangeSignal.BUY,
-    "SELL": ChangeSignal.SELL,
-    "EXIT_FROM_BUY": ChangeSignal.EXIT_FROM_BUY,
-    "EXIT_FROM_SELL": ChangeSignal.EXIT_FROM_SELL,
-}
-
-
-# ============================================================
-# Public entry point
+# Public entry point — no-op stub
 # ============================================================
 
 
@@ -86,141 +66,19 @@ def prime_cache_from_db(
     cache: SignalCache,
     timeframe: Timeframe = Timeframe.WEEKLY,
 ) -> PrimeCacheResult:
-    """Populate the cache from two SELECTs against the persisted
-    producers.
+    """No-op stub. The legacy `indicator_state` table was dropped in
+    migration 0032; there is nothing left to prime from. Returns an
+    all-zero PrimeCacheResult so callers keep working.
 
-    The two queries:
-      1. Latest `indicator_state` row per (ticker_id, timeframe).
-         Sourced from a `DISTINCT ON (ticker_id) … ORDER BY trade_date
-         DESC` over rows with `ticker_id IS NOT NULL` for the given
-         timeframe.
-      2. Latest `signal_events` row per (ticker_id, timeframe).
-         Same DISTINCT ON pattern, ordered by `(computed_at DESC,
-         event_id DESC)` so the tiebreak is deterministic.
+    Args are kept for signature-compat with the pre-3d caller sites:
+      - app.py's _build_app_state calls this at startup.
+      - admin.py's POST /v1/admin/prime-all route calls this too.
 
-    For each ticker that appears in either result we build a
-    `CachedSnapshot` carrying whichever components are present and
-    `put_snapshot` it onto the cache. Tickers that appear in neither
-    result get no entry (no data to cache).
-
-    Args:
-        db_engine: SQLAlchemy Engine for the application database.
-        cache: SignalCache to seed.
-        timeframe: Which timeframe to seed. Defaults to WEEKLY —
-            the only timeframe Steps 5 / 6 / 7 currently produce.
-
-    Returns:
-        PrimeCacheResult with component-coverage counts. Times in
-        production should be well under a second for ~2,600 tickers.
+    Both keep the log line "Cache primed: 0 snapshots" without
+    changes — the value 0 is now the true state.
     """
-    with db_engine.connect() as conn:
-        indicator_rows = _load_latest_indicator_states(
-            conn, timeframe=timeframe,
-        )
-        # === STEP 15-B2-load: signal_rows loading removed ===
-        ticker_refs = _load_ticker_refs(
-            conn, ticker_ids=set(indicator_rows.keys()),
-        )
-
-    # === STEP 15-B2-loop: signal_event branch removed (indicator-only) ===
-    snapshot_taken_at = datetime.now(UTC)
-    tickers_seen = set(indicator_rows.keys())
-
-    populated = 0
-
-    for ticker_id in tickers_seen:
-        ref = ticker_refs.get(ticker_id)
-        if ref is None:
-            logger.warning(
-                "ticker_id %d has snapshot rows but no tickers entry; skipping",
-                ticker_id,
-            )
-            continue
-
-        ind_snap = indicator_rows.get(ticker_id)
-        cache.put_snapshot(CachedSnapshot(
-            ticker_id=ticker_id,
-            ticker_ref=ref,
-            timeframe=timeframe,
-            latest_indicator_state=ind_snap,
-            snapshot_taken_at=snapshot_taken_at,
-        ))
-        populated += 1
-
     logger.info(
-        "prime_cache_from_db: %d tickers seen, %d snapshots populated",
-        len(tickers_seen), populated,
+        "prime_cache_from_db: no-op post-Phase-3d "
+        "(legacy indicator_state read removed; cache stays empty)"
     )
-    return PrimeCacheResult(
-        tickers_seen=len(tickers_seen),
-        snapshots_populated=populated,
-        indicator_only=populated,
-        signal_event_only=0,
-        both=0,
-    )
-
-
-# ============================================================
-# Read helpers
-# ============================================================
-
-
-def _load_latest_indicator_states(
-    conn, *, timeframe: Timeframe,
-) -> dict[int, IndicatorStateSnapshot]:
-    """One SELECT: latest indicator_state row per ticker_id."""
-    sql = text("""
-        SELECT DISTINCT ON (ticker_id)
-               ticker_id, trade_date,
-               med_ema, long_ema, longest_ema, atr,
-               upper_inner_band, lower_inner_band,
-               upper_mid_band, lower_mid_band,
-               upper_outer_band, lower_outer_band,
-               display_regime, computed_at
-          FROM indicator_state
-         WHERE ticker_id IS NOT NULL
-           AND timeframe = :tf
-      ORDER BY ticker_id, trade_date DESC
-    """)
-    rows = conn.execute(sql, {"tf": timeframe.value}).fetchall()
-    return {
-        r.ticker_id: IndicatorStateSnapshot(
-            trade_date=r.trade_date,
-            med_ema=r.med_ema, long_ema=r.long_ema,
-            longest_ema=r.longest_ema, atr=r.atr,
-            upper_inner_band=r.upper_inner_band,
-            lower_inner_band=r.lower_inner_band,
-            upper_mid_band=r.upper_mid_band,
-            lower_mid_band=r.lower_mid_band,
-            upper_outer_band=r.upper_outer_band,
-            lower_outer_band=r.lower_outer_band,
-            display_regime=r.display_regime,
-            computed_at=r.computed_at,
-        )
-        for r in rows
-    }
-
-
-# === STEP 15-B2-loader: _load_latest_signal_events removed ===
-
-
-
-def _load_ticker_refs(
-    conn, *, ticker_ids: set[int],
-) -> dict[int, TickerRef]:
-    """One SELECT (ANY-clause): resolve ticker_id → TickerRef for
-    the set of tickers we found snapshot rows for."""
-    if not ticker_ids:
-        return {}
-    sql = text("""
-        SELECT ticker_id, exchange, symbol, instrument
-          FROM tickers
-         WHERE ticker_id = ANY(:tids)
-    """)
-    rows = conn.execute(sql, {"tids": list(ticker_ids)}).fetchall()
-    return {
-        r.ticker_id: TickerRef(
-            exchange=r.exchange, symbol=r.symbol, instrument=r.instrument,
-        )
-        for r in rows
-    }
+    return PrimeCacheResult()

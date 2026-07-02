@@ -24,10 +24,9 @@ from datetime import datetime, UTC
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Engine
 
-# === STEP 15-B10-import: _load_latest_signal_events removed ===
+# PHASE-3D: _load_latest_indicator_states import removed (function deleted).
 from ....api.lifecycle import (
     PrimeCacheResult,
-    _load_latest_indicator_states,
     prime_cache_from_db,
 )
 # === STEP 14B-FIXUP1-admin-import: CurrentSignalsCache added ===
@@ -130,41 +129,17 @@ def admin_compute_now(
 def admin_stale_tickers(
     cache: SignalCache = Depends(get_cache),
 ) -> StaleTickersPayload:
-    """List every ticker currently flagged stale due to an ETL gap.
+    """PHASE-3D: legacy stale-ticker tracking retired.
 
-    Each entry carries `stale_since` (first detection), the last good
-    indicator_state's trade_date and computed_at, and the last known
-    regime as a string.
+    Previously listed each ticker whose SignalCache entry carried
+    a `stale_since` flag set by the compute scheduler when it saw
+    an ETL gap. Post-Phase-3b nothing calls `cache.mark_stale`
+    anywhere; post-Phase-3d the `latest_indicator_state` field is
+    gone too — so the payload can't be built even if a stale entry
+    existed. Returns an empty list; kept as a 200 endpoint so any
+    external monitor polling this doesn't start alarming.
     """
-    stale = cache.all_stale_snapshots()
-    entries: list[StaleTickerEntry] = []
-    for s in stale:
-        # Defensive: stale_snapshots can in principle have no
-        # indicator yet. Skip those — they have nothing to display.
-        if s.latest_indicator_state is None:
-            continue
-        # Map the IST-Monday DATE back to a UTC datetime for the
-        # wire shape's `last_good_bar_timestamp: datetime`.
-        bar_ts = datetime.combine(
-            s.latest_indicator_state.trade_date,
-            datetime.min.time(),
-            tzinfo=UTC,
-        )
-        assert s.stale_since is not None, (
-            "non-stale entries should have been skipped above; "
-            "reached StaleTickerEntry append with stale_since=None"
-        )
-        entries.append(StaleTickerEntry(
-            ticker=TickerRefPayload.from_domain(s.ticker_ref),
-            timeframe=s.timeframe.value,
-            stale_since=s.stale_since,
-            last_good_bar_timestamp=bar_ts,
-            last_good_computed_at=s.latest_indicator_state.computed_at,
-            last_known_signal=CoreRegime(
-                s.latest_indicator_state.display_regime,
-            ).name,
-        ))
-    return StaleTickersPayload(count=len(entries), entries=entries)
+    return StaleTickersPayload(count=0, entries=[])
 
 
 @router.post(
@@ -210,42 +185,26 @@ def admin_reprime_ticker(
             detail=f"Ticker not found: {ref}",
         )
 
-    # === STEP 15-B10-body: all_sig + sig_snap removed (indicator-only) ===
-    with db_engine.connect() as conn:
-        all_ind = _load_latest_indicator_states(conn, timeframe=timeframe)
-
-    ind_snap = all_ind.get(ticker.ticker_id)
-
-    if ind_snap is None:
-        return RepriumeResultPayload(
-            ticker=TickerRefPayload.from_domain(ref),
-            timeframe=timeframe.value,
-            succeeded=False,
-            bars_loaded=0,
-            refreshed_metadata=False,
-            notes=(
-                "Ticker exists but has no persisted state. Run a "
-                "backfill (CLI or admin endpoint) first."
-            ),
-        )
-
-    cache.put_snapshot(CachedSnapshot(
-        ticker_id=ticker.ticker_id,
-        ticker_ref=ref,
-        timeframe=timeframe,
-        latest_indicator_state=ind_snap,
-        # STEP 15-B10-snapshot: latest_signal_event arg removed
-        snapshot_taken_at=datetime.now(UTC),
-        stale_since=None,  # explicit clear on reprime
-    ))
-
+    # PHASE-3D: legacy indicator_state cache retired. This endpoint's
+    # original job (re-read one ticker's indicator_state row and
+    # rebuild its CachedSnapshot) is meaningless now — the source
+    # table was dropped in migration 0032 and the snapshot field it
+    # populated was removed from CachedSnapshot. Kept as a 200 endpoint
+    # for GUI-button compat; the notes tell the operator what to do
+    # instead.
     return RepriumeResultPayload(
         ticker=TickerRefPayload.from_domain(ref),
         timeframe=timeframe.value,
         succeeded=True,
-        bars_loaded=1 if ind_snap is not None else 0,
+        bars_loaded=0,
         refreshed_metadata=False,
-        notes="Cache entry refreshed from DB; stale flag cleared.",
+        notes=(
+            "Reprime is a no-op post-Phase-3d. The legacy "
+            "indicator_state cache was retired; V1 current_signals "
+            "cache reflects the DB directly and is refreshed by the "
+            "recompute cycle (POST /v1/admin/compute-now or the "
+            "scheduled RunScheduler tick)."
+        ),
     )
 
 
