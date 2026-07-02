@@ -1,44 +1,67 @@
-"""Phase 16d — TickerTableModel row coloring for the most recent
-tick's signals.
+"""TickerTableModel row coloring.
 
 What's covered here (pytest-qt, offscreen Qt):
 
   - `set_rows()` accepts an optional `last_signals` dict, keyed by
-    ticker_id, with values being the four signal_type strings stored
-    in the `signal_events` table: BUY / SELL / EXIT_FROM_BUY /
-    EXIT_FROM_SELL.
-  - `data(...)` for `Qt.BackgroundRole` returns the corresponding
-    light-color brush per the SIGNAL_BACKGROUND_COLORS map.
+    ticker_id, whose values are `SignalColorInputs` (the raw DB inputs
+    the coloring rule needs: current_signal / current_regime /
+    previous_signal).
+  - `data(...)` for `Qt.BackgroundRole` returns the brush produced by
+    the single source of truth,
+    `trip_ema.gui.determine_background_color.DetermineBackgroundColor`.
+    Color is regime-aware: a fresh current-bar signal colors directly;
+    otherwise the current regime + previous-bar signal decide the
+    "hold" color (green/red) or an exit color (yellow/gray).
   - Tickers absent from `last_signals` return no background brush —
     the view's alternating-row colors keep applying as before.
   - Backward compatibility: calling `set_rows(rows)` with a single
-    argument (as the existing test_gui.py tests do) keeps working
-    and produces no coloring.
+    argument keeps working and produces no coloring.
   - A subsequent `set_rows(rows)` without `last_signals` clears prior
-    coloring — important because the refresh worker rebuilds the dict
-    on every tick.
-  - Composition with ForegroundRole: a parked ticker that also has a
-    fresh BUY shows red text on a light-green background. (No
-    interaction issues between the two roles.)
+    coloring — the refresh worker rebuilds the dict every tick.
+  - Composition with ForegroundRole: a parked/delisted ticker that also
+    has a signal shows its foreground color over the signal background.
 
 These tests don't exercise the SQL query (`queries.last_run_signals`)
-because that needs a live Postgres. The integration tests in
-`tests/gui/test_slice4_views.py` follow the same convention — model
-tests here, query tests via a real DB elsewhere.
+because that needs a live Postgres — see the DB tests in
+`tests/persistence/test_last_run_signals_window.py`.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone, UTC
+from datetime import date, datetime, UTC
 
 import pytest
 from PySide6.QtCore import Qt
 
-from trip_ema.gui.queries import TickerRow
+from trip_ema.gui.queries import TickerRow, SignalColorInputs
+from trip_ema.gui.determine_background_color import DetermineBackgroundColor
 from trip_ema.gui.views.tickers import (
-    SIGNAL_BACKGROUND_COLORS, COL_SYMBOL, COL_TIER,
+    COL_TIER,
     TickerSortFilterProxy, TickerTableModel,
 )
+
+GREEN = DetermineBackgroundColor.GREEN
+RED = DetermineBackgroundColor.RED
+YELLOW = DetermineBackgroundColor.YELLOW
+GRAY = DetermineBackgroundColor.GRAY
+
+
+def _sig(
+    current: str | None = None,
+    *,
+    regime: int | None = None,
+    previous: str | None = None,
+) -> SignalColorInputs:
+    """Build a SignalColorInputs for a model `last_signals` dict.
+
+    A bare `_sig("BUY")` models a fresh current-bar BUY (colors green
+    regardless of regime). Regime + previous drive the hold cases.
+    """
+    return SignalColorInputs(
+        current_signal=current,
+        current_regime=regime,
+        previous_signal=previous,
+    )
 
 
 def _ticker(
@@ -74,8 +97,7 @@ class TestBackwardCompat:
         m = TickerTableModel()
         m.set_rows([_ticker(1, "RELIANCE")])
         # No last_signals supplied → BackgroundRole returns None for
-        # every column. The view falls back to alternating-row colors
-        # the same way it did before Phase 16d.
+        # every column. The view falls back to alternating-row colors.
         for col in range(m.columnCount()):
             assert m.data(m.index(0, col), Qt.BackgroundRole) is None
 
@@ -86,24 +108,25 @@ class TestBackwardCompat:
 
 
 # ---------------------------------------------------------------------------
-# Color mapping
+# Color mapping — fresh current-bar signal
 # ---------------------------------------------------------------------------
 
 
 class TestSignalBackgroundColors:
-    """One test per signal type, plus the absent-from-dict case."""
+    """One test per signal type, plus the absent-from-dict case. A fresh
+    current-bar signal colors directly, independent of regime."""
 
     @pytest.mark.parametrize("signal,expected_hex", [
-        ("BUY",            "#c8e6c9"),
-        ("SELL",           "#ffcdd2"),
-        ("EXIT_FROM_BUY",  "#fff9c4"),  # Step 12c: light yellow
-        ("EXIT_FROM_SELL", "#e0e0e0"),  # Step 12c: light gray
+        ("BUY",            GREEN),
+        ("SELL",           RED),
+        ("EXIT_FROM_BUY",  YELLOW),
+        ("EXIT_FROM_SELL", GRAY),
     ])
     def test_known_signal_returns_expected_color(
         self, qtbot, signal, expected_hex,
     ):
         m = TickerTableModel()
-        m.set_rows([_ticker(1, "X")], last_signals={1: signal})
+        m.set_rows([_ticker(1, "X")], last_signals={1: _sig(signal)})
         brush = m.data(m.index(0, 0), Qt.BackgroundRole)
         assert brush is not None, f"no brush for {signal}"
         assert brush.color().name().lower() == expected_hex.lower()
@@ -111,70 +134,159 @@ class TestSignalBackgroundColors:
     def test_signal_colors_apply_to_every_column(self, qtbot):
         # The row should color uniformly, not just one cell.
         m = TickerTableModel()
-        m.set_rows([_ticker(1, "X")], last_signals={1: "BUY"})
+        m.set_rows([_ticker(1, "X")], last_signals={1: _sig("BUY")})
         for col in range(m.columnCount()):
             brush = m.data(m.index(0, col), Qt.BackgroundRole)
             assert brush is not None, f"missing brush at col {col}"
-            assert brush.color().name().lower() == "#c8e6c9"
+            assert brush.color().name().lower() == GREEN.lower()
 
     def test_unsignalled_ticker_returns_no_background(self, qtbot):
         # Two tickers; only one is in last_signals.
         m = TickerTableModel()
         m.set_rows(
             [_ticker(1, "SIGNALLED"), _ticker(2, "QUIET")],
-            last_signals={1: "BUY"},
+            last_signals={1: _sig("BUY")},
         )
         assert m.data(m.index(0, 0), Qt.BackgroundRole) is not None
         assert m.data(m.index(1, 0), Qt.BackgroundRole) is None
 
     def test_unknown_signal_string_returns_no_background(self, qtbot):
-        # Defensive: a signal_type not in the SIGNAL_BACKGROUND_COLORS
-        # map (e.g. a future event kind added to the DB CHECK
-        # constraint without updating the GUI) silently produces no
-        # background rather than crashing or showing a random color.
+        # Defensive: a signal_type the GUI doesn't recognise (e.g. a
+        # future event kind added to the DB CHECK constraint without
+        # updating the enum) maps to None and produces no background
+        # rather than crashing or showing a random color.
         m = TickerTableModel()
-        m.set_rows([_ticker(1, "X")], last_signals={1: "UNKNOWN_SIGNAL"})
+        m.set_rows(
+            [_ticker(1, "X")], last_signals={1: _sig("UNKNOWN_SIGNAL")},
+        )
         assert m.data(m.index(0, 0), Qt.BackgroundRole) is None
 
 
-class TestColorMapConstant:
-    """Pin the four known mappings so a future tweak to one color
-    requires a deliberate test update, not a silent drift."""
+# ---------------------------------------------------------------------------
+# Color mapping — regime-aware "hold" + the Red→Green→Neutral fix
+# ---------------------------------------------------------------------------
 
-    def test_all_four_signal_types_have_a_color(self):
-        assert set(SIGNAL_BACKGROUND_COLORS.keys()) == {
-            "BUY", "SELL", "EXIT_FROM_BUY", "EXIT_FROM_SELL",
-        }
+
+class TestRegimeAwareColoring:
+    """The reason this rewrite exists: color must consult the current
+    regime + previous-bar signal, not just the last signal seen."""
+
+    def test_hold_green_when_regime_green_and_prev_buy(self, qtbot):
+        # No fresh flip this bar, but the ticker is still in a green
+        # regime after a prior BUY → keep it green.
+        m = TickerTableModel()
+        m.set_rows(
+            [_ticker(1, "X")],
+            last_signals={1: _sig(None, regime=1, previous="BUY")},
+        )
+        brush = m.data(m.index(0, 0), Qt.BackgroundRole)
+        assert brush is not None
+        assert brush.color().name().lower() == GREEN.lower()
+
+    def test_hold_red_when_regime_red_and_prev_sell(self, qtbot):
+        m = TickerTableModel()
+        m.set_rows(
+            [_ticker(1, "X")],
+            last_signals={1: _sig(None, regime=-1, previous="SELL")},
+        )
+        brush = m.data(m.index(0, 0), Qt.BackgroundRole)
+        assert brush is not None
+        assert brush.color().name().lower() == RED.lower()
+
+    def test_red_green_neutral_shows_yellow_not_green(self, qtbot):
+        # THE FIX. Trajectory Red→Green→Neutral: the current bar flipped
+        # green→neutral (EXIT_FROM_BUY this bar); the previous bar was
+        # the BUY. Old code colored GREEN off the stale BUY; correct is
+        # YELLOW, driven by the current-bar EXIT_FROM_BUY.
+        m = TickerTableModel()
+        m.set_rows(
+            [_ticker(1, "X")],
+            last_signals={
+                1: _sig("EXIT_FROM_BUY", regime=0, previous="BUY"),
+            },
+        )
+        brush = m.data(m.index(0, 0), Qt.BackgroundRole)
+        assert brush is not None
+        assert brush.color().name().lower() == YELLOW.lower()
+
+    def test_neutral_after_green_flip_without_exit_is_blank(self, qtbot):
+        # Neutral regime, a prior BUY, but no exit signal on the current
+        # bar → not a hold-green (regime isn't green) and not an exit →
+        # no color.
+        m = TickerTableModel()
+        m.set_rows(
+            [_ticker(1, "X")],
+            last_signals={1: _sig(None, regime=0, previous="BUY")},
+        )
+        assert m.data(m.index(0, 0), Qt.BackgroundRole) is None
+
+    def test_quietly_green_no_recent_flip_is_blank(self, qtbot):
+        # Green regime but no current or previous flip (ticker has been
+        # quietly green for months) → no color. Coloring is a two-bar
+        # rule, not a persistent-state highlight.
+        m = TickerTableModel()
+        m.set_rows(
+            [_ticker(1, "X")],
+            last_signals={1: _sig(None, regime=1, previous=None)},
+        )
+        assert m.data(m.index(0, 0), Qt.BackgroundRole) is None
+
+    def test_hold_yellow_when_neutral_and_prev_exit_from_buy(self, qtbot):
+        m = TickerTableModel()
+        m.set_rows(
+            [_ticker(1, "X")],
+            last_signals={
+                1: _sig(None, regime=0, previous="EXIT_FROM_BUY"),
+            },
+        )
+        brush = m.data(m.index(0, 0), Qt.BackgroundRole)
+        assert brush is not None
+        assert brush.color().name().lower() == YELLOW.lower()
+
+    def test_hold_gray_when_neutral_and_prev_exit_from_sell(self, qtbot):
+        m = TickerTableModel()
+        m.set_rows(
+            [_ticker(1, "X")],
+            last_signals={
+                1: _sig(None, regime=0, previous="EXIT_FROM_SELL"),
+            },
+        )
+        brush = m.data(m.index(0, 0), Qt.BackgroundRole)
+        assert brush is not None
+        assert brush.color().name().lower() == GRAY.lower()
+
+
+class TestColorConstants:
+    """Pin the four known colors on the single source of truth so a
+    future tweak requires a deliberate test update, not silent drift."""
+
+    def test_four_distinct_colors(self):
+        colors = {GREEN, RED, YELLOW, GRAY}
+        assert len(colors) == 4
 
     def test_buy_is_green_family(self):
-        # Green = G > R and G > B (roughly).
         from PySide6.QtGui import QColor
-        c = QColor(SIGNAL_BACKGROUND_COLORS["BUY"])
+        c = QColor(GREEN)
         assert c.green() > c.red() and c.green() > c.blue()
 
     def test_sell_is_red_family(self):
         from PySide6.QtGui import QColor
-        c = QColor(SIGNAL_BACKGROUND_COLORS["SELL"])
+        c = QColor(RED)
         assert c.red() > c.green() and c.red() > c.blue()
 
     def test_exit_signals_use_distinct_backgrounds(self):
-        # Step 12c: EXIT_FROM_BUY (yellow) and EXIT_FROM_SELL (gray)
-        # deliberately differ so the visual encodes prior direction.
-        assert (
-            SIGNAL_BACKGROUND_COLORS["EXIT_FROM_BUY"]
-            != SIGNAL_BACKGROUND_COLORS["EXIT_FROM_SELL"]
-        )
+        # EXIT_FROM_BUY (yellow) and EXIT_FROM_SELL (gray) deliberately
+        # differ so the visual encodes prior direction.
+        assert YELLOW != GRAY
 
     def test_exit_from_buy_is_yellow_family(self):
-        # Step 12c: yellow = R and G high, B low.
         from PySide6.QtGui import QColor
-        c = QColor(SIGNAL_BACKGROUND_COLORS["EXIT_FROM_BUY"])
+        c = QColor(YELLOW)
         assert c.red() > c.blue() and c.green() > c.blue()
 
     def test_exit_from_sell_is_gray_family(self):
-        # Step 12c: gray = R ≈ G ≈ B (all channels roughly equal).
         from PySide6.QtGui import QColor
-        c = QColor(SIGNAL_BACKGROUND_COLORS["EXIT_FROM_SELL"])
+        c = QColor(GRAY)
         assert abs(c.red() - c.green()) < 20
         assert abs(c.green() - c.blue()) < 20
         assert abs(c.red() - c.blue()) < 20
@@ -193,7 +305,7 @@ class TestSetRowsResetsLastSignals:
 
     def test_subsequent_set_rows_without_dict_clears_coloring(self, qtbot):
         m = TickerTableModel()
-        m.set_rows([_ticker(1, "X")], last_signals={1: "BUY"})
+        m.set_rows([_ticker(1, "X")], last_signals={1: _sig("BUY")})
         assert m.data(m.index(0, 0), Qt.BackgroundRole) is not None
 
         m.set_rows([_ticker(1, "X")])
@@ -201,13 +313,13 @@ class TestSetRowsResetsLastSignals:
 
     def test_subsequent_set_rows_with_different_dict_repaints(self, qtbot):
         m = TickerTableModel()
-        m.set_rows([_ticker(1, "X")], last_signals={1: "BUY"})
+        m.set_rows([_ticker(1, "X")], last_signals={1: _sig("BUY")})
         brush_buy = m.data(m.index(0, 0), Qt.BackgroundRole)
-        assert brush_buy.color().name().lower() == "#c8e6c9"
+        assert brush_buy.color().name().lower() == GREEN.lower()
 
-        m.set_rows([_ticker(1, "X")], last_signals={1: "SELL"})
+        m.set_rows([_ticker(1, "X")], last_signals={1: _sig("SELL")})
         brush_sell = m.data(m.index(0, 0), Qt.BackgroundRole)
-        assert brush_sell.color().name().lower() == "#ffcdd2"
+        assert brush_sell.color().name().lower() == RED.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -218,12 +330,13 @@ class TestSetRowsResetsLastSignals:
 class TestForegroundBackgroundInteraction:
     """Parked tickers get red text via ForegroundRole. Delisted ones
     get gray text. Neither role interferes with the other; both should
-    apply independently. Verifies the row's overall paint stays sensible
-    when both roles fire."""
+    apply independently."""
 
     def test_parked_ticker_with_fresh_buy_has_red_text_on_green_bg(self, qtbot):
         m = TickerTableModel()
-        m.set_rows([_ticker(1, "X", parked=True)], last_signals={1: "BUY"})
+        m.set_rows(
+            [_ticker(1, "X", parked=True)], last_signals={1: _sig("BUY")},
+        )
         fg = m.data(m.index(0, 0), Qt.ForegroundRole)
         bg = m.data(m.index(0, 0), Qt.BackgroundRole)
         assert fg is not None
@@ -234,13 +347,12 @@ class TestForegroundBackgroundInteraction:
         assert bg.color().green() > bg.color().red()
 
     def test_delisted_ticker_with_fresh_exit_from_buy_has_gray_text_on_yellow_bg(self, qtbot):
-        # Step 12c: EXIT_FROM_BUY paints yellow (was long, now flat);
-        # delisted still paints gray text on top. Yellow bg + gray text
-        # stays readable (contrast is fine).
+        # EXIT_FROM_BUY paints yellow (was long, now flat); delisted
+        # still paints gray text on top.
         m = TickerTableModel()
         m.set_rows(
             [_ticker(1, "X", delisted_at=datetime(2025, 1, 1, tzinfo=UTC))],
-            last_signals={1: "EXIT_FROM_BUY"},
+            last_signals={1: _sig("EXIT_FROM_BUY")},
         )
         fg = m.data(m.index(0, 0), Qt.ForegroundRole)
         bg = m.data(m.index(0, 0), Qt.BackgroundRole)
@@ -254,9 +366,8 @@ class TestForegroundBackgroundInteraction:
         assert bg.color().green() > bg.color().blue()
 
     def test_non_signalled_parked_ticker_keeps_existing_behavior(self, qtbot):
-        # Regression guard against accidentally removing the existing
-        # parked-row foreground color. last_signals is empty, so only
-        # the ForegroundRole fires (just like pre-Phase-16d).
+        # Regression guard: last_signals is empty, so only the
+        # ForegroundRole fires (just like before signal coloring).
         m = TickerTableModel()
         m.set_rows([_ticker(1, "X", parked=True)])
         fg = m.data(m.index(0, 0), Qt.ForegroundRole)
@@ -266,7 +377,7 @@ class TestForegroundBackgroundInteraction:
 
 
 # ---------------------------------------------------------------------------
-# TickerSortFilterProxy — Phase 16e signal-grouped sort
+# TickerSortFilterProxy — signal-grouped sort
 # ---------------------------------------------------------------------------
 
 
@@ -290,16 +401,16 @@ def _proxy_visible_symbols(proxy, model) -> list[str]:
 
 
 class TestSignalGroupedSort:
-    """The custom proxy should put signalled rows at the top, grouped
-    by color in the order Green → Red → Blue, alphabetical within each
-    group. Non-signalled rows stay below."""
+    """The custom proxy puts signalled rows at the top, grouped by the
+    recent flip (current_signal or previous_signal), alphabetical within
+    each group. Non-signalled rows stay below. Sort keys off the recent
+    flip — unchanged by the color rewrite."""
 
     def test_within_group_is_alphabetical_case_insensitive(self, qtbot):
         from PySide6.QtCore import Qt
 
-        # Construct rows in non-alphabetical order with mixed case.
         rows = [_t(1, "zulu"), _t(2, "ALPHA"), _t(3, "Mike")]
-        signals = {1: "BUY", 2: "BUY", 3: "BUY"}
+        signals = {1: _sig("BUY"), 2: _sig("BUY"), 3: _sig("BUY")}
         model = TickerTableModel()
         proxy = TickerSortFilterProxy()
         proxy.setSourceModel(model)
@@ -311,16 +422,14 @@ class TestSignalGroupedSort:
         assert visible == ["ALPHA", "Mike", "zulu"]
 
     def test_exit_from_buy_ranks_before_exit_from_sell(self, qtbot):
-        # Step 12c: EXIT_FROM_BUY (yellow, rank 2) comes before
-        # EXIT_FROM_SELL (gray, rank 3). Within each group, no industry
-        # is set on the stubs so symbol drives the tiebreak.
+        # EXIT_FROM_BUY (rank 2) comes before EXIT_FROM_SELL (rank 3).
         from PySide6.QtCore import Qt
 
         rows = [_t(1, "DELTA"), _t(2, "CHARLIE"), _t(3, "ALPHA")]
         signals = {
-            1: "EXIT_FROM_BUY",
-            2: "EXIT_FROM_SELL",
-            3: "EXIT_FROM_BUY",
+            1: _sig("EXIT_FROM_BUY"),
+            2: _sig("EXIT_FROM_SELL"),
+            3: _sig("EXIT_FROM_BUY"),
         }
         model = TickerTableModel()
         proxy = TickerSortFilterProxy()
@@ -330,18 +439,19 @@ class TestSignalGroupedSort:
         proxy.sort(COL_TIER, Qt.AscendingOrder)
 
         visible = _proxy_visible_symbols(proxy, model)
-        # ALPHA + DELTA (EXIT_FROM_BUY block, symbol ASC) then
-        # CHARLIE (EXIT_FROM_SELL block).
         assert visible == ["ALPHA", "DELTA", "CHARLIE"]
 
-    def test_unknown_signal_string_treated_as_unsignalled(self, qtbot):
-        # Defensive: an unknown signal_type (e.g. a future DB CHECK
-        # adds a new kind without the GUI being updated) goes to the
-        # bottom rather than picking an arbitrary group.
+    def test_hold_signal_participates_in_sort_via_recent_flip(self, qtbot):
+        # A ticker with no current flip but a previous BUY (hold-green)
+        # still sorts into the BUY group — recent_signal falls back to
+        # previous_signal.
         from PySide6.QtCore import Qt
 
         rows = [_t(1, "ZULU"), _t(2, "ALPHA")]
-        signals = {1: "FUTURE_KIND", 2: "BUY"}
+        signals = {
+            1: _sig(None),                       # unsignalled → bottom
+            2: _sig(None, regime=1, previous="BUY"),  # hold-green → BUY group
+        }
         model = TickerTableModel()
         proxy = TickerSortFilterProxy()
         proxy.setSourceModel(model)
@@ -350,7 +460,23 @@ class TestSignalGroupedSort:
         proxy.sort(COL_TIER, Qt.AscendingOrder)
 
         visible = _proxy_visible_symbols(proxy, model)
-        # ALPHA (BUY → group 0) floats above ZULU (unknown → group 99).
+        assert visible == ["ALPHA", "ZULU"]
+
+    def test_unknown_signal_string_treated_as_unsignalled(self, qtbot):
+        # Defensive: an unknown signal_type goes to the bottom rather
+        # than picking an arbitrary group.
+        from PySide6.QtCore import Qt
+
+        rows = [_t(1, "ZULU"), _t(2, "ALPHA")]
+        signals = {1: _sig("FUTURE_KIND"), 2: _sig("BUY")}
+        model = TickerTableModel()
+        proxy = TickerSortFilterProxy()
+        proxy.setSourceModel(model)
+        proxy.setSortRole(Qt.DisplayRole)
+        model.set_rows(rows, last_signals=signals)
+        proxy.sort(COL_TIER, Qt.AscendingOrder)
+
+        visible = _proxy_visible_symbols(proxy, model)
         assert visible == ["ALPHA", "ZULU"]
 
 
@@ -359,18 +485,18 @@ class TestModelLastSignalsAccessor:
 
     def test_last_signals_property_returns_set_dict(self, qtbot):
         m = TickerTableModel()
-        m.set_rows([_t(1, "X")], last_signals={1: "BUY"})
-        assert m.last_signals == {1: "BUY"}
+        m.set_rows([_t(1, "X")], last_signals={1: _sig("BUY")})
+        assert m.last_signals == {1: _sig("BUY")}
 
     def test_last_signals_property_returns_empty_after_clear(self, qtbot):
         m = TickerTableModel()
-        m.set_rows([_t(1, "X")], last_signals={1: "BUY"})
+        m.set_rows([_t(1, "X")], last_signals={1: _sig("BUY")})
         m.set_rows([_t(1, "X")])
         assert m.last_signals == {}
 
 
 # ---------------------------------------------------------------------------
-# Recent-events panel format (Phase 16e)
+# Recent-events panel format
 # ---------------------------------------------------------------------------
 
 
@@ -382,20 +508,12 @@ class TestRecentEventsFormat:
     """
 
     def test_format_string_uses_computed_at_in_ist(self, qtbot):
-        # Construct three SignalEventRows that share a bar_timestamp
-        # but have different computed_at values — exactly the scenario
-        # Uddi flagged ("looks like all the same time"). Render via the
-        # view's helper and confirm each line gets a distinct timestamp.
         from datetime import datetime, timezone
         from PySide6.QtWidgets import QApplication
 
         from trip_ema.gui.queries import SignalEventRow
         from trip_ema.gui.views.tickers import TickersView
 
-        # We don't construct a full TickersView here (it needs db/http);
-        # instead we reproduce the rendering inline to verify the
-        # format. If/when TickersView extracts the formatter to a
-        # static method, this test should switch to calling it.
         from zoneinfo import ZoneInfo
         ist = ZoneInfo("Asia/Kolkata")
         shared_bar = datetime(2026, 6, 15, 0, 0, tzinfo=UTC)
@@ -416,7 +534,6 @@ class TestRecentEventsFormat:
                 timeframe="1W", signal="BUY", price_at_signal=1833.50,
             ),
         ]
-        # Inline the same rendering tickers._on_events_received uses.
         lines = []
         for e in events:
             ts = e.computed_at.astimezone(ist).strftime("%Y-%m-%d %H:%M")

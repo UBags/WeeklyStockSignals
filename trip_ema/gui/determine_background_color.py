@@ -48,7 +48,7 @@ class DetermineBackgroundColor:
     @staticmethod
     def determine_background_color(
         current_signal: ChangeSignal | None,
-        current_regime: CoreRegime,
+        current_regime: CoreRegime | None,
         previous_signal: ChangeSignal | None,
     ) -> str | None:
         S, R = ChangeSignal, CoreRegime

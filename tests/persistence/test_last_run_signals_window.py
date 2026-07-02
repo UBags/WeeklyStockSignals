@@ -1,22 +1,19 @@
 """V1 read-path tests for trip_ema.gui.queries.last_run_signals.
 
-Step 12a: this file was rewritten from scratch — the legacy test
-scenarios pinned semantics that no longer apply in V1 (e.g.
-"computed_at-based 60-second window", "any bar_timestamp newer
-than 14 days ago"). V1 has tighter semantics tied to the exact
-bar anchors.
+last_run_signals returns {ticker_id: SignalColorInputs}, where
+SignalColorInputs carries the raw DB inputs the coloring rule needs:
+  - current_signal  : a flip on the current weekly bar (Monday 00:00
+                      UTC of the current IST week) — from current_signals,
+                      else historical_signals@current_bar (post-rotation).
+  - previous_signal : a flip on the previous weekly bar — from
+                      historical_signals@previous_bar.
+  - current_regime  : display_regime of the current weekly bar (exercised
+                      in the model tests, not seeded here).
 
-V1 coloring rule (operator's spec):
-  1. Check current_signals for a row at the current_bar (Monday
-     00:00 UTC of the current IST week). If yes, color with its
-     signal_type.
-  2. Else, check historical_signals for a row at the current_bar
-     OR the previous_bar (Monday of the prior IST week). If yes,
-     color with the matching signal_type. When both bars match,
-     the more recent (bar_timestamp DESC, computed_at DESC) wins.
-
-A ticker has at most ONE entry in the result dict. Tickers with
-no matching signal are absent (model treats absence as "no color").
+Unlike the pre-refactor contract, current and previous bars no longer
+collapse into a single "recent signal" — they surface as separate
+fields. A ticker with neither is absent from the dict (model treats
+absence as "no color").
 """
 from __future__ import annotations
 
@@ -102,10 +99,10 @@ def _make_event(
 
 
 # ============================================================
-# Rule 1: current_signals at current_bar → colored
+# current-bar signal: current_signals at current_bar
 # ============================================================
 
-def test_current_signals_at_current_bar_is_colored(
+def test_current_signals_at_current_bar_sets_current_signal(
     db_engine, now, week_anchors,
 ):
     current_monday, _ = week_anchors
@@ -120,16 +117,19 @@ def test_current_signals_at_current_bar_is_colored(
 
     with db_engine.connect() as conn:
         result = last_run_signals(conn, exchange="NSE")
-    assert result.get(tid) == "BUY"
+    assert result[tid].current_signal == "BUY"
+    assert result[tid].previous_signal is None
 
 
-def test_current_signals_at_old_bar_NOT_colored(
+def test_current_signals_at_old_bar_is_absent(
     db_engine, now, week_anchors,
 ):
-    """current_signals row exists but at a bar_timestamp older
-    than current_bar → NOT colored. (In practice this shouldn't
-    happen — the populator always writes to the latest bar — but
-    the V1 read filter must verify the bar_timestamp match.)"""
+    """current_signals row exists but at a bar_timestamp older than
+    current_bar → not picked up. current_signals is only read at the
+    current bar; previous-bar signals come from historical. Nothing in
+    historical → absent. (Shouldn't happen in practice — the populator
+    always writes the latest bar — but the read filter must verify the
+    bar_timestamp match.)"""
     current_monday, previous_monday = week_anchors
     with transaction(db_engine) as conn:
         tid = _insert_ticker(conn, "BBBB", now=now)
@@ -142,22 +142,18 @@ def test_current_signals_at_old_bar_NOT_colored(
 
     with db_engine.connect() as conn:
         result = last_run_signals(conn, exchange="NSE")
-    # The bar in current_signals is previous_monday, NOT current.
-    # Rule 1 fails. Rule 2 should pick it up (historical at
-    # current OR previous bar)... but it's not in historical
-    # either. So absent.
     assert tid not in result
 
 
 # ============================================================
-# Rule 2: fall through to historical at current OR previous bar
+# current-bar signal from historical; previous-bar signal
 # ============================================================
 
-def test_historical_at_current_bar_is_colored(
+def test_historical_at_current_bar_sets_current_signal(
     db_engine, now, week_anchors,
 ):
-    """No current_signals for ticker, but historical_signals has
-    a row at current_bar → colored."""
+    """No current_signals for ticker, but historical_signals has a row
+    at current_bar → current_signal set (post-rotation case)."""
     current_monday, _ = week_anchors
     with transaction(db_engine) as conn:
         tid = _insert_ticker(conn, "CCCC", now=now)
@@ -170,13 +166,15 @@ def test_historical_at_current_bar_is_colored(
 
     with db_engine.connect() as conn:
         result = last_run_signals(conn, exchange="NSE")
-    assert result.get(tid) == "SELL"
+    assert result[tid].current_signal == "SELL"
+    assert result[tid].previous_signal is None
 
 
-def test_historical_at_previous_bar_is_colored(
+def test_historical_at_previous_bar_sets_previous_signal(
     db_engine, now, week_anchors,
 ):
-    """No current_signals; historical at last Monday → colored."""
+    """No current_signals; historical at last Monday → previous_signal
+    set, current_signal None."""
     _, previous_monday = week_anchors
     with transaction(db_engine) as conn:
         tid = _insert_ticker(conn, "DDDD", now=now)
@@ -189,10 +187,11 @@ def test_historical_at_previous_bar_is_colored(
 
     with db_engine.connect() as conn:
         result = last_run_signals(conn, exchange="NSE")
-    assert result.get(tid) == "EXIT_FROM_BUY"
+    assert result[tid].current_signal is None
+    assert result[tid].previous_signal == "EXIT_FROM_BUY"
 
 
-def test_historical_two_weeks_back_NOT_colored(
+def test_historical_two_weeks_back_is_absent(
     db_engine, now, week_anchors,
 ):
     _, previous_monday = week_anchors
@@ -212,15 +211,15 @@ def test_historical_two_weeks_back_NOT_colored(
 
 
 # ============================================================
-# Precedence: current wins over historical
+# current_signals precedence + current/previous split
 # ============================================================
 
-def test_current_signals_wins_over_historical(
+def test_current_signals_wins_over_historical_at_current_bar(
     db_engine, now, week_anchors,
 ):
-    """Ticker has BOTH current_signals at current_bar AND
-    historical_signals at previous_bar. current_signals' signal
-    must be returned (current wins per V1 spec)."""
+    """Ticker has BOTH current_signals AND historical at the current
+    bar. current_signals' signal_type is the current_signal (it wins
+    for the current bar)."""
     current_monday, previous_monday = week_anchors
     with transaction(db_engine) as conn:
         tid = _insert_ticker(conn, "FFFF", now=now)
@@ -239,14 +238,18 @@ def test_current_signals_wins_over_historical(
 
     with db_engine.connect() as conn:
         result = last_run_signals(conn, exchange="NSE")
-    assert result.get(tid) == "BUY"   # current wins
+    # current bar from current_signals, previous bar from historical —
+    # both surface as separate fields.
+    assert result[tid].current_signal == "BUY"
+    assert result[tid].previous_signal == "SELL"
 
 
-def test_historical_newer_bar_wins_when_two_match(
+def test_historical_current_and_previous_surface_separately(
     db_engine, now, week_anchors,
 ):
-    """No current_signals; historical has rows at BOTH current
-    and previous bar. The newer (current_bar) wins."""
+    """No current_signals; historical has rows at BOTH current and
+    previous bar. They no longer collapse — current_signal comes from
+    the current bar, previous_signal from the previous bar."""
     current_monday, previous_monday = week_anchors
     with transaction(db_engine) as conn:
         tid = _insert_ticker(conn, "GGGG", now=now)
@@ -263,11 +266,12 @@ def test_historical_newer_bar_wins_when_two_match(
 
     with db_engine.connect() as conn:
         result = last_run_signals(conn, exchange="NSE")
-    assert result.get(tid) == "SELL"   # newer bar wins
+    assert result[tid].current_signal == "SELL"    # current bar
+    assert result[tid].previous_signal == "BUY"    # previous bar
 
 
 # ============================================================
-# No signals → absent (not present with None)
+# No signals → absent (not present with an empty inputs)
 # ============================================================
 
 def test_ticker_with_no_signals_absent_from_result(

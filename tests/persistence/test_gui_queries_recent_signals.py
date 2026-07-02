@@ -1,20 +1,26 @@
 """DB tests for trip_ema.gui.queries.ticker_universe_with_recent_signals.
 
-Step 12a: V1 read path. The function reads current_signals +
-historical_signals (no JOIN, two separate queries composed in
-Python) to flag each active ticker with has_recent_signal.
+V1 read path. The function reads current_signals + historical_signals
+(no JOIN, two separate queries composed in Python) plus the current-bar
+regime, to give each active ticker its coloring inputs
+(current_signal / current_regime / previous_signal) and a
+`has_recent_signal` flag.
 
-V1 semantics for "recent":
-  - current_signals has a row at the current_bar (Monday 00:00 UTC
-    of the current IST week, i.e. today's Monday) → recent=True
-  - else historical_signals has a row at current_bar OR
-    previous_bar (Monday of the prior IST week) → recent=True
-  - else recent=False
+"recent" (drives has_recent_signal and the row's recent_signal):
+  - current_signals has a row at the current_bar (Monday 00:00 UTC of
+    the current IST week) → current_signal set
+  - historical_signals has a row at current_bar → current_signal set
+    (post-rotation), or at previous_bar → previous_signal set
+  - a ticker with neither current_signal nor previous_signal is
+    has_recent_signal=False
 
-Ordering contract: (has_recent_signal DESC, symbol ASC). The
-Signals tab dropdown depends on this for its one-pass partition.
-Step 12b adds the industry-grouped + rank-score ordering at the
-view layer; the query keeps the simple contract.
+`recent_signal` (= current_signal or previous_signal) is the flip that
+drives sort/prominence — current bar wins. Color additionally consults
+current_regime, but that is exercised in the model tests
+(tests/gui/test_tickers_signal_coloring.py); here we pin the query's
+signal/recency contract.
+
+Ordering contract: (has_recent_signal DESC, symbol ASC).
 """
 from __future__ import annotations
 
@@ -115,7 +121,7 @@ def _row_by_symbol(rows, sym):
 def test_ticker_with_current_signal_at_current_bar_is_recent(
     db_engine, now, week_anchors,
 ):
-    """current_signals has a row at this Monday → recent=True."""
+    """current_signals has a row at this Monday → current_signal set."""
     current_monday, _ = week_anchors
     with transaction(db_engine) as conn:
         tid = _insert_ticker(conn, "AAAA", now=now)
@@ -132,14 +138,16 @@ def test_ticker_with_current_signal_at_current_bar_is_recent(
         )
     row = _row_by_symbol(rows, "AAAA")
     assert row.has_recent_signal is True
-    assert row.latest_signal == "BUY"
+    assert row.current_signal == "BUY"
+    assert row.previous_signal is None
+    assert row.recent_signal == "BUY"
 
 
 def test_ticker_with_historical_at_current_bar_is_recent(
     db_engine, now, week_anchors,
 ):
     """current_signals empty for this ticker; historical at
-    current bar → recent=True."""
+    current bar → current_signal set."""
     current_monday, _ = week_anchors
     with transaction(db_engine) as conn:
         tid = _insert_ticker(conn, "BBBB", now=now)
@@ -156,14 +164,16 @@ def test_ticker_with_historical_at_current_bar_is_recent(
         )
     row = _row_by_symbol(rows, "BBBB")
     assert row.has_recent_signal is True
-    assert row.latest_signal == "SELL"
+    assert row.current_signal == "SELL"
+    assert row.previous_signal is None
+    assert row.recent_signal == "SELL"
 
 
 def test_ticker_with_historical_at_previous_bar_is_recent(
     db_engine, now, week_anchors,
 ):
     """current_signals empty; historical at last Monday →
-    recent=True."""
+    previous_signal set, current_signal None."""
     _, previous_monday = week_anchors
     with transaction(db_engine) as conn:
         tid = _insert_ticker(conn, "CCCC", now=now)
@@ -180,7 +190,9 @@ def test_ticker_with_historical_at_previous_bar_is_recent(
         )
     row = _row_by_symbol(rows, "CCCC")
     assert row.has_recent_signal is True
-    assert row.latest_signal == "EXIT_FROM_BUY"
+    assert row.current_signal is None
+    assert row.previous_signal == "EXIT_FROM_BUY"
+    assert row.recent_signal == "EXIT_FROM_BUY"
 
 
 def test_ticker_with_historical_two_weeks_back_is_not_recent(
@@ -204,13 +216,15 @@ def test_ticker_with_historical_two_weeks_back_is_not_recent(
         )
     row = _row_by_symbol(rows, "DDDD")
     assert row.has_recent_signal is False
-    assert row.latest_signal is None
+    assert row.current_signal is None
+    assert row.previous_signal is None
+    assert row.recent_signal is None
 
 
 def test_ticker_with_no_signals_is_not_recent(
     db_engine, now,
 ):
-    """No row in either table → recent=False (LEFT JOIN preserves)."""
+    """No row in either table → not recent."""
     with transaction(db_engine) as conn:
         _insert_ticker(conn, "EEEE", now=now)
 
@@ -220,15 +234,18 @@ def test_ticker_with_no_signals_is_not_recent(
         )
     row = _row_by_symbol(rows, "EEEE")
     assert row.has_recent_signal is False
-    assert row.latest_signal is None
+    assert row.current_signal is None
+    assert row.previous_signal is None
+    assert row.recent_signal is None
 
 
 def test_current_signals_wins_over_historical_at_previous_bar(
     db_engine, now, week_anchors,
 ):
-    """Ticker has BOTH current_signals at current bar AND
-    historical at previous bar. The current_signals signal_type
-    must win (per V1 spec: check current first)."""
+    """Ticker has BOTH current_signals at current bar AND historical at
+    previous bar. Both surface as separate fields now: current_signal
+    from the current bar, previous_signal from the previous bar. The
+    recent flip (drives sort) is the current one."""
     current_monday, previous_monday = week_anchors
     with transaction(db_engine) as conn:
         tid = _insert_ticker(conn, "FFFF", now=now)
@@ -251,7 +268,9 @@ def test_current_signals_wins_over_historical_at_previous_bar(
         )
     row = _row_by_symbol(rows, "FFFF")
     assert row.has_recent_signal is True
-    assert row.latest_signal == "BUY"   # current wins
+    assert row.current_signal == "BUY"      # current bar
+    assert row.previous_signal == "SELL"    # previous bar
+    assert row.recent_signal == "BUY"       # current wins for sort
 
 
 # ============================================================

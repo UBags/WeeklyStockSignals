@@ -276,68 +276,130 @@ def ticker_symbol_history(
     ]
 
 
-def last_run_signals(
-    conn: Connection, *, exchange: str = "NSE",
-) -> dict[int, str]:
-    """Return {ticker_id: signal_type} for tickers to color on the
-    Tickers tab.
+@dataclass(frozen=True, slots=True)
+class SignalColorInputs:
+    """Per-ticker inputs to DetermineBackgroundColor, as RAW DB values.
 
-    Step 12a: V1 read path. NO JOIN between current_signals and
-    historical_signals — two separate queries composed in Python.
+    Kept in raw form (str signal_type / smallint display_regime) so this
+    persistence-layer DTO stays free of GUI/enum coupling. Conversion to
+    ChangeSignal / CoreRegime happens at the GUI paint boundary via
+    DetermineBackgroundColor's own converters.
 
-    Operator's spec ("which tickers get colored right now"):
-      1. For each ticker, check current_signals for a row at the
-         current_bar (Monday 00:00 UTC of the current IST week).
-         If yes, color with its signal_type.
-      2. Else, check historical_signals for a row at the current
-         bar OR the previous bar (Monday of the prior IST week).
-         If yes, color with the matching signal_type (newest wins
-         if both bars matched, which can happen mid-week after a
-         flip rotates last week's signal out of current_signals).
+      current_signal  -- signal_type at the current weekly bar, or None
+      current_regime  -- display_regime (-1/0/1) at the current bar, or None
+      previous_signal -- signal_type at the previous weekly bar, or None
+    """
+    current_signal: str | None
+    current_regime: int | None
+    previous_signal: str | None
 
-    Result: a ticker has at most one entry in the returned dict.
-    Tickers with no matching signal are absent (the model treats
-    absence as "no coloring").
 
-    Week anchors: IST Monday 00:00:00 boundary. See
-    `_ist_week_anchors` for the timestamptz shape used.
+def _signal_color_inputs_by_ticker(
+    conn: Connection, *, exchange: str | None,
+) -> dict[int, SignalColorInputs]:
+    """Shared lookup for both the Tickers tab and the Signals dropdown.
+
+    Returns {ticker_id: SignalColorInputs} for every ticker that has a
+    signal on the current OR previous weekly bar. A ticker with neither
+    is omitted -- the coloring rule returns None for it regardless of
+    regime, so there is nothing to color.
+
+    Window (Monday 00:00 UTC anchors, see `_ist_week_anchors`):
+      current_signal  : current_signals@current_ts, else
+                        historical_signals@current_ts (post-rotation).
+      previous_signal : historical_signals@previous_ts.
+      current_regime  : stock_indicator_state.display_regime@current_ts
+                        (strict -- the current weekly bar; None if that
+                        bar's state is not yet computed).
+
+    exchange=None means all exchanges (legacy contract of
+    ticker_universe_with_recent_signals).
     """
     current_ts, previous_ts = _ist_week_anchors(conn)
+    if exchange is None:
+        ex_clause = ""
+        ex_params: dict = {}
+    else:
+        ex_clause = " AND t.exchange = :ex"
+        ex_params = {"ex": exchange}
 
-    # ---- 1. current_signals at current bar ----
-    current_rows = conn.execute(text("""
+    # ---- current-bar signal: current_signals first, else historical ----
+    cur_sig: dict[int, str] = {}
+    for r in conn.execute(text(f"""
         SELECT cs.ticker_id, cs.signal_type
           FROM current_signals cs
           JOIN tickers t USING (ticker_id)
-         WHERE t.exchange = :ex
-           AND cs.bar_timestamp = :current_ts
-    """), {"ex": exchange, "current_ts": current_ts})
-    result: dict[int, str] = {
-        int(r.ticker_id): r.signal_type for r in current_rows
-    }
-
-    # ---- 2. historical_signals at current OR previous bar ----
-    historical_rows = conn.execute(text("""
+         WHERE cs.bar_timestamp = :current_ts
+               {ex_clause}
+    """), {"current_ts": current_ts, **ex_params}):
+        cur_sig[int(r.ticker_id)] = r.signal_type
+    for r in conn.execute(text(f"""
         SELECT DISTINCT ON (hs.ticker_id)
                hs.ticker_id, hs.signal_type
           FROM historical_signals hs
           JOIN tickers t USING (ticker_id)
-         WHERE t.exchange = :ex
-           AND hs.bar_timestamp IN (:current_ts, :previous_ts)
-         ORDER BY hs.ticker_id,
-                  hs.bar_timestamp DESC,
-                  hs.computed_at DESC
-    """), {
-        "ex": exchange,
-        "current_ts": current_ts,
-        "previous_ts": previous_ts,
-    })
-    for r in historical_rows:
-        tid = int(r.ticker_id)
-        if tid not in result:
-            result[tid] = r.signal_type
+         WHERE hs.bar_timestamp = :current_ts
+               {ex_clause}
+         ORDER BY hs.ticker_id, hs.computed_at DESC
+    """), {"current_ts": current_ts, **ex_params}):
+        cur_sig.setdefault(int(r.ticker_id), r.signal_type)
 
-    return result
+    # ---- previous-bar signal: historical only ----
+    prev_sig: dict[int, str] = {}
+    for r in conn.execute(text(f"""
+        SELECT DISTINCT ON (hs.ticker_id)
+               hs.ticker_id, hs.signal_type
+          FROM historical_signals hs
+          JOIN tickers t USING (ticker_id)
+         WHERE hs.bar_timestamp = :previous_ts
+               {ex_clause}
+         ORDER BY hs.ticker_id, hs.computed_at DESC
+    """), {"previous_ts": previous_ts, **ex_params}):
+        prev_sig[int(r.ticker_id)] = r.signal_type
+
+    tids = set(cur_sig) | set(prev_sig)
+    if not tids:
+        return {}
+
+    # ---- current-bar regime from stock_indicator_state (weekly) ----
+    regime: dict[int, int] = {}
+    for r in conn.execute(text(f"""
+        SELECT sis.ticker_id, sis.display_regime
+          FROM stock_indicator_state sis
+          JOIN tickers t USING (ticker_id)
+         WHERE sis.timeframe = '1W'
+           AND sis.bar_timestamp = :current_ts
+               {ex_clause}
+    """), {"current_ts": current_ts, **ex_params}):
+        tid = int(r.ticker_id)
+        if tid in tids:
+            regime[tid] = int(r.display_regime)
+
+    return {
+        tid: SignalColorInputs(
+            current_signal=cur_sig.get(tid),
+            current_regime=regime.get(tid),
+            previous_signal=prev_sig.get(tid),
+        )
+        for tid in tids
+    }
+
+
+def last_run_signals(
+    conn: Connection, *, exchange: str = "NSE",
+) -> dict[int, SignalColorInputs]:
+    """{ticker_id: SignalColorInputs} for the Tickers tab.
+
+    Thin wrapper over `_signal_color_inputs_by_ticker`. The three inputs
+    feed the single source of truth for the row color
+    (trip_ema.gui.determine_background_color.DetermineBackgroundColor).
+
+    Sort/prominence is a SEPARATE concern: the Tickers-tab proxy keys off
+    the recent flip (current_signal or previous_signal), unchanged from
+    the prior behaviour. Only the COLOR now also depends on
+    current_regime + previous_signal.
+    """
+    return _signal_color_inputs_by_ticker(conn, exchange=exchange)
 def ticker_universe_summary(
     conn: Connection, *, exchange: str = "NSE",
 ) -> dict:
@@ -373,27 +435,29 @@ def ticker_universe_summary(
 class TickerComboRow:
     """One row in the Signals tab's ticker dropdown.
 
-    Step 12c: dropdown is a flat single-list sort. Every row is
-    ordered by signal_group_industry_rank_sort_key — signal-type
-    primary (BUY < SELL < EXIT_FROM_BUY < EXIT_FROM_SELL <
-    unsignaled), then industry ASC, then rank DESC (signaled) or
-    symbol ASC (unsignaled). `latest_signal` drives the row
-    background color: BUY=green, SELL=red, EXIT_FROM_BUY=yellow,
-    EXIT_FROM_SELL=gray, None=default. `has_recent_signal` is kept
-    on the row for downstream consumers but no longer partitions
-    the dropdown display.
+    Coloring inputs (current_signal / current_regime / previous_signal)
+    feed DetermineBackgroundColor at the view's paint boundary. The
+    dropdown SORT keys off `recent_signal` (= current_signal or
+    previous_signal) via signal_group_industry_rank_sort_key -- sort and
+    color are deliberately separate concerns.
     """
-    # Phase 6-3: surfaced so the Signals tab dropdown can map rows
-    # to rank_scores for sorting + tooltip rendering.
     ticker_id: int
     exchange: str
     symbol: str
     instrument_type: str
     full_name: str | None
     has_recent_signal: bool
-    latest_signal: str | None = None
+    current_signal: str | None = None
+    current_regime: int | None = None
+    previous_signal: str | None = None
     industry: str | None = None
     market_cap: Decimal | None = None
+
+    @property
+    def recent_signal(self) -> str | None:
+        """The flip that drives sort/prominence: current bar wins, else
+        previous bar. NOT the color (color also considers regime)."""
+        return self.current_signal or self.previous_signal
 
 
 def ticker_universe_with_recent_signals(
@@ -401,68 +465,25 @@ def ticker_universe_with_recent_signals(
     *,
     exchange: str | None = None,
 ) -> list[TickerComboRow]:
-    """Active ticker universe with `has_recent_signal` flag.
+    """Active ticker universe carrying the coloring inputs + a
+    `has_recent_signal` flag.
 
-    Step 12a: V1 read path. Uses the same `last_run_signals`-style
-    two-query lookup to determine the recent-signal dict, then
-    joins to tickers / industry / market_cap for the row payload.
+    Uses the shared `_signal_color_inputs_by_ticker` lookup (current/
+    previous weekly-bar window + current-bar regime), then joins to
+    tickers / industry / market_cap for the row payload.
 
-    "Recent" means: a signal at the current bar OR the previous
-    bar (per the operator's Step 12 spec). See `last_run_signals`
-    for the precise rules.
-
-    Ordering: (has_recent_signal DESC, symbol ASC) — preserved
-    from the legacy contract so the consumer can partition the
-    list at the True→False boundary. Step 12b layers
-    industry-grouped + composite-rank-score ordering on top
-    inside the views.
+    has_recent_signal := the ticker has a signal on the current OR
+    previous bar (i.e. it is present in the shared lookup). Ordering:
+    (has_recent_signal DESC, symbol ASC) -- preserved; the view layers
+    industry-grouped + rank-score ordering on top.
     """
-    # Step 1+2: V1 recent-signal dict (matches last_run_signals
-    # semantics; inlined here so the exchange filter applies even
-    # when `exchange is None` — the legacy contract treats None as
-    # "all exchanges", and this function predates per-exchange
-    # filtering).
-    current_ts, previous_ts = _ist_week_anchors(conn)
+    inputs = _signal_color_inputs_by_ticker(conn, exchange=exchange)
 
     if exchange is None:
-        ex_clause = ""
         ex_params: dict = {}
     else:
-        ex_clause = " AND t.exchange = :ex"
         ex_params = {"ex": exchange}
 
-    current_rows = conn.execute(text(f"""
-        SELECT cs.ticker_id, cs.signal_type
-          FROM current_signals cs
-          JOIN tickers t USING (ticker_id)
-         WHERE cs.bar_timestamp = :current_ts
-               {ex_clause}
-    """), {"current_ts": current_ts, **ex_params})
-    recent: dict[int, str] = {
-        int(r.ticker_id): r.signal_type for r in current_rows
-    }
-
-    historical_rows = conn.execute(text(f"""
-        SELECT DISTINCT ON (hs.ticker_id)
-               hs.ticker_id, hs.signal_type
-          FROM historical_signals hs
-          JOIN tickers t USING (ticker_id)
-         WHERE hs.bar_timestamp IN (:current_ts, :previous_ts)
-               {ex_clause}
-         ORDER BY hs.ticker_id,
-                  hs.bar_timestamp DESC,
-                  hs.computed_at DESC
-    """), {
-        "current_ts": current_ts,
-        "previous_ts": previous_ts,
-        **ex_params,
-    })
-    for r in historical_rows:
-        tid = int(r.ticker_id)
-        if tid not in recent:
-            recent[tid] = r.signal_type
-
-    # Step 3: full universe with industry + market_cap.
     sql = """
         WITH latest_mcap AS (
             SELECT DISTINCT ON (ticker_id)
@@ -488,15 +509,17 @@ def ticker_universe_with_recent_signals(
     out: list[TickerComboRow] = []
     for r in rows:
         tid = int(r.ticker_id)
-        has_recent = tid in recent
+        inp = inputs.get(tid)
         out.append(TickerComboRow(
             ticker_id=tid,
             exchange=r.exchange,
             symbol=r.symbol,
             instrument_type=r.instrument_type,
             full_name=r.full_name,
-            has_recent_signal=has_recent,
-            latest_signal=recent.get(tid),
+            has_recent_signal=inp is not None,
+            current_signal=inp.current_signal if inp else None,
+            current_regime=inp.current_regime if inp else None,
+            previous_signal=inp.previous_signal if inp else None,
             industry=r.industry,
             market_cap=r.market_cap,
         ))

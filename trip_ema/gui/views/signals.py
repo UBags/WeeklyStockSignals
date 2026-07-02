@@ -56,6 +56,7 @@ from ..workers import submit
 from .backtest_dialog import BacktestDialog
 from .industry_panel import IndustryPanel
 from .signal_generation_panel import SignalGenerationPanel
+from ..determine_background_color import DetermineBackgroundColor
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +68,8 @@ logger = logging.getLogger(__name__)
 _DROPDOWN_GREY_BG = "#f0f0f0"                 # unused after Step 12c; kept
                                               # in case the recent/other
                                               # split is ever restored.
-_DROPDOWN_BUY_BG = "#c8e6c9"                  # light green
-_DROPDOWN_SELL_BG = "#ffcdd2"                 # light red
-_DROPDOWN_EXIT_FROM_BUY_BG = "#fff9c4"        # light yellow
-_DROPDOWN_EXIT_FROM_SELL_BG = "#e0e0e0"       # light gray
+# Dropdown row color now lives in the single source of truth,
+# trip_ema.gui.determine_background_color.DetermineBackgroundColor.
 
 _QSETTINGS_ORG = "trip_ema"
 _QSETTINGS_APP = "gui"
@@ -383,27 +382,21 @@ class SignalsView(QWidget):
             rows,
             key=lambda r: signal_group_industry_rank_sort_key(
                 r,
-                getattr(r, 'latest_signal', None),
+                r.recent_signal,
                 rank_scores.get(r.ticker_id),
             ),
         )
 
         model = QStandardItemModel(self)
-        buy_brush = QBrush(QColor(_DROPDOWN_BUY_BG))
-        sell_brush = QBrush(QColor(_DROPDOWN_SELL_BG))
-        exit_from_buy_brush = QBrush(QColor(_DROPDOWN_EXIT_FROM_BUY_BG))
-        exit_from_sell_brush = QBrush(QColor(_DROPDOWN_EXIT_FROM_SELL_BG))
-
-        def _signal_brush(sig: str | None) -> QBrush | None:
-            if sig == "BUY":
-                return buy_brush
-            if sig == "SELL":
-                return sell_brush
-            if sig == "EXIT_FROM_BUY":
-                return exit_from_buy_brush
-            if sig == "EXIT_FROM_SELL":
-                return exit_from_sell_brush
-            return None
+        def _row_brush(row) -> QBrush | None:
+            # Single source of truth for the color: current-bar
+            # signal, else current regime + previous-bar signal.
+            hex_color = DetermineBackgroundColor.determine_background_color(
+                DetermineBackgroundColor.signal_from_db(row.current_signal),
+                DetermineBackgroundColor.regime_from_db(row.current_regime),
+                DetermineBackgroundColor.signal_from_db(row.previous_signal),
+            )
+            return QBrush(QColor(hex_color)) if hex_color is not None else None
 
         def _make_item(row) -> QStandardItem:
             # Step 12c: label = {Symbol} — {FullName[:60]} — {Industry}.
@@ -428,7 +421,7 @@ class SignalsView(QWidget):
                 item.setToolTip(
                     f"{row.symbol}  rank_score = {rank_scores[tid]:+.4f}"
                 )
-            sig_brush = _signal_brush(getattr(row, 'latest_signal', None))
+            sig_brush = _row_brush(row)
             if sig_brush is not None:
                 item.setData(sig_brush, Qt.BackgroundRole)
             return item

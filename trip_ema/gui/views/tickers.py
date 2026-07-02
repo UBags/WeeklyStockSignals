@@ -88,6 +88,8 @@ from ..signals_helpers import (
     signal_industry_mcap_sort_key,
 )
 from ..workers import RefreshScheduler, submit
+from ..determine_background_color import DetermineBackgroundColor
+from ..queries import SignalColorInputs
 
 logger = logging.getLogger(__name__)
 
@@ -118,12 +120,8 @@ HEADERS = [
 # Step 12c: EXIT_FROM_BUY and EXIT_FROM_SELL now use distinct
 # backgrounds so operators can tell "was long, now flat" from
 # "was short, now flat" at a glance without reading the signal column.
-SIGNAL_BACKGROUND_COLORS = {
-    "BUY":            "#c8e6c9",   # light green
-    "SELL":           "#ffcdd2",   # light red
-    "EXIT_FROM_BUY":  "#fff9c4",   # light yellow (was long, now flat)
-    "EXIT_FROM_SELL": "#e0e0e0",   # light gray   (was short, now flat)
-}
+# Row background color now lives in the single source of truth,
+# trip_ema.gui.determine_background_color.DetermineBackgroundColor.
 
 
 class TickerTableModel(QAbstractTableModel):
@@ -136,7 +134,7 @@ class TickerTableModel(QAbstractTableModel):
         # Phase 16d — most-recent-tick signals, keyed by ticker_id.
         # Drives the row's Qt.BackgroundRole. Empty dict = no recent
         # signals, no coloring. Updated atomically via set_rows().
-        self._last_signals: dict[int, str] = {}
+        self._last_signals: dict[int, SignalColorInputs] = {}
         # Phase 6-3 — composite rank_score per ticker (0.5×RS_stock +
         # 0.3×RS_industry + 0.2×R²). The sort proxy reads this to put
         # high-momentum signalled tickers above low-momentum ones in
@@ -150,7 +148,7 @@ class TickerTableModel(QAbstractTableModel):
     def set_rows(
         self,
         rows: list[TickerRow],
-        last_signals: dict[int, str] | None = None,
+        last_signals: dict[int, SignalColorInputs] | None = None,
         rank_scores: dict[int, float] | None = None,
     ) -> None:
         """Replace the entire row set. Bulk update is cheaper than
@@ -179,7 +177,7 @@ class TickerTableModel(QAbstractTableModel):
         return None
 
     @property
-    def last_signals(self) -> dict[int, str]:
+    def last_signals(self) -> dict[int, SignalColorInputs]:
         """Read-only view of the most-recent-tick signals dict, keyed
         by ticker_id. The custom sort proxy reads this to put signalled
         rows at the top of the table."""
@@ -229,9 +227,13 @@ class TickerTableModel(QAbstractTableModel):
             # None for tickers without a recent signal lets Qt use the
             # alternating-row color (set on the view), so non-signalled
             # rows look the same as before.
-            sig = self._last_signals.get(row.ticker_id)
-            if sig is not None:
-                hex_color = SIGNAL_BACKGROUND_COLORS.get(sig)
+            inp = self._last_signals.get(row.ticker_id)
+            if inp is not None:
+                hex_color = DetermineBackgroundColor.determine_background_color(
+                    DetermineBackgroundColor.signal_from_db(inp.current_signal),
+                    DetermineBackgroundColor.regime_from_db(inp.current_regime),
+                    DetermineBackgroundColor.signal_from_db(inp.previous_signal),
+                )
                 if hex_color is not None:
                     return QBrush(QColor(hex_color))
         if role == Qt.UserRole:
@@ -402,8 +404,10 @@ class TickerSortFilterProxy(QSortFilterProxyModel):
 
         signals = src.last_signals
         ranks = src.rank_scores
-        left_sig = signals.get(left_row.ticker_id)
-        right_sig = signals.get(right_row.ticker_id)
+        _lin = signals.get(left_row.ticker_id)
+        _rin = signals.get(right_row.ticker_id)
+        left_sig = (_lin.current_signal or _lin.previous_signal) if _lin else None
+        right_sig = (_rin.current_signal or _rin.previous_signal) if _rin else None
         left_rank = ranks.get(left_row.ticker_id)
         right_rank = ranks.get(right_row.ticker_id)
         return signal_group_industry_rank_sort_key(
