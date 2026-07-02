@@ -137,6 +137,7 @@ def build_signal_history_payload(
         timeframe=timeframe,
         start=start_date,
         end=end_date,
+        tz=tz,
     )
 
     # ---- 3. Build per-bar payloads ----
@@ -276,27 +277,28 @@ def _load_indicator_rows_by_date(
     timeframe: Timeframe,
     start: date,
     end: date,
+    tz: ZoneInfo,
 ) -> dict[date, _IndicatorRow]:
-    """Fetch indicator_state rows for the window, indexed by trade_date."""
+    """Fetch stock_indicator_state rows for the window, indexed by IST date."""
     sql = text("""
-        SELECT trade_date,
+        SELECT bar_timestamp,
                med_ema, long_ema, longest_ema, atr,
                upper_inner_band, lower_inner_band,
                upper_mid_band,   lower_mid_band,
                upper_outer_band, lower_outer_band,
                display_regime
-          FROM indicator_state
+          FROM stock_indicator_state
          WHERE ticker_id = :tid
            AND timeframe = :tf
-           AND trade_date BETWEEN :start AND :end
+           AND bar_timestamp::date BETWEEN :start AND :end
     """)
     rows = conn.execute(sql, {
         "tid": ticker_id, "tf": timeframe.value,
         "start": start, "end": end,
     }).fetchall()
     return {
-        r.trade_date: _IndicatorRow(
-            trade_date=r.trade_date,
+        r.bar_timestamp.astimezone(tz).date(): _IndicatorRow(
+            trade_date=r.bar_timestamp.astimezone(tz).date(),
             med_ema=r.med_ema,
             long_ema=r.long_ema,
             longest_ema=r.longest_ema,

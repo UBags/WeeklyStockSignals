@@ -1,14 +1,12 @@
-"""Public callable surface — three functions.
+"""Public callable surface.
 
-(a) compute_full_verbose / compute_full_terse  — stateless ad-hoc compute
-(b) query_cached_verbose  / query_cached_terse — fast path via SignalCache
-(c) prime_all_tickers                          — startup orchestration
+  compute_full_verbose / compute_full_terse — stateless ad-hoc compute.
+  Plus the response types and error classes used by both.
 
-Plus the response types and error classes used by all three.
+PHASE-3E: prime_cache_from_db + PrimeCacheResult exports removed;
+lifecycle.py was deleted alongside the legacy SignalCache.
 """
 
-# === STEP 15-B3: query_cached_verbose/terse exports removed ===
-from .lifecycle import prime_cache_from_db, PrimeCacheResult
 from .responses import (
     InsufficientHistoryError,
     TerseResponse,
@@ -19,12 +17,9 @@ from .stateless import compute_full_terse, compute_full_verbose
 
 __all__ = [
     "InsufficientHistoryError",
-    "PrimeCacheResult",
     "TerseResponse",
     "TickerNotPrimedError",
     "VerboseResponse",
     "compute_full_terse",
     "compute_full_verbose",
-    "prime_cache_from_db",
-    # === STEP 15-B3-all: query_cached_* names removed from __all__ ===
 ]

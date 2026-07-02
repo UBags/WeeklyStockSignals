@@ -141,10 +141,7 @@ The Phase 15d audit (`docs/gui_endpoint_audit.md`) catalogues 25 routes. Four ar
 ```mermaid
 flowchart TB
     subgraph audit["From docs/gui_endpoint_audit.md"]
-        gap1["GET /v1/admin/orchestrator/status"]
-        gap2["POST /v1/admin/orchestrator/{ex}/run-now"]
-        gap3["POST /v1/admin/orchestrator/{ex}/pause"]
-        gap4["POST /v1/admin/orchestrator/{ex}/resume"]
+        gap1["(Phase 3b deletion) /v1/admin/orchestrator/* — routes retired"]
         gap5["POST /v1/admin/reprime"]
     end
     gap1 --> a1["Card needed in System Health.<br/>Server-side card-builder<br/>missing (admin_health.py)"]
@@ -156,7 +153,7 @@ flowchart TB
 
 ### 2.1 Orchestrator status card
 
-**Current state.** No GUI surface. Operator does `curl … /v1/admin/orchestrator/status | jq`.
+**Current state (post-Phase-3b).** Endpoint deleted. RunScheduler + RunDispatcher own scheduling; inspect their state via `/healthz` (`run_scheduler_alive`, `run_dispatcher_alive`) or `/v1/admin/health-snapshot`'s Compute Scheduler card (backed by `compute_runs`).
 
 **To close.** Add `_orchestrator_card(...)` builder in `trip_ema/transports/http/routes/admin_health.py` so the existing System Health tab picks it up automatically (the tab is card-driven; whatever cards the server returns get rendered). Open questions captured in the audit:
 

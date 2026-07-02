@@ -196,41 +196,23 @@ class ComputeRunSummaryPayload(BaseModel):
     errors: list[tuple[str, str]]
 
 
-class LifecycleResultPayload(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    tickers_primed: int
-    tickers_skipped_no_bars: int
-    tickers_failed: int
-    cache_entries_populated: int
+# PHASE-3E: LifecycleResultPayload deleted (only consumer was
+# /v1/admin/prime-all, itself deleted in Phase 3e).
 
 
 class HealthPayload(BaseModel):
     model_config = ConfigDict(frozen=True)
     status: str
-    registry_size: int
-    cache_size: int
     redis_reachable: bool | None = None
-    # PHASE-3C: Phase 14 fields (compute_scheduler_alive, distributor_alive,
-    # orchestrator_pool_alive, and their matching *_completed_at datetimes)
-    # were removed here — all six had been permanently None since Phase 3b
-    # deleted MarketOrchestrator + PulseState + the legacy schedulers. The
-    # two new fields below reflect the Phase 1a/3a subsystems that ACTUALLY
-    # own scheduling now.
+    # PHASE-3E: registry_size, cache_size, stale_tickers_count fields
+    # removed alongside SignalCache deletion.
     run_scheduler_alive: bool | None = None
-    """Phase 3c: True iff the RunScheduler thread (wall-clock tick planner)
-    is alive. None when AppState hasn't been wired yet (e.g. very early
-    startup, or in HTTP-only test fixtures)."""
+    """True iff the RunScheduler thread (wall-clock tick planner) is
+    alive. None when AppState hasn't been wired (early startup, HTTP-
+    only test fixtures)."""
     run_dispatcher_alive: bool | None = None
-    """Phase 3c: True iff the RunDispatcher thread (subprocess launcher)
-    is alive. None when AppState hasn't been wired yet."""
-    stale_tickers_count: int = 0
-    """Phase 9 A2: number of tickers currently flagged as stale due to
-    data gaps (ETL hasn't filled all expected closed weekly buckets).
-    Reported on /readyz but does NOT contribute to 503 — the service
-    is operationally healthy; it's upstream data that's behind. Ops
-    monitoring should alert on this field; the load balancer should
-    not depool on it."""
+    """True iff the RunDispatcher thread (subprocess launcher) is
+    alive. None when AppState hasn't been wired."""
     issues: list[str] = []
     """List of human-readable problem descriptions. Empty when fully healthy.
     Populated even on 200 responses if there are minor concerns (e.g.,

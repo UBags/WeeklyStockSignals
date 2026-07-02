@@ -18,8 +18,7 @@ from typing import Annotated, Any
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import Engine
 
-# === STEP 14B-FIXUP1-deps-import: CurrentSignalsCache added ===
-from ...cache import SignalCache
+# PHASE-3E: SignalCache import removed (class deleted).
 from ...cache.current_signals_cache import CurrentSignalsCache
 from ...config import Config
 # === STEP 14B-E3-import: ComputeScheduler + SubscriberDistributor imports stripped ===
@@ -47,7 +46,7 @@ class AppState:
     # === STEP 14B-FIXUP1-deps-appstate: v1_cache field added ===
     config: Config
     db_engine: Engine
-    cache: SignalCache
+    # PHASE-3E: cache: SignalCache field removed (class deleted).
     v1_cache: CurrentSignalsCache | None = None
     redis_queue: RedisQueue | None = None
     metrics_server: Any | None = None
@@ -163,9 +162,7 @@ def get_db_engine() -> Engine:
     return _require_state().db_engine
 
 
-def get_cache() -> SignalCache:
-    return _require_state().cache
-
+# PHASE-3E: get_cache() removed (SignalCache class deleted).
 
 # === STEP 14B-FIXUP1-deps-getter: get_v1_cache added ===
 def get_v1_cache() -> CurrentSignalsCache:

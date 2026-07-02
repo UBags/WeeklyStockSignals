@@ -107,7 +107,7 @@ def _seed_indicator_state(engine, trade_date_ist: date,
                           display_regime: int,
                           *, med=100.0, long_=100.0, longest=100.0,
                           atr=2.0) -> None:
-    """Seed one indicator_state row for the given week."""
+    """Seed one stock_indicator_state row for the given week."""
     upper_inner = max(med, long_, longest) + 0.2 * atr
     lower_inner = min(med, long_, longest) - 0.2 * atr
     upper_mid = max(med, long_, longest) + 2.0 * atr
@@ -116,11 +116,11 @@ def _seed_indicator_state(engine, trade_date_ist: date,
     lower_outer = min(med, long_, longest) - 4.5 * atr
     with engine.begin() as conn:
         conn.exec_driver_sql(
-            "INSERT INTO indicator_state "
-            "(ticker_id, timeframe, trade_date, med_ema, long_ema, longest_ema, atr, "
+            "INSERT INTO stock_indicator_state "
+            "(ticker_id, timeframe, bar_timestamp, med_ema, long_ema, longest_ema, atr, "
             " upper_inner_band, lower_inner_band, upper_mid_band, lower_mid_band, "
             " upper_outer_band, lower_outer_band, display_regime) "
-            "VALUES (1806, '1W', %(td)s, %(m)s, %(l)s, %(lg)s, %(a)s, "
+            "VALUES (1806, '1W', (%(td)s)::timestamp AT TIME ZONE 'Asia/Kolkata', %(m)s, %(l)s, %(lg)s, %(a)s, "
             " %(ui)s, %(li)s, %(um)s, %(lm)s, %(uo)s, %(lo)s, %(dr)s)",
             dict(td=trade_date_ist, m=med, l=long_, lg=longest, a=atr,
                  ui=upper_inner, li=lower_inner,

@@ -21,11 +21,9 @@ from datetime import datetime, UTC
 from fastapi import APIRouter, Depends
 from sqlalchemy import Engine, text
 
-# === STEP 14B-FIXUP2-imports: scheduler types + getters stripped ===
-from ....cache import SignalCache
-# PHASE-3B: get_orchestrator_pool import removed.
+# PHASE-3E: SignalCache + get_cache imports removed (subsystem deleted).
 from ..dependencies import (
-    get_cache, get_db_engine,
+    get_db_engine,
     get_redis_queue,
     require_admin_token,
 )
@@ -45,11 +43,10 @@ router = APIRouter(
 _STATUS_RANK = {"crit": 3, "warn": 2, "ok": 1, "unknown": 0}
 
 
-# PHASE-3B: orchestrator_pool dependency removed; card now reads compute_runs.
+# PHASE-3E: cache dep removed (SignalCache deleted).
 @router.get("", response_model=HealthSnapshotPayload)
 def health_snapshot(
     db_engine: Engine = Depends(get_db_engine),
-    cache: SignalCache = Depends(get_cache),
     redis_queue=Depends(get_redis_queue),
 ) -> HealthSnapshotPayload:
     """One call returning every dashboard card. ~10ms — composed of
@@ -66,8 +63,7 @@ def health_snapshot(
     # PHASE-3B: compute step health now derives from compute_runs table.
     cards.append(_compute_scheduler_card(db_engine))
 
-    # 4. Cache — populated entry count vs registered ticker count
-    cards.append(_cache_card(cache))
+    # PHASE-3E: _cache_card removed (SignalCache deleted; empty by construction).
 
     # 5. Circuit breakers — legacy in-process distributor was demolished
     cards.append(_circuit_breakers_card(redis_queue))
@@ -250,34 +246,9 @@ def _compute_scheduler_card(
             headline="compute_runs query failed", detail=str(e),
         )
 
-def _cache_card(cache: SignalCache) -> HealthCardPayload:
-    """Cache should hold one snapshot per active ticker. Empty cache
-    means the lifecycle prime hasn't run or both indicator_state and
-    signal_events are empty.
+# PHASE-3E: _cache_card deleted. No consumer; SignalCache no longer exists.
 
-    Step 9c: counts `cache.snapshot_count()` rather than `len(cache)`,
-    and drops the registry comparison (registry is deleted in 9a).
-    """
-    try:
-        n_entries = cache.snapshot_count()
-        if n_entries == 0:
-            return HealthCardPayload(
-                name="Signal cache", status="unknown",
-                headline="Cache empty",
-                detail="Run prime-all to populate from indicator_state + signal_events.",
-            )
-        return HealthCardPayload(
-            name="Signal cache", status="ok",
-            headline=f"{n_entries:,} snapshots",
-            detail="Populated from persisted indicator_state + signal_events.",
-        )
-    except Exception as e:
-        return HealthCardPayload(
-            name="Signal cache", status="unknown",
-            headline="State unavailable", detail=str(e),
-        )
 
-# === STEP 14B-FIXUP2-cb_card: distributor arg + in-process branch removed ===
 def _circuit_breakers_card(redis_queue) -> HealthCardPayload:
     """Open breakers = some transport is failing repeatedly.
     Queue mode (Redis): breakers live in the notifier worker process.

@@ -91,12 +91,9 @@ def test_compute_rejects_extra_field(http_app):
     assert response.status_code == 422
 
 
-def test_compute_does_not_touch_cache(http_app):
-    """Stateless: the cache should remain empty after a compute call."""
-    assert http_app.cache.snapshot_count() == 0
-    response = http_app.client.post("/v1/compute", json=_compute_body())
-    assert response.status_code == 200
-    assert http_app.cache.snapshot_count() == 0
+# PHASE-3E: test_compute_does_not_touch_cache deleted. The legacy
+# SignalCache it inspected no longer exists; /v1/compute is
+# structurally stateless (has no cache to touch).
 
 
 def test_compute_uses_default_timeframe(http_app):

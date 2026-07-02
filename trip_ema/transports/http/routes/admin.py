@@ -24,28 +24,19 @@ from datetime import datetime, UTC
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Engine
 
-# PHASE-3D: _load_latest_indicator_states import removed (function deleted).
-from ....api.lifecycle import (
-    PrimeCacheResult,
-    prime_cache_from_db,
-)
-# === STEP 14B-FIXUP1-admin-import: CurrentSignalsCache added ===
-from ....cache import SignalCache
+# PHASE-3E: lifecycle + SignalCache + CachedSnapshot + get_cache +
+# LifecycleResultPayload + StaleTickerEntry + CoreRegime imports removed
+# (all consumed only by /prime-all + /stale-tickers's now-deleted rich
+# payload path).
 from ....cache.current_signals_cache import CurrentSignalsCache
-from ....cache.signal_cache import CachedSnapshot
 from ....config import Config
-from ....domain import CoreRegime, TickerRef, Timeframe
+from ....domain import TickerRef, Timeframe
 from ....notifications.circuit_breaker import CircuitBreakingTransport
-# === STEP 14B-E4-import: ComputeScheduler + SubscriberDistributor imports stripped ===
 from ....orchestrator import recompute_market
-# === STEP 14B-FIXUP1-admin-deps: get_v1_cache added ===
 from ..dependencies import (
-    get_cache,
     get_v1_cache,
-    # === STEP 14B-E4-dep_cs: get_compute_scheduler removed ===
     get_config,
     get_db_engine,
-    # === STEP 14B-E4-dep_dist: get_distributor removed ===
     require_admin_token,
 )
 from ..schemas import (
@@ -53,9 +44,7 @@ from ..schemas import (
     CircuitBreakerEntry,
     CircuitBreakersPayload,
     ComputeRunSummaryPayload,
-    LifecycleResultPayload,
     RepriumeResultPayload,
-    StaleTickerEntry,
     StaleTickersPayload,
     TickerRefPayload,
 )
@@ -69,24 +58,8 @@ router = APIRouter(
 )
 
 
-@router.post("/prime-all", response_model=LifecycleResultPayload)
-def admin_prime_all(
-    db_engine: Engine = Depends(get_db_engine),
-    cache: SignalCache = Depends(get_cache),
-) -> LifecycleResultPayload:
-    """Re-run the startup prime — two SELECTs against indicator_state
-    and signal_events seed the cache. Idempotent; safe to call after
-    bulk DB writes (regenerate-signals, manual SQL imports, etc.)."""
-    logger.info("Admin: prime-all requested")
-    result: PrimeCacheResult = prime_cache_from_db(
-        db_engine=db_engine, cache=cache,
-    )
-    return LifecycleResultPayload(
-        tickers_primed=result.snapshots_populated,
-        tickers_skipped_no_bars=result.tickers_seen - result.snapshots_populated,
-        tickers_failed=0,
-        cache_entries_populated=result.snapshots_populated,
-    )
+# PHASE-3E: admin_prime_all deleted. No callers (GUI never wired,
+# no HTTP client method). SignalCache is gone; there's nothing to prime.
 
 
 # === STEP 14B-E4-compute_now: /compute-now rewired to V1 recompute_market ===
@@ -126,9 +99,7 @@ def admin_compute_now(
 
 
 @router.get("/stale-tickers", response_model=StaleTickersPayload)
-def admin_stale_tickers(
-    cache: SignalCache = Depends(get_cache),
-) -> StaleTickersPayload:
+def admin_stale_tickers() -> StaleTickersPayload:  # PHASE-3E: cache dep dropped
     """PHASE-3D: legacy stale-ticker tracking retired.
 
     Previously listed each ticker whose SignalCache entry carried
@@ -152,7 +123,7 @@ def admin_reprime_ticker(
     instrument: str = Query(default="EQ", max_length=16),
     timeframe: Timeframe = Query(default=Timeframe.WEEKLY),
     db_engine: Engine = Depends(get_db_engine),
-    cache: SignalCache = Depends(get_cache),
+    # PHASE-3E: cache dep dropped (SignalCache deleted).
 ) -> RepriumeResultPayload:
     """Refresh a single ticker's cache entry from DB.
 

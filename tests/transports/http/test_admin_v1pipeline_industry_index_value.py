@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from trip_ema.transports.http import create_app
 from trip_ema.transports.http.dependencies import (
     # === STEP 14B-FIXUP5-import: scheduler/distributor getters stripped ===
-    get_cache, get_config, get_db_engine,
+    get_v1_cache, get_config, get_db_engine,
     get_etl_executor, get_redis_queue,
 )
 
@@ -56,7 +56,7 @@ def _make_client(*, config=None, db_engine=None, executor=None):
         lambda: (db_engine or MagicMock())
     )
     app.dependency_overrides[get_etl_executor] = lambda: executor
-    app.dependency_overrides[get_cache] = lambda: MagicMock()
+    app.dependency_overrides[get_v1_cache] = lambda: MagicMock()
     # === STEP 14B-FIXUP5-overrides: scheduler/distributor overrides removed ===
     app.dependency_overrides[get_redis_queue] = lambda: None
     return TestClient(app)

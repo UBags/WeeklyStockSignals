@@ -18,7 +18,6 @@ What we DO expect run_eod to write to (these are the OHLCV concern):
                              not an indicator)
 
 What we DO NOT expect run_eod to write to (indicator / signal concern):
-  - indicator_state                    (legacy)
   - stock_indicator_state              (V1)
   - industry_indicator_state           (V1)
   - stock_indicator_enrichment         (V1)
@@ -55,7 +54,6 @@ from trip_ema.etl.yfinance_source import YFinanceSource
 # A None filter means "any row in this table is a violation."
 # === STEP 15B-FIXUP1: signal_events removed (table dropped in 0030) ===
 INDICATOR_SIGNAL_TABLES_TICKER_SCOPED = [
-    ("indicator_state",                 "ticker_id = :tid"),
     ("stock_indicator_state",           "ticker_id = :tid"),
     ("stock_indicator_enrichment",      "ticker_id = :tid"),
     ("current_signals",                 "ticker_id = :tid"),

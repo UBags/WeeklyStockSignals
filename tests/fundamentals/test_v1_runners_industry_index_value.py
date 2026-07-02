@@ -459,7 +459,6 @@ class TestPopulateIndustryIndexValueSideEffects:
             # === STEP 15B-FIXUP2-r3-baseline: signal_events baseline removed ===
             baseline_current = _count(conn, "current_signals")
             baseline_historical = _count(conn, "historical_signals")
-            baseline_legacy = _count(conn, "indicator_state")
 
         populate_industry_index_value_for_industry(
             db_engine, industry, from_date=rd, to_date=td,
@@ -483,9 +482,6 @@ class TestPopulateIndustryIndexValueSideEffects:
             assert _count(
                 conn, "historical_signals",
             ) == baseline_historical
-            assert _count(
-                conn, "indicator_state",
-            ) == baseline_legacy
 
 
 # ============================================================

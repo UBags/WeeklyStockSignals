@@ -27,12 +27,8 @@ from datetime import datetime, UTC
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ....cache import SignalCache
-# === STEP 14B-E5: scheduler type imports stripped ===
-# PHASE-3B: get_orchestrator_pool import dropped (function deleted).
-# PHASE-3C: None-tolerant getters for run_scheduler + run_dispatcher.
+# PHASE-3E: SignalCache import + get_cache removed (subsystem deleted).
 from ..dependencies import (
-    get_cache,
     get_redis_queue,
     get_run_dispatcher_or_none,
     get_run_scheduler_or_none,
@@ -44,24 +40,17 @@ router = APIRouter(tags=["health"])
 
 @router.get("/healthz", response_model=HealthPayload)
 def healthz(
-    cache: SignalCache = Depends(get_cache),
     run_scheduler=Depends(get_run_scheduler_or_none),
     run_dispatcher=Depends(get_run_dispatcher_or_none),
 ) -> HealthPayload:
     """Liveness probe. Returns 200 if the process is responsive.
 
-    PHASE-3C: reports run_scheduler_alive + run_dispatcher_alive
-    for informational value (does not change status — the process
-    is "live" as long as it can answer HTTP). Silent thread death
-    (which caused the 2026-07-02 Phase 3a startup outage) surfaces
-    here now: run_scheduler_alive=false in the JSON would have
-    caught it immediately.
+    PHASE-3E: cache-derived fields (registry_size, cache_size) removed
+    alongside SignalCache deletion. run_scheduler_alive +
+    run_dispatcher_alive remain as informational subsystem status.
     """
-    n = cache.snapshot_count()
     return HealthPayload(
         status="ok",
-        registry_size=n,   # legacy wire field, mirrors cache_size
-        cache_size=n,
         run_scheduler_alive=_thread_alive(run_scheduler),
         run_dispatcher_alive=_thread_alive(run_dispatcher),
     )
@@ -82,28 +71,23 @@ def _thread_alive(subsystem) -> bool | None:
 
 @router.get("/readyz", response_model=HealthPayload)
 def readyz(
-    cache: SignalCache = Depends(get_cache),
     redis_queue=Depends(get_redis_queue),
     run_scheduler=Depends(get_run_scheduler_or_none),
     run_dispatcher=Depends(get_run_dispatcher_or_none),
 ) -> HealthPayload:
     """Readiness probe. Returns 200 only if the service can do useful work.
 
-    PHASE-3C signals:
-      - Cache has at least one snapshot
+    PHASE-3E signals:
       - Redis reachable (if configured)
       - RunScheduler thread alive
       - RunDispatcher thread alive
 
     A dead RunScheduler or RunDispatcher counts as unready (503) —
     the process is up but can't schedule or execute new cycles, so
-    load balancers should depool it.
+    load balancers should depool it. The former "cache empty" and
+    "stale tickers" signals were removed alongside SignalCache.
     """
     issues: list[str] = []
-
-    n_snapshots = cache.snapshot_count()
-    if n_snapshots == 0:
-        issues.append("Cache empty (never seeded)")
 
     redis_reachable: bool | None = None
     if redis_queue is not None:
@@ -114,25 +98,16 @@ def readyz(
     run_scheduler_alive = _thread_alive(run_scheduler)
     run_dispatcher_alive = _thread_alive(run_dispatcher)
 
-    # Only treat False (not None) as an issue. None means "state not
-    # wired" — that's a legitimate transient during startup and the
-    # cache-empty check above already covers it.
     if run_scheduler_alive is False:
         issues.append("RunScheduler thread is not alive")
     if run_dispatcher_alive is False:
         issues.append("RunDispatcher thread is not alive")
 
-    # Phase 9 A2: stale tickers — informational only.
-    stale = cache.all_stale_snapshots()
-
     payload = HealthPayload(
         status="ready" if not issues else "not_ready",
-        registry_size=n_snapshots,   # legacy wire field
-        cache_size=n_snapshots,
         redis_reachable=redis_reachable,
         run_scheduler_alive=run_scheduler_alive,
         run_dispatcher_alive=run_dispatcher_alive,
-        stale_tickers_count=len(stale),
         issues=issues,
     )
 

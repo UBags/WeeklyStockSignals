@@ -6,7 +6,7 @@ Boot sequence:
     3. Load + validate config
     4. Open DB engine
     5. Apply pending migrations
-    6. Build SignalCache; prime from DB
+    6. Build V1 CurrentSignalsCache; prime from current_signals
     7. Build ComputeScheduler; start its background thread
     8. Build transports + SubscriberDistributor (optional, if subscribers configured)
     9. Wire dependencies into the FastAPI app
@@ -49,7 +49,7 @@ from .scheduler.run_scheduler import RunScheduler
 from .scheduler.market_calendar import TradingCalendar
 from sqlalchemy import text as _sa_text
 
-from .cache import SignalCache
+# PHASE-3E: SignalCache import removed (class deleted).
 from .cache.current_signals_cache import CurrentSignalsCache
 from .config import load_config
 from .notifications import EmailTransport, NullTransport, WebhookTransport
@@ -134,19 +134,10 @@ def _build_app_state(config_path: Path) -> AppState:
         logger.error("Migration failed: %s", e)
         raise
 
-    logger.info("Building cache")
-    cache = SignalCache()
+    # PHASE-3E: Legacy SignalCache construction + prime_cache_from_db call
+    # removed. The class is deleted; the V1 CurrentSignalsCache below is
+    # the only cache the service maintains.
 
-    logger.info("Priming all tickers from DB")
-    from trip_ema.api.lifecycle import prime_cache_from_db
-    result = prime_cache_from_db(db_engine=db_engine, cache=cache)
-    logger.info("Cache primed: %d snapshots", result.snapshots_populated)
-
-    # Step 10 cutover: build the V1 CurrentSignalsCache alongside the
-    # legacy SignalCache. Both coexist until Step 14 demolishes the
-    # latter. Primed from `current_signals` so GUI reads against the
-    # V1 cache work immediately at startup — not only after the first
-    # recompute_market cycle.
     logger.info("Building V1 current_signals cache")
     v1_cache = CurrentSignalsCache()
     with db_engine.connect() as conn:
@@ -210,10 +201,10 @@ def _build_app_state(config_path: Path) -> AppState:
     # === STEP 14B-FIXUP1-app-appstate: v1_cache plumbed through ===
     # PHASE-3B-APPSTATE: orchestrator_pool + pulse_state kwargs removed
     # (fields deleted from AppState alongside their subsystems).
+    # PHASE-3E: cache=cache kwarg removed (AppState.cache field deleted).
     return AppState(
         config=config,
         db_engine=db_engine,
-        cache=cache,
         v1_cache=v1_cache,
         redis_queue=redis_queue,
         metrics_server=metrics_server,

@@ -116,10 +116,6 @@ class TestPopulateStockIndicatorEnrichmentForTicker:
                 conn, "historical_signals",
                 "ticker_id = :tid", tid=ticker_id,
             )
-            baseline_legacy_state = _count(
-                conn, "indicator_state",
-                "ticker_id = :tid", tid=ticker_id,
-            )
             baseline_industry_state = _count(
                 conn, "industry_indicator_state",
             )
@@ -173,13 +169,6 @@ class TestPopulateStockIndicatorEnrichmentForTicker:
                 conn, "historical_signals",
                 "ticker_id = :tid", tid=ticker_id,
             ) == baseline_historical
-            assert _count(
-                conn, "indicator_state",
-                "ticker_id = :tid", tid=ticker_id,
-            ) == baseline_legacy_state, (
-                "V1 enrichment runner must NOT write to legacy "
-                "indicator_state"
-            )
             assert _count(
                 conn, "industry_indicator_state",
             ) == baseline_industry_state

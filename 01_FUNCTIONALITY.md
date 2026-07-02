@@ -235,16 +235,14 @@ flowchart TB
         h["/healthz<br/>/readyz"]
         sig["/v1/signals/{exchange}/{symbol}/history"]
         cmp["/v1/compute/*"]
-        pulse["/v1/pulse/stream  (SSE)"]
     end
     subgraph admin["Admin routes (bearer token)"]
-        adm["/v1/admin/health"]
+        adm["/v1/admin/health-snapshot"]
         adm_etl["/v1/admin/etl/*<br/>(7 actions + status + parked)"]
         adm_exst["/v1/admin/exchange-state"]
         adm_ex["/v1/admin/exchanges"]
         adm_sub["/v1/admin/subscribers/*"]
         adm_notif["/v1/admin/notifications/recent<br/>/v1/admin/notifications/dlq"]
-        adm_orch["/v1/admin/orchestrator/*"]
         adm_sig["/v1/admin/signals/generate<br/>/v1/admin/signals/generated<br/>(Phase 15b)"]
         adm_reprime["/v1/admin/reprime"]
         adm_cb["/v1/admin/circuit-breakers"]
@@ -259,13 +257,12 @@ flowchart TB
 | `GET /readyz` | Readiness; diagnostic |
 | `GET /v1/signals/{exchange}/{symbol}/history` | Replays an engine over the requested window and returns `BarState`s plus change events. Used by the GUI chart. |
 | `GET /v1/compute/*` | Stateless on-demand compute over caller-supplied bars |
-| `GET /v1/pulse/stream` | SSE stream of pulse events (internal use) |
 
 #### Admin (every route requires `Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN`)
 
 | Endpoint | Method | Use |
 |---|---|---|
-| `/v1/admin/health` | GET | Snapshot card-driven dashboard (system + circuit-breaker status) |
+| `/v1/admin/health-snapshot` | GET | Snapshot card-driven dashboard (system + circuit-breaker status) |
 | `/v1/admin/etl/run-eod` | POST | Fire `run_eod` async on the etl_executor |
 | `/v1/admin/etl/run-intraday` | POST | Fire `run_intraday` async |
 | `/v1/admin/etl/backfill` | POST | Fire backfill from a start date (optional tier) |
@@ -279,10 +276,6 @@ flowchart TB
 | `/v1/admin/subscribers/*` | CRUD | Subscriber records + filters + "send test" |
 | `/v1/admin/notifications/recent` | GET | Last N notification_log rows |
 | `/v1/admin/notifications/dlq` | GET | DLQ rows |
-| `/v1/admin/orchestrator/status` | GET | Per-exchange orchestrator state (next tick, paused?) |
-| `/v1/admin/orchestrator/{ex}/run-now` | POST | Force a tick |
-| `/v1/admin/orchestrator/{ex}/pause` | POST | Pause the tick loop |
-| `/v1/admin/orchestrator/{ex}/resume` | POST | Resume the tick loop |
 | `/v1/admin/circuit-breakers` | GET | Breaker state per transport |
 | `/v1/admin/reprime` | POST | Re-prime one ticker's engine from scratch |
 | **`/v1/admin/signals/generate`** | POST | **Phase 15b** — fire backtest generation (202 Accepted) |

@@ -1,6 +1,6 @@
-"""Read-mostly per-ticker signal cache."""
+"""Cache package.
 
-# PHASE-3D: IndicatorStateSnapshot re-export removed (class deleted).
-from .signal_cache import CachedSnapshot, SignalCache
-
-__all__ = ["CachedSnapshot", "SignalCache"]
+PHASE-3E: SignalCache + CachedSnapshot re-exports removed alongside
+the class deletion. CurrentSignalsCache remains as a submodule
+(trip_ema.cache.current_signals_cache); consumers import it directly.
+"""
