@@ -46,6 +46,11 @@ class ComputeRunRow:
     failed_stage: str | None
     error_message: str | None
     notes: str | None
+    # PHASE-3F: internal stage token of the currently-running stage
+    # (e.g. 'fetch_bars', 'iiv', 'notify'); None when no stage is
+    # active. Lets the ETL Status GUI surface progress for
+    # scheduler-driven runs that have no stdout channel.
+    current_stage: str | None = None
 
     @property
     def duration_seconds(self) -> float | None:
@@ -132,7 +137,8 @@ class ComputeRunsRepository:
                        tickers_attempted = :tickers_attempted,
                        tickers_fetched   = :tickers_fetched,
                        failed_stage      = :failed_stage,
-                       error_message     = :error_message
+                       error_message     = :error_message,
+                       current_stage     = NULL
                  WHERE compute_run_id = :rid
             """),
             {
@@ -142,6 +148,27 @@ class ComputeRunsRepository:
                 "failed_stage": failed_stage,
                 "error_message": error_message,
             },
+        )
+
+    def set_current_stage(
+        self, compute_run_id: int, stage: str | None,
+    ) -> None:
+        """PHASE-3F: publish the currently-running internal stage token
+        for an in-flight run, so the ETL Status GUI can surface live
+        progress for scheduler-driven (auto) runs — which, unlike
+        GUI-spawned runs, have no stdout channel the GUI can read.
+
+        `stage` is the internal token (e.g. 'fetch_bars', 'iiv',
+        'notify'); pass None to clear. Best-effort at the call site —
+        callers must not let a failure here abort the compute.
+        """
+        self._conn.execute(
+            text("""
+                UPDATE compute_runs
+                   SET current_stage = :stage
+                 WHERE compute_run_id = :rid
+            """),
+            {"rid": compute_run_id, "stage": stage},
         )
 
     def recent(
@@ -158,7 +185,8 @@ class ComputeRunsRepository:
         sql = """
             SELECT compute_run_id, kind, exchange, started_at,
                    finished_at, tickers_attempted, tickers_fetched,
-                   failed_stage, error_message, notes
+                   failed_stage, error_message, notes,
+                   current_stage
               FROM compute_runs
         """
         if exchange is not None:
@@ -182,7 +210,8 @@ class ComputeRunsRepository:
             text("""
                 SELECT compute_run_id, kind, exchange, started_at,
                        finished_at, tickers_attempted, tickers_fetched,
-                       failed_stage, error_message, notes
+                       failed_stage, error_message, notes,
+                       current_stage
                   FROM compute_runs
                  WHERE compute_run_id = :rid
             """),
@@ -200,7 +229,8 @@ class ComputeRunsRepository:
         sql = """
             SELECT compute_run_id, kind, exchange, started_at,
                    finished_at, tickers_attempted, tickers_fetched,
-                   failed_stage, error_message, notes
+                   failed_stage, error_message, notes,
+                   current_stage
               FROM compute_runs
              WHERE finished_at IS NULL
         """
@@ -232,4 +262,5 @@ def _row_to_dc(row) -> ComputeRunRow:
         failed_stage=row.failed_stage,
         error_message=row.error_message,
         notes=row.notes,
+        current_stage=row.current_stage,  # PHASE-3F
     )

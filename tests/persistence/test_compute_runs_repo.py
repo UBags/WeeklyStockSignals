@@ -240,3 +240,79 @@ class TestRowAccessors:
                 compute_run_id=999_999_999,
             )
         assert row is None
+
+
+class TestCurrentStage:
+    """PHASE-3F: compute_runs.current_stage — live per-stage marker
+    read by the ETL Status GUI to surface auto-run progress."""
+
+    def test_start_leaves_current_stage_null(self, db_engine):
+        with transaction(db_engine) as conn:
+            run_id = ComputeRunsRepository(conn).start(
+                kind="intraday", exchange="NSE",
+            )
+            row = ComputeRunsRepository(conn).get(run_id)
+        assert row is not None
+        assert row.current_stage is None
+
+    def test_set_current_stage_round_trips(self, db_engine):
+        with transaction(db_engine) as conn:
+            run_id = ComputeRunsRepository(conn).start(
+                kind="intraday", exchange="NSE",
+            )
+        with transaction(db_engine) as conn:
+            ComputeRunsRepository(conn).set_current_stage(run_id, "iiv")
+        with db_engine.connect() as conn:
+            row = ComputeRunsRepository(conn).get(run_id)
+        assert row is not None
+        assert row.current_stage == "iiv"
+
+    def test_set_current_stage_visible_in_in_flight(self, db_engine):
+        with transaction(db_engine) as conn:
+            run_id = ComputeRunsRepository(conn).start(
+                kind="intraday", exchange="NSE",
+            )
+        with transaction(db_engine) as conn:
+            ComputeRunsRepository(conn).set_current_stage(
+                run_id, "fetch_bars",
+            )
+        with db_engine.connect() as conn:
+            rows = ComputeRunsRepository(conn).in_flight(exchange="NSE")
+        match = [r for r in rows if r.compute_run_id == run_id]
+        assert match, "expected the in-flight row to be present"
+        assert match[0].current_stage == "fetch_bars"
+
+    def test_set_current_stage_none_clears(self, db_engine):
+        with transaction(db_engine) as conn:
+            run_id = ComputeRunsRepository(conn).start(
+                kind="intraday", exchange="NSE",
+            )
+        with transaction(db_engine) as conn:
+            ComputeRunsRepository(conn).set_current_stage(
+                run_id, "notify",
+            )
+        with transaction(db_engine) as conn:
+            ComputeRunsRepository(conn).set_current_stage(run_id, None)
+        with db_engine.connect() as conn:
+            row = ComputeRunsRepository(conn).get(run_id)
+        assert row is not None
+        assert row.current_stage is None
+
+    def test_finish_nulls_current_stage(self, db_engine):
+        with transaction(db_engine) as conn:
+            run_id = ComputeRunsRepository(conn).start(
+                kind="eod", exchange="NSE",
+            )
+        with transaction(db_engine) as conn:
+            ComputeRunsRepository(conn).set_current_stage(
+                run_id, "industry_state",
+            )
+        with transaction(db_engine) as conn:
+            ComputeRunsRepository(conn).finish(
+                run_id, tickers_attempted=10, tickers_fetched=10,
+            )
+        with db_engine.connect() as conn:
+            row = ComputeRunsRepository(conn).get(run_id)
+        assert row is not None
+        assert row.finished_at is not None
+        assert row.current_stage is None
