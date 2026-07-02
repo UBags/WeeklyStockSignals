@@ -705,10 +705,37 @@ def cmd_cycle(args, config: Config) -> int:
         # Stdout progress emitter — the shape the GUI parses
         def _progress(stage: str, msg: str) -> None:
             print(f"  [{stage}] {msg}", flush=True)
+            # PHASE-3F: also publish the live stage to compute_runs so
+            # the ETL Status GUI can surface progress for scheduler-
+            # driven (auto) runs, whose subprocess stdout the GUI can't
+            # read. Only on the "running" transition; best-effort — a
+            # publish failure must never abort the compute.
+            if msg == "running" and run_id is not None:
+                try:
+                    with transaction(db_engine) as conn:
+                        ComputeRunsRepository(conn).set_current_stage(
+                            run_id, stage,
+                        )
+                except Exception:
+                    print(
+                        f"  [{stage}] warn: current_stage publish "
+                        f"failed",
+                        file=sys.stderr, flush=True,
+                    )
 
         try:
             # ---- Stage 1: Fetch ----
-            tickers_fetched = _run_fetch_pass(
+            # ISSUE-C-FIX: `_run_fetch_pass` returns the etl_runs.run_id,
+            # NOT a ticker count. Naming the return value `tickers_fetched`
+            # (as this code used to) wrote the run_id straight into
+            # compute_runs.tickers_fetched, which showed up in the GUI's
+            # activity log as the mysterious 460-something "cutoff" for
+            # every cycle.  Now we rebind the name to the actual
+            # etl_runs.tickers_succeeded value, queried right after the
+            # fetch pass closes its own run row (it's committed by the
+            # time the call returns, so the SELECT is safe).
+            from sqlalchemy import text
+            fetch_run_id = _run_fetch_pass(
                 db_engine, config,
                 exchange=exchange,
                 kind=(
@@ -722,6 +749,19 @@ def cmd_cycle(args, config: Config) -> int:
                 source=None,
                 intraday=(kind == "intraday"),
                 progress_cb=_progress,
+            )
+            with db_engine.connect() as conn:
+                row = conn.execute(text(
+                    "SELECT tickers_succeeded, tickers_attempted "
+                    "  FROM etl_runs WHERE run_id = :rid"
+                ), {"rid": fetch_run_id}).one()
+                tickers_fetched = int(row.tickers_succeeded)
+                fetch_attempted = int(row.tickers_attempted)
+            print(
+                f"fetch stage: attempted={fetch_attempted} "
+                f"fetched={tickers_fetched} "
+                f"(etl_runs.run_id={fetch_run_id})",
+                flush=True,
             )
 
             # ---- Stages 2-9: recompute_market ----
