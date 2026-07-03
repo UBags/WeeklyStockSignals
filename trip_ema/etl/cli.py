@@ -742,9 +742,11 @@ def cmd_cycle(args, config: Config) -> int:
                     RunKind.INTRADAY if kind == "intraday"
                     else RunKind.EOD
                 ),
-                tier_filter=(
-                    {Tier.TIER_1} if kind == "intraday" else None
-                ),
+                # ALL-TICKERS: every run (intraday/eod, auto or
+                # manual) fetches the full exchange universe. Tiers
+                # only affect fetch ORDER now (tier-1 first via
+                # _select_tickers), never scope.
+                tier_filter=None,
                 timeframe=Timeframe.DAILY,
                 source=None,
                 intraday=(kind == "intraday"),

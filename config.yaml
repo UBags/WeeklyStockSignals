@@ -215,9 +215,12 @@ transports:
 # separate process. The main service ignores it.
 etl:
 #   exchange: NSE
-   tier_1_size: 200                # NIFTY 200 → tier-1 (daily refresh)
-#   tier_2_size: 500                # next 500 → tier-2 (weekly)
-#                                   # everything else → tier-3 (monthly)
+   # Tiers affect fetch ORDER only (tier-1 first, for Ctrl-C
+   # safety on backfills). Scope is always the full universe:
+   # every run (intraday / eod / backfill) fetches all tickers.
+   tier_1_size: 200                # NIFTY 200 → tier-1
+#   tier_2_size: 500                # next 500 → tier-2
+#                                   # everything else → tier-3
    park_failure_threshold: 3       # park after this many consecutive failures
    yfinance_batch_size: 50
 #   yfinance_concurrency: 4

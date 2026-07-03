@@ -416,7 +416,7 @@ def run_intraday(
     exchange: str,
     source: YFinanceSource | None = None,
 ) -> int:
-    """Hourly Tier-1-only pass for `exchange` during market hours.
+    """Hourly full-universe pass for `exchange` during market hours.
 
     Yfinance returns hourly bars; we aggregate them to a daily
     PROVISIONAL bar (the latest one). The trip_ema scheduler's
@@ -451,7 +451,7 @@ def run_intraday(
         config,
         exchange=exchange,
         kind=RunKind.INTRADAY,
-        tier_filter={Tier.TIER_1},
+        tier_filter=None,  # full universe — every run fetches all tickers
         timeframe=Timeframe.DAILY,  # We aggregate hourly → daily-provisional
         source=source,
         intraday=True,
@@ -635,11 +635,13 @@ def _run_fetch_pass(
 
       - exchange: which exchange's tickers to fetch (passed through
         to ticker selection and to the YFinanceSource symbol mapper).
-      - tier_filter: None = all tickers, {Tier.TIER_1} = intraday.
+      - tier_filter: None = all tickers (default for eod / intraday /
+        backfill). A non-None set restricts to those tiers — used
+        only by an explicit backfill --tier override.
       - start_date: backfill provides one; eod / intraday don't (they
         compute from days_lookback).
-      - intraday: True → hourly fetch (Tier 1 only) → aggregate to
-        provisional daily.
+      - intraday: True → hourly fetch → aggregate to provisional
+        daily. Full universe (no tier restriction).
 
     Caller is responsible for validating the exchange BEFORE calling
     this helper (the public entry points do that).
