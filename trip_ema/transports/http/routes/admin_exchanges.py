@@ -23,10 +23,14 @@ from datetime import datetime, UTC
 
 from fastapi import APIRouter, Depends
 
+# ISSUE-A2: MarketHoursService + ExchangeMarketStatusPayload imports.
+from fastapi import HTTPException, status as _http_status
+
 from ....config import Config
 from ....etl.exchanges import configured_exchanges
+from ....scheduler.market_hours import MarketHoursService
 from ..dependencies import get_config, require_admin_token
-from ..schemas import ExchangeListPayload
+from ..schemas import ExchangeListPayload, ExchangeMarketStatusPayload
 
 logger = logging.getLogger(__name__)
 
@@ -54,4 +58,40 @@ def admin_exchanges_list(
         exchanges=exchanges,
         total=len(exchanges),
         snapshot_taken_at=datetime.now(UTC),
+    )
+
+
+# ISSUE-A2: market-status per exchange for the GUI modal.
+@router.get(
+    "/{exchange}/market-status",
+    response_model=ExchangeMarketStatusPayload,
+)
+def admin_exchange_market_status(
+    exchange: str,
+    config: Config = Depends(get_config),
+) -> ExchangeMarketStatusPayload:
+    """Return whether `exchange` is currently open.
+
+    Consulted by the GUI's Confirm Intraday Cycle modal before it
+    opens, so the modal can display accurate state (previously
+    hardcoded to False, making the popup always say
+    'market currently closed' even during trading hours).
+
+    Returns 404 if the exchange is not configured in market_hours,
+    matching the semantics of MarketHoursService.is_open which
+    raises KeyError for unknown exchanges.
+    """
+    now = datetime.now(UTC)
+    svc = MarketHoursService(config.market_hours)
+    try:
+        is_open = svc.is_open(exchange, now)
+    except KeyError:
+        raise HTTPException(
+            status_code=_http_status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"Exchange {exchange!r} not configured in market_hours"
+            ),
+        )
+    return ExchangeMarketStatusPayload(
+        exchange=exchange, is_open=is_open, checked_at=now,
     )

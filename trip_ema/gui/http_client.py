@@ -198,6 +198,22 @@ class TripEmaHttpClient:
         """Return every exchange_state row. ExchangeStateListPayload shape."""
         return self._get("/v1/admin/exchange-state")
 
+    # ISSUE-A2: market-status query for the intraday modal.
+    def get_exchange_market_status(self, exchange: str) -> dict:
+        """Return the market-status payload for one exchange.
+
+        Shape: {"exchange": str, "is_open": bool, "checked_at": iso8601}.
+        Raises ApiError(404) if the exchange is not configured in
+        market_hours (matches the server's MarketHoursService KeyError
+        semantics).
+
+        Used by the GUI's Confirm Intraday Cycle modal to display
+        accurate market state before the operator commits to a run.
+        """
+        return self._get(
+            f"/v1/admin/exchanges/{exchange}/market-status",
+        )
+
     # ---------- Signal data (GET) — for the chart view ---------- #
 
     def get_signal_history(

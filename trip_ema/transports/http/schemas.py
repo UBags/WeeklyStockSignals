@@ -443,6 +443,21 @@ class ExchangeListPayload(BaseModel):
     snapshot_taken_at: datetime
 
 
+# ISSUE-A2: exchange market-status payload.
+class ExchangeMarketStatusPayload(BaseModel):
+    """Response from GET /v1/admin/exchanges/{exchange}/market-status.
+
+    Cheap wire shape: the GUI polls this before showing the
+    Confirm Intraday Cycle modal so the popup can display accurate
+    market state instead of a hardcoded default. Pure config +
+    wall-clock read, no DB touched.
+    """
+    model_config = ConfigDict(frozen=True)
+    exchange: str
+    is_open: bool
+    checked_at: datetime
+
+
 # ---------- Signal history (chart data) ---------- #
 
 
