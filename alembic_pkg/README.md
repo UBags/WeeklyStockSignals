@@ -174,7 +174,7 @@ connection for the migration; we don't need pooling.
 | 0028 | backfill_runs | Adds `backfill_runs` table + the unique partial index on `(()) WHERE finished_at IS NULL` |
 | 0029 | compute_runs_mkt_overview | Adds `compute_runs` (cycle audit log) + `market_overview_daily` |
 | 0030 | drop_legacy_signal_tables | DROPs `signal_events` (the V1 cutover demolishes the legacy table) |
-
+| 0034 | daily_grain_indicator_state | stock_indicator_state + enrichment → daily grain; PK (ticker_id, timeframe, date); FK re-pointed |
 ## 6. Revision file template
 
 Every revision follows the template `script.py.mako` produces:
