@@ -18,7 +18,7 @@ bar_timestamp) — the DB FK with ON DELETE CASCADE enforces this.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 # Re-export so persistence-layer validation has one canonical source.
 from trip_ema.fundamentals import PATTERN_LABELS
@@ -30,7 +30,7 @@ __all__ = ["PATTERN_LABELS", "StockIndicatorEnrichment"]
 class StockIndicatorEnrichment:
     """One row from stock_indicator_enrichment.
 
-    PK: (ticker_id, timeframe, bar_timestamp) — same composite as
+    PK: (ticker_id, timeframe, date) — same composite as
     the core stock_indicator_state row this enrichment belongs to.
 
     Field meanings (mirrors the legacy IndicatorState's enrichment
@@ -66,6 +66,7 @@ class StockIndicatorEnrichment:
     # --- keys ---
     ticker_id: int
     timeframe: str
+    date: date
     bar_timestamp: datetime
 
     # --- band-pierce flags (2) ---

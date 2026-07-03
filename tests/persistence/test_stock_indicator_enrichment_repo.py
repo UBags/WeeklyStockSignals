@@ -6,6 +6,15 @@ chain — each enrichment row requires a state row to exist first.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 import pytest
 from sqlalchemy import text
@@ -50,6 +59,7 @@ def _seed_state(
         StockIndicatorState(
             ticker_id=ticker_id,
             timeframe=timeframe,
+            date=bar_timestamp.astimezone(_IST).date(),
             bar_timestamp=bar_timestamp,
             med_ema=100.0,
             long_ema=100.0,
@@ -78,6 +88,7 @@ def _make_enrichment(
     return StockIndicatorEnrichment(
         ticker_id=ticker_id,
         timeframe=timeframe,
+        date=bar_timestamp.astimezone(_IST).date(),
         bar_timestamp=bar_timestamp,
         pierces_upper_mid=False,
         pierces_lower_mid=False,

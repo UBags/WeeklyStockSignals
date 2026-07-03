@@ -136,12 +136,12 @@ def _seed_stock_state(
             upper_inner_band, lower_inner_band,
             upper_mid_band, lower_mid_band,
             upper_outer_band, lower_outer_band,
-            display_regime
+            display_regime, date
         ) VALUES (
             :tid, :tf, :bt,
             100, 100, 100, 5,
             105, 95, 110, 90, 120, 80,
-            :dr
+            :dr, CURRENT_DATE
         )
     """), {
         "tid": ticker_id, "tf": timeframe,
@@ -255,7 +255,7 @@ def test_stock_indicator_enrichment_exists_with_expected_columns(db_engine):
 
     # No stray columns
     expected_cols = (
-        {"ticker_id", "timeframe", "bar_timestamp", "computed_at"}
+        {"ticker_id", "timeframe", "date", "bar_timestamp", "computed_at"}
         | set(_ENRICHMENT_COLS.keys())
     )
     assert set(cols.keys()) == expected_cols, (
@@ -299,7 +299,7 @@ def test_industry_indicator_enrichment_exists_with_expected_columns(db_engine):
 def test_primary_keys(db_engine):
     with db_engine.connect() as conn:
         assert _pk_columns(conn, "stock_indicator_enrichment") == [
-            "ticker_id", "timeframe", "bar_timestamp",
+            "ticker_id", "timeframe", "date",
         ]
         assert _pk_columns(conn, "industry_indicator_enrichment") == [
             "industry_name", "timeframe", "bar_timestamp",
@@ -319,7 +319,7 @@ def test_stock_enrichment_fk_to_state_with_cascade(db_engine):
         )
     assert info, "FK constraint not found"
     assert info["foreign_table"] == "stock_indicator_state"
-    assert info["local_cols"] == ["ticker_id", "timeframe", "bar_timestamp"]
+    assert info["local_cols"] == ["ticker_id", "timeframe", "date"]
     assert info["delete_rule"] == "CASCADE"
 
 
@@ -350,8 +350,8 @@ def test_stock_enrichment_requires_parent_state_row(db_engine):
         with pytest.raises(IntegrityError, match=r"foreign key"):
             conn.execute(text("""
                 INSERT INTO stock_indicator_enrichment (
-                    ticker_id, timeframe, bar_timestamp
-                ) VALUES (:tid, '1W', NOW())
+                    ticker_id, timeframe, bar_timestamp, date
+                ) VALUES (:tid, '1W', NOW(), CURRENT_DATE)
             """), {"tid": tid})
 
 
@@ -379,10 +379,10 @@ def test_stock_state_delete_cascades_to_enrichment(db_engine):
         bt = _seed_stock_state(conn, tid)
         conn.execute(text("""
             INSERT INTO stock_indicator_enrichment (
-                ticker_id, timeframe, bar_timestamp,
+                ticker_id, timeframe, bar_timestamp, date,
                 pierces_upper_mid, med_pattern_label, med_turn_buy
             ) VALUES (
-                :tid, '1W', :bt,
+                :tid, '1W', :bt, CURRENT_DATE,
                 TRUE, '1 SUCCESSIVE HIGHER VALLEY', TRUE
             )
         """), {"tid": tid, "bt": bt})
@@ -444,8 +444,8 @@ def test_ticker_delete_cascades_transitively_to_enrichment(db_engine):
         bt = _seed_stock_state(conn, tid)
         conn.execute(text("""
             INSERT INTO stock_indicator_enrichment (
-                ticker_id, timeframe, bar_timestamp
-            ) VALUES (:tid, '1W', :bt)
+                ticker_id, timeframe, bar_timestamp, date
+            ) VALUES (:tid, '1W', :bt, CURRENT_DATE)
         """), {"tid": tid, "bt": bt})
 
         # Delete the ticker — cascades through state to enrichment
@@ -478,8 +478,8 @@ def test_stock_enrichment_defaults_apply(db_engine):
         bt = _seed_stock_state(conn, tid)
         conn.execute(text("""
             INSERT INTO stock_indicator_enrichment (
-                ticker_id, timeframe, bar_timestamp
-            ) VALUES (:tid, '1W', :bt)
+                ticker_id, timeframe, bar_timestamp, date
+            ) VALUES (:tid, '1W', :bt, CURRENT_DATE)
         """), {"tid": tid, "bt": bt})
 
         row = conn.execute(text("""
@@ -528,9 +528,9 @@ def test_pattern_label_accepts_any_string(db_engine):
         # Use a value that is NOT in PATTERN_LABELS — DB should accept it.
         conn.execute(text("""
             INSERT INTO stock_indicator_enrichment (
-                ticker_id, timeframe, bar_timestamp,
+                ticker_id, timeframe, bar_timestamp, date,
                 med_pattern_label
-            ) VALUES (:tid, '1W', :bt, 'SOMETHING_FUTURE')
+            ) VALUES (:tid, '1W', :bt, CURRENT_DATE, 'SOMETHING_FUTURE')
         """), {"tid": tid, "bt": bt})
         v = conn.execute(text("""
             SELECT med_pattern_label FROM stock_indicator_enrichment
@@ -550,14 +550,14 @@ def test_stock_enrichment_pk_uniqueness(db_engine):
         bt = _seed_stock_state(conn, tid)
         conn.execute(text("""
             INSERT INTO stock_indicator_enrichment (
-                ticker_id, timeframe, bar_timestamp
-            ) VALUES (:tid, '1W', :bt)
+                ticker_id, timeframe, bar_timestamp, date
+            ) VALUES (:tid, '1W', :bt, CURRENT_DATE)
         """), {"tid": tid, "bt": bt})
         with pytest.raises(IntegrityError, match=r"pkey|duplicate"):
             conn.execute(text("""
                 INSERT INTO stock_indicator_enrichment (
-                    ticker_id, timeframe, bar_timestamp
-                ) VALUES (:tid, '1W', :bt)
+                    ticker_id, timeframe, bar_timestamp, date
+                ) VALUES (:tid, '1W', :bt, CURRENT_DATE)
             """), {"tid": tid, "bt": bt})
 
 

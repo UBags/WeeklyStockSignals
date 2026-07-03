@@ -97,7 +97,7 @@ class StockIndicatorEnrichmentRepository:
         row = self._conn.execute(
             text(_SELECT_SQL + " WHERE ticker_id = :tid "
                  "AND timeframe = :tf AND bar_timestamp <= :bt "
-                 "ORDER BY bar_timestamp DESC LIMIT 1"),
+                 "ORDER BY date DESC LIMIT 1"),
             {"tid": ticker_id, "tf": timeframe, "bt": bar_timestamp},
         ).fetchone()
         return _row_to_enrichment(row) if row else None
@@ -109,7 +109,7 @@ class StockIndicatorEnrichmentRepository:
         row = self._conn.execute(
             text(_SELECT_SQL + " WHERE ticker_id = :tid "
                  "AND timeframe = :tf "
-                 "ORDER BY bar_timestamp DESC LIMIT 1"),
+                 "ORDER BY date DESC LIMIT 1"),
             {"tid": ticker_id, "tf": timeframe},
         ).fetchone()
         return _row_to_enrichment(row) if row else None
@@ -135,7 +135,7 @@ class StockIndicatorEnrichmentRepository:
         if to_dt is not None:
             parts.append("  AND bar_timestamp <= :to")
             params["to"] = to_dt
-        parts.append("ORDER BY bar_timestamp DESC")
+        parts.append("ORDER BY date DESC")
         if limit is not None:
             parts.append("LIMIT :lim")
             params["lim"] = limit
@@ -173,6 +173,7 @@ class StockIndicatorEnrichmentRepository:
             "tid": e.ticker_id,
             "tf": e.timeframe,
             "bt": e.bar_timestamp,
+            "dt": e.date,
             "pu": e.pierces_upper_mid,
             "pl": e.pierces_lower_mid,
             "dm": e.dist_to_med_in_hl_units,
@@ -218,7 +219,7 @@ _SELECT_SQL = """SELECT ticker_id, timeframe, bar_timestamp,
        med_turn_buy, med_turn_sell,
        long_turn_buy, long_turn_sell,
        longest_turn_buy, longest_turn_sell,
-       computed_at
+       computed_at, date
 FROM stock_indicator_enrichment"""
 
 
@@ -238,7 +239,7 @@ _UPSERT_SQL = """
         med_turn_buy, med_turn_sell,
         long_turn_buy, long_turn_sell,
         longest_turn_buy, longest_turn_sell,
-        computed_at
+        computed_at, date
     ) VALUES (
         :tid, :tf, :bt,
         :pu, :pl,
@@ -248,10 +249,11 @@ _UPSERT_SQL = """
         :pcm, :pcl, :pclx,
         :mpl, :lpl, :lxpl,
         :mtb, :mts, :ltb, :lts, :lxtb, :lxts,
-        :ca
+        :ca, :dt
     )
-    ON CONFLICT (ticker_id, timeframe, bar_timestamp)
+    ON CONFLICT (ticker_id, timeframe, date)
     DO UPDATE SET
+        bar_timestamp = EXCLUDED.bar_timestamp,
         pierces_upper_mid = EXCLUDED.pierces_upper_mid,
         pierces_lower_mid = EXCLUDED.pierces_lower_mid,
         dist_to_med_in_hl_units = EXCLUDED.dist_to_med_in_hl_units,
@@ -334,4 +336,5 @@ def _row_to_enrichment(row) -> StockIndicatorEnrichment:
         longest_turn_buy=bool(row[24]),
         longest_turn_sell=bool(row[25]),
         computed_at=row[26],
+        date=row[27],
     )

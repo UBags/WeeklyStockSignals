@@ -60,6 +60,7 @@ def test_stock_indicator_state_exists_with_expected_columns(db_engine):
         "lower_outer_band": ("double precision", "NO"),
         "display_regime": ("smallint", "NO"),
         "computed_at": ("timestamp with time zone", "NO"),
+        "date": ("date", "NO"),
     }
     for name, (dtype, nullable) in expected.items():
         assert name in cols, f"missing column {name}"
@@ -140,7 +141,7 @@ def _pk_columns(conn, table_name: str) -> list[str]:
 def test_primary_keys(db_engine):
     with db_engine.connect() as conn:
         assert _pk_columns(conn, "stock_indicator_state") == [
-            "ticker_id", "timeframe", "bar_timestamp",
+            "ticker_id", "timeframe", "date",
         ]
         assert _pk_columns(conn, "industry_indicator_state") == [
             "industry_name", "timeframe", "bar_timestamp",
@@ -208,12 +209,12 @@ def test_stock_indicator_state_regime_check(db_engine):
                     upper_inner_band, lower_inner_band,
                     upper_mid_band, lower_mid_band,
                     upper_outer_band, lower_outer_band,
-                    display_regime
+                    display_regime, date
                 ) VALUES (
                     :tid, '1W', NOW(),
                     100, 100, 100, 5,
                     105, 95, 110, 90, 120, 80,
-                    9
+                    9, CURRENT_DATE
                 )
             """), {"tid": tid})
 
@@ -229,12 +230,12 @@ def test_stock_indicator_state_atr_nonnegative(db_engine):
                     upper_inner_band, lower_inner_band,
                     upper_mid_band, lower_mid_band,
                     upper_outer_band, lower_outer_band,
-                    display_regime
+                    display_regime, date
                 ) VALUES (
                     :tid, '1W', NOW(),
                     100, 100, 100, -1,
                     105, 95, 110, 90, 120, 80,
-                    1
+                    1, CURRENT_DATE
                 )
             """), {"tid": tid})
 
@@ -250,12 +251,12 @@ def test_stock_indicator_state_emas_positive(db_engine):
                     upper_inner_band, lower_inner_band,
                     upper_mid_band, lower_mid_band,
                     upper_outer_band, lower_outer_band,
-                    display_regime
+                    display_regime, date
                 ) VALUES (
                     :tid, '1W', NOW(),
                     0, 100, 100, 5,
                     105, 95, 110, 90, 120, 80,
-                    1
+                    1, CURRENT_DATE
                 )
             """), {"tid": tid})
 
@@ -376,12 +377,12 @@ def test_stock_indicator_state_ticker_cascade(db_engine):
                 upper_inner_band, lower_inner_band,
                 upper_mid_band, lower_mid_band,
                 upper_outer_band, lower_outer_band,
-                display_regime
+                display_regime, date
             ) VALUES (
                 :tid, '1W', NOW(),
                 100, 100, 100, 5,
                 105, 95, 110, 90, 120, 80,
-                1
+                1, CURRENT_DATE
             )
         """), {"tid": tid})
         conn.execute(text("DELETE FROM tickers WHERE ticker_id = :tid"), {"tid": tid})

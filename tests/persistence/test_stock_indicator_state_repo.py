@@ -6,6 +6,15 @@ db_engine fixture from tests/persistence/conftest.py.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 import pytest
 from sqlalchemy import text
@@ -45,6 +54,7 @@ def _make_state(
     return StockIndicatorState(
         ticker_id=ticker_id,
         timeframe=timeframe,
+        date=bar_timestamp.astimezone(_IST).date(),
         bar_timestamp=bar_timestamp,
         med_ema=med_ema,
         long_ema=med_ema,

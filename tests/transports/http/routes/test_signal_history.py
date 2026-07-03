@@ -117,10 +117,10 @@ def _seed_indicator_state(engine, trade_date_ist: date,
     with engine.begin() as conn:
         conn.exec_driver_sql(
             "INSERT INTO stock_indicator_state "
-            "(ticker_id, timeframe, bar_timestamp, med_ema, long_ema, longest_ema, atr, "
+            "(ticker_id, timeframe, date, bar_timestamp, med_ema, long_ema, longest_ema, atr, "
             " upper_inner_band, lower_inner_band, upper_mid_band, lower_mid_band, "
             " upper_outer_band, lower_outer_band, display_regime) "
-            "VALUES (1806, '1W', (%(td)s)::timestamp AT TIME ZONE 'Asia/Kolkata', %(m)s, %(l)s, %(lg)s, %(a)s, "
+            "VALUES (1806, '1W', %(td)s, (%(td)s)::timestamp AT TIME ZONE 'Asia/Kolkata', %(m)s, %(l)s, %(lg)s, %(a)s, "
             " %(ui)s, %(li)s, %(um)s, %(lm)s, %(uo)s, %(lo)s, %(dr)s)",
             dict(td=trade_date_ist, m=med, l=long_, lg=longest, a=atr,
                  ui=upper_inner, li=lower_inner,

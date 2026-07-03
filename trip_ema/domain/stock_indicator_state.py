@@ -21,7 +21,7 @@ removed in Step 14.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 
 # Allowed values for stock_indicator_state.display_regime. The DB
@@ -34,7 +34,9 @@ REGIME_VALUES = (-1, 0, 1)
 class StockIndicatorState:
     """One row from stock_indicator_state.
 
-    PK: (ticker_id, timeframe, bar_timestamp).
+    PK: (ticker_id, timeframe, date). `date` is the IST trading
+    date; `bar_timestamp` is the (non-unique) IST-Monday week
+    anchor of the week containing `date`.
 
     Field meanings (mirrors the Pine indicator):
 
@@ -62,6 +64,7 @@ class StockIndicatorState:
     # --- keys ---
     ticker_id: int
     timeframe: str
+    date: date
     bar_timestamp: datetime
 
     # --- EMAs ---

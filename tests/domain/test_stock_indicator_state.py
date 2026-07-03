@@ -6,7 +6,10 @@ so the tests verify constructor wiring and immutability.
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 import pytest
 
@@ -20,6 +23,7 @@ def _make_state(**overrides) -> StockIndicatorState:
     defaults = {
         "ticker_id": 1,
         "timeframe": "1W",
+        "date": date(2026, 6, 22),
         "bar_timestamp": datetime(2026, 6, 22, tzinfo=timezone.utc),
         "med_ema": 100.0,
         "long_ema": 100.0,

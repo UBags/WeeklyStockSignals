@@ -10,6 +10,9 @@ TestClassifyRegimeChange class — no fixture needed.
 from __future__ import annotations
 
 from datetime import datetime, UTC
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 import pytest
 
@@ -55,6 +58,7 @@ def _state(
     return StockIndicatorState(
         ticker_id=ticker_id,
         timeframe=timeframe,
+        date=bar_timestamp.astimezone(_IST).date(),
         bar_timestamp=bar_timestamp,
         med_ema=100.0, long_ema=99.0, longest_ema=98.0,
         atr=2.0,
@@ -102,10 +106,12 @@ class TestClassifyRegimeChange:
     def test_classify(self, before, after, expected):
         assert _classify_regime_change(before, after) == expected
 
-    def test_classify_equal_regimes_raises(self):
-        """Defensive: should never be called with equal regimes."""
-        with pytest.raises(ValueError, match="cannot classify"):
-            _classify_regime_change(0, 0)
+    def test_classify_equal_regimes_returns_none(self):
+        """Equal regimes are not a signal. The rule is total and never
+        raises (NO_CHANGE has no DB signal_type → None)."""
+        assert _classify_regime_change(1, 1) is None
+        assert _classify_regime_change(0, 0) is None
+        assert _classify_regime_change(-1, -1) is None
 
 
 # ============================================================

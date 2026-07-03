@@ -8,7 +8,7 @@ StockIndicatorState).
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -22,6 +22,7 @@ def _make_enrichment(**overrides) -> StockIndicatorEnrichment:
     defaults = {
         "ticker_id": 1,
         "timeframe": "1W",
+        "date": date(2026, 6, 22),
         "bar_timestamp": datetime(2026, 6, 22, tzinfo=timezone.utc),
         "pierces_upper_mid": False,
         "pierces_lower_mid": False,

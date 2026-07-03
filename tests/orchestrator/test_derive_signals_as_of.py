@@ -43,21 +43,22 @@ def _seed_state(
             bar_ts = datetime.combine(monday, time(0, 0), tzinfo=UTC)
             conn.execute(text("""
                 INSERT INTO stock_indicator_state (
-                    ticker_id, timeframe, bar_timestamp,
+                    ticker_id, timeframe, date, bar_timestamp,
                     med_ema, long_ema, longest_ema, atr,
                     upper_inner_band, lower_inner_band,
                     upper_mid_band, lower_mid_band,
                     upper_outer_band, lower_outer_band,
                     display_regime, computed_at
                 ) VALUES (
-                    :tid, '1W', :ts,
+                    :tid, '1W', :dt, :ts,
                     100.0, 99.0, 98.0, 2.0,
                     102.0, 96.0, 104.0, 94.0, 106.0, 92.0,
                     :reg, NOW()
                 )
-                ON CONFLICT (ticker_id, timeframe, bar_timestamp)
+                ON CONFLICT (ticker_id, timeframe, date)
                 DO UPDATE SET display_regime = EXCLUDED.display_regime
-            """), {"tid": ticker_id, "ts": bar_ts, "reg": regime})
+            """), {"tid": ticker_id, "ts": bar_ts, "reg": regime,
+                   "dt": monday})
 
 
 def _seed_daily(

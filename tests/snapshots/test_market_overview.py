@@ -82,14 +82,14 @@ def _seed_state(
     weekly bar."""
     conn.execute(text("""
         INSERT INTO stock_indicator_state (
-            ticker_id, timeframe, bar_timestamp,
+            ticker_id, timeframe, date, bar_timestamp,
             med_ema, long_ema, longest_ema, atr,
             upper_inner_band, lower_inner_band,
             upper_mid_band, lower_mid_band,
             upper_outer_band, lower_outer_band,
             display_regime, computed_at
         ) VALUES (
-            :tid, '1W', :ts,
+            :tid, '1W', (:ts AT TIME ZONE 'Asia/Kolkata')::date, :ts,
             :med, :long, :longest, 2.0,
             120.0, 80.0, 130.0, 70.0, 140.0, 60.0,
             :reg, NOW()

@@ -186,6 +186,7 @@ def populate_stock_indicator_state_for_ticker(
         StockIndicatorState(
             ticker_id=ticker_id,
             timeframe=timeframe,
+            date=p["bar_timestamp"].astimezone(_IST).date(),
             bar_timestamp=p["bar_timestamp"],
             med_ema=p["med_ema"],
             long_ema=p["long_ema"],
@@ -430,6 +431,7 @@ def populate_stock_indicator_enrichment_for_ticker(
         StockIndicatorEnrichment(
             ticker_id=ticker_id,
             timeframe=timeframe,
+            date=p["bar_timestamp"].astimezone(_IST).date(),
             bar_timestamp=p["bar_timestamp"],
             pierces_upper_mid=p["pierces_upper_mid"],
             pierces_lower_mid=p["pierces_lower_mid"],

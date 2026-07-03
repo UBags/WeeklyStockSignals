@@ -51,16 +51,17 @@ class StockIndicatorStateRepository:
                     upper_inner_band, lower_inner_band,
                     upper_mid_band, lower_mid_band,
                     upper_outer_band, lower_outer_band,
-                    display_regime, computed_at
+                    display_regime, computed_at, date
                 ) VALUES (
                     :tid, :tf, :bt,
                     :med, :long, :longest,
                     :atr,
                     :uib, :lib, :umb, :lmb, :uob, :lob,
-                    :dr, :ca
+                    :dr, :ca, :dt
                 )
-                ON CONFLICT (ticker_id, timeframe, bar_timestamp)
+                ON CONFLICT (ticker_id, timeframe, date)
                 DO UPDATE SET
+                    bar_timestamp = EXCLUDED.bar_timestamp,
                     med_ema = EXCLUDED.med_ema,
                     long_ema = EXCLUDED.long_ema,
                     longest_ema = EXCLUDED.longest_ema,
@@ -94,16 +95,17 @@ class StockIndicatorStateRepository:
                     upper_inner_band, lower_inner_band,
                     upper_mid_band, lower_mid_band,
                     upper_outer_band, lower_outer_band,
-                    display_regime, computed_at
+                    display_regime, computed_at, date
                 ) VALUES (
                     :tid, :tf, :bt,
                     :med, :long, :longest,
                     :atr,
                     :uib, :lib, :umb, :lmb, :uob, :lob,
-                    :dr, :ca
+                    :dr, :ca, :dt
                 )
-                ON CONFLICT (ticker_id, timeframe, bar_timestamp)
+                ON CONFLICT (ticker_id, timeframe, date)
                 DO UPDATE SET
+                    bar_timestamp = EXCLUDED.bar_timestamp,
                     med_ema = EXCLUDED.med_ema,
                     long_ema = EXCLUDED.long_ema,
                     longest_ema = EXCLUDED.longest_ema,
@@ -149,7 +151,7 @@ class StockIndicatorStateRepository:
                        upper_inner_band, lower_inner_band,
                        upper_mid_band, lower_mid_band,
                        upper_outer_band, lower_outer_band,
-                       display_regime, computed_at
+                       display_regime, computed_at, date
                 FROM stock_indicator_state
                 WHERE ticker_id = :tid AND timeframe = :tf
                   AND bar_timestamp = :bt
@@ -174,11 +176,11 @@ class StockIndicatorStateRepository:
                        upper_inner_band, lower_inner_band,
                        upper_mid_band, lower_mid_band,
                        upper_outer_band, lower_outer_band,
-                       display_regime, computed_at
+                       display_regime, computed_at, date
                 FROM stock_indicator_state
                 WHERE ticker_id = :tid AND timeframe = :tf
                   AND bar_timestamp <= :bt
-                ORDER BY bar_timestamp DESC
+                ORDER BY date DESC
                 LIMIT 1
             """),
             {"tid": ticker_id, "tf": timeframe, "bt": bar_timestamp},
@@ -199,10 +201,10 @@ class StockIndicatorStateRepository:
                        upper_inner_band, lower_inner_band,
                        upper_mid_band, lower_mid_band,
                        upper_outer_band, lower_outer_band,
-                       display_regime, computed_at
+                       display_regime, computed_at, date
                 FROM stock_indicator_state
                 WHERE ticker_id = :tid AND timeframe = :tf
-                ORDER BY bar_timestamp DESC
+                ORDER BY date DESC
                 LIMIT 1
             """),
             {"tid": ticker_id, "tf": timeframe},
@@ -229,7 +231,7 @@ class StockIndicatorStateRepository:
             "       upper_inner_band, lower_inner_band,",
             "       upper_mid_band, lower_mid_band,",
             "       upper_outer_band, lower_outer_band,",
-            "       display_regime, computed_at",
+            "       display_regime, computed_at, date",
             "FROM stock_indicator_state",
             "WHERE ticker_id = :tid AND timeframe = :tf",
         ]
@@ -240,7 +242,7 @@ class StockIndicatorStateRepository:
         if to_dt is not None:
             sql_parts.append("  AND bar_timestamp <= :to")
             params["to"] = to_dt
-        sql_parts.append("ORDER BY bar_timestamp DESC")
+        sql_parts.append("ORDER BY date DESC")
         if limit is not None:
             sql_parts.append("LIMIT :lim")
             params["lim"] = limit
@@ -260,6 +262,7 @@ class StockIndicatorStateRepository:
 
     # ---------- internals ---------- #
 
+    @staticmethod
     @staticmethod
     def _validate(state: StockIndicatorState) -> None:
         if state.display_regime not in REGIME_VALUES:
@@ -295,6 +298,7 @@ class StockIndicatorStateRepository:
             "lob": state.lower_outer_band,
             "dr": state.display_regime,
             "ca": state.computed_at,
+            "dt": state.date,
         }
 
 
@@ -317,4 +321,5 @@ def _row_to_state(row) -> StockIndicatorState:
         lower_outer_band=float(row[12]),
         display_regime=int(row[13]),
         computed_at=row[14],
+        date=row[15],
     )
