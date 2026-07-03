@@ -40,3 +40,8 @@ commit*_bundle/
 
 # Refactor tracking scratchpads — not for the tree
 CLEAN_PIPELINE_REFACTOR_*.md
+
+# local scratch dumps
+DDL.txt
+FAILS.txt
+trip_ema_ddl.sql
