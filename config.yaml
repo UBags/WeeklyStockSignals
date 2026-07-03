@@ -222,9 +222,9 @@ etl:
 #   tier_2_size: 500                # next 500 → tier-2
 #                                   # everything else → tier-3
    park_failure_threshold: 3       # park after this many consecutive failures
-   yfinance_batch_size: 50
+   yfinance_batch_size: 100
 #   yfinance_concurrency: 4
-   yfinance_request_delay_seconds: 45
+   yfinance_request_delay_seconds: 30
 #   reconcile_window_days: 7
 #   parked_dir: var/etl/parked
 #   checkpoint_dir: var/etl

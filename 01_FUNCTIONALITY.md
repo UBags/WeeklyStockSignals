@@ -144,7 +144,7 @@ flowchart LR
 | `approve-action` | Approve a pending corporate-action review row. |
 | `generate-signals` | **Phase 15a** — replay engine over historical bars and write a per-exchange backtest JSON file. |
 
-**Tiering.** `etl/tiering.py` bucketizes the universe so that the EoD pass treats high-volume names first and low-volume tail last. The orchestrator (`scheduler/`) uses the same buckets for intraday cadence.
+**Tiering.** `etl/tiering.py` bucketizes the universe by volume so that every fetch pass processes high-volume names first and the low-volume tail last (a Ctrl-C partway through still leaves the most important tickers done). Tiers affect fetch **order only** — every run (intraday / EoD / backfill) fetches and processes the full universe.
 
 **Parking.** A ticker that fails three consecutive fetches is auto-parked (`etl/parked.py`); the scheduler then skips it until an operator unparks (CLI or GUI).
 
