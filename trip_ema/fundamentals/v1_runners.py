@@ -24,7 +24,7 @@ side validation period.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time, UTC
+from datetime import date, datetime, time, timedelta, UTC
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -116,23 +116,31 @@ def populate_stock_indicator_state_for_ticker(
     mode: Literal["full", "incremental"] = "full",
     n_weeks_to_upsert: int = 2,
 ) -> int:
-    """Compute V1 stock indicator state for one (ticker, timeframe).
+    """Compute DAILY-GRAIN V1 stock indicator state for one ticker.
 
-    Reads the full OHLCV history for this ticker+timeframe via
-    `_fetch_bars_at_timeframe` (which handles 1D → 1W aggregation
-    when only 1D is stored), runs `compute_state_primitives`, and
-    upserts the resulting rows to `stock_indicator_state`.
+    The weekly indicator formulas are sampled once per trading day.
+    Reads raw 1D bars, and for each trading day D computes the weekly
+    med/long/longest EMA, ATR and the three band pairs "as of that
+    day's close" by appending a prorated synthetic forming-week bar to
+    the completed weekly bars (see fundamentals/daily_grain.py). Volume
+    proration is per-exchange via MarketSession. The resulting row is
+    stored with date=D, bar_timestamp=that week's Monday.
+
+    mode="full"        -> emit every trading day since the first 1D bar.
+    mode="incremental" -> emit only the current in-progress week's days
+                          (live intraday / EoD), overwriting the current
+                          day's row in place via (ticker_id, timeframe,
+                          date).
 
     Returns the fundamentals_run.run_id. Raises ValueError if the
-    ticker doesn't exist or has fewer than `min_bars` (insufficient
-    to seed the EMAs meaningfully).
-
-    `force` is reserved for future "skip-if-recent" semantics; the
-    legacy runner used an 80-day guard, but the V1 model treats
-    every invocation as a full recompute since the runner is cheap
-    and idempotent.
+    ticker doesn't exist or has fewer than `min_bars` daily bars.
+    `force` / `n_weeks_to_upsert` retained for signature compatibility.
     """
-    # Validate timeframe.
+    from sqlalchemy import text as _text
+    from ..persistence.bars_repo import BarsRepository
+    from .daily_grain import compute_daily_grain_states
+    from .market_session import market_session_for
+
     try:
         Timeframe(timeframe)
     except ValueError as e:
@@ -142,7 +150,6 @@ def populate_stock_indicator_state_for_ticker(
             f"{[t.value for t in Timeframe]}"
         ) from e
 
-    # Sanity: ticker must exist.
     with db_engine.connect() as conn:
         ticker = TickersRepository(conn).get_by_id(ticker_id)
     if ticker is None:
@@ -151,42 +158,48 @@ def populate_stock_indicator_state_for_ticker(
             f"ticker_id={ticker_id} does not exist"
         )
 
-    # Read OHLCV bars.
     with db_engine.connect() as conn:
-        bars = _fetch_bars_at_timeframe(conn, ticker_id, timeframe)
-    if len(bars) < min_bars:
+        daily_bars = BarsRepository(conn).fetch_history(
+            ticker_id, Timeframe.DAILY, limit=100000,
+        )
+        tz_row = conn.execute(_text(
+            "SELECT COALESCE(tz, 'UTC') AS tz "
+            "FROM tickers WHERE ticker_id = :tid"
+        ), {"tid": ticker_id}).first()
+    tz = tz_row.tz if tz_row else "UTC"
+
+    if len(daily_bars) < min_bars:
         raise ValueError(
             f"populate_stock_indicator_state_for_ticker: "
-            f"ticker_id={ticker_id} tf={timeframe} has only "
-            f"{len(bars)} bars (need at least {min_bars} to seed EMAs)"
+            f"ticker_id={ticker_id} has only {len(daily_bars)} daily "
+            f"bars (need at least {min_bars})"
         )
 
-    # Build pandas Series for the compute layer.
-    open_s = pd.Series([b.open for b in bars], dtype=float)  # noqa: F841
-    high_s = pd.Series([b.high for b in bars], dtype=float)
-    low_s = pd.Series([b.low for b in bars], dtype=float)
-    close_s = pd.Series([b.close for b in bars], dtype=float)
-    volume_s = pd.Series([b.volume for b in bars], dtype=float)
-    # The bar's UTC timestamp from ohlcv_bars carries through to
-    # stock_indicator_state.bar_timestamp 1:1. Both columns are
-    # TIMESTAMPTZ so timezone semantics are preserved.
-    timestamps = pd.Series([b.timestamp for b in bars])
+    session = market_session_for(ticker.ref.exchange, tz)
+    now = datetime.now(UTC)
 
-    # Compute the core state (skips NaN-warmup bars).
-    primitives = compute_state_primitives(
-        close_s, volume_s, high_s, low_s,
-        trade_dates=timestamps,
-        synthetic_atr_for_index=False,
+    target_days = None
+    if mode == "incremental":
+        zone = session.zone
+        last_local = daily_bars[-1].timestamp.astimezone(zone).date()
+        last_monday = last_local - timedelta(days=last_local.weekday())
+        target_days = sorted({
+            d for d in (
+                b.timestamp.astimezone(zone).date() for b in daily_bars
+            )
+            if (d - timedelta(days=d.weekday())) == last_monday
+        })
+
+    prim_rows = compute_daily_grain_states(
+        daily_bars, session=session, now=now, target_days=target_days,
     )
 
-    # Convert to dataclass list. computed_at is set on the runner side
-    # so all rows of one run share the same audit timestamp.
-    now = datetime.now(UTC)
+    audit_now = datetime.now(UTC)
     states = [
         StockIndicatorState(
             ticker_id=ticker_id,
             timeframe=timeframe,
-            date=p["bar_timestamp"].astimezone(_IST).date(),
+            date=p["trade_date"],
             bar_timestamp=p["bar_timestamp"],
             med_ema=p["med_ema"],
             long_ema=p["long_ema"],
@@ -199,47 +212,35 @@ def populate_stock_indicator_state_for_ticker(
             upper_outer_band=p["upper_outer_band"],
             lower_outer_band=p["lower_outer_band"],
             display_regime=p["display_regime"],
-            computed_at=now,
+            computed_at=audit_now,
         )
-        for p in primitives
+        for p in prim_rows
     ]
 
-    # Incremental mode: slice the write set to the last
-    # n_weeks_to_upsert rows. The full trajectory is still computed
-    # (cheap pandas math); only the DB-write cost is reduced.
-    states_to_upsert = _slice_for_mode(
-        states, mode, n_weeks_to_upsert,
-    )
-
-    # Atomic write: one transaction, all rows or none.
     with transaction(db_engine) as conn:
         run_id = FundamentalsRunRepository(conn).open(
             phase=PHASE_V1_STOCK_STATE, exchange=ticker.ref.exchange,
             notes=(
-                f"v1_stock_indicator_state for ticker_id={ticker_id} "
+                f"v1_stock_indicator_state daily-grain for "
+                f"ticker_id={ticker_id} "
                 f"({ticker.ref.exchange}:{ticker.ref.symbol}) "
                 f"tf={timeframe} mode={mode}"
             ),
         )
-        StockIndicatorStateRepository(conn).upsert_many(
-            states_to_upsert,
-        )
+        StockIndicatorStateRepository(conn).upsert_many(states)
         FundamentalsRunRepository(conn).close(
             run_id, status="SUCCESS",
-            succeeded=len(states_to_upsert), failed=0,
-            skipped=(len(bars) - len(states_to_upsert)),
+            succeeded=len(states), failed=0, skipped=0,
         )
 
     logger.info(
-        "populate_stock_indicator_state_for_ticker "
-        "ticker_id=%d (%s:%s) tf=%s mode=%s: "
-        "emitted=%d (of %d computed) skipped=%d bars=%d",
+        "populate_stock_indicator_state_for_ticker[daily-grain] "
+        "ticker_id=%d (%s:%s) tf=%s mode=%s: emitted=%d rows "
+        "from %d daily bars",
         ticker_id, ticker.ref.exchange, ticker.ref.symbol, timeframe,
-        mode, len(states_to_upsert), len(states),
-        len(bars) - len(states_to_upsert), len(bars),
+        mode, len(states), len(daily_bars),
     )
     return run_id
-
 
 def populate_stock_indicator_state_for_exchange(
     db_engine: Engine,
@@ -351,20 +352,19 @@ def populate_stock_indicator_enrichment_for_ticker(
     mode: Literal["full", "incremental"] = "full",
     n_weeks_to_upsert: int = 2,
 ) -> int:
-    """Compute V1 stock indicator enrichment for one (ticker, timeframe).
+    """Compute DAILY-GRAIN V1 stock indicator enrichment for one ticker.
 
-    Reads OHLCV history, runs `compute_enrichment_primitives`, and
-    upserts to `stock_indicator_enrichment` (FK ON DELETE CASCADE
-    back to `stock_indicator_state`).
-
-    Requires the matching state row(s) to exist — fails fast with a
-    clear ValueError if state has not been populated yet. The FK
-    would catch this on insert otherwise but with a less helpful
-    error message.
+    Mirrors the daily-grain state runner: one enrichment row per trading
+    day, 1:1 with the state rows (same days survive EMA warmup, so the
+    FK ON DELETE CASCADE back to stock_indicator_state holds per row).
+    Requires state to have been populated first.
 
     Returns the fundamentals_run.run_id.
     """
-    # Validate timeframe.
+    from ..persistence.bars_repo import BarsRepository
+    from .daily_grain import compute_daily_grain_enrichment
+    from .market_session import market_session_for
+
     try:
         Timeframe(timeframe)
     except ValueError as e:
@@ -374,7 +374,6 @@ def populate_stock_indicator_enrichment_for_ticker(
             f"{[t.value for t in Timeframe]}"
         ) from e
 
-    # Sanity: ticker must exist.
     with db_engine.connect() as conn:
         ticker = TickersRepository(conn).get_by_id(ticker_id)
     if ticker is None:
@@ -383,10 +382,7 @@ def populate_stock_indicator_enrichment_for_ticker(
             f"ticker_id={ticker_id} does not exist"
         )
 
-    # Sanity: state must have been populated first. The FK ON DELETE
-    # CASCADE requires a state row per enrichment row; we fail-fast
-    # here for a cleaner error than the IntegrityError that would
-    # otherwise come from the upsert.
+    # State must exist first (FK). Fail fast with a clear message.
     with db_engine.connect() as conn:
         state_count = StockIndicatorStateRepository(
             conn,
@@ -395,43 +391,52 @@ def populate_stock_indicator_enrichment_for_ticker(
         raise ValueError(
             f"populate_stock_indicator_enrichment_for_ticker: "
             f"ticker_id={ticker_id} tf={timeframe} has no state rows. "
-            f"Run the state populator first (Step 4 endpoint)."
+            f"Run the state populator first."
         )
 
-    # Read OHLCV bars.
+    from sqlalchemy import text as _text
     with db_engine.connect() as conn:
-        bars = _fetch_bars_at_timeframe(conn, ticker_id, timeframe)
-    if len(bars) < min_bars:
+        daily_bars = BarsRepository(conn).fetch_history(
+            ticker_id, Timeframe.DAILY, limit=100000,
+        )
+        tz_row = conn.execute(_text(
+            "SELECT COALESCE(tz, 'UTC') AS tz "
+            "FROM tickers WHERE ticker_id = :tid"
+        ), {"tid": ticker_id}).first()
+    tz = tz_row.tz if tz_row else "UTC"
+
+    if len(daily_bars) < min_bars:
         raise ValueError(
             f"populate_stock_indicator_enrichment_for_ticker: "
-            f"ticker_id={ticker_id} tf={timeframe} has only "
-            f"{len(bars)} bars (need at least {min_bars} to seed EMAs)"
+            f"ticker_id={ticker_id} has only {len(daily_bars)} daily "
+            f"bars (need at least {min_bars})"
         )
 
-    # Build pandas Series for the compute layer.
-    high_s = pd.Series([b.high for b in bars], dtype=float)
-    low_s = pd.Series([b.low for b in bars], dtype=float)
-    close_s = pd.Series([b.close for b in bars], dtype=float)
-    volume_s = pd.Series([b.volume for b in bars], dtype=float)
-    timestamps = pd.Series([b.timestamp for b in bars])
+    session = market_session_for(ticker.ref.exchange, tz)
+    now = datetime.now(UTC)
 
-    # Compute enrichment (skips NaN-warmup bars; row-by-row aligned
-    # with what compute_state_primitives would emit, so the FK is
-    # satisfied for every emitted row).
-    primitives = compute_enrichment_primitives(
-        close_s, volume_s, high_s, low_s,
-        trade_dates=timestamps,
-        synthetic_atr_for_index=False,
+    target_days = None
+    if mode == "incremental":
+        zone = session.zone
+        last_local = daily_bars[-1].timestamp.astimezone(zone).date()
+        last_monday = last_local - timedelta(days=last_local.weekday())
+        target_days = sorted({
+            d for d in (
+                b.timestamp.astimezone(zone).date() for b in daily_bars
+            )
+            if (d - timedelta(days=d.weekday())) == last_monday
+        })
+
+    prim_rows = compute_daily_grain_enrichment(
+        daily_bars, session=session, now=now, target_days=target_days,
     )
 
-    # Convert to dataclass list. computed_at is set on the runner side
-    # so all rows of one run share the same audit timestamp.
-    now = datetime.now(UTC)
+    audit_now = datetime.now(UTC)
     enrichments = [
         StockIndicatorEnrichment(
             ticker_id=ticker_id,
             timeframe=timeframe,
-            date=p["bar_timestamp"].astimezone(_IST).date(),
+            date=p["trade_date"],
             bar_timestamp=p["bar_timestamp"],
             pierces_upper_mid=p["pierces_upper_mid"],
             pierces_lower_mid=p["pierces_lower_mid"],
@@ -460,47 +465,36 @@ def populate_stock_indicator_enrichment_for_ticker(
             long_turn_sell=p["long_turn_sell"],
             longest_turn_buy=p["longest_turn_buy"],
             longest_turn_sell=p["longest_turn_sell"],
-            computed_at=now,
+            computed_at=audit_now,
         )
-        for p in primitives
+        for p in prim_rows
     ]
 
-    # Incremental mode: slice the write set to the last
-    # n_weeks_to_upsert rows.
-    enrichments_to_upsert = _slice_for_mode(
-        enrichments, mode, n_weeks_to_upsert,
-    )
-
-    # Atomic write.
     with transaction(db_engine) as conn:
         run_id = FundamentalsRunRepository(conn).open(
             phase=PHASE_V1_STOCK_ENRICHMENT,
             exchange=ticker.ref.exchange,
             notes=(
-                f"v1_stock_indicator_enrichment for ticker_id={ticker_id} "
+                f"v1_stock_indicator_enrichment daily-grain for "
+                f"ticker_id={ticker_id} "
                 f"({ticker.ref.exchange}:{ticker.ref.symbol}) "
                 f"tf={timeframe} mode={mode}"
             ),
         )
-        StockIndicatorEnrichmentRepository(conn).upsert_many(
-            enrichments_to_upsert,
-        )
+        StockIndicatorEnrichmentRepository(conn).upsert_many(enrichments)
         FundamentalsRunRepository(conn).close(
             run_id, status="SUCCESS",
-            succeeded=len(enrichments_to_upsert), failed=0,
-            skipped=(len(bars) - len(enrichments_to_upsert)),
+            succeeded=len(enrichments), failed=0, skipped=0,
         )
 
     logger.info(
-        "populate_stock_indicator_enrichment_for_ticker "
-        "ticker_id=%d (%s:%s) tf=%s mode=%s: "
-        "emitted=%d (of %d computed) skipped=%d bars=%d",
+        "populate_stock_indicator_enrichment_for_ticker[daily-grain] "
+        "ticker_id=%d (%s:%s) tf=%s mode=%s: emitted=%d rows "
+        "from %d daily bars",
         ticker_id, ticker.ref.exchange, ticker.ref.symbol, timeframe,
-        mode, len(enrichments_to_upsert), len(enrichments),
-        len(bars) - len(enrichments_to_upsert), len(bars),
+        mode, len(enrichments), len(daily_bars),
     )
     return run_id
-
 
 def populate_stock_indicator_enrichment_for_exchange(
     db_engine: Engine,

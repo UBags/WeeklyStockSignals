@@ -165,25 +165,27 @@ class TestStockStateIncremental:
         # ~57 weekly bars from 400 daily, minus EMA warmup. Expect > 20.
         assert cnt > 20
 
-    def test_incremental_writes_only_last_n(self, db_engine):
-        """mode='incremental' with n_weeks_to_upsert=2 → exactly 2
-        rows in stock_indicator_state for this ticker."""
+    def test_incremental_writes_current_week_only(self, db_engine):
+        """Daily grain: mode='incremental' writes only the current
+        in-progress week's day rows — all sharing that week's Monday
+        bar_timestamp. n_weeks_to_upsert is vestigial."""
         tid = self._setup(db_engine)
         populate_stock_indicator_state_for_ticker(
-            db_engine, tid, "1W",
-            mode="incremental", n_weeks_to_upsert=2,
+            db_engine, tid, "1W", mode="incremental",
         )
         with db_engine.connect() as conn:
-            cnt = StockIndicatorStateRepository(
+            rows = StockIndicatorStateRepository(
                 conn,
-            ).count_for_ticker(tid, "1W")
-        assert cnt == 2
+            ).get_history_for_ticker(tid, "1W")
+        assert len(rows) >= 1
+        # Every incremental row belongs to the same (latest) week.
+        assert len({r.bar_timestamp for r in rows}) == 1
 
-    def test_incremental_writes_latest_bars(self, db_engine):
-        """The 2 rows written by incremental are the 2 LATEST
-        weekly bars (not any random 2)."""
+    def test_incremental_writes_latest_week(self, db_engine):
+        """The incremental rows belong to the LATEST week (the one
+        containing the most recent daily bar)."""
         tid = self._setup(db_engine)
-        # Full first to learn what the latest 2 bars look like
+        # Full first to learn the latest week's Monday.
         populate_stock_indicator_state_for_ticker(
             db_engine, tid, "1W",
         )
@@ -191,11 +193,9 @@ class TestStockStateIncremental:
             full_history = StockIndicatorStateRepository(
                 conn,
             ).get_history_for_ticker(tid, "1W")
-        # newest-first → first two ARE the latest
-        latest_two = sorted(
-            [full_history[0].bar_timestamp,
-             full_history[1].bar_timestamp],
-        )
+        # newest-first → [0] is the latest day; its bar_timestamp is
+        # the latest week's Monday.
+        latest_monday = full_history[0].bar_timestamp
 
         # Reset: delete state, re-run incremental
         with transaction(db_engine) as conn:
@@ -205,51 +205,62 @@ class TestStockStateIncremental:
                 {"tid": tid},
             )
         populate_stock_indicator_state_for_ticker(
-            db_engine, tid, "1W",
-            mode="incremental", n_weeks_to_upsert=2,
+            db_engine, tid, "1W", mode="incremental",
         )
 
         with db_engine.connect() as conn:
             history = StockIndicatorStateRepository(
                 conn,
             ).get_history_for_ticker(tid, "1W")
-        incremental_bars = sorted(
-            [history[0].bar_timestamp, history[1].bar_timestamp],
-        )
-        assert incremental_bars == latest_two
+        assert {r.bar_timestamp for r in history} == {latest_monday}
 
-    def test_incremental_n_larger_than_computed_writes_all(
-        self, db_engine,
-    ):
-        """If n_weeks_to_upsert > computed_count, write all
-        (no padding, no error). Acts like full mode."""
+    def test_n_weeks_to_upsert_has_no_effect(self, db_engine):
+        """Daily grain ignores n_weeks_to_upsert: incremental writes
+        the current week regardless of the n value."""
         tid = self._setup(db_engine)
+        populate_stock_indicator_state_for_ticker(
+            db_engine, tid, "1W",
+            mode="incremental", n_weeks_to_upsert=2,
+        )
+        with db_engine.connect() as conn:
+            cnt_small = StockIndicatorStateRepository(
+                conn,
+            ).count_for_ticker(tid, "1W")
+        with transaction(db_engine) as conn:
+            conn.execute(
+                text("DELETE FROM stock_indicator_state "
+                     "WHERE ticker_id = :tid"),
+                {"tid": tid},
+            )
         populate_stock_indicator_state_for_ticker(
             db_engine, tid, "1W",
             mode="incremental", n_weeks_to_upsert=100_000,
         )
         with db_engine.connect() as conn:
-            cnt = StockIndicatorStateRepository(
+            cnt_large = StockIndicatorStateRepository(
                 conn,
             ).count_for_ticker(tid, "1W")
-        # Same as full mode: > 20 rows
-        assert cnt > 20
+        assert cnt_small == cnt_large >= 1
 
     def test_incremental_is_idempotent(self, db_engine):
-        """Re-running incremental upserts in place; row count
-        stays at n_weeks_to_upsert."""
+        """Re-running incremental upserts the current week's day rows
+        in place; row count is unchanged."""
         tid = self._setup(db_engine)
-        # Run incremental twice
-        for _ in range(2):
-            populate_stock_indicator_state_for_ticker(
-                db_engine, tid, "1W",
-                mode="incremental", n_weeks_to_upsert=2,
-            )
+        populate_stock_indicator_state_for_ticker(
+            db_engine, tid, "1W", mode="incremental",
+        )
         with db_engine.connect() as conn:
-            cnt = StockIndicatorStateRepository(
+            first = StockIndicatorStateRepository(
                 conn,
             ).count_for_ticker(tid, "1W")
-        assert cnt == 2
+        populate_stock_indicator_state_for_ticker(
+            db_engine, tid, "1W", mode="incremental",
+        )
+        with db_engine.connect() as conn:
+            second = StockIndicatorStateRepository(
+                conn,
+            ).count_for_ticker(tid, "1W")
+        assert first == second and first >= 1
 
     def test_full_then_incremental_does_not_truncate(self, db_engine):
         """Full populates everything; subsequent incremental
@@ -282,8 +293,8 @@ class TestStockStateIncremental:
 class TestStockStateBulkPassthrough:
 
     def test_bulk_passes_mode_to_each_ticker(self, db_engine):
-        """Bulk wrapper with mode='incremental' produces only
-        n_weeks_to_upsert rows per ticker."""
+        """Bulk wrapper with mode='incremental' writes only the
+        current week's day rows per ticker (not the full history)."""
         with transaction(db_engine) as conn:
             _seed_ticker(conn, ticker_id=7101, symbol="A")
             _seed_daily_bars(conn, 7101, n=400)
@@ -295,10 +306,10 @@ class TestStockStateBulkPassthrough:
             mode="incremental", n_weeks_to_upsert=2,
         )
         assert "succeeded" in report
-        # Both tickers wrote rows. The count in the report should
-        # be 2 (n_weeks_to_upsert) for each.
+        # Each ticker wrote only the current week's days (<= 7),
+        # proving incremental did not emit the full history.
         for (_, _, cnt) in report["succeeded"]:
-            assert cnt == 2
+            assert 1 <= cnt <= 7
 
 
 # ============================================================
@@ -318,30 +329,35 @@ class TestStockEnrichmentIncremental:
         )
         return ticker_id
 
-    def test_incremental_writes_only_last_n(self, db_engine):
+    def test_incremental_writes_current_week_only(self, db_engine):
         tid = self._setup(db_engine)
         populate_stock_indicator_enrichment_for_ticker(
-            db_engine, tid, "1W",
-            mode="incremental", n_weeks_to_upsert=2,
+            db_engine, tid, "1W", mode="incremental",
         )
         with db_engine.connect() as conn:
             cnt = StockIndicatorEnrichmentRepository(
                 conn,
             ).count_for_ticker(tid, "1W")
-        assert cnt == 2
+        # Current week's day rows only, not the full history.
+        assert 1 <= cnt <= 7
 
     def test_incremental_is_idempotent(self, db_engine):
         tid = self._setup(db_engine)
-        for _ in range(2):
-            populate_stock_indicator_enrichment_for_ticker(
-                db_engine, tid, "1W",
-                mode="incremental", n_weeks_to_upsert=2,
-            )
+        populate_stock_indicator_enrichment_for_ticker(
+            db_engine, tid, "1W", mode="incremental",
+        )
         with db_engine.connect() as conn:
-            cnt = StockIndicatorEnrichmentRepository(
+            first = StockIndicatorEnrichmentRepository(
                 conn,
             ).count_for_ticker(tid, "1W")
-        assert cnt == 2
+        populate_stock_indicator_enrichment_for_ticker(
+            db_engine, tid, "1W", mode="incremental",
+        )
+        with db_engine.connect() as conn:
+            second = StockIndicatorEnrichmentRepository(
+                conn,
+            ).count_for_ticker(tid, "1W")
+        assert first == second and first >= 1
 
     def test_full_default_unchanged(self, db_engine):
         tid = self._setup(db_engine)
@@ -379,7 +395,7 @@ class TestStockEnrichmentBulkPassthrough:
         )
         assert "succeeded" in report
         for (_, _, cnt) in report["succeeded"]:
-            assert cnt == 2
+            assert 1 <= cnt <= 7
 
 
 # ============================================================
