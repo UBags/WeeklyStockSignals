@@ -312,6 +312,45 @@ def backfill(
         result_kwargs["current_signals_upserted"] = upserted
         result_kwargs["current_signals_deleted"] = deleted
 
+        # ---- Notify subscribers — IFF this backfill is current
+        # through today (to_monday == the current IST week's Monday).
+        # A historical-range backfill must NOT email anyone. When it
+        # does fire, it calls the exact same notify_subscribers the
+        # live cycle uses; subscriber cadence
+        # (find_due_for_notification) dedups against any live cycle
+        # that already notified today. ----
+        if to_monday == _monday_of(datetime.now(_IST).date()):
+            from ..config.brevo_secrets import load_brevo_api_key
+            from ..orchestrator.notify_subscribers import (
+                notify_subscribers,
+            )
+            brevo_config = getattr(
+                getattr(config, "transports", None), "brevo", None,
+            )
+            if brevo_config is None:
+                _emit_progress(
+                    progress_cb, "notify",
+                    "skipped: brevo not configured",
+                )
+            else:
+                _notify_now = datetime.now(UTC)
+                notify_subscribers(
+                    db_engine,
+                    brevo_api_key=load_brevo_api_key(
+                        brevo_config.secrets_file,
+                    ),
+                    brevo_from_address=brevo_config.sender_email,
+                    brevo_from_name=brevo_config.sender_name,
+                    cycle_id=_notify_now.strftime("%Y%m%d-%H%M%S"),
+                    now=_notify_now,
+                    progress_cb=progress_cb,
+                )
+        else:
+            _emit_progress(
+                progress_cb, "notify",
+                "skipped: backfill not current through today",
+            )
+
         # Stage 10 (cache) is service-side. No CLI action.
         _emit_progress(progress_cb, "stage_10_cache", "skipped (service-side)")
 

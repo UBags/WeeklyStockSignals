@@ -38,8 +38,7 @@ from datetime import datetime, UTC
 
 from sqlalchemy.engine import Engine
 
-from ..notifications.compose_email import compose_email
-from ..notifications.send_email import send_email
+from ..notifications.signal_report import send_signal_report
 from ..persistence import transaction
 from ..persistence.current_signals_repo import CurrentSignalsRepository
 from ..persistence.notification_log_repo import (
@@ -263,15 +262,27 @@ def _process_one_subscriber(
     Catches its own exceptions to keep notify_subscribers's loop
     isolated, but the outer try/except remains as a safety net.
     """
-    # Compose
-    with db_engine.connect() as conn:
-        body = compose_email(conn, subscriber, cycle_id, now)
-    if body is None:
-        # Rare: current_signals went empty between the upfront count
-        # and this per-subscriber compose. Defensive.
+    # Compose + send via the per-subscriber signal-report primitive.
+    # Defaults (which_*=ALL, when=ALWAYS, full 1970..2099 window)
+    # reproduce V1 behavior: every due subscriber gets every signal.
+    # The future per-subscriber-params layer passes real filters here.
+    result = send_signal_report(
+        db_engine,
+        notification_mailid=subscriber.address,
+        brevo_api_key=brevo_api_key,
+        brevo_from_address=brevo_from_address,
+        brevo_from_name=brevo_from_name,
+        now=now,
+        cycle_id=cycle_id,
+        subscriber_id=subscriber.subscriber_id,
+    )
+    if result is None:
+        # Gated out (no signals after filtering, or outside the
+        # subscription window). Nothing sent — same skip semantics
+        # as the old empty-body path.
         logger.warning(
-            "notify_subscribers[%s] compose returned None for "
-            "subscriber_id=%d; skipping",
+            "notify_subscribers[%s] no report for subscriber_id=%d; "
+            "skipping",
             cycle_id, subscriber.subscriber_id,
         )
         return {
@@ -280,15 +291,6 @@ def _process_one_subscriber(
         }
 
     composed = 1
-
-    # Send (never raises — returns SendResult)
-    result = send_email(
-        subscriber, body,
-        api_key=brevo_api_key,
-        from_address=brevo_from_address,
-        from_name=brevo_from_name,
-        now=now,
-    )
     if not result.success:
         # last_notified_at NOT updated → next cycle retries.
         logger.warning(

@@ -87,6 +87,29 @@ _TYPE_LABELS = {
 # Public entry point
 # ====================================================================
 
+def build_email_body(
+    rows: list[EnrichedSignalRow],
+    cycle_id: str,
+    now: datetime,
+) -> EmailBody:
+    """Render a pre-fetched, pre-filtered row list into an EmailBody.
+
+    Shared renderer: compose_email (current cycle, all signals) and the
+    per-subscriber signal-report notifier (filtered rows) both call
+    this. Assumes `rows` is non-empty — callers handle the empty case.
+    """
+    counts = _count_signal_kinds(rows)
+    subject = _make_subject(cycle_id, len(rows), counts)
+    html = _render_html(rows, cycle_id, now)
+    plain_text = _render_plain_text(rows, cycle_id, now)
+    return EmailBody(
+        subject=subject,
+        html=html,
+        plain_text=plain_text,
+        signal_count=len(rows),
+    )
+
+
 def compose_email(
     conn: Connection,
     subscriber: SubscriberRecord,
@@ -112,17 +135,7 @@ def compose_email(
     if not rows:
         return None
 
-    counts = _count_signal_kinds(rows)
-    subject = _make_subject(cycle_id, len(rows), counts)
-    html = _render_html(rows, cycle_id, now)
-    plain_text = _render_plain_text(rows, cycle_id, now)
-
-    return EmailBody(
-        subject=subject,
-        html=html,
-        plain_text=plain_text,
-        signal_count=len(rows),
-    )
+    return build_email_body(rows, cycle_id, now)
 
 
 # ====================================================================

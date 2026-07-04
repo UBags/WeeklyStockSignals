@@ -187,7 +187,7 @@ class TestHappyPath:
 
         now = datetime(2026, 6, 27, 14, 30, tzinfo=UTC)
         with patch(
-            "trip_ema.orchestrator.notify_subscribers.send_email",
+            "trip_ema.notifications.signal_report.send_email",
             side_effect=_make_send_result(success=True),
         ):
             result = notify_subscribers(
@@ -240,7 +240,7 @@ class TestHappyPath:
                 _seed_current_signal(conn, ticker_id=tid)
 
         with patch(
-            "trip_ema.orchestrator.notify_subscribers.send_email",
+            "trip_ema.notifications.signal_report.send_email",
             side_effect=_make_send_result(success=True),
         ):
             result = notify_subscribers(
@@ -270,7 +270,7 @@ class TestHappyPath:
             _seed_current_signal(conn, ticker_id=1002)
 
         with patch(
-            "trip_ema.orchestrator.notify_subscribers.send_email",
+            "trip_ema.notifications.signal_report.send_email",
             side_effect=_make_send_result(success=True),
         ):
             result = notify_subscribers(
@@ -301,7 +301,7 @@ class TestFailureIsolation:
             _seed_current_signal(conn, ticker_id=1001)
 
         with patch(
-            "trip_ema.orchestrator.notify_subscribers.send_email",
+            "trip_ema.notifications.signal_report.send_email",
             side_effect=_make_send_result(
                 success=False, error="500 Internal Server Error",
             ),
@@ -358,7 +358,7 @@ class TestFailureIsolation:
             )
 
         with patch(
-            "trip_ema.orchestrator.notify_subscribers.send_email",
+            "trip_ema.notifications.signal_report.send_email",
             side_effect=selective_fake,
         ):
             result = notify_subscribers(
