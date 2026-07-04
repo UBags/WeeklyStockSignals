@@ -240,40 +240,67 @@ def backfill(
             )
 
         # ---- Stage 2: stock indicator state ----
-        _emit_progress(progress_cb, "stage_2_stock_state", "starting")
-        done, failed = _stage_stock_state(db_engine, scoped_tickers)
+        _emit_progress(
+            progress_cb, "stage_2_stock_state",
+            f"starting ({len(scoped_tickers)} stocks)",
+        )
+        done, failed = _stage_stock_state(
+            db_engine, scoped_tickers, progress_cb,
+        )
+        _emit_progress(
+            progress_cb, "stage_2_stock_state",
+            f"completed: {done}/{len(scoped_tickers)} stocks"
+            + (f" ({len(failed)} failed)" if failed else ""),
+        )
         result_kwargs["stock_state_tickers_done"] = done
         result_kwargs["stock_state_failed"] = failed
 
         # ---- Stage 3: stock indicator enrichment ----
         _emit_progress(
-            progress_cb, "stage_3_stock_enrichment", "starting",
+            progress_cb, "stage_3_stock_enrichment",
+            f"starting ({len(scoped_tickers)} stocks)",
         )
         done, failed = _stage_stock_enrichment(
-            db_engine, scoped_tickers,
+            db_engine, scoped_tickers, progress_cb,
+        )
+        _emit_progress(
+            progress_cb, "stage_3_stock_enrichment",
+            f"completed: {done}/{len(scoped_tickers)} stocks"
+            + (f" ({len(failed)} failed)" if failed else ""),
         )
         result_kwargs["stock_enrichment_tickers_done"] = done
         result_kwargs["stock_enrichment_failed"] = failed
 
         # ---- Stage 4: IIV refresh ----
         _emit_progress(progress_cb, "stage_4_iiv", "starting")
-        result_kwargs["iiv_industries_done"] = _stage_iiv(
+        iiv_done = _stage_iiv(
             db_engine, date_from=date_from, date_to=date_to,
         )
+        _emit_progress(
+            progress_cb, "stage_4_iiv",
+            f"completed: {iiv_done} industries",
+        )
+        result_kwargs["iiv_industries_done"] = iiv_done
 
         # ---- Stage 5: industry indicator state ----
         _emit_progress(progress_cb, "stage_5_industry_state", "starting")
-        result_kwargs["industry_state_done"] = _stage_industry_state(
-            db_engine,
+        ind_state_done = _stage_industry_state(db_engine)
+        _emit_progress(
+            progress_cb, "stage_5_industry_state",
+            f"completed: {ind_state_done} indicators",
         )
+        result_kwargs["industry_state_done"] = ind_state_done
 
         # ---- Stage 6: industry indicator enrichment ----
         _emit_progress(
             progress_cb, "stage_6_industry_enrichment", "starting",
         )
-        result_kwargs["industry_enrichment_done"] = (
-            _stage_industry_enrichment(db_engine)
+        ind_enr_done = _stage_industry_enrichment(db_engine)
+        _emit_progress(
+            progress_cb, "stage_6_industry_enrichment",
+            f"completed: {ind_enr_done} indicators",
         )
+        result_kwargs["industry_enrichment_done"] = ind_enr_done
 
         # ---- Stage 7: DELETE historical_signals in range ----
         _emit_progress(
@@ -426,18 +453,20 @@ def _stage_fetch_bars(
 
 def _stage_stock_state(
     db_engine, scoped_tickers: list[int],
+    progress_cb: "Callable[[str, str], None] | None" = None,
 ) -> tuple[int, list[tuple[int, str]]]:
     """Stage 2: full recompute of stock_indicator_state per ticker.
 
     Returns (done_count, [(failed_ticker_id, error_str)]).
     Per-ticker error isolation — a failure on ticker X doesn't
-    abort the rest. Stage halts and propagates only if the
-    populator infrastructure itself blows up (DB connection
-    failure, etc).
+    abort the rest. Emits "N/total stocks done" via progress_cb
+    roughly every 1% of the ticker list.
     """
     done = 0
     failed: list[tuple[int, str]] = []
-    for tid in scoped_tickers:
+    total = len(scoped_tickers)
+    every = max(1, total // 100)
+    for i, tid in enumerate(scoped_tickers, 1):
         try:
             populate_stock_indicator_state_for_ticker(
                 db_engine, tid, str(Timeframe.WEEKLY),
@@ -450,16 +479,27 @@ def _stage_stock_state(
                 "backfill stage_2: ticker_id=%d FAILED: %s",
                 tid, e,
             )
+        if i % every == 0 or i == total:
+            _emit_progress(
+                progress_cb, "stage_2_stock_state",
+                f"{done}/{total} stocks done"
+                + (f" ({len(failed)} failed)" if failed else ""),
+            )
     return done, failed
 
 
 def _stage_stock_enrichment(
     db_engine, scoped_tickers: list[int],
+    progress_cb: "Callable[[str, str], None] | None" = None,
 ) -> tuple[int, list[tuple[int, str]]]:
-    """Stage 3: full recompute of stock_indicator_enrichment."""
+    """Stage 3: full recompute of stock_indicator_enrichment.
+
+    Emits "N/total stocks done" via progress_cb ~every 1%."""
     done = 0
     failed: list[tuple[int, str]] = []
-    for tid in scoped_tickers:
+    total = len(scoped_tickers)
+    every = max(1, total // 100)
+    for i, tid in enumerate(scoped_tickers, 1):
         try:
             populate_stock_indicator_enrichment_for_ticker(
                 db_engine, tid, str(Timeframe.WEEKLY),
@@ -471,6 +511,12 @@ def _stage_stock_enrichment(
             logger.warning(
                 "backfill stage_3: ticker_id=%d FAILED: %s",
                 tid, e,
+            )
+        if i % every == 0 or i == total:
+            _emit_progress(
+                progress_cb, "stage_3_stock_enrichment",
+                f"{done}/{total} stocks done"
+                + (f" ({len(failed)} failed)" if failed else ""),
             )
     return done, failed
 
