@@ -154,15 +154,16 @@ class TestDailyGrainShape:
         assert "idx_stock_indicator_state_ticker_date" in idx
         assert "idx_stock_indicator_state_date" in idx
 
-    def test_industry_tables_untouched(self, db_engine):
-        """Industry side stays weekly — PK still on bar_timestamp, no
-        `date` column."""
+    def test_industry_tables_daily_grain_at_head(self, db_engine):
+        """At head, 0035 (which runs after 0034) has flipped the
+        industry tables to daily grain: PK on `date`, `date`
+        present on both tables. 0034 itself leaves industry alone."""
         with db_engine.connect() as conn:
             assert _pk_columns(conn, "industry_indicator_state") == [
-                "industry_name", "timeframe", "bar_timestamp",
+                "industry_name", "timeframe", "date",
             ]
-            assert "date" not in _columns(conn, "industry_indicator_state")
-            assert "date" not in _columns(
+            assert "date" in _columns(conn, "industry_indicator_state")
+            assert "date" in _columns(
                 conn, "industry_indicator_enrichment",
             )
 

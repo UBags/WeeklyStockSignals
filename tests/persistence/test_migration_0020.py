@@ -144,7 +144,7 @@ def test_primary_keys(db_engine):
             "ticker_id", "timeframe", "date",
         ]
         assert _pk_columns(conn, "industry_indicator_state") == [
-            "industry_name", "timeframe", "bar_timestamp",
+            "industry_name", "timeframe", "date",
         ]
         assert _pk_columns(conn, "current_signals") == ["ticker_id"]
         assert _pk_columns(conn, "historical_signals") == ["signal_id"]

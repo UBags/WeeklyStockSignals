@@ -1036,35 +1036,24 @@ def populate_industry_indicator_state_for_industry(
             f"{min_bars} to seed EMAs)"
         )
 
-    # Build pandas Series for the compute layer.
-    open_s = pd.Series(  # noqa: F841  (kept for parity / readability)
-        [b.open for b in weekly_bars], dtype=float,
+    # Daily-grain compute via the constant-volume state-carry
+    # engine: one row per trading day; volume pinned to 1.0 (an
+    # artificial index has no volume, so the VW triple-EMA becomes
+    # a plain triple-EMA). `weekly_bars` above is kept for the
+    # min_bars guard and the run-accounting log below.
+    from .industry_daily_grain import (
+        compute_industry_daily_grain_states,
     )
-    high_s = pd.Series([b.high for b in weekly_bars], dtype=float)
-    low_s = pd.Series([b.low for b in weekly_bars], dtype=float)
-    close_s = pd.Series([b.close for b in weekly_bars], dtype=float)
-    volume_s = pd.Series(
-        [b.volume for b in weekly_bars], dtype=float,
-    )
-    # The weekly bar's IST-Monday timestamp carries through to
-    # industry_indicator_state.bar_timestamp 1:1. Both columns are
-    # TIMESTAMPTZ.
-    timestamps = pd.Series([b.timestamp for b in weekly_bars])
-
-    # Compute core state — true-range ATR (Phase 1B unification).
-    primitives = compute_state_primitives(
-        close_s, volume_s, high_s, low_s,
-        trade_dates=timestamps,
-        synthetic_atr_for_index=False,
-    )
-
-    # Convert to dataclass list. computed_at is set on the runner
-    # side so all rows of one run share the same audit timestamp.
+    # computed_at is set on the runner side so all rows of one run
+    # share the same audit timestamp.
     now = datetime.now(UTC)
+    primitives = compute_industry_daily_grain_states(history, now=now)
+
     states = [
         IndustryIndicatorState(
             industry_name=industry_name,
             timeframe=timeframe,
+            date=p["trade_date"],
             bar_timestamp=p["bar_timestamp"],
             med_ema=p["med_ema"],
             long_ema=p["long_ema"],
@@ -1296,31 +1285,25 @@ def populate_industry_indicator_enrichment_for_industry(
             f"{min_bars})"
         )
 
-    # Build pandas Series for the compute layer.
-    high_s = pd.Series([b.high for b in weekly_bars], dtype=float)
-    low_s = pd.Series([b.low for b in weekly_bars], dtype=float)
-    close_s = pd.Series([b.close for b in weekly_bars], dtype=float)
-    volume_s = pd.Series(
-        [b.volume for b in weekly_bars], dtype=float,
+    # Daily-grain enrichment via the constant-volume engine (same
+    # walk as the state runner; 1:1 aligned per trading day).
+    # `weekly_bars` above is kept for the min_bars guard and the
+    # run-accounting log below.
+    from .industry_daily_grain import (
+        compute_industry_daily_grain_enrichment,
     )
-    timestamps = pd.Series([b.timestamp for b in weekly_bars])
-
-    # Compute enrichment (skips NaN-warmup bars with the EXACT same
-    # condition as compute_state_primitives, so the FK is satisfied
-    # for every emitted enrichment row).
-    primitives = compute_enrichment_primitives(
-        close_s, volume_s, high_s, low_s,
-        trade_dates=timestamps,
-        synthetic_atr_for_index=False,
-    )
-
-    # Convert to dataclass list. computed_at is set on the runner
-    # side so all rows of one run share the same audit timestamp.
+    # computed_at is set on the runner side so all rows of one run
+    # share the same audit timestamp.
     now = datetime.now(UTC)
+    primitives = compute_industry_daily_grain_enrichment(
+        history, now=now,
+    )
+
     enrichments = [
         IndustryIndicatorEnrichment(
             industry_name=industry_name,
             timeframe=timeframe,
+            date=p["trade_date"],
             bar_timestamp=p["bar_timestamp"],
             pierces_upper_mid=p["pierces_upper_mid"],
             pierces_lower_mid=p["pierces_lower_mid"],

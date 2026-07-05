@@ -55,6 +55,7 @@ def _seed_state(
         industry_name=industry_name,
         timeframe=timeframe,
         bar_timestamp=bar_timestamp,
+        date=bar_timestamp.date(),
         med_ema=100.0, long_ema=99.0, longest_ema=98.0,
         atr=5.0,
         upper_inner_band=105.0, lower_inner_band=95.0,
@@ -71,15 +72,19 @@ def _make_enrichment(
     *,
     timeframe: str = "Weekly",
     bar_timestamp: datetime | None = None,
+    date=None,
     med_pattern_label: str = "NA",
     med_turn_buy: bool = False,
 ) -> IndustryIndicatorEnrichment:
     if bar_timestamp is None:
         bar_timestamp = datetime(2025, 10, 6, tzinfo=UTC)
+    if date is None:
+        date = bar_timestamp.date()
     return IndustryIndicatorEnrichment(
         industry_name=industry_name,
         timeframe=timeframe,
         bar_timestamp=bar_timestamp,
+        date=date,
         pierces_upper_mid=False,
         pierces_lower_mid=False,
         dist_to_med_in_hl_units=0.5,

@@ -21,7 +21,7 @@ from ..domain.industry_indicator_state import (
 # Reused across the SELECT helpers — keep the column order stable
 # because _row_to_state unpacks positionally.
 _SELECT_COLS = (
-    "industry_name, timeframe, bar_timestamp, "
+    "industry_name, timeframe, bar_timestamp, date, "
     "med_ema, long_ema, longest_ema, atr, "
     "upper_inner_band, lower_inner_band, "
     "upper_mid_band, lower_mid_band, "
@@ -32,7 +32,7 @@ _SELECT_COLS = (
 
 _UPSERT_SQL = """
     INSERT INTO industry_indicator_state (
-        industry_name, timeframe, bar_timestamp,
+        industry_name, timeframe, bar_timestamp, date,
         med_ema, long_ema, longest_ema,
         atr,
         upper_inner_band, lower_inner_band,
@@ -40,13 +40,13 @@ _UPSERT_SQL = """
         upper_outer_band, lower_outer_band,
         display_regime, computed_at
     ) VALUES (
-        :ind, :tf, :bt,
+        :ind, :tf, :bt, :dt,
         :med, :long, :longest,
         :atr,
         :uib, :lib, :umb, :lmb, :uob, :lob,
         :dr, :ca
     )
-    ON CONFLICT (industry_name, timeframe, bar_timestamp)
+    ON CONFLICT (industry_name, timeframe, date)
     DO UPDATE SET
         med_ema = EXCLUDED.med_ema,
         long_ema = EXCLUDED.long_ema,
@@ -155,7 +155,7 @@ class IndustryIndicatorStateRepository:
                 FROM industry_indicator_state
                 WHERE industry_name = :ind AND timeframe = :tf
                   AND bar_timestamp <= :bt
-                ORDER BY bar_timestamp DESC
+                ORDER BY bar_timestamp DESC, date DESC
                 LIMIT 1
             """),
             {"ind": industry_name, "tf": timeframe,
@@ -175,7 +175,7 @@ class IndustryIndicatorStateRepository:
                 SELECT {_SELECT_COLS}
                 FROM industry_indicator_state
                 WHERE industry_name = :ind AND timeframe = :tf
-                ORDER BY bar_timestamp DESC
+                ORDER BY bar_timestamp DESC, date DESC
                 LIMIT 1
             """),
             {"ind": industry_name, "tf": timeframe},
@@ -209,7 +209,7 @@ class IndustryIndicatorStateRepository:
         if to_dt is not None:
             sql_parts.append("  AND bar_timestamp <= :to")
             params["to"] = to_dt
-        sql_parts.append("ORDER BY bar_timestamp DESC")
+        sql_parts.append("ORDER BY bar_timestamp DESC, date DESC")
         if limit is not None:
             sql_parts.append("LIMIT :lim")
             params["lim"] = limit
@@ -254,6 +254,7 @@ class IndustryIndicatorStateRepository:
             "ind": state.industry_name,
             "tf": state.timeframe,
             "bt": state.bar_timestamp,
+            "dt": state.date,
             "med": state.med_ema,
             "long": state.long_ema,
             "longest": state.longest_ema,
@@ -276,16 +277,17 @@ def _row_to_state(row) -> IndustryIndicatorState:
         industry_name=row[0],
         timeframe=row[1],
         bar_timestamp=row[2],
-        med_ema=float(row[3]),
-        long_ema=float(row[4]),
-        longest_ema=float(row[5]),
-        atr=float(row[6]),
-        upper_inner_band=float(row[7]),
-        lower_inner_band=float(row[8]),
-        upper_mid_band=float(row[9]),
-        lower_mid_band=float(row[10]),
-        upper_outer_band=float(row[11]),
-        lower_outer_band=float(row[12]),
-        display_regime=int(row[13]),
-        computed_at=row[14],
+        date=row[3],
+        med_ema=float(row[4]),
+        long_ema=float(row[5]),
+        longest_ema=float(row[6]),
+        atr=float(row[7]),
+        upper_inner_band=float(row[8]),
+        lower_inner_band=float(row[9]),
+        upper_mid_band=float(row[10]),
+        lower_mid_band=float(row[11]),
+        upper_outer_band=float(row[12]),
+        lower_outer_band=float(row[13]),
+        display_regime=int(row[14]),
+        computed_at=row[15],
     )

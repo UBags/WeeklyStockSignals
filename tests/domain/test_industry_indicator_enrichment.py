@@ -5,7 +5,7 @@ Mirror of test_stock_indicator_enrichment / test_industry_indicator_state.
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, fields
-from datetime import datetime, UTC
+from datetime import date, datetime, UTC
 
 import pytest
 
@@ -20,6 +20,7 @@ def _make(**overrides) -> IndustryIndicatorEnrichment:
         industry_name="IT - Services",
         timeframe="Weekly",
         bar_timestamp=datetime(2025, 10, 6, tzinfo=UTC),
+        date=date(2025, 10, 6),
         pierces_upper_mid=False,
         pierces_lower_mid=False,
         dist_to_med_in_hl_units=0.5,
@@ -80,12 +81,13 @@ class TestIndustryIndicatorEnrichment:
     def test_field_count(self):
         """Lock in 27 fields: 3 PK + 23 enrichment + 1 audit."""
         fs = fields(IndustryIndicatorEnrichment)
-        assert len(fs) == 27
+        assert len(fs) == 28
 
     def test_expected_field_names(self):
         fs = {f.name for f in fields(IndustryIndicatorEnrichment)}
         expected = {
             "industry_name", "timeframe", "bar_timestamp",
+            "date",
             "pierces_upper_mid", "pierces_lower_mid",
             "dist_to_med_in_hl_units", "dist_to_long_in_hl_units",
             "dist_to_longest_in_hl_units",

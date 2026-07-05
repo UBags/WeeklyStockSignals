@@ -171,14 +171,14 @@ def _seed_industry_state(
         bar_timestamp = datetime(2026, 6, 22, 0, 0, tzinfo=timezone.utc)
     conn.execute(text("""
         INSERT INTO industry_indicator_state (
-            industry_name, timeframe, bar_timestamp,
+            industry_name, timeframe, bar_timestamp, date,
             med_ema, long_ema, longest_ema, atr,
             upper_inner_band, lower_inner_band,
             upper_mid_band, lower_mid_band,
             upper_outer_band, lower_outer_band,
             display_regime
         ) VALUES (
-            :n, :tf, :bt,
+            :n, :tf, :bt, CAST(:bt AS date),
             1000, 1000, 1000, 50,
             1050, 950, 1100, 900, 1200, 800,
             1
@@ -286,7 +286,7 @@ def test_industry_indicator_enrichment_exists_with_expected_columns(db_engine):
 
     # No stray columns
     expected_cols = (
-        {"industry_name", "timeframe", "bar_timestamp", "computed_at"}
+        {"industry_name", "timeframe", "bar_timestamp", "date", "computed_at"}
         | set(_ENRICHMENT_COLS.keys())
     )
     assert set(cols.keys()) == expected_cols
@@ -302,7 +302,7 @@ def test_primary_keys(db_engine):
             "ticker_id", "timeframe", "date",
         ]
         assert _pk_columns(conn, "industry_indicator_enrichment") == [
-            "industry_name", "timeframe", "bar_timestamp",
+            "industry_name", "timeframe", "date",
         ]
 
 
@@ -333,7 +333,7 @@ def test_industry_enrichment_fk_to_state_with_cascade(db_engine):
     assert info, "FK constraint not found"
     assert info["foreign_table"] == "industry_indicator_state"
     assert info["local_cols"] == [
-        "industry_name", "timeframe", "bar_timestamp",
+        "industry_name", "timeframe", "date",
     ]
     assert info["delete_rule"] == "CASCADE"
 
@@ -363,8 +363,8 @@ def test_industry_enrichment_requires_parent_state_row(db_engine):
         with pytest.raises(IntegrityError, match=r"foreign key"):
             conn.execute(text("""
                 INSERT INTO industry_indicator_enrichment (
-                    industry_name, timeframe, bar_timestamp
-                ) VALUES (:n, '1W', NOW())
+                    industry_name, timeframe, bar_timestamp, date
+                ) VALUES (:n, '1W', NOW(), CAST(NOW() AS date))
             """), {"n": name})
 
 
@@ -414,9 +414,9 @@ def test_industry_state_delete_cascades_to_enrichment(db_engine):
         bt = _seed_industry_state(conn, name)
         conn.execute(text("""
             INSERT INTO industry_indicator_enrichment (
-                industry_name, timeframe, bar_timestamp,
+                industry_name, timeframe, bar_timestamp, date,
                 pierces_upper_mid
-            ) VALUES (:n, '1W', :bt, TRUE)
+            ) VALUES (:n, '1W', :bt, CAST(:bt AS date), TRUE)
         """), {"n": name, "bt": bt})
 
         n = conn.execute(text("""

@@ -44,16 +44,20 @@ def _make_state(
     *,
     timeframe: str = "Weekly",
     bar_timestamp: datetime | None = None,
+    date=None,
     display_regime: int = 1,
     med_ema: float = 100.0,
     atr: float = 5.0,
 ) -> IndustryIndicatorState:
     if bar_timestamp is None:
         bar_timestamp = datetime(2025, 10, 6, tzinfo=UTC)
+    if date is None:
+        date = bar_timestamp.date()
     return IndustryIndicatorState(
         industry_name=industry_name,
         timeframe=timeframe,
         bar_timestamp=bar_timestamp,
+        date=date,
         med_ema=med_ema,
         long_ema=99.0,
         longest_ema=98.0,

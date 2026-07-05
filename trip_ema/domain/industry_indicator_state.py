@@ -21,7 +21,7 @@ flags, distance metrics) live on a separate dataclass
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 
 # Allowed values for industry_indicator_state.display_regime. The
@@ -60,6 +60,7 @@ class IndustryIndicatorState:
     industry_name: str
     timeframe: str
     bar_timestamp: datetime
+    date: date
 
     # --- EMAs ---
     med_ema: float

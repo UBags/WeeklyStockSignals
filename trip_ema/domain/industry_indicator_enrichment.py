@@ -13,7 +13,7 @@ populator (Step 7) must run before this enrichment populator
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 # Re-export so persistence-layer validation has one canonical source.
 from trip_ema.fundamentals import PATTERN_LABELS
@@ -36,6 +36,7 @@ class IndustryIndicatorEnrichment:
     industry_name: str
     timeframe: str
     bar_timestamp: datetime
+    date: date
 
     # --- band-pierce flags (2) ---
     pierces_upper_mid: bool

@@ -6,7 +6,7 @@ REGIME_VALUES constant. Mirror of test_stock_indicator_state.
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, fields
-from datetime import datetime, UTC
+from datetime import date, datetime, UTC
 
 import pytest
 
@@ -21,6 +21,7 @@ def _make(**overrides) -> IndustryIndicatorState:
         industry_name="IT - Services",
         timeframe="Weekly",
         bar_timestamp=datetime(2025, 10, 6, tzinfo=UTC),
+        date=date(2025, 10, 6),
         med_ema=100.0,
         long_ema=99.0,
         longest_ema=98.0,
@@ -72,12 +73,13 @@ class TestIndustryIndicatorState:
     def test_field_count(self):
         """Lock in the 15-field shape (3 PK + 11 indicator + 1 audit)."""
         fs = fields(IndustryIndicatorState)
-        assert len(fs) == 15
+        assert len(fs) == 16
 
     def test_expected_field_names(self):
         fs = {f.name for f in fields(IndustryIndicatorState)}
         expected = {
             "industry_name", "timeframe", "bar_timestamp",
+            "date",
             "med_ema", "long_ema", "longest_ema",
             "atr",
             "upper_inner_band", "lower_inner_band",

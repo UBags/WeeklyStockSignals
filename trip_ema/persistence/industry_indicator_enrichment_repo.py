@@ -106,7 +106,7 @@ class IndustryIndicatorEnrichmentRepository:
         row = self._conn.execute(
             text(_SELECT_SQL + " WHERE industry_name = :ind "
                  "AND timeframe = :tf AND bar_timestamp <= :bt "
-                 "ORDER BY bar_timestamp DESC LIMIT 1"),
+                 "ORDER BY bar_timestamp DESC, date DESC LIMIT 1"),
             {"ind": industry_name, "tf": timeframe,
              "bt": bar_timestamp},
         ).fetchone()
@@ -119,7 +119,7 @@ class IndustryIndicatorEnrichmentRepository:
         row = self._conn.execute(
             text(_SELECT_SQL + " WHERE industry_name = :ind "
                  "AND timeframe = :tf "
-                 "ORDER BY bar_timestamp DESC LIMIT 1"),
+                 "ORDER BY bar_timestamp DESC, date DESC LIMIT 1"),
             {"ind": industry_name, "tf": timeframe},
         ).fetchone()
         return _row_to_enrichment(row) if row else None
@@ -146,7 +146,7 @@ class IndustryIndicatorEnrichmentRepository:
         if to_dt is not None:
             parts.append("  AND bar_timestamp <= :to")
             params["to"] = to_dt
-        parts.append("ORDER BY bar_timestamp DESC")
+        parts.append("ORDER BY bar_timestamp DESC, date DESC")
         if limit is not None:
             parts.append("LIMIT :lim")
             params["lim"] = limit
@@ -186,6 +186,7 @@ class IndustryIndicatorEnrichmentRepository:
             "ind": e.industry_name,
             "tf": e.timeframe,
             "bt": e.bar_timestamp,
+            "dt": e.date,
             "pu": e.pierces_upper_mid,
             "pl": e.pierces_lower_mid,
             "dm": e.dist_to_med_in_hl_units,
@@ -217,7 +218,7 @@ class IndustryIndicatorEnrichmentRepository:
 # SQL constants
 # ====================================================================
 
-_SELECT_SQL = """SELECT industry_name, timeframe, bar_timestamp,
+_SELECT_SQL = """SELECT industry_name, timeframe, bar_timestamp, date,
        pierces_upper_mid, pierces_lower_mid,
        dist_to_med_in_hl_units, dist_to_long_in_hl_units,
        dist_to_longest_in_hl_units,
@@ -237,7 +238,7 @@ FROM industry_indicator_enrichment"""
 
 _UPSERT_SQL = """
     INSERT INTO industry_indicator_enrichment (
-        industry_name, timeframe, bar_timestamp,
+        industry_name, timeframe, bar_timestamp, date,
         pierces_upper_mid, pierces_lower_mid,
         dist_to_med_in_hl_units, dist_to_long_in_hl_units,
         dist_to_longest_in_hl_units,
@@ -253,7 +254,7 @@ _UPSERT_SQL = """
         longest_turn_buy, longest_turn_sell,
         computed_at
     ) VALUES (
-        :ind, :tf, :bt,
+        :ind, :tf, :bt, :dt,
         :pu, :pl,
         :dm, :dl, :dlx,
         :mdm, :mdl, :mdlx,
@@ -263,7 +264,7 @@ _UPSERT_SQL = """
         :mtb, :mts, :ltb, :lts, :lxtb, :lxts,
         :ca
     )
-    ON CONFLICT (industry_name, timeframe, bar_timestamp)
+    ON CONFLICT (industry_name, timeframe, date)
     DO UPDATE SET
         pierces_upper_mid = EXCLUDED.pierces_upper_mid,
         pierces_lower_mid = EXCLUDED.pierces_lower_mid,
@@ -299,52 +300,53 @@ def _row_to_enrichment(row) -> IndustryIndicatorEnrichment:
         industry_name=row[0],
         timeframe=row[1],
         bar_timestamp=row[2],
-        pierces_upper_mid=bool(row[3]),
-        pierces_lower_mid=bool(row[4]),
+        date=row[3],
+        pierces_upper_mid=bool(row[4]),
+        pierces_lower_mid=bool(row[5]),
         dist_to_med_in_hl_units=(
-            float(row[5]) if row[5] is not None else None
-        ),
-        dist_to_long_in_hl_units=(
             float(row[6]) if row[6] is not None else None
         ),
-        dist_to_longest_in_hl_units=(
+        dist_to_long_in_hl_units=(
             float(row[7]) if row[7] is not None else None
         ),
-        mean_dist_to_med_in_hl_units=(
+        dist_to_longest_in_hl_units=(
             float(row[8]) if row[8] is not None else None
         ),
-        mean_dist_to_long_in_hl_units=(
+        mean_dist_to_med_in_hl_units=(
             float(row[9]) if row[9] is not None else None
         ),
-        mean_dist_to_longest_in_hl_units=(
+        mean_dist_to_long_in_hl_units=(
             float(row[10]) if row[10] is not None else None
         ),
-        bars_since_med_turn=(
-            int(row[11]) if row[11] is not None else None
+        mean_dist_to_longest_in_hl_units=(
+            float(row[11]) if row[11] is not None else None
         ),
-        bars_since_long_turn=(
+        bars_since_med_turn=(
             int(row[12]) if row[12] is not None else None
         ),
-        bars_since_longest_turn=(
+        bars_since_long_turn=(
             int(row[13]) if row[13] is not None else None
         ),
-        pct_change_since_med_turn=(
-            float(row[14]) if row[14] is not None else None
+        bars_since_longest_turn=(
+            int(row[14]) if row[14] is not None else None
         ),
-        pct_change_since_long_turn=(
+        pct_change_since_med_turn=(
             float(row[15]) if row[15] is not None else None
         ),
-        pct_change_since_longest_turn=(
+        pct_change_since_long_turn=(
             float(row[16]) if row[16] is not None else None
         ),
-        med_pattern_label=row[17],
-        long_pattern_label=row[18],
-        longest_pattern_label=row[19],
-        med_turn_buy=bool(row[20]),
-        med_turn_sell=bool(row[21]),
-        long_turn_buy=bool(row[22]),
-        long_turn_sell=bool(row[23]),
-        longest_turn_buy=bool(row[24]),
-        longest_turn_sell=bool(row[25]),
-        computed_at=row[26],
+        pct_change_since_longest_turn=(
+            float(row[17]) if row[17] is not None else None
+        ),
+        med_pattern_label=row[18],
+        long_pattern_label=row[19],
+        longest_pattern_label=row[20],
+        med_turn_buy=bool(row[21]),
+        med_turn_sell=bool(row[22]),
+        long_turn_buy=bool(row[23]),
+        long_turn_sell=bool(row[24]),
+        longest_turn_buy=bool(row[25]),
+        longest_turn_sell=bool(row[26]),
+        computed_at=row[27],
     )
