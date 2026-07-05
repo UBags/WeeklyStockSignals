@@ -64,10 +64,6 @@ from .runners import (
     _list_trading_days_in_range,
     _parse_iso_date,
 )
-from .v1_compute_primitives import (
-    compute_enrichment_primitives,
-    compute_state_primitives,
-)
 
 logger = logging.getLogger(__name__)
 

@@ -171,7 +171,7 @@ class TestDailyGrainTrajectory:
     def test_friday_row_matches_completed_week_compute(self):
         import pandas as pd
         from trip_ema.indicators.aggregation import daily_to_weekly
-        from trip_ema.fundamentals.v1_compute_primitives import (
+        from trip_ema.archive.v1_compute_primitives import (
             compute_state_primitives,
         )
         bars = _gen_daily(40, date(2025, 1, 6))

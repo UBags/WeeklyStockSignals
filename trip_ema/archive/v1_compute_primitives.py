@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .indicator_primitives import (
+from ..fundamentals.indicator_primitives import (
     INDICATOR_DEFAULTS,
     EngineParams,
     _compute_regime_series,

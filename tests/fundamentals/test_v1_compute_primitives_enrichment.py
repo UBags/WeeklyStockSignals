@@ -15,7 +15,7 @@ from trip_ema.fundamentals.indicator_primitives import (
     INDICATOR_DEFAULTS,
     compute_indicator_series,
 )
-from trip_ema.fundamentals.v1_compute_primitives import (
+from trip_ema.archive.v1_compute_primitives import (
     compute_enrichment_primitives,
     compute_state_primitives,
 )
