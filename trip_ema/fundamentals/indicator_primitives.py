@@ -49,6 +49,8 @@ import numpy as np
 import pandas as pd
 from typing import cast
 
+from .pattern_rules import bars_and_pct_since_turn, pattern_label
+
 if TYPE_CHECKING:
     # The flat-shape IndicatorParams from the domain layer. Used by
     # `EngineParams.from_domain` to bridge in from the public/config
@@ -637,82 +639,9 @@ def _detect_turns(ema_series: pd.Series) -> tuple[pd.Series, pd.Series]:
     return buy, sell
 
 
-def _pattern_label_for_ema(
-    buy_turn_now: bool,
-    sell_turn_now: bool,
-    source_now: float,
-    last_buy_value: float | None,
-    second_last_buy_value: float | None,
-    last_sell_value: float | None,
-    second_last_sell_value: float | None,
-    last_buy_label: str,
-    last_sell_label: str,
-    *,
-    label_ttl_bars: int = 3,
-    bars_since_last_buy: int | None = None,
-    bars_since_last_sell: int | None = None,
-) -> str:
-    """Return the pattern label for the current bar, given current
-    turn signals and tracked state.
-
-    Pine's logic (translated from the operator's script):
-      mediumTermNote = if (mediumTerm2SuccessiveHigherValleys
-                           or mediumTerm2SuccessiveHigherValleys[1]
-                           or mediumTerm2SuccessiveHigherValleys[2]):
-          "2 SUCCESSIVE HIGHER VALLEYS"
-      else if (mediumTermHigherValley or ...[1] or ...[2]):
-          "1 SUCCESSIVE HIGHER VALLEY"
-      else if (mediumTerm2SuccessiveLowerTops or ...):
-          "2 SUCCESSIVE LOWER TOPS"
-      else if (mediumTermLowerTop or ...):
-          "1 SUCCESSIVE LOWER TOP"
-      else:
-          "NA"
-
-    The "or [1] or [2]" makes the label sticky for 3 bars after the
-    detection bar. We replicate this by tracking the last detected
-    label and emitting it for up to label_ttl_bars after detection.
-
-    Detection conditions (Pine):
-      2_higher_valleys: buy_turn AND source > last_buy AND last_buy >= second_last_buy
-      1_higher_valley: buy_turn AND source > last_buy AND last_buy < second_last_buy
-      2_lower_tops: sell_turn AND source < last_sell AND last_sell <= second_last_sell
-      1_lower_top: sell_turn AND source < last_sell AND last_sell > second_last_sell
-
-    Returns one of: 'NA', '1 SUCCESSIVE HIGHER VALLEY',
-    '2 SUCCESSIVE HIGHER VALLEYS', '1 SUCCESSIVE LOWER TOP',
-    '2 SUCCESSIVE LOWER TOPS'.
-    """
-    # First check: does this bar print a detection?
-    if buy_turn_now and last_buy_value is not None:
-        if source_now > last_buy_value:
-            if (second_last_buy_value is not None
-                and last_buy_value >= second_last_buy_value):
-                return "2 SUCCESSIVE HIGHER VALLEYS"
-            elif (second_last_buy_value is not None
-                  and last_buy_value < second_last_buy_value):
-                return "1 SUCCESSIVE HIGHER VALLEY"
-    if sell_turn_now and last_sell_value is not None:
-        if source_now < last_sell_value:
-            if (second_last_sell_value is not None
-                and last_sell_value <= second_last_sell_value):
-                return "2 SUCCESSIVE LOWER TOPS"
-            elif (second_last_sell_value is not None
-                  and last_sell_value > second_last_sell_value):
-                return "1 SUCCESSIVE LOWER TOP"
-
-    # No fresh detection. Check stickiness: did one fire recently?
-    # The Pine "or [1] or [2]" means within the last 3 bars
-    # (current + 2 prior).
-    if (bars_since_last_buy is not None
-        and bars_since_last_buy < label_ttl_bars
-        and last_buy_label != "NA"):
-        return last_buy_label
-    if (bars_since_last_sell is not None
-        and bars_since_last_sell < label_ttl_bars
-        and last_sell_label != "NA"):
-        return last_sell_label
-    return "NA"
+# Pattern-label logic lives in pattern_rules (shared with the
+# state-carry engine). Alias kept so existing call sites are stable.
+_pattern_label_for_ema = pattern_label
 
 
 @dataclass
@@ -985,46 +914,21 @@ def compute_bar_states(
 
 
 def _bars_and_pct_since_turn(
-    i: int,
-    close: pd.Series,
-    state: _PerEMATrackState,
-    ema_now: float,
-    prev_ema: float | None,
+    i: int, close: pd.Series, state: _PerEMATrackState,
+    ema_now: float, *, prev_ema: float | None,
 ) -> tuple[int | None, float | None]:
-    """Compute (bars_since_turn, pct_change_since_turn) for one EMA
-    at bar i, following the Pine table's display logic.
-
-    Display direction follows the EMA's current slope:
-      - If ema_now > prev_ema (EMA rising), use last_buy_bar_idx.
-        pct_change = (close[i] - close[turn_bar]) / close[turn_bar] × 100
-      - If ema_now < prev_ema (EMA falling), use last_sell_bar_idx.
-        pct_change = -(close[i] - close[turn_bar]) / close[turn_bar] × 100
-        (negated, because we're measuring the down-move from a sell)
-      - If ema is flat or NaN, return (None, None).
-    """
-    if prev_ema is None or pd.isna(prev_ema) or pd.isna(ema_now):
-        return None, None
-    if ema_now > prev_ema:
-        if state.last_buy_bar_idx is None:
-            return None, None
-        n_bars = i - state.last_buy_bar_idx
-        turn_close = close.iloc[state.last_buy_bar_idx]
-        if turn_close == 0:
-            return n_bars, None
-        pct = (close.iloc[i] - turn_close) / turn_close * 100.0
-        return n_bars, float(pct)
-    elif ema_now < prev_ema:
-        if state.last_sell_bar_idx is None:
-            return None, None
-        n_bars = i - state.last_sell_bar_idx
-        turn_close = close.iloc[state.last_sell_bar_idx]
-        if turn_close == 0:
-            return n_bars, None
-        pct = -(close.iloc[i] - turn_close) / turn_close * 100.0
-        return n_bars, float(pct)
-    else:
-        # Flat EMA — no direction to report.
-        return None, None
+    """Thin pandas adapter over the shared pure rule in
+    pattern_rules.bars_and_pct_since_turn."""
+    lb = state.last_buy_bar_idx
+    ls = state.last_sell_bar_idx
+    return bars_and_pct_since_turn(
+        ema_now=ema_now, prev_ema=prev_ema,
+        current_idx=i, current_close=close.iloc[i],
+        last_buy_bar_idx=lb,
+        last_buy_close=(close.iloc[lb] if lb is not None else None),
+        last_sell_bar_idx=ls,
+        last_sell_close=(close.iloc[ls] if ls is not None else None),
+    )
 
 
 def _none_if_nan(value):

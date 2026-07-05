@@ -376,6 +376,7 @@ def compute_daily_grain_via_engine(
     params,
     target_days: list[date] | None = None,
     synthetic_atr_for_index: bool = False,
+    constant_volume: float | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Return (state_rows, enrich_rows), one per emitted trading day.
 
@@ -426,9 +427,12 @@ def compute_daily_grain_via_engine(
             lo = min(b.low for b in week_daily)
             cl = week_daily[-1].close
             wtd_vol = sum(b.volume for b in week_daily)
-            vol = session.imputed_weekly_volume(
-                wtd_vol, monday_local, ld, now_local,
-            )
+            if constant_volume is not None:
+                vol = constant_volume
+            else:
+                vol = session.imputed_weekly_volume(
+                    wtd_vol, monday_local, ld, now_local,
+                )
             engine.restore(snap)
             s, e = engine.apply(hi, lo, cl, vol)
             if _is_state_warmup(s):
@@ -442,6 +446,8 @@ def compute_daily_grain_via_engine(
         engine.restore(snap)
         real = real_by_monday.get(w_monday)
         if real is not None:
-            engine.apply(real.high, real.low, real.close, real.volume)
+            adv_vol = (constant_volume if constant_volume is not None
+                       else real.volume)
+            engine.apply(real.high, real.low, real.close, adv_vol)
 
     return state_rows, enrich_rows
