@@ -11,10 +11,10 @@ from datetime import date, datetime, timezone, UTC
 
 import pytest
 
+from trip_ema.archive.indicator_state import IndicatorState
 from trip_ema.fundamentals import (
     PATTERN_LABELS,
     REGIME_VALUES,
-    IndicatorState,
 )
 
 
