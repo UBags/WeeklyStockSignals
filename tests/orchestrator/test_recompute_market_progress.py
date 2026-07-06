@@ -34,8 +34,7 @@ _emit_progress = rm_mod._emit_progress
 EXPECTED_STAGES = [
     "stock_state",
     "stock_enrichment",
-    "rotation",
-    "derive",
+    "signals",
     "cache_rebuild",
     "iiv",
     "industry_state",

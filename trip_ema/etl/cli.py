@@ -770,6 +770,7 @@ def cmd_cycle(args, config: Config) -> int:
             recompute_result = recompute_market(
                 db_engine,
                 mode="live",
+                signal_mode="intraday" if kind == "intraday" else "eod",
                 as_of=now,
                 exchange=exchange,
                 progress_cb=_progress,

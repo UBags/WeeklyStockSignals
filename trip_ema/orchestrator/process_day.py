@@ -46,6 +46,7 @@ from sqlalchemy.engine import Engine
 from ..persistence import transaction
 from ..persistence.current_signals_repo import CurrentSignalsRepository
 from ..persistence.historical_signals_repo import HistoricalSignalsRepository
+from ..persistence.tickers_repo import TickersRepository
 from .derive_signals import derive_signal_for_ticker_this_cycle
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class ProcessDayResult:
 def process_signals_for_day(
     db_engine: Engine,
     *,
-    scoped_tickers: list[int],
+    scoped_tickers: list[int] | None = None,
     day: date,
     today: date,
     mode: ProcessMode,
@@ -78,7 +79,8 @@ def process_signals_for_day(
 
     Args:
         scoped_tickers: concrete ticker_ids (caller resolves scope — all-active
-            for the live cycle, the backfill scope for backfill). Never None.
+            for the live cycle, the backfill scope for backfill). None resolves
+            to all active tickers inside the transaction.
         day: observation/processing day D. Historical rows are keyed on this;
             only signals whose signal_date == D are written.
         today: current trading day. current_signals is refreshed only when
@@ -93,6 +95,12 @@ def process_signals_for_day(
 
     hist = cur_up = cur_del = 0
     with transaction(db_engine) as conn:
+        if scoped_tickers is None:
+            # Live cycle default: all active tickers (matches the legacy
+            # _stage_derive_and_insert scope via find_active()).
+            scoped_tickers = [
+                t.ticker_id for t in TickersRepository(conn).find_active()
+            ]
         flips: list = []
         no_flip: list[int] = []
         for tid in scoped_tickers:

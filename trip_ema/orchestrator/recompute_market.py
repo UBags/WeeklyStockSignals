@@ -44,12 +44,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, UTC
+from zoneinfo import ZoneInfo
 from collections.abc import Callable
 from typing import Literal
 
 from sqlalchemy.engine import Engine
 
 from ..cache.current_signals_cache import CurrentSignalsCache
+from .process_day import process_signals_for_day
 from ..fundamentals.v1_runners import (
     populate_industry_index_value_for_all,
     populate_industry_indicator_enrichment_for_all,
@@ -277,6 +279,7 @@ def recompute_market(
     db_engine: Engine,
     *,
     mode: Literal["live"] = "live",
+    signal_mode: Literal["intraday", "eod"] = "eod",
     as_of: datetime | None = None,
     n_weeks_to_upsert: int = 2,
     cache: CurrentSignalsCache | None = None,
@@ -376,39 +379,35 @@ def recompute_market(
             stage_errors.append(("stock_enrichment", str(e)))
             _emit_progress(progress_cb, "stock_enrichment", f"failed: {e}")
 
-    # ---- Stage 3: rotate signals ----
+    # ---- Stage 3: signals (per-day; current every run, historical at eod) ----
+    # Unified per-day path: replaces the legacy rotate(3)+derive(4) pair with
+    # process_signals_for_day. signal_mode gates historical (eod writes it,
+    # intraday does not). signals_rotated now carries historical rows written
+    # this cycle (0 for intraday); signals_emitted carries current upserts.
     if not stage_errors:
         try:
-            _emit_progress(progress_cb, "rotation", "running")
-            signals_rotated = _stage_rotate_signals(db_engine)
+            _emit_progress(progress_cb, "signals", "running")
+            _ist_day = as_of.astimezone(ZoneInfo("Asia/Kolkata")).date()
+            _pd = process_signals_for_day(
+                db_engine,
+                scoped_tickers=None,
+                day=_ist_day,
+                today=_ist_day,
+                mode=signal_mode,
+                as_of=as_of,
+            )
+            signals_rotated = _pd.historical_written
+            signals_emitted = _pd.current_upserted
             logger.info(
-                "recompute_market[%s] stage 3 rotation: "
-                "rows_moved=%d", exchange, signals_rotated,
+                "recompute_market[%s] stage 3 signals[%s]: hist=%d current=%d",
+                exchange, signal_mode, signals_rotated, signals_emitted,
             )
-            _emit_progress(progress_cb, "rotation", "done")
+            _emit_progress(progress_cb, "signals", "done")
         except Exception as e:
-            msg = f"rotation stage halted: {e}"
+            msg = f"signals stage halted: {e}"
             logger.exception("recompute_market[%s] %s", exchange, msg)
-            stage_errors.append(("rotation", str(e)))
-            _emit_progress(progress_cb, "rotation", f"failed: {e}")
-
-    # ---- Stage 4: derive signals + insert into current ----
-    if not stage_errors:
-        try:
-            _emit_progress(progress_cb, "derive", "running")
-            signals_emitted = _stage_derive_and_insert(
-                db_engine, as_of,
-            )
-            logger.info(
-                "recompute_market[%s] stage 4 derive: emitted=%d",
-                exchange, signals_emitted,
-            )
-            _emit_progress(progress_cb, "derive", "done")
-        except Exception as e:
-            msg = f"derive stage halted: {e}"
-            logger.exception("recompute_market[%s] %s", exchange, msg)
-            stage_errors.append(("derive", str(e)))
-            _emit_progress(progress_cb, "derive", f"failed: {e}")
+            stage_errors.append(("signals", str(e)))
+            _emit_progress(progress_cb, "signals", f"failed: {e}")
 
     # ---- Stage 5: cache rebuild ----
     if not stage_errors and cache is not None:
