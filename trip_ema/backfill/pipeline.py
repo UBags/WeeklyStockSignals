@@ -61,6 +61,7 @@ from ..fundamentals.v1_runners import (
 from ..orchestrator.derive_signals import (
     derive_signal_for_ticker_this_cycle,
 )
+from ..orchestrator.process_day import process_signals_for_day
 from ..persistence import transaction
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.current_signals_repo import CurrentSignalsRepository
@@ -314,28 +315,24 @@ def backfill(
             )
         )
 
-        # ---- Stage 8: walk Mondays, derive, INSERT historical ----
+        # ---- Stages 8+9: per-day walk on the unified wrapper ----
+        # Each trading day D in the range runs process_signals_for_day in
+        # backfill mode: per-day historical (delete D + insert) and current
+        # only when D == today (the final day). Replaces the legacy Monday-
+        # walk + separate current rebuild.
         _emit_progress(
-            progress_cb, "stage_8_walk_mondays", "starting",
+            progress_cb, "stage_8_walk_days", "starting",
         )
-        mondays_walked, inserted = _stage_walk_and_insert_historical(
+        _today = datetime.now(_IST).date()
+        days_walked, inserted, upserted, deleted = _stage_backfill_daywalk(
             db_engine,
             scoped_tickers=scoped_tickers,
-            from_monday=from_monday,
-            to_monday=to_monday,
+            date_from=date_from,
+            date_to=date_to,
+            today=_today,
         )
-        result_kwargs["mondays_walked"] = mondays_walked
+        result_kwargs["mondays_walked"] = days_walked
         result_kwargs["historical_signals_inserted"] = inserted
-
-        # ---- Stage 9: rebuild current_signals ----
-        _emit_progress(
-            progress_cb, "stage_9_current_signals", "starting",
-        )
-        upserted, deleted = _stage_rebuild_current(
-            db_engine,
-            scoped_tickers=scoped_tickers,
-            to_monday=to_monday,
-        )
         result_kwargs["current_signals_upserted"] = upserted
         result_kwargs["current_signals_deleted"] = deleted
 
@@ -565,6 +562,60 @@ def _stage_delete_historical(
             ticker_ids=scoped_tickers,
             from_date=from_dt,
         )
+
+
+def _walk_trading_days(
+    db_engine, *, scoped_tickers: list[int],
+    date_from: date, date_to: date,
+) -> list[date]:
+    """Trading days in [date_from, date_to] for the scoped tickers = the
+    distinct stock_indicator_state dates in range (populated by the state
+    stage earlier in this pipeline). Only days with state can produce
+    signals, so this is both correct and the minimal set to walk."""
+    with db_engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT date
+                  FROM stock_indicator_state
+                 WHERE date BETWEEN :f AND :t
+                   AND timeframe = :tf
+                   AND ticker_id = ANY(:ids)
+                 ORDER BY date
+            """),
+            {"f": date_from, "t": date_to, "tf": "1W", "ids": scoped_tickers},
+        ).all()
+    return [r[0] for r in rows]
+
+
+def _stage_backfill_daywalk(
+    db_engine, *, scoped_tickers: list[int],
+    date_from: date, date_to: date, today: date,
+) -> tuple[int, int, int, int]:
+    """Stages 8+9 unified: walk each trading day in range and run
+    process_signals_for_day in backfill mode. Per-day historical
+    (delete day + insert); current only on the day that == today.
+
+    Returns (days_walked, historical_inserted, current_upserted,
+    current_deleted)."""
+    days = _walk_trading_days(
+        db_engine, scoped_tickers=scoped_tickers,
+        date_from=date_from, date_to=date_to,
+    )
+    hist_ins = cur_up = cur_del = 0
+    for d in days:
+        as_of_dt = datetime.combine(d, time(16, 30), tzinfo=_IST)
+        pd = process_signals_for_day(
+            db_engine,
+            scoped_tickers=scoped_tickers,
+            day=d,
+            today=today,
+            mode="backfill",
+            as_of=as_of_dt,
+        )
+        hist_ins += pd.historical_written
+        cur_up += pd.current_upserted
+        cur_del += pd.current_deleted
+    return len(days), hist_ins, cur_up, cur_del
 
 
 def _stage_walk_and_insert_historical(

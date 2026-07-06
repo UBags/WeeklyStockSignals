@@ -497,11 +497,11 @@ class TestHistoricalSignals:
         # regime-change types
         assert all(h.ticker_id == 1 for h in hist)
 
-    def test_archived_at_is_next_monday_1630_ist(
+    def test_archived_at_is_set(
         self, db_engine, stub_populators,
     ):
-        """archived_at on backfilled historical rows = next Monday's
-        16:30 IST (the time the live cycle would have rotated)."""
+        """Backfilled historical rows have archived_at set. Rotation was
+        removed, so it defaults to NOW() (no per-row next-Monday stamp)."""
         _seed_ticker(db_engine, ticker_id=1, symbol="ARCH")
         _seed_state_rows(db_engine, ticker_id=1, regime_sequence=[
             (date(2024, 6, 3), 1),
@@ -523,12 +523,8 @@ class TestHistoricalSignals:
                  WHERE ticker_id = 1
                  ORDER BY computed_at DESC LIMIT 1
             """)).first()
-        # archived_at should be 2024-06-17 16:30 IST
-        expected = datetime.combine(
-            date(2024, 6, 17), time(16, 30), tzinfo=_IST,
-        )
-        # Allow some timezone slop comparing TIMESTAMPTZ
-        assert row.archived_at.astimezone(_IST) == expected
+        # Rotation removed: archived_at defaults to NOW() on backfilled rows.
+        assert row.archived_at is not None
 
     def test_idempotent_rerun_produces_same_state(
         self, db_engine, stub_populators,
@@ -578,10 +574,12 @@ class TestHistoricalSignals:
 
 class TestCurrentSignalsRebuild:
 
-    def test_flip_at_to_monday_upserts_current(
+    def test_historical_backfill_leaves_current_untouched_on_flip(
         self, db_engine, stub_populators,
     ):
-        """Regime flip at to_monday → row UPSERTED into current_signals."""
+        """Per-day model: current_signals is written only when a walked
+        day == today. A historical backfill leaves current untouched even
+        with a flip at the range end."""
         _seed_ticker(db_engine, ticker_id=1, symbol="FLIPNOW")
         _seed_state_rows(db_engine, ticker_id=1, regime_sequence=[
             (date(2024, 6, 3), 1),
@@ -597,14 +595,15 @@ class TestCurrentSignalsRebuild:
             stocks=[1],
             refetch_bars=False,
         )
-        assert result.current_signals_upserted == 1
+        assert result.current_signals_upserted == 0
         cur = _curr_signal_for_ticker(db_engine, 1)
-        assert cur is not None
+        assert cur is None
 
-    def test_no_flip_at_to_monday_deletes_current(
+    def test_historical_backfill_leaves_existing_current_untouched(
         self, db_engine, stub_populators,
     ):
-        """No flip at to_monday → existing current_signals row deleted."""
+        """Per-day model: a historical backfill does not touch
+        current_signals, so a pre-seeded stale row is left in place."""
         _seed_ticker(db_engine, ticker_id=1, symbol="NOFLIP")
         # Seed an existing current_signals row that the backfill
         # should DELETE (since the latest bar shows no flip).
@@ -638,8 +637,8 @@ class TestCurrentSignalsRebuild:
             refetch_bars=False,
         )
         assert result.current_signals_upserted == 0
-        assert result.current_signals_deleted == 1
-        assert _curr_signal_for_ticker(db_engine, 1) is None
+        assert result.current_signals_deleted == 0
+        assert _curr_signal_for_ticker(db_engine, 1) is not None
 
 
 # ============================================================
