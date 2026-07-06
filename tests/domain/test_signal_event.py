@@ -68,10 +68,10 @@ class TestSignalEvent:
             s.brand_new = 42  # type: ignore[attr-defined]
 
     def test_field_count(self):
-        """Lock in the 8-field shape: 3 keys + 1 type + 2 regimes +
-        1 price + 1 audit. NO signal_id (persistence-internal),
-        NO archived_at (historical_signals audit field)."""
-        assert len(fields(SignalEvent)) == 8
+        """Lock in the 9-field shape: 3 keys + 1 type + 2 regimes +
+        1 price + 1 audit + 1 per-day signal_date. NO signal_id
+        (persistence-internal), NO archived_at (historical_signals audit)."""
+        assert len(fields(SignalEvent)) == 9
 
     def test_expected_field_names(self):
         names = {f.name for f in fields(SignalEvent)}
@@ -80,6 +80,7 @@ class TestSignalEvent:
             "signal_type",
             "regime_before", "regime_after",
             "price_at_signal", "computed_at",
+            "signal_date",
         }
         assert names == expected
 

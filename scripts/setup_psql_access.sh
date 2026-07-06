@@ -75,6 +75,14 @@ if ! pgq "SELECT 1;" >/dev/null 2>&1; then
 fi
 echo "[*] postgres-role authentication OK; will reuse for all subsequent psql calls"
 
+# Same as pgq() but connects to trip_ema. GRANTs and ALTER DEFAULT PRIVILEGES
+# are PER-DATABASE, so they MUST run inside trip_ema — not the postgres default
+# DB that bare `psql` connects to.
+pgq_db() {
+    local sql="$1"; shift || true
+    sudo -u postgres PGPASSWORD="$POSTGRES_PW" psql -v ON_ERROR_STOP=1 -d trip_ema -tAc "$sql" "$@"
+}
+
 # ----- 5. Detect PG version + pg_hba.conf path --------------------------------
 HBA_FILE="$(pgq 'SHOW hba_file;' 2>/dev/null || true)"
 if [[ -z "$HBA_FILE" || ! -f "$HBA_FILE" ]]; then
@@ -109,6 +117,50 @@ for ROLE in "${ROLES[@]}"; do
         pgq "ALTER ROLE ${ROLE} WITH LOGIN PASSWORD '${ESCAPED_PW}';" >/dev/null
     fi
 done
+
+# ----- 7b. Grant privileges (existing objects + DEFAULT for future tables) ----
+# WHY: previously grants were applied per-table at creation time, so any table
+# added later by a migration (e.g. `subscribers`) was left ungranted — which is
+# why `pg_dump -U trip_etl_user` failed on LOCK TABLE, and why a TRUNCATE as
+# trip_etl_user would fail on the same tables. We fix it in two layers:
+#   (a) GRANT on ALL EXISTING tables/sequences, and
+#   (b) ALTER DEFAULT PRIVILEGES for every role that currently owns a table,
+#       so FUTURE tables created by any of them inherit the grants automatically.
+#
+# Privilege model (matches project convention):
+#   trip_gui_user     -> read-only            (SELECT)
+#   trip_engine_user  -> read/write           (SELECT/INSERT/UPDATE/DELETE)
+#   trip_etl_user     -> read/write/purge      (… + TRUNCATE)
+echo "[*] Granting schema + table + sequence privileges to the three roles"
+
+pgq_db "GRANT USAGE ON SCHEMA public TO trip_gui_user, trip_engine_user, trip_etl_user;" >/dev/null
+
+# (a) existing objects ---------------------------------------------------------
+pgq_db "GRANT SELECT ON ALL TABLES IN SCHEMA public TO trip_gui_user;" >/dev/null
+pgq_db "GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO trip_gui_user;" >/dev/null
+
+pgq_db "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO trip_engine_user;" >/dev/null
+pgq_db "GRANT SELECT, USAGE, UPDATE ON ALL SEQUENCES IN SCHEMA public TO trip_engine_user;" >/dev/null
+
+pgq_db "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA public TO trip_etl_user;" >/dev/null
+pgq_db "GRANT SELECT, USAGE, UPDATE ON ALL SEQUENCES IN SCHEMA public TO trip_etl_user;" >/dev/null
+
+# (b) default privileges — keyed by CREATING role, so we cover every role that
+#     currently owns a table in public (whoever migrations run as). -----------
+OWNERS="$(pgq_db "SELECT DISTINCT tableowner FROM pg_tables WHERE schemaname='public';")"
+if [[ -z "${OWNERS//[[:space:]]/}" ]]; then
+    echo "[!] No table owners found in trip_ema.public — grants may not have applied." >&2
+    echo "    (If this fires, the schema is empty or the connection DB is wrong.)" >&2
+fi
+echo "[*] Setting DEFAULT PRIVILEGES for future tables created by: $(echo $OWNERS | tr '\n' ' ')"
+for OWNER in $OWNERS; do
+    pgq_db "ALTER DEFAULT PRIVILEGES FOR ROLE ${OWNER} IN SCHEMA public GRANT SELECT ON TABLES TO trip_gui_user;" >/dev/null
+    pgq_db "ALTER DEFAULT PRIVILEGES FOR ROLE ${OWNER} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO trip_engine_user;" >/dev/null
+    pgq_db "ALTER DEFAULT PRIVILEGES FOR ROLE ${OWNER} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO trip_etl_user;" >/dev/null
+    pgq_db "ALTER DEFAULT PRIVILEGES FOR ROLE ${OWNER} IN SCHEMA public GRANT SELECT, USAGE ON SEQUENCES TO trip_gui_user;" >/dev/null
+    pgq_db "ALTER DEFAULT PRIVILEGES FOR ROLE ${OWNER} IN SCHEMA public GRANT SELECT, USAGE, UPDATE ON SEQUENCES TO trip_engine_user, trip_etl_user;" >/dev/null
+done
+echo "[*] Grants applied (existing objects + default privileges for future tables)"
 
 # ----- 8. Patch pg_hba.conf if needed ----------------------------------------
 MARKER_BEGIN="# >>> trip_ema setup_psql_access.sh BEGIN (do not edit) >>>"
@@ -208,6 +260,13 @@ echo
 echo "[*] Smoke test: connecting as trip_etl_user via socket (no password prompt expected)"
 if sudo -u "$INVOKING_USER" psql -U trip_etl_user -d trip_ema -tAc "SELECT 'OK: ' || current_user || '@' || current_database();" ; then
     echo "[*] Success."
+    # Verify the grant fix on the exact table that previously blocked pg_dump.
+    echo "[*] Verifying trip_etl_user can now read the previously-blocked 'subscribers' table"
+    if sudo -u "$INVOKING_USER" psql -U trip_etl_user -d trip_ema -tAc "SELECT COUNT(*) FROM subscribers;" >/dev/null 2>&1; then
+        echo "[*] subscribers readable by trip_etl_user — grant fix confirmed; pg_dump/TRUNCATE will now work."
+    else
+        echo "[!] trip_etl_user STILL cannot read subscribers — inspect grants before backing up/nuking." >&2
+    fi
 else
     echo "[!] Smoke test FAILED. Inspect $HBA_FILE and check that systemctl reload succeeded." >&2
     exit 1

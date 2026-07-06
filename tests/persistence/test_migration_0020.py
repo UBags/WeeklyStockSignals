@@ -113,6 +113,7 @@ def test_historical_signals_exists_with_expected_columns(db_engine):
         "signal_id", "ticker_id", "timeframe", "bar_timestamp",
         "signal_type", "regime_before", "regime_after",
         "price_at_signal", "computed_at", "archived_at",
+        "signal_date",
     }
     assert set(cols.keys()) == expected
     # signal_id should be BIGSERIAL backed by a sequence

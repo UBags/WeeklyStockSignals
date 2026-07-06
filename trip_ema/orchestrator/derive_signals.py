@@ -178,6 +178,7 @@ def derive_signal_for_ticker_this_cycle(
         regime_after=latest.display_regime,
         price_at_signal=price,
         computed_at=now,
+        signal_date=latest.date,
     )
 
 

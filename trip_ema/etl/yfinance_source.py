@@ -195,8 +195,9 @@ class YFinanceSource:
                     start=start.isoformat(),
                     end=(end + timedelta(days=1)).isoformat(),  # yf is end-exclusive
                     interval="1d",
-                    auto_adjust=False,
+                    auto_adjust=True,   # split+dividend adjusted (was False)
                     actions=False,
+                    repair=True,        # fix split-residue / 100x bad ticks
                     threads=False,
                     progress=False,
                     group_by="ticker",
@@ -238,8 +239,9 @@ class YFinanceSource:
                     tickers=yf_symbols,
                     period=f"{lookback_days}d",
                     interval="1h",
-                    auto_adjust=False,
+                    auto_adjust=True,   # split+dividend adjusted (was False)
                     actions=False,
+                    repair=True,        # fix split-residue / 100x bad ticks
                     threads=False,
                     progress=False,
                     group_by="ticker",

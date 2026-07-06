@@ -36,10 +36,10 @@ _INSERT_SQL = """
     INSERT INTO historical_signals (
         ticker_id, timeframe, bar_timestamp, signal_type,
         regime_before, regime_after, price_at_signal,
-        computed_at, archived_at
+        computed_at, archived_at, signal_date
     ) VALUES (
         :tid, :tf, :bt, :st,
-        :rb, :ra, :p, :ca, COALESCE(:aa, NOW())
+        :rb, :ra, :p, :ca, COALESCE(:aa, NOW()), :sd
     )
 """
 
@@ -84,6 +84,30 @@ class HistoricalSignalsRepository:
                    AND computed_at >= :from_dt
             """),
             {"ids": ticker_ids, "from_dt": from_date},
+        )
+        return result.rowcount
+
+    def delete_for_tickers_on_date(
+        self,
+        *,
+        ticker_ids: list[int],
+        signal_date,          # datetime.date; annotation-only under future-annotations
+    ) -> int:
+        """Delete this ticker-set's rows for exactly `signal_date`.
+
+        The idempotent primitive for the per-day model: 'process day D'
+        deletes D's rows then re-inserts, so a re-run self-corrects
+        rather than duplicating.
+        """
+        if not ticker_ids:
+            return 0
+        result = self._conn.execute(
+            text("""
+                DELETE FROM historical_signals
+                 WHERE ticker_id = ANY(:ids)
+                   AND signal_date = :d
+            """),
+            {"ids": ticker_ids, "d": signal_date},
         )
         return result.rowcount
 
@@ -240,6 +264,7 @@ class HistoricalSignalsRepository:
             "p": s.price_at_signal,
             "ca": s.computed_at,
             "aa": archived_at,   # None → DB default NOW()
+            "sd": s.signal_date,
         }
 
 

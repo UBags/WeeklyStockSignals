@@ -30,7 +30,7 @@ canonical SignalEvent.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 
 # Allowed values for signal_type. Matches the DB CHECK constraints
@@ -67,3 +67,4 @@ class SignalEvent:
     regime_after: int
     price_at_signal: float
     computed_at: datetime
+    signal_date: date | None = None
