@@ -95,29 +95,25 @@ class TestInsertMany:
             ).count_for_ticker(tid)
         assert count == 3
 
-    def test_allows_duplicates(self, db_engine):
-        """No uniqueness on historical_signals — same
-        (ticker_id, bar_timestamp, signal_type) is allowed across
-        multiple inserts (rotation across cycles produces these)."""
+    def test_rejects_duplicate_per_day(self, db_engine):
+        """Per-day grain: UNIQUE(ticker_id, timeframe, signal_date)
+        forbids a second historical row for the same ticker/day
+        (rotation, which appended per-cycle copies, is gone)."""
+        import pytest
+        from sqlalchemy.exc import IntegrityError
+        bt = datetime(2025, 10, 6, tzinfo=UTC)
         with transaction(db_engine) as conn:
             tid = _seed_ticker(conn)
-            repo = HistoricalSignalsRepository(conn)
-            bt = datetime(2025, 10, 6, tzinfo=UTC)
-            # Same logical signal, different computed_at
-            repo.insert_many([_make_signal(
+            HistoricalSignalsRepository(conn).insert_many([_make_signal(
                 tid, bar_timestamp=bt,
                 computed_at=datetime(2025, 10, 8, tzinfo=UTC),
             )])
-            repo.insert_many([_make_signal(
-                tid, bar_timestamp=bt,
-                computed_at=datetime(2025, 10, 9, tzinfo=UTC),
-            )])
-
-        with db_engine.connect() as conn:
-            count = HistoricalSignalsRepository(
-                conn,
-            ).count_for_ticker(tid)
-        assert count == 2
+        with pytest.raises(IntegrityError):
+            with transaction(db_engine) as conn:
+                HistoricalSignalsRepository(conn).insert_many([_make_signal(
+                    tid, bar_timestamp=bt,
+                    computed_at=datetime(2025, 10, 9, tzinfo=UTC),
+                )])
 
     def test_archived_at_uses_db_default_when_none(self, db_engine):
         with transaction(db_engine) as conn:
@@ -241,33 +237,6 @@ class TestGetForTicker:
         assert rows[0].signal_type == "EXIT_FROM_SELL"
         assert rows[1].signal_type == "SELL"
         assert rows[2].signal_type == "BUY"
-
-    def test_ordering_by_computed_at_tiebreaker(self, db_engine):
-        """Same bar_timestamp, two computed_at — newer computed_at
-        sorts first. Tests the (bar_timestamp DESC, computed_at DESC)
-        composite ordering."""
-        with transaction(db_engine) as conn:
-            tid = _seed_ticker(conn)
-            repo = HistoricalSignalsRepository(conn)
-            bt = datetime(2025, 10, 6, tzinfo=UTC)
-            repo.insert_many([
-                _make_signal(
-                    tid, bar_timestamp=bt,
-                    computed_at=datetime(2025, 10, 8, tzinfo=UTC),
-                ),
-                _make_signal(
-                    tid, bar_timestamp=bt,
-                    computed_at=datetime(2025, 10, 10, tzinfo=UTC),
-                ),
-            ])
-
-        with db_engine.connect() as conn:
-            rows = HistoricalSignalsRepository(
-                conn,
-            ).get_for_ticker(tid)
-        assert len(rows) == 2
-        # Newer computed_at first
-        assert rows[0].computed_at > rows[1].computed_at
 
     def test_with_limit(self, db_engine):
         tid = self._seed_three(db_engine)

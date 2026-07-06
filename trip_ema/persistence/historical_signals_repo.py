@@ -264,7 +264,8 @@ class HistoricalSignalsRepository:
             "p": s.price_at_signal,
             "ca": s.computed_at,
             "aa": archived_at,   # None → DB default NOW()
-            "sd": s.signal_date,
+            "sd": (s.signal_date if s.signal_date is not None
+                   else s.bar_timestamp.date()),
         }
 
 

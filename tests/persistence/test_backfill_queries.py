@@ -91,14 +91,15 @@ def _seed_historical_signal(
         INSERT INTO historical_signals (
             ticker_id, timeframe, bar_timestamp, signal_type,
             regime_before, regime_after, price_at_signal,
-            computed_at
+            computed_at, signal_date
         ) VALUES (
-            :tid, :tf, :bts, :st, :rb, :ra, :px, :ca
+            :tid, :tf, :bts, :st, :rb, :ra, :px, :ca, :sd
         )
     """), {
         "tid": ticker_id, "tf": timeframe, "bts": bar_timestamp,
         "st": signal_type, "rb": regime_before, "ra": regime_after,
         "px": price, "ca": computed_at,
+        "sd": bar_timestamp.date(),
     })
 
 
@@ -306,18 +307,23 @@ class TestHistoricalDeleteCount:
         # Mirrors the pipeline's DELETE — computed_at >= from_dt
         with transaction(db_engine) as conn:
             tid = _seed_ticker(conn, symbol="A")
-            # All bars on same week; difference is in computed_at
-            bts = datetime(2024, 6, 17, tzinfo=UTC)  # a Monday
+            # Distinct bar days (per-day unique constraint). The count
+            # query filters on computed_at, so each bar's day is
+            # irrelevant to what is counted — only the computed_at
+            # boundary matters.
             _seed_historical_signal(
-                conn, ticker_id=tid, bar_timestamp=bts,
+                conn, ticker_id=tid,
+                bar_timestamp=datetime(2024, 6, 17, tzinfo=UTC),
                 computed_at=datetime(2023, 12, 31, tzinfo=UTC),
             )
             _seed_historical_signal(
-                conn, ticker_id=tid, bar_timestamp=bts,
+                conn, ticker_id=tid,
+                bar_timestamp=datetime(2024, 6, 18, tzinfo=UTC),
                 computed_at=datetime(2024, 1, 1, tzinfo=UTC),
             )
             _seed_historical_signal(
-                conn, ticker_id=tid, bar_timestamp=bts,
+                conn, ticker_id=tid,
+                bar_timestamp=datetime(2024, 6, 19, tzinfo=UTC),
                 computed_at=datetime(2024, 6, 1, tzinfo=UTC),
             )
         # 2024-01-01 IS a Monday → _monday_of() is a no-op,

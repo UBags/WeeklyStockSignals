@@ -340,27 +340,29 @@ def test_current_signals_ticker_id_is_unique(db_engine):
 # Historical signals: duplicates ARE allowed
 # ============================================================
 
-def test_historical_signals_allows_duplicates(db_engine):
-    """Same (ticker_id, bar_timestamp, signal_type) can repeat —
-    by design, no uniqueness constraint beyond signal_id."""
+def test_historical_signals_rejects_duplicate_per_day(db_engine):
+    """Per-day grain: UNIQUE(ticker_id, timeframe, signal_date) forbids a
+    second row for the same ticker/day. (Rotation, which appended
+    per-cycle copies, is gone.)"""
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+    bar_ts = datetime(2026, 6, 22, 0, 0, tzinfo=timezone.utc)
+    ins = text("""
+        INSERT INTO historical_signals (
+            ticker_id, timeframe, bar_timestamp,
+            signal_type, regime_before, regime_after,
+            price_at_signal, computed_at, signal_date
+        ) VALUES (
+            :tid, '1W', :bt,
+            'BUY', 0, 1, 100, NOW(), :sd
+        )
+    """)
     with db_engine.begin() as conn:
         tid = _seed_ticker(conn)
-        bar_ts = datetime(2026, 6, 22, 0, 0, tzinfo=timezone.utc)
-        for _ in range(3):
-            conn.execute(text("""
-                INSERT INTO historical_signals (
-                    ticker_id, timeframe, bar_timestamp,
-                    signal_type, regime_before, regime_after,
-                    price_at_signal, computed_at
-                ) VALUES (
-                    :tid, '1W', :bt,
-                    'BUY', 0, 1, 100, NOW()
-                )
-            """), {"tid": tid, "bt": bar_ts})
-        count = conn.execute(text(
-            "SELECT COUNT(*) FROM historical_signals WHERE ticker_id = :tid"
-        ), {"tid": tid}).scalar_one()
-        assert count == 3
+        conn.execute(ins, {"tid": tid, "bt": bar_ts, "sd": bar_ts.date()})
+    with pytest.raises(IntegrityError):
+        with db_engine.begin() as conn:
+            conn.execute(ins, {"tid": tid, "bt": bar_ts, "sd": bar_ts.date()})
 
 
 # ============================================================

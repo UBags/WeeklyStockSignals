@@ -165,9 +165,10 @@ def _seed_signal_event(engine, bar_timestamp_ist: datetime,
         sql = (
             "INSERT INTO historical_signals "
             "(ticker_id, timeframe, bar_timestamp, signal_type, "
-            " regime_before, regime_after, price_at_signal, computed_at) "
+            " regime_before, regime_after, price_at_signal, computed_at, "
+            " signal_date) "
             "VALUES (1806, '1W', %(bt)s, %(st)s, %(rb)s, %(ra)s, "
-            "        %(p)s, %(ca)s)"
+            "        %(p)s, %(ca)s, %(sd)s)"
         )
     else:
         raise ValueError(
@@ -177,7 +178,7 @@ def _seed_signal_event(engine, bar_timestamp_ist: datetime,
         conn.exec_driver_sql(
             sql,
             dict(bt=bar_utc, st=signal_type, rb=rb, ra=ra,
-                 p=price, ca=computed_at_utc),
+                 p=price, ca=computed_at_utc, sd=bar_utc.date()),
         )
 
 

@@ -143,10 +143,13 @@ class TestDeleteForTickersFromDate:
             bar_ts=cutoff,
             computed_at=cutoff,
         )
-        # Row just before cutoff is NOT
+        # Row just before cutoff is NOT deleted. Its bar_ts is on a
+        # different DAY (distinct signal_date) so the per-day unique
+        # constraint is not tripped; only the computed_at boundary is
+        # under test.
         _insert_signal(
             db_engine, ticker_id=1,
-            bar_ts=cutoff - timedelta(seconds=1),
+            bar_ts=cutoff - timedelta(days=1),
             computed_at=cutoff - timedelta(seconds=1),
         )
         with transaction(db_engine) as conn:

@@ -661,14 +661,15 @@ class TestPartialScopeIsolation:
                 INSERT INTO historical_signals (
                     ticker_id, timeframe, bar_timestamp, signal_type,
                     regime_before, regime_after, price_at_signal,
-                    computed_at, archived_at
+                    computed_at, archived_at, signal_date
                 ) VALUES (
                     2, '1W', :bt, 'BUY',
-                    -1, 1, 99.0, :ca, NOW()
+                    -1, 1, 99.0, :ca, NOW(), :sd
                 )
             """), {
                 "bt": datetime(2024, 6, 3, 0, 0, tzinfo=UTC),
                 "ca": datetime(2024, 6, 3, 16, 30, tzinfo=_IST),
+                "sd": datetime(2024, 6, 3, 0, 0, tzinfo=UTC).date(),
             })
 
         _seed_state_rows(db_engine, ticker_id=1, regime_sequence=[
