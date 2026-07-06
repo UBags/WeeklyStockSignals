@@ -40,7 +40,6 @@ from .recompute_market import (
     RecomputeMarketResult,
     recompute_market,
 )
-from .rotate_signals import rotate_current_to_historical
 
 __all__ = [
     "NotifyResult",
@@ -49,5 +48,4 @@ __all__ = [
     "derive_signals_for_all_active_stocks",
     "notify_subscribers",
     "recompute_market",
-    "rotate_current_to_historical",
 ]

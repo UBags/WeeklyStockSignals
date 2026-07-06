@@ -55,14 +55,6 @@ def stub_stages(monkeypatch):
         lambda *a, **k: (10, 0, 0),
     )
     monkeypatch.setattr(
-        rm_mod, "_stage_rotate_signals",
-        lambda *a, **k: 5,
-    )
-    monkeypatch.setattr(
-        rm_mod, "_stage_derive_and_insert",
-        lambda *a, **k: 3,
-    )
-    monkeypatch.setattr(
         rm_mod, "_stage_rebuild_cache",
         lambda *a, **k: True,
     )
@@ -186,8 +178,7 @@ class TestFailurePath:
             rm_mod, "_stage_stock_state", boom,
         )
         for name in (
-            "_stage_stock_enrichment", "_stage_rotate_signals",
-            "_stage_derive_and_insert", "_stage_rebuild_cache",
+            "_stage_stock_enrichment", "_stage_rebuild_cache",
             "_stage_iiv_refresh", "_stage_industry_state",
             "_stage_industry_enrichment",
         ):
@@ -220,14 +211,6 @@ class TestFailurePath:
         monkeypatch.setattr(
             rm_mod, "_stage_stock_enrichment",
             lambda *a, **k: (10, 0, 0),
-        )
-        monkeypatch.setattr(
-            rm_mod, "_stage_rotate_signals",
-            lambda *a, **k: 5,
-        )
-        monkeypatch.setattr(
-            rm_mod, "_stage_derive_and_insert",
-            lambda *a, **k: 3,
         )
         monkeypatch.setattr(
             rm_mod, "_stage_rebuild_cache",

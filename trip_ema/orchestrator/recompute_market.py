@@ -62,7 +62,6 @@ from ..fundamentals.v1_runners import (
 from ..persistence import transaction
 from ..persistence.current_signals_repo import CurrentSignalsRepository
 from .derive_signals import derive_signals_for_all_active_stocks
-from .rotate_signals import rotate_current_to_historical
 
 logger = logging.getLogger(__name__)
 
@@ -215,24 +214,6 @@ def _stage_industry_enrichment(
         len(report.get("failed", [])),
         len(report.get("skipped", [])),
     )
-
-
-def _stage_rotate_signals(db_engine: Engine) -> int:
-    """Returns rows_moved."""
-    with transaction(db_engine) as conn:
-        return rotate_current_to_historical(conn)
-
-
-def _stage_derive_and_insert(
-    db_engine: Engine, as_of: datetime,
-) -> int:
-    """Derive signals from latest state pairs and insert into
-    current_signals. Returns rows inserted."""
-    with transaction(db_engine) as conn:
-        signals = derive_signals_for_all_active_stocks(
-            conn, now=as_of,
-        )
-        return CurrentSignalsRepository(conn).insert_many(signals)
 
 
 def _stage_rebuild_cache(

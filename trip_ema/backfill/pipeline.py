@@ -618,91 +618,6 @@ def _stage_backfill_daywalk(
     return len(days), hist_ins, cur_up, cur_del
 
 
-def _stage_walk_and_insert_historical(
-    db_engine, *,
-    scoped_tickers: list[int],
-    from_monday: date,
-    to_monday: date,
-) -> tuple[int, int]:
-    """Stage 8: for each Monday in [from_monday, to_monday], derive
-    signal for each scoped ticker at that Monday, INSERT into
-    historical_signals if a flip is detected.
-
-    `archived_at` for the inserted rows = next Monday's 16:30 IST
-    (the timestamp the live cycle would have rotated the row out
-    of current_signals, had the cycle run then).
-
-    Returns (mondays_walked, signals_inserted)."""
-    mondays = list(_walk_mondays(from_monday, to_monday))
-    inserted = 0
-
-    for monday in mondays:
-        as_of_dt = datetime.combine(
-            monday, time(16, 30), tzinfo=_IST,
-        )
-        archived_at = datetime.combine(
-            monday + timedelta(days=7), time(16, 30), tzinfo=_IST,
-        )
-        events: list[SignalEvent] = []
-        with db_engine.connect() as conn:
-            for tid in scoped_tickers:
-                ev = derive_signal_for_ticker_this_cycle(
-                    conn, tid,
-                    now=as_of_dt,
-                    as_of=as_of_dt,
-                )
-                if ev is not None:
-                    events.append(ev)
-        if events:
-            with transaction(db_engine) as conn:
-                HistoricalSignalsRepository(
-                    conn,
-                ).insert_many(events, archived_at=archived_at)
-            inserted += len(events)
-
-    return len(mondays), inserted
-
-
-def _stage_rebuild_current(
-    db_engine, *,
-    scoped_tickers: list[int],
-    to_monday: date,
-) -> tuple[int, int]:
-    """Stage 9: for each scoped ticker, derive at `to_monday`.
-    If a flip is detected → UPSERT into current_signals via
-    insert_many (uses the existing ON CONFLICT DO UPDATE on
-    ticker_id PK). If not → DELETE the row (if any exists).
-
-    Returns (upserted, deleted)."""
-    as_of_dt = datetime.combine(
-        to_monday, time(16, 30), tzinfo=_IST,
-    )
-    events_to_upsert: list[SignalEvent] = []
-    tickers_no_flip: list[int] = []
-
-    for tid in scoped_tickers:
-        with db_engine.connect() as conn:
-            ev = derive_signal_for_ticker_this_cycle(
-                conn, tid,
-                now=as_of_dt,
-                as_of=as_of_dt,
-            )
-        if ev is not None:
-            events_to_upsert.append(ev)
-        else:
-            tickers_no_flip.append(tid)
-
-    upserted = 0
-    deleted = 0
-    with transaction(db_engine) as conn:
-        repo = CurrentSignalsRepository(conn)
-        if events_to_upsert:
-            upserted = repo.insert_many(events_to_upsert)
-        if tickers_no_flip:
-            deleted = repo.delete_for_tickers(tickers_no_flip)
-    return upserted, deleted
-
-
 # ============================================================
 # Helpers
 # ============================================================
@@ -754,14 +669,6 @@ def _monday_of(d: date) -> date:
     """Monday of the week containing `d`. Matches the IST-Monday
     anchor used throughout the V1 weekly bars."""
     return d - timedelta(days=d.weekday())
-
-
-def _walk_mondays(from_monday: date, to_monday: date):
-    """Yield each Monday in [from_monday, to_monday] inclusive."""
-    cur = from_monday
-    while cur <= to_monday:
-        yield cur
-        cur += timedelta(days=7)
 
 
 def _emit_progress(
