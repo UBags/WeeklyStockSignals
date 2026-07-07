@@ -65,6 +65,7 @@ from ..orchestrator.industry_stages import (
     _stage_industry_state,
 )
 from ..persistence import transaction
+from .phase_ledger import run_phase, reset_phases
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.current_signals_repo import CurrentSignalsRepository
 from ..persistence.historical_signals_repo import (
@@ -132,6 +133,7 @@ def backfill(
     exchange: str = "NSE",
     stocks: list[int] | None = None,
     refetch_bars: bool = True,
+    resume: bool = True,
     progress_cb: Callable[[str, str], None] | None = None,
 ) -> BackfillResult:
     """Operator entry point for the V1 backfill pipeline.
@@ -205,6 +207,17 @@ def backfill(
         )
     logger.info("backfill: run_id=%d started", run_id)
 
+    # resume=False forces a full rebuild: clear the phase ledger so every
+    # phase re-runs. resume=True (default) leaves the ledger, so already-
+    # COMPLETE phases are skipped and the run picks up where it stopped.
+    if not resume:
+        n_cleared = reset_phases(db_engine, exchange)
+        logger.info(
+            "backfill: resume=False — cleared %d phase-ledger rows for %s",
+            n_cleared, exchange,
+        )
+    _force = not resume
+
     # ---- The pipeline body — wrap in try/finally so finish() ALWAYS
     # gets called, freeing the live cycle's deferral check. ----
     result_kwargs: dict = {
@@ -228,14 +241,20 @@ def backfill(
         # ---- Stage 1: yfinance bar refetch ----
         if refetch_bars:
             _emit_progress(progress_cb, "stage_1_fetch_bars", "starting")
-            result_kwargs["bars_fetch_run_id"] = _stage_fetch_bars(
-                db_engine, config,
-                exchange=exchange,
-                scoped_tickers=scoped_tickers,
-                stocks=stocks,
-                start_date=date_from,
-                end_date=date_to,
+            _r = run_phase(
+                db_engine, exchange, "fetch_bars",
+                lambda: _stage_fetch_bars(
+                    db_engine, config,
+                    exchange=exchange,
+                    scoped_tickers=scoped_tickers,
+                    stocks=stocks,
+                    start_date=date_from,
+                    end_date=date_to,
+                ),
+                backfill_run_id=run_id, force=_force,
             )
+            if _r is not None:
+                result_kwargs["bars_fetch_run_id"] = _r
         else:
             _emit_progress(
                 progress_cb,
@@ -247,75 +266,116 @@ def backfill(
             progress_cb, "stage_2_stock_state",
             f"starting ({len(scoped_tickers)} stocks)",
         )
-        done, failed = _stage_stock_state_full(
-            db_engine, scoped_tickers, progress_cb,
+        _r = run_phase(
+            db_engine, exchange, "stock_state",
+            lambda: _stage_stock_state_full(
+                db_engine, scoped_tickers, progress_cb,
+            ),
+            backfill_run_id=run_id, force=_force,
         )
-        _emit_progress(
-            progress_cb, "stage_2_stock_state",
-            f"completed: {done}/{len(scoped_tickers)} stocks"
-            + (f" ({len(failed)} failed)" if failed else ""),
-        )
-        result_kwargs["stock_state_tickers_done"] = done
-        result_kwargs["stock_state_failed"] = failed
+        if _r is not None:
+            done, failed = _r
+            _emit_progress(
+                progress_cb, "stage_2_stock_state",
+                f"completed: {done}/{len(scoped_tickers)} stocks"
+                + (f" ({len(failed)} failed)" if failed else ""),
+            )
+            result_kwargs["stock_state_tickers_done"] = done
+            result_kwargs["stock_state_failed"] = failed
+        else:
+            _emit_progress(
+                progress_cb, "stage_2_stock_state",
+                "skipped (already complete)",
+            )
 
         # ---- Stage 3: stock indicator enrichment ----
         _emit_progress(
             progress_cb, "stage_3_stock_enrichment",
             f"starting ({len(scoped_tickers)} stocks)",
         )
-        done, failed = _stage_stock_enrichment_full(
-            db_engine, scoped_tickers, progress_cb,
+        _r = run_phase(
+            db_engine, exchange, "stock_enrichment",
+            lambda: _stage_stock_enrichment_full(
+                db_engine, scoped_tickers, progress_cb,
+            ),
+            backfill_run_id=run_id, force=_force,
         )
-        _emit_progress(
-            progress_cb, "stage_3_stock_enrichment",
-            f"completed: {done}/{len(scoped_tickers)} stocks"
-            + (f" ({len(failed)} failed)" if failed else ""),
-        )
-        result_kwargs["stock_enrichment_tickers_done"] = done
-        result_kwargs["stock_enrichment_failed"] = failed
+        if _r is not None:
+            done, failed = _r
+            _emit_progress(
+                progress_cb, "stage_3_stock_enrichment",
+                f"completed: {done}/{len(scoped_tickers)} stocks"
+                + (f" ({len(failed)} failed)" if failed else ""),
+            )
+            result_kwargs["stock_enrichment_tickers_done"] = done
+            result_kwargs["stock_enrichment_failed"] = failed
+        else:
+            _emit_progress(
+                progress_cb, "stage_3_stock_enrichment",
+                "skipped (already complete)",
+            )
 
         # ---- Stage 4: IIV refresh ----
         _emit_progress(progress_cb, "stage_4_iiv", "starting")
-        iiv_done = _stage_iiv_full(
-            db_engine, date_from=date_from, date_to=date_to,
+        _r = run_phase(
+            db_engine, exchange, "iiv",
+            lambda: _stage_iiv_full(
+                db_engine, date_from=date_from, date_to=date_to,
+            ),
+            backfill_run_id=run_id, force=_force,
         )
-        _emit_progress(
-            progress_cb, "stage_4_iiv",
-            f"completed: {iiv_done} industries",
-        )
-        result_kwargs["iiv_industries_done"] = iiv_done
+        if _r is not None:
+            result_kwargs["iiv_industries_done"] = _r
+            _emit_progress(
+                progress_cb, "stage_4_iiv",
+                f"completed: {_r} industries",
+            )
 
         # ---- Stage 5: industry indicator state ----
         _emit_progress(progress_cb, "stage_5_industry_state", "starting")
-        ind_state_done = _stage_industry_state(db_engine, mode="full")[0]
-        _emit_progress(
-            progress_cb, "stage_5_industry_state",
-            f"completed: {ind_state_done} indicators",
+        _r = run_phase(
+            db_engine, exchange, "industry_state",
+            lambda: _stage_industry_state(db_engine, mode="full")[0],
+            backfill_run_id=run_id, force=_force,
         )
-        result_kwargs["industry_state_done"] = ind_state_done
+        if _r is not None:
+            result_kwargs["industry_state_done"] = _r
+            _emit_progress(
+                progress_cb, "stage_5_industry_state",
+                f"completed: {_r} indicators",
+            )
 
         # ---- Stage 6: industry indicator enrichment ----
         _emit_progress(
             progress_cb, "stage_6_industry_enrichment", "starting",
         )
-        ind_enr_done = _stage_industry_enrichment(db_engine, mode="full")[0]
-        _emit_progress(
-            progress_cb, "stage_6_industry_enrichment",
-            f"completed: {ind_enr_done} indicators",
+        _r = run_phase(
+            db_engine, exchange, "industry_enrichment",
+            lambda: _stage_industry_enrichment(db_engine, mode="full")[0],
+            backfill_run_id=run_id, force=_force,
         )
-        result_kwargs["industry_enrichment_done"] = ind_enr_done
+        if _r is not None:
+            result_kwargs["industry_enrichment_done"] = _r
+            _emit_progress(
+                progress_cb, "stage_6_industry_enrichment",
+                f"completed: {_r} indicators",
+            )
 
         # ---- Stage 7: DELETE historical_signals in range ----
         _emit_progress(
             progress_cb, "stage_7_delete_historical", "starting",
         )
-        result_kwargs["historical_signals_deleted"] = (
-            _stage_delete_historical(
+        _r = run_phase(
+            db_engine, exchange, "delete_historical",
+            lambda: _stage_delete_historical(
                 db_engine,
                 scoped_tickers=scoped_tickers,
                 from_monday=from_monday,
-            )
+            ),
+            backfill_run_id=run_id, force=_force,
         )
+        if _r is not None:
+            result_kwargs["historical_signals_deleted"] = _r
 
         # ---- Stages 8+9: per-day walk on the unified wrapper ----
         # Each trading day D in the range runs process_signals_for_day in
@@ -326,18 +386,28 @@ def backfill(
             progress_cb, "stage_8_walk_days", "starting",
         )
         _today = datetime.now(_IST).date()
-        (days_walked, inserted, upserted, deleted,
-         today_walked) = _stage_backfill_daywalk(
-            db_engine,
-            scoped_tickers=scoped_tickers,
-            date_from=date_from,
-            date_to=date_to,
-            today=_today,
+        _r = run_phase(
+            db_engine, exchange, "daywalk",
+            lambda: _stage_backfill_daywalk(
+                db_engine,
+                scoped_tickers=scoped_tickers,
+                date_from=date_from,
+                date_to=date_to,
+                today=_today,
+            ),
+            backfill_run_id=run_id, force=_force,
         )
-        result_kwargs["days_walked"] = days_walked
-        result_kwargs["historical_signals_inserted"] = inserted
-        result_kwargs["current_signals_upserted"] = upserted
-        result_kwargs["current_signals_deleted"] = deleted
+        if _r is not None:
+            (days_walked, inserted, upserted, deleted,
+             today_walked) = _r
+            result_kwargs["days_walked"] = days_walked
+            result_kwargs["historical_signals_inserted"] = inserted
+            result_kwargs["current_signals_upserted"] = upserted
+            result_kwargs["current_signals_deleted"] = deleted
+        else:
+            # daywalk already COMPLETE (resume) — don't notify off a walk
+            # we didn't run; today_walked stays False.
+            today_walked = False
 
         # ---- Notify subscribers — IFF this backfill is current
         # through today (to_monday == the current IST week's Monday).
