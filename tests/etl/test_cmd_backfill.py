@@ -98,7 +98,7 @@ def _make_result(**overrides) -> BackfillResult:
         historical_signals_inserted=0,
         current_signals_upserted=0,
         current_signals_deleted=0,
-        mondays_walked=1,
+        days_walked=1,
         failed_stage=None,
         error_message=None,
     )

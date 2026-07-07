@@ -58,8 +58,6 @@ from .industry_stages import (
 )
 from ..fundamentals.v1_runners import (
     populate_industry_index_value_for_all,
-    populate_industry_indicator_enrichment_for_all,
-    populate_industry_indicator_state_for_all,
     populate_stock_indicator_enrichment_for_exchange,
     populate_stock_indicator_state_for_exchange,
 )

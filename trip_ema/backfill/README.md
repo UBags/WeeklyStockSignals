@@ -262,7 +262,7 @@ class BackfillResult:
     historical_signals_inserted:     int
     current_signals_upserted:        int
     current_signals_deleted:         int
-    mondays_walked:                  int
+    days_walked:                     int
 
     failed_stage:                    str | None
     error_message:                   str | None

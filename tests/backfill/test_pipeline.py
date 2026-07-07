@@ -207,12 +207,12 @@ def stub_populators(monkeypatch):
         _noop_industry_iiv,
     )
     monkeypatch.setattr(
-        "trip_ema.backfill.pipeline."
+        "trip_ema.orchestrator.industry_stages."
         "populate_industry_indicator_state_for_all",
         _noop_industry_state,
     )
     monkeypatch.setattr(
-        "trip_ema.backfill.pipeline."
+        "trip_ema.orchestrator.industry_stages."
         "populate_industry_indicator_enrichment_for_all",
         _noop_industry_enrichment,
     )

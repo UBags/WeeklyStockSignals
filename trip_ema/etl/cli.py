@@ -428,7 +428,7 @@ def _report_backfill_result(result) -> int:
     print(
         f"  signals:     deleted={result.historical_signals_deleted}, "
         f"inserted={result.historical_signals_inserted}, "
-        f"mondays_walked={result.mondays_walked}"
+        f"days_walked={result.days_walked}"
     )
     print(
         f"  current:     upserted={result.current_signals_upserted}, "

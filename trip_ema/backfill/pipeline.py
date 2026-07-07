@@ -53,8 +53,6 @@ from ..domain.signal_event import SignalEvent
 from ..etl.runner import fetch_bars_for_tickers, run_backfill
 from ..fundamentals.v1_runners import (
     populate_industry_index_value_for_all,
-    populate_industry_indicator_enrichment_for_all,
-    populate_industry_indicator_state_for_all,
     populate_stock_indicator_enrichment_for_ticker,
     populate_stock_indicator_state_for_ticker,
 )
@@ -116,7 +114,7 @@ class BackfillResult:
     historical_signals_inserted: int = 0
     current_signals_upserted: int = 0
     current_signals_deleted: int = 0
-    mondays_walked: int = 0
+    days_walked: int = 0
     failed_stage: str | None = None
     error_message: str | None = None
 
@@ -335,7 +333,7 @@ def backfill(
             date_to=date_to,
             today=_today,
         )
-        result_kwargs["mondays_walked"] = days_walked
+        result_kwargs["days_walked"] = days_walked
         result_kwargs["historical_signals_inserted"] = inserted
         result_kwargs["current_signals_upserted"] = upserted
         result_kwargs["current_signals_deleted"] = deleted
