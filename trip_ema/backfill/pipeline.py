@@ -66,6 +66,9 @@ from ..orchestrator.industry_stages import (
 )
 from ..persistence import transaction
 from .phase_ledger import run_phase, reset_phases
+from ..fundamentals.market_cap_compute import populate_market_cap_range
+from ..fundamentals.runners import build_all_industry_index_chains
+from ..fundamentals.runners import run_index_value_backfill_all
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.current_signals_repo import CurrentSignalsRepository
 from ..persistence.historical_signals_repo import (
@@ -313,6 +316,60 @@ def backfill(
             _emit_progress(
                 progress_cb, "stage_3_stock_enrichment",
                 "skipped (already complete)",
+            )
+
+        # ---- Stage 3b: market cap (per exchange) ----
+        # These three build the per-exchange industry indices that
+        # stages 4-6 operate on. Without them, iiv/state/enrichment
+        # process 0 industries.
+        _emit_progress(progress_cb, "stage_3b_market_cap", "starting")
+        _r = run_phase(
+            db_engine, exchange, "market_cap",
+            lambda: _stage_market_cap(
+                db_engine, exchange=exchange,
+                date_from=date_from, date_to=date_to,
+            ),
+            backfill_run_id=run_id, force=_force,
+        )
+        if _r is not None:
+            _emit_progress(
+                progress_cb, "stage_3b_market_cap",
+                f"completed: ~{_r} mcap rows",
+            )
+
+        # ---- Stage 3c: build industry indices (per exchange) ----
+        _emit_progress(
+            progress_cb, "stage_3c_industry_index_build", "starting",
+        )
+        _r = run_phase(
+            db_engine, exchange, "industry_index_build",
+            lambda: _stage_industry_index_build(
+                db_engine, exchange=exchange, through=date_to,
+            ),
+            backfill_run_id=run_id, force=_force,
+        )
+        if _r is not None:
+            _emit_progress(
+                progress_cb, "stage_3c_industry_index_build",
+                f"completed: {_r} chains",
+            )
+
+        # ---- Stage 3d: backfill industry index values ----
+        _emit_progress(
+            progress_cb, "stage_3d_industry_index_values", "starting",
+        )
+        _r = run_phase(
+            db_engine, exchange, "industry_index_values",
+            lambda: _stage_industry_index_values(
+                db_engine, date_from=date_from, date_to=date_to,
+                force=_force,
+            ),
+            backfill_run_id=run_id, force=_force,
+        )
+        if _r is not None:
+            _emit_progress(
+                progress_cb, "stage_3d_industry_index_values",
+                f"completed: {_r} indices",
             )
 
         # ---- Stage 4: IIV refresh ----
@@ -599,6 +656,41 @@ def _stage_iiv_full(
         db_engine, from_date=date_from, to_date=date_to,
     )
     return len(report.get("succeeded", []))
+
+
+def _stage_market_cap(
+    db_engine: Engine, *, exchange: str, date_from: date, date_to: date,
+) -> int:
+    """Populate daily_market_cap for the exchange over the range
+    (adjusted close x current shares). Returns approx rows."""
+    res = populate_market_cap_range(
+        db_engine, exchange,
+        date_from=date_from, date_to=date_to,
+        use_current_shares_always=True,
+    )
+    return int(res.get("approx", 0)) if isinstance(res, dict) else 0
+
+
+def _stage_industry_index_build(
+    db_engine: Engine, *, exchange: str, through: date,
+) -> int:
+    """Build per-exchange annual-April chain-linked industry indices
+    (top 12, min 4). Returns number of chains built."""
+    out = build_all_industry_index_chains(
+        db_engine, exchange, through=through, n=12, min_constituents=4,
+    )
+    return len(out.get("chains", [])) if isinstance(out, dict) else 0
+
+
+def _stage_industry_index_values(
+    db_engine: Engine, *, date_from: date, date_to: date, force: bool,
+) -> int:
+    """Backfill daily industry_index_value rows for all active indices.
+    Returns number of indices processed OK."""
+    out = run_index_value_backfill_all(
+        db_engine, from_date=date_from, to_date=date_to, force=force,
+    )
+    return int(out.get("n_ok", 0)) if isinstance(out, dict) else 0
 
 
 def _stage_delete_historical(
