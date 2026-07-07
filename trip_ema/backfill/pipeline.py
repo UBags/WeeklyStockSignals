@@ -245,7 +245,7 @@ def backfill(
             progress_cb, "stage_2_stock_state",
             f"starting ({len(scoped_tickers)} stocks)",
         )
-        done, failed = _stage_stock_state(
+        done, failed = _stage_stock_state_full(
             db_engine, scoped_tickers, progress_cb,
         )
         _emit_progress(
@@ -261,7 +261,7 @@ def backfill(
             progress_cb, "stage_3_stock_enrichment",
             f"starting ({len(scoped_tickers)} stocks)",
         )
-        done, failed = _stage_stock_enrichment(
+        done, failed = _stage_stock_enrichment_full(
             db_engine, scoped_tickers, progress_cb,
         )
         _emit_progress(
@@ -274,7 +274,7 @@ def backfill(
 
         # ---- Stage 4: IIV refresh ----
         _emit_progress(progress_cb, "stage_4_iiv", "starting")
-        iiv_done = _stage_iiv(
+        iiv_done = _stage_iiv_full(
             db_engine, date_from=date_from, date_to=date_to,
         )
         _emit_progress(
@@ -285,7 +285,7 @@ def backfill(
 
         # ---- Stage 5: industry indicator state ----
         _emit_progress(progress_cb, "stage_5_industry_state", "starting")
-        ind_state_done = _stage_industry_state(db_engine)
+        ind_state_done = _stage_industry_state_full(db_engine)
         _emit_progress(
             progress_cb, "stage_5_industry_state",
             f"completed: {ind_state_done} indicators",
@@ -296,7 +296,7 @@ def backfill(
         _emit_progress(
             progress_cb, "stage_6_industry_enrichment", "starting",
         )
-        ind_enr_done = _stage_industry_enrichment(db_engine)
+        ind_enr_done = _stage_industry_enrichment_full(db_engine)
         _emit_progress(
             progress_cb, "stage_6_industry_enrichment",
             f"completed: {ind_enr_done} indicators",
@@ -448,7 +448,7 @@ def _stage_fetch_bars(
         )
 
 
-def _stage_stock_state(
+def _stage_stock_state_full(
     db_engine, scoped_tickers: list[int],
     progress_cb: "Callable[[str, str], None] | None" = None,
 ) -> tuple[int, list[tuple[int, str]]]:
@@ -485,7 +485,7 @@ def _stage_stock_state(
     return done, failed
 
 
-def _stage_stock_enrichment(
+def _stage_stock_enrichment_full(
     db_engine, scoped_tickers: list[int],
     progress_cb: "Callable[[str, str], None] | None" = None,
 ) -> tuple[int, list[tuple[int, str]]]:
@@ -518,7 +518,7 @@ def _stage_stock_enrichment(
     return done, failed
 
 
-def _stage_iiv(
+def _stage_iiv_full(
     db_engine, *, date_from: date, date_to: date,
 ) -> int:
     """Stage 4: IIV refresh for all industries, full date range."""
@@ -528,7 +528,11 @@ def _stage_iiv(
     return len(report.get("succeeded", []))
 
 
-def _stage_industry_state(db_engine) -> int:
+def _stage_industry_state_full(db_engine) -> int:
+    # NOTE: candidate for mode-parameterized merge with the recompute
+    # _stage_industry_state_incremental — both just call
+    # populate_industry_indicator_state_for_all(mode=...) and differ only
+    # in mode + return shape.
     """Stage 5: industry_indicator_state, full mode, all industries."""
     report = populate_industry_indicator_state_for_all(
         db_engine, mode="full",
@@ -536,7 +540,11 @@ def _stage_industry_state(db_engine) -> int:
     return len(report.get("succeeded", []))
 
 
-def _stage_industry_enrichment(db_engine) -> int:
+def _stage_industry_enrichment_full(db_engine) -> int:
+    # NOTE: candidate for mode-parameterized merge with the recompute
+    # _stage_industry_enrichment_incremental — both just call
+    # populate_industry_indicator_enrichment_for_all(mode=...) and differ
+    # only in mode + return shape.
     """Stage 6: industry_indicator_enrichment, full mode."""
     report = populate_industry_indicator_enrichment_for_all(
         db_engine, mode="full",
