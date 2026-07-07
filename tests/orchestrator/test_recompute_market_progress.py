@@ -63,11 +63,11 @@ def stub_stages(monkeypatch):
         lambda *a, **k: (50, 0, 0),
     )
     monkeypatch.setattr(
-        rm_mod, "_stage_industry_state_incremental",
+        rm_mod, "_stage_industry_state",
         lambda *a, **k: (50, 0, 0),
     )
     monkeypatch.setattr(
-        rm_mod, "_stage_industry_enrichment_incremental",
+        rm_mod, "_stage_industry_enrichment",
         lambda *a, **k: (50, 0, 0),
     )
 
@@ -179,8 +179,8 @@ class TestFailurePath:
         )
         for name in (
             "_stage_stock_enrichment_incremental", "_stage_rebuild_cache",
-            "_stage_iiv_incremental", "_stage_industry_state_incremental",
-            "_stage_industry_enrichment_incremental",
+            "_stage_iiv_incremental", "_stage_industry_state",
+            "_stage_industry_enrichment",
         ):
             monkeypatch.setattr(
                 rm_mod, name, lambda *a, **k: (0, 0, 0),
@@ -229,11 +229,11 @@ class TestFailurePath:
             industry_stages_called.append("industry_enrichment")
             return (0, 0, 0)
         monkeypatch.setattr(
-            rm_mod, "_stage_industry_state_incremental",
+            rm_mod, "_stage_industry_state",
             watch_industry_state,
         )
         monkeypatch.setattr(
-            rm_mod, "_stage_industry_enrichment_incremental",
+            rm_mod, "_stage_industry_enrichment",
             watch_industry_enrich,
         )
 

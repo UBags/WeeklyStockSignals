@@ -52,6 +52,10 @@ from sqlalchemy.engine import Engine
 
 from ..cache.current_signals_cache import CurrentSignalsCache
 from .process_day import process_signals_for_day
+from .industry_stages import (
+    _stage_industry_enrichment,
+    _stage_industry_state,
+)
 from ..fundamentals.v1_runners import (
     populate_industry_index_value_for_all,
     populate_industry_indicator_enrichment_for_all,
@@ -178,44 +182,6 @@ def _stage_iiv_incremental(
         db_engine,
         from_date=from_date,
         to_date=to_date,
-    )
-    return (
-        len(report.get("succeeded", [])),
-        len(report.get("failed", [])),
-        len(report.get("skipped", [])),
-    )
-
-
-def _stage_industry_state_incremental(
-    db_engine: Engine,
-    n_weeks_to_upsert: int,
-) -> tuple[int, int, int]:
-    # NOTE: candidate for mode-parameterized merge with the backfill
-    # _stage_industry_state_full — both just call
-    # populate_industry_indicator_state_for_all(mode=...) and differ only
-    # in mode + return shape.
-    report = populate_industry_indicator_state_for_all(
-        db_engine,
-        mode="incremental", n_weeks_to_upsert=n_weeks_to_upsert,
-    )
-    return (
-        len(report.get("succeeded", [])),
-        len(report.get("failed", [])),
-        len(report.get("skipped", [])),
-    )
-
-
-def _stage_industry_enrichment_incremental(
-    db_engine: Engine,
-    n_weeks_to_upsert: int,
-) -> tuple[int, int, int]:
-    # NOTE: candidate for mode-parameterized merge with the backfill
-    # _stage_industry_enrichment_full — both just call
-    # populate_industry_indicator_enrichment_for_all(mode=...) and differ
-    # only in mode + return shape.
-    report = populate_industry_indicator_enrichment_for_all(
-        db_engine,
-        mode="incremental", n_weeks_to_upsert=n_weeks_to_upsert,
     )
     return (
         len(report.get("succeeded", [])),
@@ -437,8 +403,9 @@ def recompute_market(
     if not stage_errors:
         try:
             _emit_progress(progress_cb, "industry_state", "running")
-            industry_state = _stage_industry_state_incremental(
-                db_engine, n_weeks_to_upsert,
+            industry_state = _stage_industry_state(
+                db_engine, mode="incremental",
+                n_weeks_to_upsert=n_weeks_to_upsert,
             )
             logger.info(
                 "recompute_market[%s] stage 7 industry_state: "
@@ -456,8 +423,9 @@ def recompute_market(
     if not stage_errors:
         try:
             _emit_progress(progress_cb, "industry_enrichment", "running")
-            industry_enrichment = _stage_industry_enrichment_incremental(
-                db_engine, n_weeks_to_upsert,
+            industry_enrichment = _stage_industry_enrichment(
+                db_engine, mode="incremental",
+                n_weeks_to_upsert=n_weeks_to_upsert,
             )
             logger.info(
                 "recompute_market[%s] stage 8 industry_enrichment: "

@@ -62,6 +62,10 @@ from ..orchestrator.derive_signals import (
     derive_signal_for_ticker_this_cycle,
 )
 from ..orchestrator.process_day import process_signals_for_day
+from ..orchestrator.industry_stages import (
+    _stage_industry_enrichment,
+    _stage_industry_state,
+)
 from ..persistence import transaction
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.current_signals_repo import CurrentSignalsRepository
@@ -285,7 +289,7 @@ def backfill(
 
         # ---- Stage 5: industry indicator state ----
         _emit_progress(progress_cb, "stage_5_industry_state", "starting")
-        ind_state_done = _stage_industry_state_full(db_engine)
+        ind_state_done = _stage_industry_state(db_engine, mode="full")[0]
         _emit_progress(
             progress_cb, "stage_5_industry_state",
             f"completed: {ind_state_done} indicators",
@@ -296,7 +300,7 @@ def backfill(
         _emit_progress(
             progress_cb, "stage_6_industry_enrichment", "starting",
         )
-        ind_enr_done = _stage_industry_enrichment_full(db_engine)
+        ind_enr_done = _stage_industry_enrichment(db_engine, mode="full")[0]
         _emit_progress(
             progress_cb, "stage_6_industry_enrichment",
             f"completed: {ind_enr_done} indicators",
@@ -524,30 +528,6 @@ def _stage_iiv_full(
     """Stage 4: IIV refresh for all industries, full date range."""
     report = populate_industry_index_value_for_all(
         db_engine, from_date=date_from, to_date=date_to,
-    )
-    return len(report.get("succeeded", []))
-
-
-def _stage_industry_state_full(db_engine) -> int:
-    # NOTE: candidate for mode-parameterized merge with the recompute
-    # _stage_industry_state_incremental — both just call
-    # populate_industry_indicator_state_for_all(mode=...) and differ only
-    # in mode + return shape.
-    """Stage 5: industry_indicator_state, full mode, all industries."""
-    report = populate_industry_indicator_state_for_all(
-        db_engine, mode="full",
-    )
-    return len(report.get("succeeded", []))
-
-
-def _stage_industry_enrichment_full(db_engine) -> int:
-    # NOTE: candidate for mode-parameterized merge with the recompute
-    # _stage_industry_enrichment_incremental — both just call
-    # populate_industry_indicator_enrichment_for_all(mode=...) and differ
-    # only in mode + return shape.
-    """Stage 6: industry_indicator_enrichment, full mode."""
-    report = populate_industry_indicator_enrichment_for_all(
-        db_engine, mode="full",
     )
     return len(report.get("succeeded", []))
 
