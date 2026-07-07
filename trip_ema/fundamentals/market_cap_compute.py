@@ -80,6 +80,9 @@ def compute_market_cap_for_date(
     trade_date: date,
     *,
     allow_approx_fallback: bool = True,
+    price_column: str = "adj_close",
+    backup_price_column: str = "close",
+    use_current_shares_always: bool = False,
 ) -> ComputeResult:
     """Compute and store daily_market_cap rows for all active EQ
     tickers on `exchange` for `trade_date`.
@@ -136,15 +139,29 @@ def compute_market_cap_for_date(
     from datetime import datetime as _dt
     day_start = _dt.combine(trade_date, _dt.min.time())
     day_end = _dt.combine(trade_date, _dt.max.time())
+    # Whitelist the column names — they go into SQL text, so never
+    # interpolate arbitrary strings.
+    _ALLOWED_PRICE_COLS = {"adj_close", "close", "open", "high", "low"}
+    if price_column not in _ALLOWED_PRICE_COLS:
+        raise ValueError(f"price_column {price_column!r} not allowed")
+    if backup_price_column not in _ALLOWED_PRICE_COLS:
+        raise ValueError(
+            f"backup_price_column {backup_price_column!r} not allowed"
+        )
+    # COALESCE(primary, backup): use adjusted price where present, fall
+    # back to raw close where adj_close is NULL. Per-row.
+    _price_expr = f"COALESCE(b.{price_column}, b.{backup_price_column})"
     with db_engine.connect() as conn:
         close_rows = conn.execute(
-            text("""
-                SELECT b.ticker_id, b.close
+            text(
+                f"""
+                SELECT b.ticker_id, {_price_expr}
                 FROM ohlcv_bars b
                 WHERE b.timeframe = '1d'
                   AND b.bar_timestamp >= :start
                   AND b.bar_timestamp <= :end
-            """),
+                """
+            ),
             {"start": day_start, "end": day_end},
         ).fetchall()
     closes: dict[int, float] = {
@@ -167,6 +184,19 @@ def compute_market_cap_for_date(
         #   3. otherwise, skip.
         ticker_shares_info: dict[int, tuple[int | None, str]] = {}
         for tid, _sym in universe:
+            if use_current_shares_always:
+                # Index-build mode: always current shares, always
+                # APPROX_TODAYS_SHARES. The adjusted price already
+                # handles splits/divs, so a uniform current-share
+                # basis across all history is correct here.
+                latest = shares_repo.get_latest(tid)
+                if latest is not None and latest.shares_outstanding is not None:
+                    ticker_shares_info[tid] = (
+                        latest.shares_outstanding, "APPROX_TODAYS_SHARES",
+                    )
+                else:
+                    ticker_shares_info[tid] = (None, "")
+                continue
             row = shares_repo.get_as_of(tid, trade_date)
             if row is not None and row.shares_outstanding is not None:
                 ticker_shares_info[tid] = (row.shares_outstanding, "COMPUTED")
@@ -228,3 +258,83 @@ def compute_market_cap_for_date(
         skipped_no_close=skipped_no_close,
         skipped_no_shares=skipped_no_shares,
     )
+
+
+def _trading_days_from_bars(
+    db_engine: "Engine", exchange: str, date_from: date, date_to: date,
+) -> list[date]:
+    """Distinct 1d-bar trade dates for the exchange in [date_from, date_to],
+    ascending. Trading days come from ohlcv_bars (daily_market_cap is what we
+    are populating, so it can't be the source)."""
+    from datetime import datetime as _dt
+    start = _dt.combine(date_from, _dt.min.time())
+    end = _dt.combine(date_to, _dt.max.time())
+    with db_engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT b.bar_timestamp::date AS d
+                FROM ohlcv_bars b
+                JOIN tickers t ON t.ticker_id = b.ticker_id
+                WHERE b.timeframe = '1d'
+                  AND t.exchange = :ex
+                  AND b.bar_timestamp >= :start
+                  AND b.bar_timestamp <= :end
+                ORDER BY d ASC
+            """),
+            {"ex": exchange, "start": start, "end": end},
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def populate_market_cap_range(
+    db_engine: "Engine",
+    exchange: str,
+    *,
+    date_from: date,
+    date_to: date,
+    price_column: str = "adj_close",
+    backup_price_column: str = "close",
+    use_current_shares_always: bool = True,
+    progress_cb=None,
+) -> dict:
+    """Walk every trading day in [date_from, date_to] and populate
+    daily_market_cap via compute_market_cap_for_date.
+
+    Defaults are the industry-index-build settings: adjusted price
+    (fallback to raw close) × CURRENT shares, source APPROX_TODAYS_SHARES.
+    Idempotent (per-date upserts). Returns aggregate counts + per-day
+    summaries.
+    """
+    days = _trading_days_from_bars(db_engine, exchange, date_from, date_to)
+    total = {
+        "days": len(days),
+        "computed": 0,
+        "approx": 0,
+        "skipped_no_close": 0,
+        "skipped_no_shares": 0,
+    }
+    for i, d in enumerate(days):
+        res = compute_market_cap_for_date(
+            db_engine, exchange, d,
+            price_column=price_column,
+            backup_price_column=backup_price_column,
+            use_current_shares_always=use_current_shares_always,
+        )
+        total["computed"] += res.succeeded_computed
+        total["approx"] += res.succeeded_approx
+        total["skipped_no_close"] += res.skipped_no_close
+        total["skipped_no_shares"] += res.skipped_no_shares
+        if progress_cb is not None:
+            progress_cb(
+                "market_cap_range",
+                f"{i + 1}/{len(days)} {d} "
+                f"approx={res.succeeded_approx}",
+            )
+    logger.info(
+        "populate_market_cap_range %s %s..%s: %d days, "
+        "approx=%d computed=%d no_close=%d no_shares=%d",
+        exchange, date_from, date_to, total["days"],
+        total["approx"], total["computed"],
+        total["skipped_no_close"], total["skipped_no_shares"],
+    )
+    return total
