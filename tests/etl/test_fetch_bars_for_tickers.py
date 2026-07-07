@@ -91,7 +91,8 @@ class TestFetchBarsForTickers:
         def _spy_execute_batches(*, tickers, **kwargs):
             captured_tickers.extend(tickers)
             from trip_ema.etl.types import RunOutcome
-            return RunOutcome.SUCCESS
+            # _execute_batches now returns (outcome, failed_tickers).
+            return RunOutcome.SUCCESS, []
 
         monkeypatch.setattr(
             "trip_ema.etl.runner._execute_batches",
@@ -122,7 +123,8 @@ class TestFetchBarsForTickers:
 
         def _stub_execute_batches(**kwargs):
             from trip_ema.etl.types import RunOutcome
-            return RunOutcome.SUCCESS
+            # _execute_batches now returns (outcome, failed_tickers).
+            return RunOutcome.SUCCESS, []
 
         monkeypatch.setattr(
             "trip_ema.etl.runner._execute_batches",
