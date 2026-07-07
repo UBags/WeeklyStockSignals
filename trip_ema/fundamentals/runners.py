@@ -2231,3 +2231,185 @@ def _fetch_bars_at_timeframe(conn, ticker_id, timeframe):
             daily_bars, include_partial_last_week=True, tz=tz,
         )
     return []
+
+
+def build_rebalance_chain(
+    db_engine: Engine,
+    industry_name: str,
+    *,
+    exchange: str,
+    through: date,
+    n: int = 12,
+    min_constituents: int = 4,
+) -> dict:
+    """Build the full annual-April rebalance chain for one existing index.
+
+    Walks every April rebalance date from the index's base_date to `through`
+    (inclusive) via _annual_april_rebalance_dates, calling run_rebalance for
+    each in ascending order. Ascending order matters: each period's continuity
+    splice reads the prior period's stored link_factor.
+
+    Returns {'industry': ..., 'rebalances': [(date, picked|None, skipped_reason)],
+             'n_built': int, 'n_skipped': int}.
+    """
+    from ..persistence.fundamentals_repo import IndustryIndexRepository
+
+    with db_engine.connect() as conn:
+        idx = IndustryIndexRepository(conn).get(industry_name)
+    if idx is None:
+        raise ValueError(
+            f"build_rebalance_chain: index {industry_name!r} does not exist"
+        )
+
+    dates = _annual_april_rebalance_dates(db_engine, idx.base_date, through)
+    rebalances: list[tuple] = []
+    n_built = 0
+    n_skipped = 0
+    for rd in dates:
+        try:
+            result = run_rebalance(
+                db_engine, industry_name, rd,
+                n=n, exchange=exchange, min_constituents=min_constituents,
+            )
+            if result.rebalance_skipped:
+                rebalances.append((rd, None, result.skip_reason))
+                n_skipped += 1
+            else:
+                rebalances.append((rd, result.constituents_picked, None))
+                n_built += 1
+        except Exception as e:  # noqa: BLE001
+            logger.exception(
+                "build_rebalance_chain: %s on %s failed: %s",
+                industry_name, rd, e,
+            )
+            rebalances.append((rd, None, f"error: {e}"))
+            n_skipped += 1
+
+    logger.info(
+        "build_rebalance_chain %s: %d rebalances built, %d skipped "
+        "(base_date=%s through=%s)",
+        industry_name, n_built, n_skipped, idx.base_date, through,
+    )
+    return {
+        "industry": industry_name,
+        "rebalances": rebalances,
+        "n_built": n_built,
+        "n_skipped": n_skipped,
+    }
+
+
+def build_all_industry_index_chains(
+    db_engine: Engine,
+    exchange: str,
+    *,
+    through: date,
+    n: int = 12,
+    min_constituents: int = 4,
+    base_value: float = 1000.0,
+) -> dict:
+    """Discover qualifying industries and build each full annual-April chain.
+
+    1. Discover industries with >= min_constituents active EQ tickers (reuses
+       run_industry_index_build's discovery query).
+    2. For each, find the first April rebalance date at/after the earliest
+       mcap date, upsert an ANNUAL_APR index anchored there.
+    3. build_rebalance_chain for each.
+
+    Returns {'qualified': [...], 'unqualified': [...], 'chains': [chain_dict],
+             'failed': [(industry, err)]}.
+    """
+    from ..persistence.fundamentals_repo import IndustryIndexRepository
+
+    # ---- 1. discover candidate industries (same query as build) ----
+    with db_engine.connect() as conn:
+        rows = conn.execute(text("""
+            WITH effective_industry AS (
+                SELECT
+                    t.ticker_id,
+                    COALESCE(io.industry, ii.industry) AS industry,
+                    COALESCE(io.sector, ii.sector) AS sector
+                FROM tickers t
+                LEFT JOIN industry_override io ON io.ticker_id = t.ticker_id
+                LEFT JOIN instrument_industry ii ON ii.ticker_id = t.ticker_id
+                WHERE t.is_active = TRUE
+                  AND t.instrument_type = 'EQ'
+                  AND t.exchange = :ex
+            )
+            SELECT ei.industry, MAX(ei.sector) AS sector, COUNT(*) AS c
+            FROM effective_industry ei
+            WHERE ei.industry IS NOT NULL
+            GROUP BY ei.industry
+            ORDER BY ei.industry
+        """), {"ex": exchange}).fetchall()
+
+    qualified: list[tuple[str, str, int]] = []
+    unqualified: list[tuple[str, str, int]] = []
+    for industry, sector, c in rows:
+        (qualified if int(c) >= min_constituents else unqualified).append(
+            (industry, sector or "Unknown", int(c))
+        )
+
+    # ---- 2. earliest mcap date → first April rebalance ----
+    with db_engine.connect() as conn:
+        earliest = conn.execute(text("""
+            SELECT MIN(mc.trade_date)
+            FROM daily_market_cap mc
+            JOIN tickers t ON t.ticker_id = mc.ticker_id
+            WHERE t.exchange = :ex
+        """), {"ex": exchange}).scalar()
+
+    chains: list[dict] = []
+    failed: list[tuple[str, str]] = []
+    if earliest is None:
+        return {
+            "qualified": qualified, "unqualified": unqualified,
+            "chains": [], "failed": [(i, "no mcap data") for i, _, _ in qualified],
+        }
+
+    first_aprils = _annual_april_rebalance_dates(db_engine, earliest, through)
+    if not first_aprils:
+        return {
+            "qualified": qualified, "unqualified": unqualified,
+            "chains": [], "failed": [
+                (i, "no April trading day in range") for i, _, _ in qualified
+            ],
+        }
+    base_date = first_aprils[0]
+
+    # ---- 3. per industry: upsert ANNUAL_APR index + build chain ----
+    for industry, sector, _c in qualified:
+        try:
+            with db_engine.connect() as conn:
+                existing = IndustryIndexRepository(conn).get(industry)
+            with transaction(db_engine) as conn:
+                IndustryIndexRepository(conn).upsert(
+                    industry,
+                    sector_name=sector,
+                    base_date=(existing.base_date if existing else base_date),
+                    base_value=(existing.base_value if existing else base_value),
+                    rebalance_schedule="ANNUAL_APR",
+                    min_constituents=min_constituents,
+                )
+            chain = build_rebalance_chain(
+                db_engine, industry,
+                exchange=exchange, through=through,
+                n=n, min_constituents=min_constituents,
+            )
+            chains.append(chain)
+        except Exception as e:  # noqa: BLE001
+            logger.exception(
+                "build_all_industry_index_chains: %s failed: %s", industry, e,
+            )
+            failed.append((industry, str(e)))
+
+    logger.info(
+        "build_all_industry_index_chains %s: %d chains built, %d qualified, "
+        "%d unqualified, %d failed",
+        exchange, len(chains), len(qualified), len(unqualified), len(failed),
+    )
+    return {
+        "qualified": qualified,
+        "unqualified": unqualified,
+        "chains": chains,
+        "failed": failed,
+    }
