@@ -550,7 +550,7 @@ def fetch_bars_for_tickers(
                 exchange=exchange,
                 correlation_id=cid,
             )
-        outcome = _execute_batches(
+        outcome, _failed_tickers = _execute_batches(
             db_engine=db_engine,
             config=config,
             src=src,
@@ -562,6 +562,15 @@ def fetch_bars_for_tickers(
             kind=RunKind.BACKFILL,
             intraday=False,
         )
+        # Same single bounded solo-retry for the per-ticker path.
+        if _failed_tickers:
+            _solo_retry_once(
+                db_engine, config,
+                exchange=exchange,
+                failed_tickers=_failed_tickers,
+                start=start_date, end=end_date,
+                timeframe=Timeframe.DAILY, intraday=False,
+            )
         with db_engine.begin() as conn:
             EtlStatusRepository(conn).close_run(run_id, outcome)
 
@@ -741,7 +750,7 @@ def _run_fetch_pass(
         end_date = date.today()
         effective_start = start_date or (end_date - _timedelta_days(days_lookback))
 
-        outcome = _execute_batches(
+        outcome, _failed_tickers = _execute_batches(
             db_engine=db_engine,
             config=config,
             src=src,
@@ -753,6 +762,17 @@ def _run_fetch_pass(
             kind=kind,
             intraday=intraday,
         )
+        # Single BOUNDED solo-retry of tickers that flaked in the
+        # batched pass. yfinance drops random symbols under batch
+        # load; solo re-fetch recovers them. See _solo_retry_once.
+        if _failed_tickers:
+            _solo_retry_once(
+                db_engine, config,
+                exchange=exchange,
+                failed_tickers=_failed_tickers,
+                start=effective_start, end=end_date,
+                timeframe=timeframe, intraday=intraday,
+            )
 
         with db_engine.begin() as conn:
             EtlStatusRepository(conn).close_run(run_id, outcome)
@@ -775,6 +795,61 @@ def _run_fetch_pass(
         return run_id
 
 
+def _solo_retry_once(
+    db_engine: Engine,
+    config: Config,
+    *,
+    exchange: str,
+    failed_tickers: list,
+    start: date,
+    end: date,
+    timeframe: Timeframe,
+    intraday: bool,
+) -> None:
+    """Re-fetch each flaked ticker ONCE, solo (batch_size=1).
+
+    yfinance drops random symbols under batch load; a solo re-fetch is
+    reliable. This runs exactly ONE pass over the failed set captured at
+    entry — it is NOT a retry-until-success loop:
+
+      * `snapshot` is fixed before the loop. New failures during the
+        retry are recorded by _process_one_batch's own failure handling
+        (counting toward the across-run park threshold) but are NOT
+        added back here, so they are never retried again in this pass.
+      * Plain `for` over the snapshot, hard-bounded by its length.
+      * A genuinely-dataless ticker (delisted / ETF / renamed) simply
+        fails its one solo attempt and is left alone. No infinite loop.
+    """
+    snapshot = list(failed_tickers)  # fixed; never appended to below
+    if not snapshot:
+        return
+    solo_src = YFinanceSource(
+        exchange=exchange,
+        batch_size=1,
+        request_delay_seconds=config.etl.yfinance_request_delay_seconds,
+    )
+    max_iterations = len(snapshot)  # hard bound — cannot loop
+    recovered = 0
+    for i, ticker in enumerate(snapshot):
+        assert i < max_iterations, "solo-retry exceeded its bound"
+        try:
+            bs = _process_one_batch(
+                db_engine=db_engine, config=config, src=solo_src,
+                batch=[ticker], start=start, end=end,
+                timeframe=timeframe, intraday=intraday,
+            )
+            if bs.succeeded > 0:
+                recovered += 1
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "solo-retry failed for ticker_id=%s", ticker.ticker_id,
+            )
+    logger.info(
+        "solo-retry pass: %d/%d flaked tickers recovered",
+        recovered, len(snapshot),
+    )
+
+
 def _execute_batches(
     *,
     db_engine: Engine,
@@ -787,7 +862,7 @@ def _execute_batches(
     timeframe: Timeframe,
     kind: RunKind,
     intraday: bool,
-) -> RunOutcome:
+) -> tuple[RunOutcome, list]:
     """Submit all the batches to a ThreadPoolExecutor, collect results.
 
     Returns SUCCESS if no tickers parked, PARTIAL if some parked,
@@ -802,6 +877,7 @@ def _execute_batches(
     total_succeeded = 0
     total_failed = 0
     total_bars_written = 0
+    all_failed_tickers: list = []
 
     with ThreadPoolExecutor(max_workers=config.etl.yfinance_concurrency) as ex:
         futures = [
@@ -823,6 +899,7 @@ def _execute_batches(
             total_succeeded += bs.succeeded
             total_failed += bs.failed
             total_bars_written += bs.bars_written
+            all_failed_tickers.extend(bs.failed_tickers)
             # Update the run counters incrementally so the GUI sees progress.
             with db_engine.begin() as conn:
                 EtlStatusRepository(conn).increment_counters(
@@ -834,12 +911,12 @@ def _execute_batches(
     M.etl_bars_written_total.inc(total_bars_written)
 
     if total_attempted == 0:
-        return RunOutcome.FAILED
+        return RunOutcome.FAILED, all_failed_tickers
     if total_succeeded == 0:
-        return RunOutcome.FAILED
+        return RunOutcome.FAILED, all_failed_tickers
     if total_failed > 0:
-        return RunOutcome.PARTIAL
-    return RunOutcome.SUCCESS
+        return RunOutcome.PARTIAL, all_failed_tickers
+    return RunOutcome.SUCCESS, all_failed_tickers
 
 
 @dataclass(frozen=True, slots=True)
@@ -848,6 +925,9 @@ class _BatchStats:
     succeeded: int = 0
     failed: int = 0
     bars_written: int = 0
+    # Identities of tickers that failed this batch — used by the
+    # single bounded solo-retry in _run_fetch_pass.
+    failed_tickers: tuple = ()
 
 
 def _process_one_batch(
@@ -890,6 +970,7 @@ def _process_one_batch(
     succeeded = 0
     failed = 0
     bars_written = 0
+    failed_tickers_local: list = []
 
     for ticker in batch:
         outcome = results_by_symbol.get(ticker.symbol)
@@ -900,6 +981,7 @@ def _process_one_batch(
             )
             _handle_ticker_failure(db_engine, config, ticker, err)
             failed += 1
+            failed_tickers_local.append(ticker)
             M.etl_tickers_fetched_total.labels(
                 tier=str(ticker.tier.value), outcome="failed",
             ).inc()
@@ -955,6 +1037,7 @@ def _process_one_batch(
         succeeded=succeeded,
         failed=failed,
         bars_written=bars_written,
+        failed_tickers=tuple(failed_tickers_local),
     )
 
 
