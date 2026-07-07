@@ -47,11 +47,11 @@ def stub_stages(monkeypatch):
     """Stub all 8 _stage_* helpers to no-op returns so recompute_market
     runs to completion without touching the DB."""
     monkeypatch.setattr(
-        rm_mod, "_stage_stock_state",
+        rm_mod, "_stage_stock_state_incremental",
         lambda *a, **k: (10, 0, 0),
     )
     monkeypatch.setattr(
-        rm_mod, "_stage_stock_enrichment",
+        rm_mod, "_stage_stock_enrichment_incremental",
         lambda *a, **k: (10, 0, 0),
     )
     monkeypatch.setattr(
@@ -59,15 +59,15 @@ def stub_stages(monkeypatch):
         lambda *a, **k: True,
     )
     monkeypatch.setattr(
-        rm_mod, "_stage_iiv_refresh",
+        rm_mod, "_stage_iiv_incremental",
         lambda *a, **k: (50, 0, 0),
     )
     monkeypatch.setattr(
-        rm_mod, "_stage_industry_state",
+        rm_mod, "_stage_industry_state_incremental",
         lambda *a, **k: (50, 0, 0),
     )
     monkeypatch.setattr(
-        rm_mod, "_stage_industry_enrichment",
+        rm_mod, "_stage_industry_enrichment_incremental",
         lambda *a, **k: (50, 0, 0),
     )
 
@@ -175,12 +175,12 @@ class TestFailurePath:
         def boom(*a, **k):
             raise ValueError("synthetic stock_state failure")
         monkeypatch.setattr(
-            rm_mod, "_stage_stock_state", boom,
+            rm_mod, "_stage_stock_state_incremental", boom,
         )
         for name in (
-            "_stage_stock_enrichment", "_stage_rebuild_cache",
-            "_stage_iiv_refresh", "_stage_industry_state",
-            "_stage_industry_enrichment",
+            "_stage_stock_enrichment_incremental", "_stage_rebuild_cache",
+            "_stage_iiv_incremental", "_stage_industry_state_incremental",
+            "_stage_industry_enrichment_incremental",
         ):
             monkeypatch.setattr(
                 rm_mod, name, lambda *a, **k: (0, 0, 0),
@@ -205,11 +205,11 @@ class TestFailurePath:
         self, monkeypatch,
     ):
         monkeypatch.setattr(
-            rm_mod, "_stage_stock_state",
+            rm_mod, "_stage_stock_state_incremental",
             lambda *a, **k: (10, 0, 0),
         )
         monkeypatch.setattr(
-            rm_mod, "_stage_stock_enrichment",
+            rm_mod, "_stage_stock_enrichment_incremental",
             lambda *a, **k: (10, 0, 0),
         )
         monkeypatch.setattr(
@@ -219,7 +219,7 @@ class TestFailurePath:
 
         def boom(*a, **k):
             raise RuntimeError("iiv boom")
-        monkeypatch.setattr(rm_mod, "_stage_iiv_refresh", boom)
+        monkeypatch.setattr(rm_mod, "_stage_iiv_incremental", boom)
 
         industry_stages_called = []
         def watch_industry_state(*a, **k):
@@ -229,11 +229,11 @@ class TestFailurePath:
             industry_stages_called.append("industry_enrichment")
             return (0, 0, 0)
         monkeypatch.setattr(
-            rm_mod, "_stage_industry_state",
+            rm_mod, "_stage_industry_state_incremental",
             watch_industry_state,
         )
         monkeypatch.setattr(
-            rm_mod, "_stage_industry_enrichment",
+            rm_mod, "_stage_industry_enrichment_incremental",
             watch_industry_enrich,
         )
 

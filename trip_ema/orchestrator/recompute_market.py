@@ -128,7 +128,7 @@ class RecomputeMarketResult:
 # Stage helpers
 # ====================================================================
 
-def _stage_stock_state(
+def _stage_stock_state_incremental(
     db_engine: Engine,
     exchange: str,
     n_weeks_to_upsert: int,
@@ -145,7 +145,7 @@ def _stage_stock_state(
     )
 
 
-def _stage_stock_enrichment(
+def _stage_stock_enrichment_incremental(
     db_engine: Engine,
     exchange: str,
     n_weeks_to_upsert: int,
@@ -161,7 +161,7 @@ def _stage_stock_enrichment(
     )
 
 
-def _stage_iiv_refresh(
+def _stage_iiv_incremental(
     db_engine: Engine,
     as_of: datetime,
     n_weeks_to_upsert: int,
@@ -186,10 +186,14 @@ def _stage_iiv_refresh(
     )
 
 
-def _stage_industry_state(
+def _stage_industry_state_incremental(
     db_engine: Engine,
     n_weeks_to_upsert: int,
 ) -> tuple[int, int, int]:
+    # NOTE: candidate for mode-parameterized merge with the backfill
+    # _stage_industry_state_full — both just call
+    # populate_industry_indicator_state_for_all(mode=...) and differ only
+    # in mode + return shape.
     report = populate_industry_indicator_state_for_all(
         db_engine,
         mode="incremental", n_weeks_to_upsert=n_weeks_to_upsert,
@@ -201,10 +205,14 @@ def _stage_industry_state(
     )
 
 
-def _stage_industry_enrichment(
+def _stage_industry_enrichment_incremental(
     db_engine: Engine,
     n_weeks_to_upsert: int,
 ) -> tuple[int, int, int]:
+    # NOTE: candidate for mode-parameterized merge with the backfill
+    # _stage_industry_enrichment_full — both just call
+    # populate_industry_indicator_enrichment_for_all(mode=...) and differ
+    # only in mode + return shape.
     report = populate_industry_indicator_enrichment_for_all(
         db_engine,
         mode="incremental", n_weeks_to_upsert=n_weeks_to_upsert,
@@ -326,7 +334,7 @@ def recompute_market(
     # ---- Stage 1: stock state ----
     try:
         _emit_progress(progress_cb, "stock_state", "running")
-        stock_state = _stage_stock_state(
+        stock_state = _stage_stock_state_incremental(
             db_engine, exchange, n_weeks_to_upsert,
         )
         logger.info(
@@ -345,7 +353,7 @@ def recompute_market(
     if not stage_errors:
         try:
             _emit_progress(progress_cb, "stock_enrichment", "running")
-            stock_enrichment = _stage_stock_enrichment(
+            stock_enrichment = _stage_stock_enrichment_incremental(
                 db_engine, exchange, n_weeks_to_upsert,
             )
             logger.info(
@@ -410,7 +418,7 @@ def recompute_market(
     if not stage_errors:
         try:
             _emit_progress(progress_cb, "iiv", "running")
-            iiv = _stage_iiv_refresh(
+            iiv = _stage_iiv_incremental(
                 db_engine, as_of, n_weeks_to_upsert,
             )
             logger.info(
@@ -429,7 +437,7 @@ def recompute_market(
     if not stage_errors:
         try:
             _emit_progress(progress_cb, "industry_state", "running")
-            industry_state = _stage_industry_state(
+            industry_state = _stage_industry_state_incremental(
                 db_engine, n_weeks_to_upsert,
             )
             logger.info(
@@ -448,7 +456,7 @@ def recompute_market(
     if not stage_errors:
         try:
             _emit_progress(progress_cb, "industry_enrichment", "running")
-            industry_enrichment = _stage_industry_enrichment(
+            industry_enrichment = _stage_industry_enrichment_incremental(
                 db_engine, n_weeks_to_upsert,
             )
             logger.info(
