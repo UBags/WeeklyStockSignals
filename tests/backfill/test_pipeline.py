@@ -34,6 +34,18 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from trip_ema.backfill.pipeline import backfill, BackfillResult
+
+
+@pytest.fixture(autouse=True)
+def _clear_phase_ledger(db_engine):
+    """Each test starts with an empty phase ledger so its first
+    backfill() runs every phase (resume=True skips COMPLETE phases, and
+    tests share a DB — without this, a phase COMPLETE'd by one test would
+    be skipped by the next)."""
+    from trip_ema.persistence import transaction as _txn
+    with _txn(db_engine) as _c:
+        _c.execute(text("DELETE FROM pipeline_phase_status"))
+    yield
 from trip_ema.persistence import transaction
 from trip_ema.persistence.backfill_runs_repo import (
     BackfillRunsRepository,
@@ -425,6 +437,7 @@ class TestTickerScopeResolution:
             date_to=date(2024, 6, 3),
             stocks=[1],
             refetch_bars=False,
+            resume=False,  # 2nd run over same range — redo, don't skip
         )
         assert result2.ticker_scope_label == "1"
 
@@ -555,6 +568,7 @@ class TestHistoricalSignals:
             date_to=date(2024, 6, 10),
             stocks=[1],
             refetch_bars=False,
+            resume=False,  # redo work — this tests idempotent REDO
         )
         hist_b = _hist_signals_for_ticker(db_engine, 1)
 
