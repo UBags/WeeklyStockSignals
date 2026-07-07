@@ -258,6 +258,36 @@ class YFinanceSource:
             for s in symbols
         }
 
+    @staticmethod
+    def _subframe_for_symbol(df, yf_symbol: str):
+        """Return a per-ticker sub-DataFrame with FLAT single-level
+        columns (Open/High/Low/Close/Volume/[Adj Close]), tolerant of
+        every column shape yfinance emits:
+          - flat single-level columns (legacy single-symbol)
+          - MultiIndex (Ticker, Field)  -> df[yf_symbol]
+          - MultiIndex (Field, Ticker)  -> df.xs(symbol, axis=1, level=1)
+        Returns None if the symbol isn't present in a multi-symbol frame.
+        """
+        cols = df.columns
+        if getattr(cols, "nlevels", 1) == 1:
+            # Flat columns already — single-symbol legacy shape.
+            return df
+        # MultiIndex: find which level carries the ticker.
+        lvl0 = set(cols.get_level_values(0))
+        lvl1 = set(cols.get_level_values(1))
+        if yf_symbol in lvl0:
+            sub = df[yf_symbol]           # (Ticker, Field) order
+        elif yf_symbol in lvl1:
+            sub = df.xs(yf_symbol, axis=1, level=1)  # (Field, Ticker) order
+        else:
+            return None
+        # sub may still have a residual level if the frame was 3-level;
+        # collapse any remaining MultiIndex to its last level (the field).
+        if getattr(sub.columns, "nlevels", 1) > 1:
+            sub = sub.copy()
+            sub.columns = sub.columns.get_level_values(-1)
+        return sub
+
     def _normalize_df_to_outcomes(
         self,
         df,
@@ -283,22 +313,16 @@ class YFinanceSource:
                 )
             return results
 
-        is_multi = len(symbols) > 1
-
         for symbol in symbols:
             yf_symbol = self._yf(symbol)
             try:
-                if is_multi:
-                    # Multi-index columns: df[yf_symbol] gives sub-frame
-                    if yf_symbol not in df.columns.get_level_values(0):
-                        results[symbol] = FetchOutcome(
-                            yfinance_symbol=yf_symbol,
-                            error_message="symbol not in returned columns",
-                        )
-                        continue
-                    sub = df[yf_symbol]
-                else:
-                    sub = df
+                sub = self._subframe_for_symbol(df, yf_symbol)
+                if sub is None:
+                    results[symbol] = FetchOutcome(
+                        yfinance_symbol=yf_symbol,
+                        error_message="symbol not in returned columns",
+                    )
+                    continue
 
                 bars: list[RawBar] = []
                 for ts, row in sub.iterrows():
