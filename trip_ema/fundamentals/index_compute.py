@@ -362,11 +362,19 @@ def compute_index_value_for_date(
         (w / sum_present_weights) * ratio
         for w, ratio in present
     )
-    effective_base = _effective_base_value(
-        db_engine, industry_name,
-        effective_rebalance_date,
-        default_base=idx.base_value,
+    # Chain-linking: effective_base = base_value * link_factor(period),
+    # where link_factor is stored per rebalance in industry_index_period.
+    # First period has link_factor=1.0 (or no row) -> effective_base =
+    # base_value. Subsequent periods splice to the prior index level.
+    from ..persistence.fundamentals_repo import (
+        IndustryIndexPeriodRepository,
     )
+    with db_engine.connect() as _pconn:
+        _lf = IndustryIndexPeriodRepository(_pconn).get_link_factor(
+            industry_name, effective_rebalance_date,
+        )
+    link_factor = _lf if _lf is not None else 1.0
+    effective_base = idx.base_value * link_factor
     value = effective_base * weighted_sum
 
     if value <= 0:

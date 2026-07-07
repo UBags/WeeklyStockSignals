@@ -30,9 +30,13 @@ from trip_ema.persistence.fundamentals_repo import (
     IndustryIndexConstituentRepository,
     IndustryIndexRepository,
     IndustryIndexValueRepository,
+    IndustryIndexPeriodRepository,
     InstrumentIndustryRepository,
 )
 from trip_ema.persistence.tickers_repo import TickersRepository
+from trip_ema.fundamentals.index_compute import (
+    compute_index_value_for_date,
+)
 
 
 # ---------- fixtures ---------- #
@@ -613,3 +617,96 @@ class TestEndToEnd:
             assert h.value == pytest.approx(1000.0, rel=1e-9)
             assert h.constituents_used == 5
             assert h.renormalized is False
+
+
+class TestChainLinkContinuity:
+    """Golden test: chain-linking yields a CONTINUOUS index across rebalances.
+
+    Asserts the numerical no-jump property — on rebalance R2 the NEW basket's
+    value equals the OLD basket's value on R2. Without chain-linking the index
+    would reset to base_value (1000) at R2.
+    """
+
+    def test_no_jump_across_annual_rebalance(
+        self, db_engine, itservices_universe,
+    ):
+        r1 = date(2025, 4, 1)
+        r2 = date(2026, 4, 1)
+        names = ["TCS", "INFY", "WIPRO", "HCLTECH", "TECHM"]
+
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                "IT - Services", sector_name="Technology",
+                base_date=r1, min_constituents=4,
+            )
+        _mcap_for_all(db_engine, itservices_universe, names, r1, close=100.0)
+        run_rebalance(
+            db_engine, "IT - Services", r1,
+            n=5, exchange="NSE", min_constituents=4,
+        )
+
+        with db_engine.connect() as conn:
+            lf1 = IndustryIndexPeriodRepository(conn).get_link_factor(
+                "IT - Services", r1,
+            )
+        assert lf1 == pytest.approx(1.0)
+        v_r1 = compute_index_value_for_date(db_engine, "IT - Services", r1)
+        assert v_r1 is not None
+        assert v_r1.value == pytest.approx(1000.0)
+
+        # Old basket drifts to R2 (same tickers, new closes).
+        _mcap_for_all(db_engine, itservices_universe, names, r2, close=130.0)
+        old_on_r2 = compute_index_value_for_date(db_engine, "IT - Services", r2)
+        assert old_on_r2 is not None
+        assert old_on_r2.value == pytest.approx(1300.0)
+
+        run_rebalance(
+            db_engine, "IT - Services", r2,
+            n=5, exchange="NSE", min_constituents=4,
+        )
+
+        # GOLDEN: new basket on R2 == old basket on R2 → no jump.
+        new_on_r2 = compute_index_value_for_date(db_engine, "IT - Services", r2)
+        assert new_on_r2 is not None
+        assert new_on_r2.value == pytest.approx(old_on_r2.value)
+        assert new_on_r2.value == pytest.approx(1300.0)
+
+        with db_engine.connect() as conn:
+            lf2 = IndustryIndexPeriodRepository(conn).get_link_factor(
+                "IT - Services", r2,
+            )
+        assert lf2 == pytest.approx(1.3)
+
+    def test_off_schedule_rebalance_also_chain_links(
+        self, db_engine, itservices_universe,
+    ):
+        """A non-April (mid-year) rebalance — the delisting edge case — must
+        chain-link identically. run_rebalance is date-arbitrary."""
+        r1 = date(2025, 4, 1)
+        r_mid = date(2025, 7, 15)
+        names = ["TCS", "INFY", "WIPRO", "HCLTECH", "TECHM"]
+
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                "IT - Services", sector_name="Technology",
+                base_date=r1, min_constituents=4,
+            )
+        _mcap_for_all(db_engine, itservices_universe, names, r1, close=100.0)
+        run_rebalance(
+            db_engine, "IT - Services", r1,
+            n=5, exchange="NSE", min_constituents=4,
+        )
+        _mcap_for_all(db_engine, itservices_universe, names, r_mid, close=110.0)
+        old_mid = compute_index_value_for_date(
+            db_engine, "IT - Services", r_mid,
+        )
+        assert old_mid.value == pytest.approx(1100.0)
+
+        run_rebalance(
+            db_engine, "IT - Services", r_mid,
+            n=5, exchange="NSE", min_constituents=4,
+        )
+        new_mid = compute_index_value_for_date(
+            db_engine, "IT - Services", r_mid,
+        )
+        assert new_mid.value == pytest.approx(old_mid.value)

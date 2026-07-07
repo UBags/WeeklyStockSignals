@@ -1515,6 +1515,42 @@ def _next_semiannual_rebalance_date(db_engine, after_date: date) -> date | None:
     return None
 
 
+def _annual_april_rebalance_dates(
+    db_engine, from_date: date, through: date,
+) -> list[date]:
+    """Every April rebalance date in [from_date, through], ascending.
+
+    Target = April 1 each year; if not a trading day (no daily_market_cap
+    row), walk forward up to 7 days to the next trading day. A year with
+    no trading day near April is skipped. Used by the chain driver to walk
+    the annual rebalance sequence (ANNUAL_APR schedule).
+    """
+    from datetime import date as _date, timedelta as _td
+    out: list[date] = []
+    with db_engine.connect() as conn:
+        for y in range(from_date.year, through.year + 1):
+            target = _date(y, 4, 1)
+            if target < from_date or target > through:
+                # allow the holiday-walk to still land in-range
+                if target > through:
+                    continue
+            found = None
+            for offset in range(7):
+                probe = target + _td(days=offset)
+                if probe < from_date or probe > through:
+                    continue
+                row = conn.execute(text("""
+                    SELECT 1 FROM daily_market_cap
+                    WHERE trade_date = :td LIMIT 1
+                """), {"td": probe}).fetchone()
+                if row is not None:
+                    found = probe
+                    break
+            if found is not None:
+                out.append(found)
+    return out
+
+
 def _list_trading_days_in_range(
     db_engine, from_date: date, to_date: date,
 ) -> list[date]:
@@ -1620,6 +1656,42 @@ def run_rebalance(
             constituents_closed=0,
             rebalance_skipped=True,
             skip_reason=skip_reason,
+        )
+
+    # ----- chain-link: value the OLD basket on R (the continuity
+    # anchor) BEFORE we close it, then compute + store the splice
+    # factor. compute_index_value_for_date is read-only and, at this
+    # point, list_as_of(R) still returns the OLD constituents. -----
+    from .index_compute import compute_index_value_for_date as _civ
+    from ..persistence.fundamentals_repo import (
+        IndustryIndexConstituentRepository as _CR,
+        IndustryIndexPeriodRepository as _PR,
+    )
+    with db_engine.connect() as _c0:
+        _has_prior = len(_CR(_c0).list_active_for_index(industry_name)) > 0
+    if _has_prior:
+        _old_cv = _civ(db_engine, industry_name, rebalance_date)
+        if _old_cv is not None and _old_cv.value > 0:
+            _link_factor = _old_cv.value / idx.base_value
+            _prior_value = _old_cv.value
+        else:
+            logger.warning(
+                "run_rebalance: no prior-basket value on %s for %r — "
+                "chain breaks here; link_factor=1.0",
+                rebalance_date, industry_name,
+            )
+            _link_factor = 1.0
+            _prior_value = None
+        _is_base = False
+    else:
+        _link_factor = 1.0
+        _prior_value = None
+        _is_base = True
+    with transaction(db_engine) as _cw:
+        _PR(_cw).upsert_period(
+            industry_name, rebalance_date=rebalance_date,
+            link_factor=_link_factor, is_base=_is_base,
+            prior_value=_prior_value,
         )
 
     # ----- write phase: single transaction so we can't half-rebalance ----- #

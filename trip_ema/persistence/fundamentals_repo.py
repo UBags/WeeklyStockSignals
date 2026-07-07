@@ -1795,6 +1795,54 @@ def _value_from_row(row):
 # === STEP 14A: CLUSTER B — ISR + SER removed ===
 
 
+class IndustryIndexPeriodRepository:
+    """Per-rebalance chain-link factors (industry_index_period).
+
+    One row per (industry_name, rebalance_date). link_factor splices the new
+    basket onto the prior index level so the curve is continuous across a
+    rebalance. See migration 0038 / run_rebalance for the derivation.
+    """
+
+    def __init__(self, conn: "Connection"):
+        self._conn = conn
+
+    def upsert_period(
+        self, industry_name: str, *,
+        rebalance_date: "date",
+        link_factor: float,
+        is_base: bool,
+        prior_value: float | None = None,
+        new_basket_ratiosum: float | None = None,
+    ) -> None:
+        """Idempotent on (industry_name, rebalance_date)."""
+        if link_factor <= 0:
+            raise ValueError("link_factor must be > 0")
+        self._conn.execute(text("""
+            INSERT INTO industry_index_period
+                (industry_name, rebalance_date, link_factor,
+                 is_base, prior_value, new_basket_ratiosum, computed_at)
+            VALUES (:n, :rd, :lf, :ib, :pv, :nbr, NOW())
+            ON CONFLICT (industry_name, rebalance_date) DO UPDATE SET
+                link_factor = EXCLUDED.link_factor,
+                is_base = EXCLUDED.is_base,
+                prior_value = EXCLUDED.prior_value,
+                new_basket_ratiosum = EXCLUDED.new_basket_ratiosum,
+                computed_at = NOW()
+        """), {"n": industry_name, "rd": rebalance_date, "lf": link_factor,
+               "ib": is_base, "pv": prior_value, "nbr": new_basket_ratiosum})
+
+    def get_link_factor(
+        self, industry_name: str, rebalance_date: "date",
+    ) -> float | None:
+        """link_factor for one rebalance period, or None if no row."""
+        row = self._conn.execute(text("""
+            SELECT link_factor
+            FROM industry_index_period
+            WHERE industry_name = :n AND rebalance_date = :rd
+        """), {"n": industry_name, "rd": rebalance_date}).scalar()
+        return float(row) if row is not None else None
+
+
 class StockBenchmarkStatsRepository:
     """Per-(stock, benchmark, window) regression stats. PK
     (ticker_id, benchmark_kind, window_label, as_of_date); weekly
