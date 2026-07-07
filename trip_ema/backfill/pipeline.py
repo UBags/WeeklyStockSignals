@@ -326,7 +326,8 @@ def backfill(
             progress_cb, "stage_8_walk_days", "starting",
         )
         _today = datetime.now(_IST).date()
-        days_walked, inserted, upserted, deleted = _stage_backfill_daywalk(
+        (days_walked, inserted, upserted, deleted,
+         today_walked) = _stage_backfill_daywalk(
             db_engine,
             scoped_tickers=scoped_tickers,
             date_from=date_from,
@@ -345,7 +346,7 @@ def backfill(
         # live cycle uses; subscriber cadence
         # (find_due_for_notification) dedups against any live cycle
         # that already notified today. ----
-        if to_monday == _monday_of(datetime.now(_IST).date()):
+        if today_walked:
             from ..config.brevo_secrets import load_brevo_api_key
             from ..orchestrator.notify_subscribers import (
                 notify_subscribers,
@@ -374,7 +375,7 @@ def backfill(
         else:
             _emit_progress(
                 progress_cb, "notify",
-                "skipped: backfill not current through today",
+                "skipped: today not in backfilled range",
             )
 
         # Stage 10 (cache) is service-side. No CLI action.
@@ -576,13 +577,14 @@ def _walk_trading_days(
 def _stage_backfill_daywalk(
     db_engine, *, scoped_tickers: list[int],
     date_from: date, date_to: date, today: date,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int, bool]:
     """Stages 8+9 unified: walk each trading day in range and run
     process_signals_for_day in backfill mode. Per-day historical
     (delete day + insert); current only on the day that == today.
 
     Returns (days_walked, historical_inserted, current_upserted,
-    current_deleted)."""
+    current_deleted, today_walked). today_walked is True iff today's
+    trading day was in the walked range (drives the notify gate)."""
     days = _walk_trading_days(
         db_engine, scoped_tickers=scoped_tickers,
         date_from=date_from, date_to=date_to,
@@ -601,7 +603,7 @@ def _stage_backfill_daywalk(
         hist_ins += pd.historical_written
         cur_up += pd.current_upserted
         cur_del += pd.current_deleted
-    return len(days), hist_ins, cur_up, cur_del
+    return len(days), hist_ins, cur_up, cur_del, (today in days)
 
 
 # ============================================================
