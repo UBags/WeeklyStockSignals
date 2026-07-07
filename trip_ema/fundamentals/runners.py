@@ -2413,3 +2413,51 @@ def build_all_industry_index_chains(
         "chains": chains,
         "failed": failed,
     }
+
+
+def run_index_value_backfill_all(
+    db_engine: Engine,
+    *,
+    from_date: date,
+    to_date: date,
+    force: bool = False,
+) -> dict:
+    """Run the daily index-value backfill for EVERY active index.
+
+    Iterates ACTIVE industry_index rows and calls run_index_value_backfill for
+    each over [from_date, to_date]. Each per-industry call walks its own trading
+    days (from daily_market_cap), skips pre-base_date days, and writes
+    industry_index_value rows using the chain-linked value model.
+
+    Returns {'industries': [(name, run_id|None, error|None)], 'n_ok', 'n_failed'}.
+    """
+    from ..persistence.fundamentals_repo import IndustryIndexRepository
+
+    with db_engine.connect() as conn:
+        indices = IndustryIndexRepository(conn).list_all()
+    active = [ix for ix in indices if getattr(ix, "status", "ACTIVE") == "ACTIVE"]
+
+    results: list[tuple] = []
+    n_ok = 0
+    n_failed = 0
+    for ix in active:
+        name = ix.industry_name
+        try:
+            run_id = run_index_value_backfill(
+                db_engine, name,
+                from_date=from_date, to_date=to_date, force=force,
+            )
+            results.append((name, run_id, None))
+            n_ok += 1
+        except Exception as e:  # noqa: BLE001
+            logger.exception(
+                "run_index_value_backfill_all: %s failed: %s", name, e,
+            )
+            results.append((name, None, str(e)))
+            n_failed += 1
+
+    logger.info(
+        "run_index_value_backfill_all %s..%s: %d ok, %d failed (of %d active)",
+        from_date, to_date, n_ok, n_failed, len(active),
+    )
+    return {"industries": results, "n_ok": n_ok, "n_failed": n_failed}
