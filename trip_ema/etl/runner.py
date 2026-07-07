@@ -823,31 +823,54 @@ def _solo_retry_once(
     snapshot = list(failed_tickers)  # fixed; never appended to below
     if not snapshot:
         return
-    solo_src = YFinanceSource(
-        exchange=exchange,
-        batch_size=1,
-        request_delay_seconds=config.etl.yfinance_request_delay_seconds,
-        repair=False,  # rescue IntCastingNaNError repair-casualties
-    )
-    max_iterations = len(snapshot)  # hard bound — cannot loop
-    recovered = 0
-    for i, ticker in enumerate(snapshot):
-        assert i < max_iterations, "solo-retry exceeded its bound"
-        try:
-            bs = _process_one_batch(
-                db_engine=db_engine, config=config, src=solo_src,
-                batch=[ticker], start=start, end=end,
-                timeframe=timeframe, intraday=intraday,
-            )
-            if bs.succeeded > 0:
-                recovered += 1
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "solo-retry failed for ticker_id=%s", ticker.ticker_id,
-            )
+
+    def _solo_pass(pass_snapshot, *, repair):
+        """One bounded solo pass. Returns (recovered, still_failed).
+        Plain `for` over a fixed snapshot; no `while`, hard-bounded —
+        cannot loop. still_failed = tickers with bs.succeeded == 0."""
+        src = YFinanceSource(
+            exchange=exchange,
+            batch_size=1,
+            request_delay_seconds=(
+                config.etl.yfinance_request_delay_seconds
+            ),
+            repair=repair,
+        )
+        bound = len(pass_snapshot)
+        recovered = 0
+        still_failed = []
+        for i, ticker in enumerate(pass_snapshot):
+            assert i < bound, "solo-retry exceeded its bound"
+            try:
+                bs = _process_one_batch(
+                    db_engine=db_engine, config=config, src=src,
+                    batch=[ticker], start=start, end=end,
+                    timeframe=timeframe, intraday=intraday,
+                )
+                if bs.succeeded > 0:
+                    recovered += 1
+                else:
+                    still_failed.append(ticker)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "solo-retry failed for ticker_id=%s",
+                    ticker.ticker_id,
+                )
+                still_failed.append(ticker)
+        return recovered, still_failed
+
+    # Layer 2: repair=True — batch-flakes recover WITH repair's fixing.
+    rec_a, survivors = _solo_pass(snapshot, repair=True)
+    # Layer 3: repair=False over ONLY Layer-2's survivors — rescues the
+    # IntCastingNaNError repair-casualties. survivors is fixed before
+    # this pass; no re-add, so no loop.
+    rec_b = 0
+    if survivors:
+        rec_b, _still = _solo_pass(survivors, repair=False)
     logger.info(
-        "solo-retry pass: %d/%d flaked tickers recovered",
-        recovered, len(snapshot),
+        "solo-retry: %d recovered (repair=True), %d recovered "
+        "(repair=False) of %d flaked",
+        rec_a, rec_b, len(snapshot),
     )
 
 
