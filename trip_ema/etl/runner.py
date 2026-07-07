@@ -827,6 +827,7 @@ def _solo_retry_once(
         exchange=exchange,
         batch_size=1,
         request_delay_seconds=config.etl.yfinance_request_delay_seconds,
+        repair=False,  # rescue IntCastingNaNError repair-casualties
     )
     max_iterations = len(snapshot)  # hard bound — cannot loop
     recovered = 0

@@ -102,6 +102,7 @@ class YFinanceSource:
         max_retries: int = 3,
         retry_backoff_base: float = 2.0,
         request_delay_seconds: float = 0.0,
+        repair: bool = True,
     ):
         # NB: exchange is validated by the runner before YFinanceSource
         # is constructed. We trust it here. A misformatted exchange
@@ -111,6 +112,11 @@ class YFinanceSource:
         self._max_retries = max_retries
         self._retry_backoff_base = retry_backoff_base
         self._request_delay = request_delay_seconds
+        # repair=True fixes split-residue / 100x bad ticks for the bulk
+        # fetch, but crashes (IntCastingNaNError) on some tickers' NaN
+        # volumes. The solo-retry recovery pass sets repair=False to
+        # rescue those.
+        self._repair = repair
 
     @property
     def exchange(self) -> str:
@@ -197,7 +203,7 @@ class YFinanceSource:
                     interval="1d",
                     auto_adjust=True,   # split+dividend adjusted (was False)
                     actions=False,
-                    repair=True,        # fix split-residue / 100x bad ticks
+                    repair=self._repair,  # False on the solo-retry pass
                     threads=False,
                     progress=False,
                     group_by="ticker",
@@ -241,7 +247,7 @@ class YFinanceSource:
                     interval="1h",
                     auto_adjust=True,   # split+dividend adjusted (was False)
                     actions=False,
-                    repair=True,        # fix split-residue / 100x bad ticks
+                    repair=self._repair,  # False on the solo-retry pass
                     threads=False,
                     progress=False,
                     group_by="ticker",
