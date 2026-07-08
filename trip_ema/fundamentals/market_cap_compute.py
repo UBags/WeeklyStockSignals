@@ -273,7 +273,7 @@ def compute_market_cap_for_date(
 
 
 def _trading_days_from_bars(
-    db_engine: "Engine", exchange: str, date_from: date, date_to: date,
+    db_engine: Engine, exchange: str, date_from: date, date_to: date,
 ) -> list[date]:
     """Distinct 1d-bar trade dates for the exchange in [date_from, date_to],
     ascending. Trading days come from ohlcv_bars (daily_market_cap is what we
@@ -299,7 +299,7 @@ def _trading_days_from_bars(
 
 
 def populate_market_cap_range(
-    db_engine: "Engine",
+    db_engine: Engine,
     exchange: str,
     *,
     date_from: date,
