@@ -1150,7 +1150,8 @@ class TestComputeIndexValuesEndpoint:
             called.append((industry_name, kw))
             return 1
         monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_index_value_backfill",
+            "trip_ema.fundamentals.v1_runners."
+            "populate_industry_index_value_for_industry",
             fake_backfill,
         )
         r = real_db_client.post(
@@ -1173,7 +1174,8 @@ class TestComputeIndexValuesEndpoint:
             called.append(industry_name)
             return 1
         monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_index_value_backfill",
+            "trip_ema.fundamentals.v1_runners."
+            "populate_industry_index_value_for_industry",
             fake_backfill,
         )
         r = real_db_client.post(

@@ -931,7 +931,7 @@ def _run_index_value_backfill_safe(
     force: bool, all_active: bool,
 ) -> None:
     """Runs either one industry or all active industries."""
-    from ....fundamentals.runners import run_index_value_backfill
+    from ....fundamentals.v1_runners import populate_industry_index_value_for_industry
     try:
         with db_engine.connect() as conn:
             ir = IndustryIndexRepository(conn)
@@ -949,11 +949,10 @@ def _run_index_value_backfill_safe(
             )
             if effective_from > effective_to:
                 continue
-            run_index_value_backfill(
+            populate_industry_index_value_for_industry(
                 db_engine, idx.industry_name,
                 from_date=effective_from,
                 to_date=effective_to,
-                force=force,
             )
     except Exception:
         logger.exception(
