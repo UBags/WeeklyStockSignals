@@ -321,6 +321,7 @@ def backfill(
             lambda: _stage_market_cap(
                 db_engine, exchange=exchange,
                 date_from=date_from, date_to=date_to,
+                progress_cb=progress_cb,
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -631,6 +632,7 @@ def _stage_stock_enrichment_full(
 
 def _stage_market_cap(
     db_engine: Engine, *, exchange: str, date_from: date, date_to: date,
+    progress_cb: Callable[[str, str], None] | None = None,
 ) -> int:
     """Populate daily_market_cap for the exchange over the range
     (adjusted close x current shares). Returns approx rows."""
@@ -638,6 +640,7 @@ def _stage_market_cap(
         db_engine, exchange,
         date_from=date_from, date_to=date_to,
         use_current_shares_always=True,
+        progress_cb=progress_cb,
     )
     if not isinstance(res, dict):
         return 0

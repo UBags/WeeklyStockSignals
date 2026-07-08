@@ -37,11 +37,13 @@ DB after the call).
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import date
 
 from sqlalchemy import Engine, text
 
+from .parallel import fan_out
 from ..persistence import transaction
 from ..persistence.fundamentals_repo import (
     DailyMarketCapRepository,
@@ -334,14 +336,13 @@ def populate_market_cap_range(
             for s in _latest
             if s.shares_outstanding is not None
         }
-    total = {
-        "days": len(days),
-        "computed": 0,
-        "approx": 0,
-        "skipped_no_close": 0,
-        "skipped_no_shares": 0,
-    }
-    for i, d in enumerate(days):
+    # Compute each trading day in parallel — days are independent
+    # (disjoint trade_date rows, no write contention), and each worker
+    # opens its own pooled connections inside compute_market_cap_for_date.
+    _results: list = []
+    _lock = threading.Lock()
+
+    def _compute_one_day(d):
         res = compute_market_cap_for_date(
             db_engine, exchange, d,
             price_column=price_column,
@@ -349,16 +350,28 @@ def populate_market_cap_range(
             use_current_shares_always=use_current_shares_always,
             shares_override=shares_override,
         )
-        total["computed"] += res.succeeded_computed
-        total["approx"] += res.succeeded_approx
-        total["skipped_no_close"] += res.skipped_no_close
-        total["skipped_no_shares"] += res.skipped_no_shares
-        if progress_cb is not None:
-            progress_cb(
-                "market_cap_range",
-                f"{i + 1}/{len(days)} {d} "
-                f"approx={res.succeeded_approx}",
-            )
+        with _lock:
+            _results.append(res)
+
+    outcome = fan_out(
+        days, _compute_one_day,
+        label="stage_3b_market_cap", progress_cb=progress_cb,
+    )
+    # The mcap phase is not per-day resumable, so any failed day must
+    # fail the phase (not silently leave a gap) — a resume retries it.
+    if outcome.failed:
+        _names = ", ".join(str(item) for item, _ in outcome.failed[:5])
+        raise RuntimeError(
+            f"market_cap: {len(outcome.failed)} of {len(days)} days "
+            f"failed (e.g. {_names}); phase not complete"
+        )
+    total = {
+        "days": len(days),
+        "computed": sum(r.succeeded_computed for r in _results),
+        "approx": sum(r.succeeded_approx for r in _results),
+        "skipped_no_close": sum(r.skipped_no_close for r in _results),
+        "skipped_no_shares": sum(r.skipped_no_shares for r in _results),
+    }
     logger.info(
         "populate_market_cap_range %s %s..%s: %d days, "
         "approx=%d computed=%d no_close=%d no_shares=%d",

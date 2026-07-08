@@ -202,6 +202,43 @@ class TestComputeHappyPath:
             ), {"td": td}).scalar()
         assert got == 0
 
+    def test_populate_range_parallel_aggregates_all_days(
+        self, db_engine, universe,
+    ):
+        """populate_market_cap_range computes every trading day (in
+        parallel) and aggregates the per-day counters correctly, with
+        no lost rows across workers."""
+        from trip_ema.fundamentals.market_cap_compute import (
+            populate_market_cap_range,
+        )
+        days = [date(2026, 5, 20), date(2026, 5, 21), date(2026, 5, 22)]
+        for d in days:
+            ts = datetime(d.year, d.month, d.day, 15, 30, tzinfo=UTC)
+            for sym, close in [
+                ("RELIANCE", 1450.0), ("TCS", 4100.0), ("HDFCBANK", 1700.0),
+            ]:
+                _insert_bar(db_engine, universe[("NSE", sym)], ts, close)
+        for sym, sh in [
+            ("RELIANCE", 6_700_000_000), ("TCS", 3_600_000_000),
+            ("HDFCBANK", 7_600_000_000),
+        ]:
+            _insert_shares(db_engine, universe[("NSE", sym)],
+                           as_of_date=date(2026, 5, 1), count=sh)
+
+        total = populate_market_cap_range(
+            db_engine, "NSE",
+            date_from=days[0], date_to=days[-1],
+            use_current_shares_always=True,
+        )
+        assert total["days"] == 3
+        assert total["approx"] == 9      # 3 tickers x 3 days
+        assert total["computed"] == 0
+        with db_engine.connect() as conn:
+            got = conn.execute(
+                text("SELECT COUNT(*) FROM daily_market_cap"),
+            ).scalar()
+        assert got == 9
+
     def test_all_three_NSE_tickers_get_COMPUTED_rows(self, db_engine, universe):
         """The base case: bars + shares both present → all 3 NSE EQ
         tickers get COMPUTED rows. BSE ticker untouched (different
