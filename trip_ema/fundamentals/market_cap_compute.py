@@ -83,6 +83,7 @@ def compute_market_cap_for_date(
     price_column: str = "adj_close",
     backup_price_column: str = "close",
     use_current_shares_always: bool = False,
+    shares_override: dict[int, tuple[int | None, str]] | None = None,
 ) -> ComputeResult:
     """Compute and store daily_market_cap rows for all active EQ
     tickers on `exchange` for `trade_date`.
@@ -174,46 +175,57 @@ def compute_market_cap_for_date(
     skipped_no_close = 0
     skipped_no_shares = 0
 
-    with db_engine.connect() as conn:
-        shares_repo = InstrumentSharesRepository(conn)
+    if shares_override is not None:
+        # Range-walk fast path: the caller pre-resolved current shares for
+        # the whole universe in ONE query (see populate_market_cap_range).
+        # Valid only in current-shares mode, where shares are date-
+        # invariant. Tickers absent from the map have no usable shares —
+        # identical to get_latest(tid) returning None.
+        ticker_shares_info: dict[int, tuple[int | None, str]] = {
+            tid: shares_override.get(tid, (None, ""))
+            for tid, _sym in universe
+        }
+    else:
+        with db_engine.connect() as conn:
+            shares_repo = InstrumentSharesRepository(conn)
 
-        # Pre-resolve shares per ticker. For each ticker we want:
-        #   1. shares as-of trade_date (or earlier) → COMPUTED row.
-        #   2. otherwise, shares from a LATER date (today's known
-        #      shares) → APPROX_TODAYS_SHARES row (if allowed).
-        #   3. otherwise, skip.
-        ticker_shares_info: dict[int, tuple[int | None, str]] = {}
-        for tid, _sym in universe:
-            if use_current_shares_always:
-                # Index-build mode: always current shares, always
-                # APPROX_TODAYS_SHARES. The adjusted price already
-                # handles splits/divs, so a uniform current-share
-                # basis across all history is correct here.
+            # Pre-resolve shares per ticker. For each ticker we want:
+            #   1. shares as-of trade_date (or earlier) → COMPUTED row.
+            #   2. otherwise, shares from a LATER date (today's known
+            #      shares) → APPROX_TODAYS_SHARES row (if allowed).
+            #   3. otherwise, skip.
+            ticker_shares_info: dict[int, tuple[int | None, str]] = {}
+            for tid, _sym in universe:
+                if use_current_shares_always:
+                    # Index-build mode: always current shares, always
+                    # APPROX_TODAYS_SHARES. The adjusted price already
+                    # handles splits/divs, so a uniform current-share
+                    # basis across all history is correct here.
+                    latest = shares_repo.get_latest(tid)
+                    if latest is not None and latest.shares_outstanding is not None:
+                        ticker_shares_info[tid] = (
+                            latest.shares_outstanding, "APPROX_TODAYS_SHARES",
+                        )
+                    else:
+                        ticker_shares_info[tid] = (None, "")
+                    continue
+                row = shares_repo.get_as_of(tid, trade_date)
+                if row is not None and row.shares_outstanding is not None:
+                    ticker_shares_info[tid] = (row.shares_outstanding, "COMPUTED")
+                    continue
+                # No shares as-of trade_date. Try the absolute latest.
                 latest = shares_repo.get_latest(tid)
-                if latest is not None and latest.shares_outstanding is not None:
+                if (
+                    latest is not None
+                    and latest.shares_outstanding is not None
+                    and allow_approx_fallback
+                ):
                     ticker_shares_info[tid] = (
                         latest.shares_outstanding, "APPROX_TODAYS_SHARES",
                     )
-                else:
-                    ticker_shares_info[tid] = (None, "")
-                continue
-            row = shares_repo.get_as_of(tid, trade_date)
-            if row is not None and row.shares_outstanding is not None:
-                ticker_shares_info[tid] = (row.shares_outstanding, "COMPUTED")
-                continue
-            # No shares as-of trade_date. Try the absolute latest.
-            latest = shares_repo.get_latest(tid)
-            if (
-                latest is not None
-                and latest.shares_outstanding is not None
-                and allow_approx_fallback
-            ):
-                ticker_shares_info[tid] = (
-                    latest.shares_outstanding, "APPROX_TODAYS_SHARES",
-                )
-                continue
-            # Nothing we can use.
-            ticker_shares_info[tid] = (None, "")
+                    continue
+                # Nothing we can use.
+                ticker_shares_info[tid] = (None, "")
 
     # Write the rows in one transaction. Each upsert is one
     # statement; for ~2300 tickers this is ~2300 INSERT/UPSERT
@@ -306,6 +318,21 @@ def populate_market_cap_range(
     summaries.
     """
     days = _trading_days_from_bars(db_engine, exchange, date_from, date_to)
+    # Prefetch current shares for the whole universe ONCE. In
+    # use_current_shares_always mode the shares are date-invariant, so
+    # per-day per-ticker resolution was O(days x tickers) redundant
+    # queries; one DISTINCT-ON query replaces them all.
+    shares_override = None
+    if use_current_shares_always:
+        with db_engine.connect() as conn:
+            _latest = InstrumentSharesRepository(
+                conn,
+            ).list_latest_for_exchange(exchange)
+        shares_override = {
+            s.ticker_id: (s.shares_outstanding, "APPROX_TODAYS_SHARES")
+            for s in _latest
+            if s.shares_outstanding is not None
+        }
     total = {
         "days": len(days),
         "computed": 0,
@@ -319,6 +346,7 @@ def populate_market_cap_range(
             price_column=price_column,
             backup_price_column=backup_price_column,
             use_current_shares_always=use_current_shares_always,
+            shares_override=shares_override,
         )
         total["computed"] += res.succeeded_computed
         total["approx"] += res.succeeded_approx

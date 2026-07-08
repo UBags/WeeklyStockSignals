@@ -81,6 +81,62 @@ def _insert_shares(
 
 class TestComputeHappyPath:
 
+    def test_shares_override_matches_per_ticker_current_shares(
+        self, db_engine, universe,
+    ):
+        """The range-walk fast path (shares_override) must produce rows
+        byte-identical to the per-ticker current-shares resolution."""
+        td = date(2026, 5, 22)
+        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=UTC)
+        for sym, close, sh in [
+            ("RELIANCE", 1450.0, 6_700_000_000),
+            ("TCS", 4100.0, 3_600_000_000),
+            ("HDFCBANK", 1700.0, 7_600_000_000),
+        ]:
+            _insert_bar(db_engine, universe[("NSE", sym)], bar_ts, close)
+            _insert_shares(db_engine, universe[("NSE", sym)],
+                           as_of_date=date(2026, 5, 21), count=sh)
+
+        def _snapshot():
+            with db_engine.connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT ticker_id, market_cap, shares_used, source "
+                    "FROM daily_market_cap WHERE trade_date = :td "
+                    "ORDER BY ticker_id"
+                ), {"td": td}).fetchall()
+            return [(r[0], float(r[1]), r[2], r[3]) for r in rows]
+
+        # Per-ticker current-shares path.
+        r1 = compute_market_cap_for_date(
+            db_engine, "NSE", td, use_current_shares_always=True,
+        )
+        snap1 = _snapshot()
+
+        # Clear, then re-run via a shares_override built the way
+        # populate_market_cap_range builds it.
+        with transaction(db_engine) as conn:
+            conn.execute(
+                text("DELETE FROM daily_market_cap WHERE trade_date = :td"),
+                {"td": td},
+            )
+            latest = InstrumentSharesRepository(conn).list_latest_for_exchange(
+                "NSE",
+            )
+        override = {
+            s.ticker_id: (s.shares_outstanding, "APPROX_TODAYS_SHARES")
+            for s in latest
+            if s.shares_outstanding is not None
+        }
+        r2 = compute_market_cap_for_date(
+            db_engine, "NSE", td,
+            use_current_shares_always=True, shares_override=override,
+        )
+        snap2 = _snapshot()
+
+        assert r1.succeeded_approx == r2.succeeded_approx == 3
+        assert r1.succeeded_computed == r2.succeeded_computed == 0
+        assert snap1 == snap2
+
     def test_all_three_NSE_tickers_get_COMPUTED_rows(self, db_engine, universe):
         """The base case: bars + shares both present → all 3 NSE EQ
         tickers get COMPUTED rows. BSE ticker untouched (different
