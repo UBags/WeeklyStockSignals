@@ -41,23 +41,18 @@ import os
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Callable, Sequence
+from collections.abc import Callable
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
 
 from ..domain import Timeframe
-from ..domain.signal_event import SignalEvent
 from ..etl.runner import fetch_bars_for_tickers, run_backfill
 from ..fundamentals.v1_runners import (
     populate_industry_index_value_for_all,
     populate_stock_indicator_enrichment_for_ticker,
     populate_stock_indicator_state_for_ticker,
-)
-from ..orchestrator.derive_signals import (
-    derive_signal_for_ticker_this_cycle,
 )
 from ..orchestrator.process_day import process_signals_for_day
 from ..orchestrator.industry_stages import (
@@ -69,7 +64,6 @@ from .phase_ledger import run_phase, reset_phases
 from ..fundamentals.market_cap_compute import populate_market_cap_range
 from ..fundamentals.runners import build_all_industry_index_chains
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
-from ..persistence.current_signals_repo import CurrentSignalsRepository
 from ..persistence.historical_signals_repo import (
     HistoricalSignalsRepository,
 )
@@ -567,7 +561,7 @@ def _stage_fetch_bars(
 
 def _stage_stock_state_full(
     db_engine, scoped_tickers: list[int],
-    progress_cb: "Callable[[str, str], None] | None" = None,
+    progress_cb: Callable[[str, str], None] | None = None,
 ) -> tuple[int, list[tuple[int, str]]]:
     """Stage 2: full recompute of stock_indicator_state per ticker.
 
@@ -604,7 +598,7 @@ def _stage_stock_state_full(
 
 def _stage_stock_enrichment_full(
     db_engine, scoped_tickers: list[int],
-    progress_cb: "Callable[[str, str], None] | None" = None,
+    progress_cb: Callable[[str, str], None] | None = None,
 ) -> tuple[int, list[tuple[int, str]]]:
     """Stage 3: full recompute of stock_indicator_enrichment.
 
