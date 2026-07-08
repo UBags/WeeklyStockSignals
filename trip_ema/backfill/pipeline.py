@@ -598,30 +598,17 @@ def _stage_stock_enrichment_full(
     """Stage 3: full recompute of stock_indicator_enrichment.
 
     Emits "N/total stocks done" via progress_cb ~every 1%."""
-    done = 0
-    failed: list[tuple[int, str]] = []
-    total = len(scoped_tickers)
-    every = max(1, total // 100)
-    for i, tid in enumerate(scoped_tickers, 1):
-        try:
-            populate_stock_indicator_enrichment_for_ticker(
-                db_engine, tid, str(Timeframe.WEEKLY),
-                mode="full",
-            )
-            done += 1
-        except Exception as e:
-            failed.append((tid, f"{type(e).__name__}: {e}"))
-            logger.warning(
-                "backfill stage_3: ticker_id=%d FAILED: %s",
-                tid, e,
-            )
-        if i % every == 0 or i == total:
-            _emit_progress(
-                progress_cb, "stage_3_stock_enrichment",
-                f"{done}/{total} stocks done"
-                + (f" ({len(failed)} failed)" if failed else ""),
-            )
-    return done, failed
+    def _one(tid):
+        populate_stock_indicator_enrichment_for_ticker(
+            db_engine, tid, str(Timeframe.WEEKLY),
+            mode="full",
+        )
+
+    outcome = fan_out(
+        scoped_tickers, _one,
+        label="stage_3_stock_enrichment", progress_cb=progress_cb,
+    )
+    return outcome.done, outcome.failed
 
 
 def _stage_market_cap(
