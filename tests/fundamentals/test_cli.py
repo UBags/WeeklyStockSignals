@@ -1016,8 +1016,8 @@ class TestCmdComputeIndexValues:
         # Stub the runner to open+close a SUCCESS run, returning its id.
         called = []
         def fake_backfill(engine, industry_name, *, from_date, to_date,
-                          resume_run_id=None, force=False):
-            called.append((industry_name, from_date, to_date, force))
+                          resume_run_id=None):
+            called.append((industry_name, from_date, to_date))
             with transaction(engine) as conn:
                 rid = FundamentalsRunRepository(conn).open(
                     phase="index_value", exchange="ALL",
@@ -1028,7 +1028,8 @@ class TestCmdComputeIndexValues:
                 )
             return rid
         monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_index_value_backfill",
+            "trip_ema.fundamentals.v1_runners."
+            "populate_industry_index_value_for_industry",
             fake_backfill,
         )
         args = type("A", (), {})()
@@ -1044,13 +1045,12 @@ class TestCmdComputeIndexValues:
         assert rc == 0
         # The runner was called with the right industry and dates.
         assert len(called) == 1
-        industry_called, from_called, to_called, force_called = called[0]
+        industry_called, from_called, to_called = called[0]
         assert industry_called == "IT - Services"
         # from_date = max(cli_from, base_date). base_date is 2025-10-01,
         # cli_from is 2025-10-01 → 2025-10-01.
         assert from_called == date(2025, 10, 1)
         assert to_called == date(2026, 5, 1)
-        assert force_called is False
         assert "status=SUCCESS" in out
 
     def test_all_active_iterates_indices(
@@ -1073,7 +1073,8 @@ class TestCmdComputeIndexValues:
                 )
             return rid
         monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_index_value_backfill",
+            "trip_ema.fundamentals.v1_runners."
+            "populate_industry_index_value_for_industry",
             fake_backfill,
         )
         args = type("A", (), {})()
@@ -1123,7 +1124,8 @@ class TestCmdComputeIndexValues:
                 )
             return rid
         monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_index_value_backfill",
+            "trip_ema.fundamentals.v1_runners."
+            "populate_industry_index_value_for_industry",
             fake_backfill,
         )
         args = type("A", (), {})()

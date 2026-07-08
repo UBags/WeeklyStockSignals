@@ -578,7 +578,7 @@ def cmd_compute_index_values(args, config: Config) -> int:
     to = --to or today.
     """
     from datetime import date as _date
-    from .runners import run_index_value_backfill
+    from .v1_runners import populate_industry_index_value_for_industry
     from ..persistence.fundamentals_repo import IndustryIndexRepository
 
     if not args.industry and not args.all_active:
@@ -643,12 +643,11 @@ def cmd_compute_index_values(args, config: Config) -> int:
                 )
                 continue
             try:
-                run_id = run_index_value_backfill(
+                run_id = populate_industry_index_value_for_industry(
                     db_engine, idx.industry_name,
                     from_date=from_date,
                     to_date=cli_to,
                     resume_run_id=args.resume,
-                    force=args.force,
                 )
                 with db_engine.connect() as conn:
                     r = FundamentalsRunRepository(conn).get(run_id)
