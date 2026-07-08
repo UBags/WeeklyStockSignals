@@ -819,6 +819,7 @@ def populate_industry_index_value_for_all(
     from_date: date | None = None,
     to_date: date | None = None,
     checkpoint_every: int = 50,
+    progress_cb=None,
 ) -> dict:
     """Bulk-compute V1 industry index values for every ACTIVE industry.
 
@@ -850,7 +851,9 @@ def populate_industry_index_value_for_all(
     failed: list[tuple[str, str]] = []
     skipped: list[tuple[str, str]] = []
 
-    for idx in indices:
+    _lock = threading.Lock()
+
+    def _do_industry(idx):
         try:
             run_id = populate_industry_index_value_for_industry(
                 db_engine, idx.industry_name,
@@ -863,22 +866,30 @@ def populate_industry_index_value_for_all(
                         idx.industry_name,
                     )
                 )
-            succeeded.append((idx.industry_name, run_id, cnt))
+            with _lock:
+                succeeded.append((idx.industry_name, run_id, cnt))
             logger.debug(
                 "industry=%s OK (run_id=%d, total_rows=%d)",
                 idx.industry_name, run_id, cnt,
             )
         except ValueError as e:
-            skipped.append((idx.industry_name, str(e)))
+            with _lock:
+                skipped.append((idx.industry_name, str(e)))
             logger.info(
                 "industry=%s skipped: %s", idx.industry_name, e,
             )
         except Exception as e:
-            failed.append((idx.industry_name, str(e)))
+            with _lock:
+                failed.append((idx.industry_name, str(e)))
             logger.warning(
                 "industry=%s failed: %s",
                 idx.industry_name, e, exc_info=True,
             )
+
+    fan_out(
+        indices, _do_industry,
+        label="stage_3d_industry_index_values", progress_cb=progress_cb,
+    )
 
     report = {
         "from_date":

@@ -361,6 +361,7 @@ def backfill(
             db_engine, exchange, "industry_index_values",
             lambda: _stage_industry_index_values(
                 db_engine, date_from=date_from, date_to=date_to,
+                progress_cb=progress_cb,
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -698,6 +699,7 @@ def _stage_industry_index_build(
 
 def _stage_industry_index_values(
     db_engine: Engine, *, date_from: date, date_to: date,
+    progress_cb: Callable[[str, str], None] | None = None,
 ) -> int:
     """Backfill daily industry_index_value rows for all active indices.
 
@@ -710,6 +712,7 @@ def _stage_industry_index_values(
     """
     report = populate_industry_index_value_for_all(
         db_engine, from_date=date_from, to_date=date_to,
+        progress_cb=progress_cb,
     )
     return (
         len(report.get("succeeded", []))
