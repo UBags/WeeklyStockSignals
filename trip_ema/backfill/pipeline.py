@@ -440,6 +440,7 @@ def backfill(
                 date_from=date_from,
                 date_to=date_to,
                 today=_today,
+                progress_cb=progress_cb,
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -741,6 +742,7 @@ def _walk_trading_days(
 def _stage_backfill_daywalk(
     db_engine, *, scoped_tickers: list[int],
     date_from: date, date_to: date, today: date,
+    progress_cb: Callable[[str, str], None] | None = None,
 ) -> tuple[int, int, int, int, bool]:
     """Stages 8+9 unified: walk each trading day in range and run
     process_signals_for_day in backfill mode. Per-day historical
@@ -754,7 +756,9 @@ def _stage_backfill_daywalk(
         date_from=date_from, date_to=date_to,
     )
     hist_ins = cur_up = cur_del = 0
-    for d in days:
+    total = len(days)
+    every = max(1, total // 100)
+    for i, d in enumerate(days, 1):
         as_of_dt = datetime.combine(d, time(16, 30), tzinfo=_IST)
         pd = process_signals_for_day(
             db_engine,
@@ -767,6 +771,11 @@ def _stage_backfill_daywalk(
         hist_ins += pd.historical_written
         cur_up += pd.current_upserted
         cur_del += pd.current_deleted
+        if i % every == 0 or i == total:
+            _emit_progress(
+                progress_cb, "stage_8_walk_days",
+                f"{i}/{total} days walked",
+            )
     return len(days), hist_ins, cur_up, cur_del, (today in days)
 
 

@@ -37,12 +37,14 @@ readers for the whole cycle; row-level upsert/delete preserves MVCC.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Literal
 
 from sqlalchemy.engine import Engine
 
+from ..fundamentals.parallel import fan_out
 from ..persistence import transaction
 from ..persistence.current_signals_repo import CurrentSignalsRepository
 from ..persistence.historical_signals_repo import HistoricalSignalsRepository
@@ -93,34 +95,50 @@ def process_signals_for_day(
     write_historical = mode in ("eod", "backfill")
     write_current = day == today
 
-    hist = cur_up = cur_del = 0
-    with transaction(db_engine) as conn:
-        if scoped_tickers is None:
-            # Live cycle default: all active tickers (matches the legacy
-            # _stage_derive_and_insert scope via find_active()).
+    # Resolve scope (own connection).
+    if scoped_tickers is None:
+        # Live cycle default: all active tickers (matches the legacy
+        # _stage_derive_and_insert scope via find_active()).
+        with db_engine.connect() as conn:
             scoped_tickers = [
                 t.ticker_id for t in TickersRepository(conn).find_active()
             ]
-        flips: list = []
-        no_flip: list[int] = []
-        for tid in scoped_tickers:
-            try:
+
+    # Derive in parallel. derive_signal_for_ticker_this_cycle is READ-ONLY
+    # (reads state rows + daily close), so each ticker runs on its own
+    # pooled connection concurrently. flips/no_flip are collected under a
+    # lock; the writes below stay a single serial transaction. Writes are
+    # order-independent (distinct ticker_ids), so completion order is fine.
+    flips: list = []
+    no_flip: list[int] = []
+    _lock = threading.Lock()
+
+    def _derive_one(tid):
+        try:
+            with db_engine.connect() as conn:
                 ev = derive_signal_for_ticker_this_cycle(
                     conn, tid, now=as_of, timeframe=timeframe, as_of=as_of,
                 )
-            except Exception:
-                logger.exception(
-                    "process_signals_for_day: derive error ticker_id=%d "
-                    "day=%s; treating as no-flip", tid, day,
-                )
+        except Exception:
+            logger.exception(
+                "process_signals_for_day: derive error ticker_id=%d "
+                "day=%s; treating as no-flip", tid, day,
+            )
+            with _lock:
                 no_flip.append(tid)
-                continue
-            # A signal counts for day D only if it was observed on D.
-            if ev is not None and ev.signal_date == day:
+            return
+        # A signal counts for day D only if it was observed on D.
+        if ev is not None and ev.signal_date == day:
+            with _lock:
                 flips.append(ev)
-            else:
+        else:
+            with _lock:
                 no_flip.append(tid)
 
+    fan_out(scoped_tickers, _derive_one, label="signals_derive")
+
+    hist = cur_up = cur_del = 0
+    with transaction(db_engine) as conn:
         if write_historical:
             HistoricalSignalsRepository(conn).delete_for_tickers_on_date(
                 ticker_ids=scoped_tickers, signal_date=day,
