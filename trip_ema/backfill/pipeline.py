@@ -61,6 +61,7 @@ from ..orchestrator.industry_stages import (
 )
 from ..persistence import transaction
 from .phase_ledger import run_phase, reset_phases
+from ..fundamentals.parallel import fan_out
 from ..fundamentals.market_cap_compute import populate_market_cap_range
 from ..fundamentals.runners import build_all_industry_index_chains
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
@@ -577,30 +578,17 @@ def _stage_stock_state_full(
     abort the rest. Emits "N/total stocks done" via progress_cb
     roughly every 1% of the ticker list.
     """
-    done = 0
-    failed: list[tuple[int, str]] = []
-    total = len(scoped_tickers)
-    every = max(1, total // 100)
-    for i, tid in enumerate(scoped_tickers, 1):
-        try:
-            populate_stock_indicator_state_for_ticker(
-                db_engine, tid, str(Timeframe.WEEKLY),
-                mode="full",
-            )
-            done += 1
-        except Exception as e:
-            failed.append((tid, f"{type(e).__name__}: {e}"))
-            logger.warning(
-                "backfill stage_2: ticker_id=%d FAILED: %s",
-                tid, e,
-            )
-        if i % every == 0 or i == total:
-            _emit_progress(
-                progress_cb, "stage_2_stock_state",
-                f"{done}/{total} stocks done"
-                + (f" ({len(failed)} failed)" if failed else ""),
-            )
-    return done, failed
+    def _one(tid):
+        populate_stock_indicator_state_for_ticker(
+            db_engine, tid, str(Timeframe.WEEKLY),
+            mode="full",
+        )
+
+    outcome = fan_out(
+        scoped_tickers, _one,
+        label="stage_2_stock_state", progress_cb=progress_cb,
+    )
+    return outcome.done, outcome.failed
 
 
 def _stage_stock_enrichment_full(
