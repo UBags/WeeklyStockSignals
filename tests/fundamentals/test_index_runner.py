@@ -15,11 +15,13 @@ import pytest
 from sqlalchemy import text
 
 from trip_ema.domain import TickerRef
+from trip_ema.archive.index_value_backfill import (
+    run_index_value_backfill,
+)
 from trip_ema.fundamentals.runners import (
     RebalanceResult,
     _list_trading_days_in_range,
     _next_semiannual_rebalance_date,
-    run_index_value_backfill,
     run_industry_index_build,
     run_rebalance,
 )
