@@ -29,7 +29,6 @@ from datetime import date, datetime, time, timedelta, UTC
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-import pandas as pd
 from sqlalchemy.engine import Engine
 
 from ..domain import OHLCVBar, Timeframe
@@ -62,7 +61,6 @@ from ..persistence import transaction
 from .index_compute import compute_index_value_for_date
 from .parallel import fan_out
 from .runners import (
-    _fetch_bars_at_timeframe,
     _list_trading_days_in_range,
     _parse_iso_date,
 )
