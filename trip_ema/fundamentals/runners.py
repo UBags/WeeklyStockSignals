@@ -41,6 +41,7 @@ Exit semantics:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, UTC
@@ -48,6 +49,7 @@ from collections.abc import Callable
 
 from sqlalchemy import Engine, text
 
+from .parallel import fan_out
 from ..persistence import transaction
 from ..persistence.fundamentals_repo import (
     FundamentalsRunRepository,
@@ -2079,6 +2081,7 @@ def build_all_industry_index_chains(
     n: int = 12,
     min_constituents: int = 4,
     base_value: float = 1000.0,
+    progress_cb: Callable[[str, str], None] | None = None,
 ) -> dict:
     """Discover qualifying industries and build each full annual-April chain.
 
@@ -2157,31 +2160,44 @@ def build_all_industry_index_chains(
         }
     base_date = first_aprils[0]
 
-    # ---- 3. per industry: upsert ANNUAL_APR index + build chain ----
-    for industry, sector, _c in qualified:
-        try:
-            with db_engine.connect() as conn:
-                existing = IndustryIndexRepository(conn).get(industry)
-            with transaction(db_engine) as conn:
-                IndustryIndexRepository(conn).upsert(
-                    industry,
-                    sector_name=sector,
-                    base_date=(existing.base_date if existing else base_date),
-                    base_value=(existing.base_value if existing else base_value),
-                    rebalance_schedule="ANNUAL_APR",
-                    min_constituents=min_constituents,
-                )
-            chain = build_rebalance_chain(
-                db_engine, industry,
-                exchange=exchange, through=through,
-                n=n, min_constituents=min_constituents,
+    # ---- 3. per industry (parallel): upsert ANNUAL_APR index + build
+    # chain. Industries are independent — each touches only its own
+    # index / constituent / period / value rows — so they fan out safely.
+    # The April rebalances WITHIN one industry stay sequential inside
+    # build_rebalance_chain, preserving the chain-link ordering.
+    _chains_lock = threading.Lock()
+
+    def _build_one(item):
+        industry, sector, _c = item
+        with db_engine.connect() as conn:
+            existing = IndustryIndexRepository(conn).get(industry)
+        with transaction(db_engine) as conn:
+            IndustryIndexRepository(conn).upsert(
+                industry,
+                sector_name=sector,
+                base_date=(existing.base_date if existing else base_date),
+                base_value=(existing.base_value if existing else base_value),
+                rebalance_schedule="ANNUAL_APR",
+                min_constituents=min_constituents,
             )
+        chain = build_rebalance_chain(
+            db_engine, industry,
+            exchange=exchange, through=through,
+            n=n, min_constituents=min_constituents,
+        )
+        with _chains_lock:
             chains.append(chain)
-        except Exception as e:  # noqa: BLE001
-            logger.exception(
-                "build_all_industry_index_chains: %s failed: %s", industry, e,
-            )
-            failed.append((industry, str(e)))
+
+    _outcome = fan_out(
+        qualified, _build_one,
+        label="stage_3c_industry_index_build", progress_cb=progress_cb,
+    )
+    for _item, _err in _outcome.failed:
+        logger.error(
+            "build_all_industry_index_chains: %s failed: %s",
+            _item[0], _err,
+        )
+        failed.append((_item[0], _err))
 
     logger.info(
         "build_all_industry_index_chains %s: %d chains built, %d qualified, "

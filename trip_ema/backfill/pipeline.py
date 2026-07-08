@@ -339,6 +339,7 @@ def backfill(
             db_engine, exchange, "industry_index_build",
             lambda: _stage_industry_index_build(
                 db_engine, exchange=exchange, through=date_to,
+                progress_cb=progress_cb,
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -657,6 +658,7 @@ def _stage_market_cap(
 
 def _stage_industry_index_build(
     db_engine: Engine, *, exchange: str, through: date,
+    progress_cb: Callable[[str, str], None] | None = None,
 ) -> int:
     """Build per-exchange annual-April chain-linked industry indices
     (top 12, min 4).
@@ -669,6 +671,7 @@ def _stage_industry_index_build(
     """
     out = build_all_industry_index_chains(
         db_engine, exchange, through=through, n=12, min_constituents=4,
+        progress_cb=progress_cb,
     )
     if not isinstance(out, dict):
         return 0
