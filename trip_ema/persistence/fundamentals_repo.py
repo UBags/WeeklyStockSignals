@@ -1857,12 +1857,12 @@ class IndustryIndexPeriodRepository:
     rebalance. See migration 0038 / run_rebalance for the derivation.
     """
 
-    def __init__(self, conn: "Connection"):
+    def __init__(self, conn: Connection):
         self._conn = conn
 
     def upsert_period(
         self, industry_name: str, *,
-        rebalance_date: "date",
+        rebalance_date: date,
         link_factor: float,
         is_base: bool,
         prior_value: float | None = None,
@@ -1886,7 +1886,7 @@ class IndustryIndexPeriodRepository:
                "ib": is_base, "pv": prior_value, "nbr": new_basket_ratiosum})
 
     def get_link_factor(
-        self, industry_name: str, rebalance_date: "date",
+        self, industry_name: str, rebalance_date: date,
     ) -> float | None:
         """link_factor for one rebalance period, or None if no row."""
         row = self._conn.execute(text("""
