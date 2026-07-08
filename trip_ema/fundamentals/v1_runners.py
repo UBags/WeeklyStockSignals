@@ -24,6 +24,7 @@ side validation period.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import date, datetime, time, timedelta, UTC
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -59,6 +60,7 @@ from ..persistence.stock_indicator_state_repo import (
 from ..persistence.tickers_repo import TickersRepository
 from ..persistence import transaction
 from .index_compute import compute_index_value_for_date
+from .parallel import fan_out
 from .runners import (
     _fetch_bars_at_timeframe,
     _list_trading_days_in_range,
@@ -1111,6 +1113,7 @@ def populate_industry_indicator_state_for_all(
     min_bars: int = 30,
     mode: Literal["full", "incremental"] = "full",
     n_weeks_to_upsert: int = 2,
+    progress_cb=None,
 ) -> dict:
     """Bulk-compute V1 industry indicator state for every ACTIVE
     industry.
@@ -1137,7 +1140,9 @@ def populate_industry_indicator_state_for_all(
     failed: list[tuple[str, str]] = []
     skipped: list[tuple[str, str]] = []
 
-    for idx in indices:
+    _lock = threading.Lock()
+
+    def _do_industry(idx):
         try:
             run_id = populate_industry_indicator_state_for_industry(
                 db_engine, idx.industry_name,
@@ -1149,7 +1154,8 @@ def populate_industry_indicator_state_for_all(
                 cnt = IndustryIndicatorStateRepository(
                     conn,
                 ).count_for_industry(idx.industry_name, timeframe)
-            succeeded.append((idx.industry_name, run_id, cnt))
+            with _lock:
+                succeeded.append((idx.industry_name, run_id, cnt))
             logger.debug(
                 "industry=%s tf=%s OK (run_id=%d, count=%d)",
                 idx.industry_name, timeframe, run_id, cnt,
@@ -1158,17 +1164,24 @@ def populate_industry_indicator_state_for_all(
             # ValueError covers "no IIV rows", "insufficient bars",
             # "industry doesn't exist". Treat as skipped, not failed
             # — the industry simply isn't ready yet.
-            skipped.append((idx.industry_name, str(e)))
+            with _lock:
+                skipped.append((idx.industry_name, str(e)))
             logger.info(
                 "industry=%s tf=%s skipped: %s",
                 idx.industry_name, timeframe, e,
             )
         except Exception as e:
-            failed.append((idx.industry_name, str(e)))
+            with _lock:
+                failed.append((idx.industry_name, str(e)))
             logger.warning(
                 "industry=%s tf=%s failed: %s",
                 idx.industry_name, timeframe, e, exc_info=True,
             )
+
+    fan_out(
+        indices, _do_industry,
+        label="industry_indicator_state", progress_cb=progress_cb,
+    )
 
     report = {
         "timeframe": timeframe,
@@ -1385,6 +1398,7 @@ def populate_industry_indicator_enrichment_for_all(
     min_bars: int = 30,
     mode: Literal["full", "incremental"] = "full",
     n_weeks_to_upsert: int = 2,
+    progress_cb=None,
 ) -> dict:
     """Bulk-compute V1 industry indicator enrichment for every
     ACTIVE industry.
@@ -1411,7 +1425,9 @@ def populate_industry_indicator_enrichment_for_all(
     failed: list[tuple[str, str]] = []
     skipped: list[tuple[str, str]] = []
 
-    for idx in indices:
+    _lock = threading.Lock()
+
+    def _do_industry(idx):
         try:
             run_id = (
                 populate_industry_indicator_enrichment_for_industry(
@@ -1425,7 +1441,8 @@ def populate_industry_indicator_enrichment_for_all(
                 cnt = IndustryIndicatorEnrichmentRepository(
                     conn,
                 ).count_for_industry(idx.industry_name, timeframe)
-            succeeded.append((idx.industry_name, run_id, cnt))
+            with _lock:
+                succeeded.append((idx.industry_name, run_id, cnt))
             logger.debug(
                 "industry=%s tf=%s OK (run_id=%d, count=%d)",
                 idx.industry_name, timeframe, run_id, cnt,
@@ -1435,17 +1452,24 @@ def populate_industry_indicator_enrichment_for_all(
             # "insufficient bars", "industry doesn't exist". Treat
             # as skipped, not failed — the industry simply isn't
             # ready yet (likely Step 7 not yet run for it).
-            skipped.append((idx.industry_name, str(e)))
+            with _lock:
+                skipped.append((idx.industry_name, str(e)))
             logger.info(
                 "industry=%s tf=%s skipped: %s",
                 idx.industry_name, timeframe, e,
             )
         except Exception as e:
-            failed.append((idx.industry_name, str(e)))
+            with _lock:
+                failed.append((idx.industry_name, str(e)))
             logger.warning(
                 "industry=%s tf=%s failed: %s",
                 idx.industry_name, timeframe, e, exc_info=True,
             )
+
+    fan_out(
+        indices, _do_industry,
+        label="industry_indicator_enrichment", progress_cb=progress_cb,
+    )
 
     report = {
         "timeframe": timeframe,

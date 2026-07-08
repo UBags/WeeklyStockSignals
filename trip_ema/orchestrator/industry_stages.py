@@ -17,13 +17,14 @@ from ..fundamentals.v1_runners import (
 
 def _stage_industry_state(
     db_engine: Engine, *, mode: str, n_weeks_to_upsert: int | None = None,
+    progress_cb=None,
 ) -> tuple[int, int, int]:
     """industry_indicator_state for all industries. mode="incremental" (live,
     trailing n_weeks) or mode="full" (backfill, all history). Returns
     (succeeded, failed, skipped) counts."""
     kwargs = {"n_weeks_to_upsert": n_weeks_to_upsert} if mode == "incremental" else {}
     report = populate_industry_indicator_state_for_all(
-        db_engine, mode=mode, **kwargs,
+        db_engine, mode=mode, progress_cb=progress_cb, **kwargs,
     )
     return (
         len(report.get("succeeded", [])),
@@ -34,12 +35,13 @@ def _stage_industry_state(
 
 def _stage_industry_enrichment(
     db_engine: Engine, *, mode: str, n_weeks_to_upsert: int | None = None,
+    progress_cb=None,
 ) -> tuple[int, int, int]:
     """industry_indicator_enrichment for all industries. See _stage_industry_state
     for the mode semantics. Returns (succeeded, failed, skipped) counts."""
     kwargs = {"n_weeks_to_upsert": n_weeks_to_upsert} if mode == "incremental" else {}
     report = populate_industry_indicator_enrichment_for_all(
-        db_engine, mode=mode, **kwargs,
+        db_engine, mode=mode, progress_cb=progress_cb, **kwargs,
     )
     return (
         len(report.get("succeeded", [])),

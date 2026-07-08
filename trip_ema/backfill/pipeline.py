@@ -375,7 +375,9 @@ def backfill(
         _emit_progress(progress_cb, "stage_5_industry_state", "starting")
         _r = run_phase(
             db_engine, exchange, "industry_state",
-            lambda: _stage_industry_state(db_engine, mode="full")[0],
+            lambda: _stage_industry_state(
+                db_engine, mode="full", progress_cb=progress_cb,
+            )[0],
             backfill_run_id=run_id, force=_force,
         )
         if _r is not None:
@@ -391,7 +393,9 @@ def backfill(
         )
         _r = run_phase(
             db_engine, exchange, "industry_enrichment",
-            lambda: _stage_industry_enrichment(db_engine, mode="full")[0],
+            lambda: _stage_industry_enrichment(
+                db_engine, mode="full", progress_cb=progress_cb,
+            )[0],
             backfill_run_id=run_id, force=_force,
         )
         if _r is not None:
