@@ -267,6 +267,7 @@ def cmd_backfill(args, config: Config) -> int:
                 exchange=args.exchange,
                 stocks=stocks,
                 refetch_bars=refetch,
+                resume=not getattr(args, "rebuild", False),
                 progress_cb=_progress,
             )
         except IntegrityError:
@@ -976,6 +977,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "Skip stage 1 (yfinance bar refetch). Useful when the "
             "OHLCV table is already populated and only the V1 "
             "derivations need rebuilding."
+        ),
+    )
+    bk.add_argument(
+        "--rebuild", action="store_true",
+        help=(
+            "Force a full rebuild: clear the phase-completion ledger "
+            "and re-run every phase (resume=False). Without this, a "
+            "re-run resumes — skipping phases already marked COMPLETE. "
+            "Use --rebuild for the first index build or after changing "
+            "the ticker universe."
         ),
     )
     bk.add_argument(
