@@ -263,7 +263,7 @@ class TestMarkerLifecycle:
     ):
         _seed_ticker(db_engine, ticker_id=1, symbol="TEST1")
 
-        # Make stage 4 (IIV) raise — it has NO per-ticker isolation
+        # Make stage 3d (industry index values) raise — NO per-ticker isolation
         # so the exception propagates and triggers the failed_stage
         # path. Stages 2+3 have per-ticker isolation by design;
         # failures there land in stock_state_failed[] without
@@ -276,7 +276,7 @@ class TestMarkerLifecycle:
             "populate_industry_index_value_for_all",
             _boom,
         )
-        # Earlier stages no-op so we reach stage 4 cleanly
+        # Earlier stages no-op so we reach stage 3d cleanly
         monkeypatch.setattr(
             "trip_ema.backfill.pipeline."
             "populate_stock_indicator_state_for_ticker",
@@ -297,9 +297,7 @@ class TestMarkerLifecycle:
         # Pipeline did NOT crash — it caught the exception
         # internally, marked finished, and returned a result
         assert result.failed_stage is not None
-        assert "stage_4" in result.failed_stage or \
-               "stage_iiv" in result.failed_stage or \
-               result.failed_stage == "stage_iiv"
+        assert "industry_index_values" in result.failed_stage
         assert "simulated stage_4 failure" in result.error_message
         # Marker is finished — live cycle can resume
         with db_engine.connect() as conn:

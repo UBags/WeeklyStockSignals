@@ -68,7 +68,6 @@ from ..persistence import transaction
 from .phase_ledger import run_phase, reset_phases
 from ..fundamentals.market_cap_compute import populate_market_cap_range
 from ..fundamentals.runners import build_all_industry_index_chains
-from ..fundamentals.runners import run_index_value_backfill_all
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.current_signals_repo import CurrentSignalsRepository
 from ..persistence.historical_signals_repo import (
@@ -355,6 +354,10 @@ def backfill(
             )
 
         # ---- Stage 3d: backfill industry index values ----
+        # The ONLY industry-index-value pass. Shares the
+        # populate_industry_index_value_for_all populator with the live
+        # intraday/eod cycle; the old duplicate "stage 4 iiv" pass over
+        # the same table and range has been removed.
         _emit_progress(
             progress_cb, "stage_3d_industry_index_values", "starting",
         )
@@ -362,30 +365,14 @@ def backfill(
             db_engine, exchange, "industry_index_values",
             lambda: _stage_industry_index_values(
                 db_engine, date_from=date_from, date_to=date_to,
-                force=_force,
-            ),
-            backfill_run_id=run_id, force=_force,
-        )
-        if _r is not None:
-            _emit_progress(
-                progress_cb, "stage_3d_industry_index_values",
-                f"completed: {_r} indices",
-            )
-
-        # ---- Stage 4: IIV refresh ----
-        _emit_progress(progress_cb, "stage_4_iiv", "starting")
-        _r = run_phase(
-            db_engine, exchange, "iiv",
-            lambda: _stage_iiv_full(
-                db_engine, date_from=date_from, date_to=date_to,
             ),
             backfill_run_id=run_id, force=_force,
         )
         if _r is not None:
             result_kwargs["iiv_industries_done"] = _r
             _emit_progress(
-                progress_cb, "stage_4_iiv",
-                f"completed: {_r} industries",
+                progress_cb, "stage_3d_industry_index_values",
+                f"completed: {_r} indices",
             )
 
         # ---- Stage 5: industry indicator state ----
@@ -648,16 +635,6 @@ def _stage_stock_enrichment_full(
     return done, failed
 
 
-def _stage_iiv_full(
-    db_engine, *, date_from: date, date_to: date,
-) -> int:
-    """Stage 4: IIV refresh for all industries, full date range."""
-    report = populate_industry_index_value_for_all(
-        db_engine, from_date=date_from, to_date=date_to,
-    )
-    return len(report.get("succeeded", []))
-
-
 def _stage_market_cap(
     db_engine: Engine, *, exchange: str, date_from: date, date_to: date,
 ) -> int:
@@ -716,14 +693,24 @@ def _stage_industry_index_build(
 
 
 def _stage_industry_index_values(
-    db_engine: Engine, *, date_from: date, date_to: date, force: bool,
+    db_engine: Engine, *, date_from: date, date_to: date,
 ) -> int:
     """Backfill daily industry_index_value rows for all active indices.
-    Returns number of indices processed OK."""
-    out = run_index_value_backfill_all(
-        db_engine, from_date=date_from, to_date=date_to, force=force,
+
+    Routes through the SHARED populator the live intraday/eod cycle also
+    uses (populate_industry_index_value_for_all), so all three pipelines
+    compute index values through one code path and differ only in the
+    date window (full range here, trailing weeks live). Resume/force is
+    handled at the phase-ledger boundary, so no per-industry skip-recent
+    guard is needed here. Returns the count of industries computed OK.
+    """
+    report = populate_industry_index_value_for_all(
+        db_engine, from_date=date_from, to_date=date_to,
     )
-    return int(out.get("n_ok", 0)) if isinstance(out, dict) else 0
+    return (
+        len(report.get("succeeded", []))
+        if isinstance(report, dict) else 0
+    )
 
 
 def _stage_delete_historical(
