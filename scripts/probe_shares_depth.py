@@ -134,7 +134,7 @@ def load_price_first_dates(engine, ticker_ids: list[int]) -> dict[int, date]:
         rows = conn.execute(text("""
             SELECT ticker_id, MIN(bar_timestamp) AS first_ts
             FROM ohlcv_bars
-            WHERE timeframe = '1d' AND ticker_id = ANY(:ids)
+            WHERE timeframe = '1D' AND ticker_id = ANY(:ids)
             GROUP BY ticker_id
         """), {"ids": ticker_ids}).fetchall()
     out: dict[int, date] = {}

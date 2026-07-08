@@ -13,7 +13,7 @@ scripts/probe_yfinance_hist_mcap.py).
 What this module does:
   - compute_market_cap_for_date(db_engine, exchange, trade_date)
     Iterates active EQ tickers on `exchange`. For each:
-      - Look up the day's close from ohlcv_bars (timeframe='1d').
+      - Look up the day's close from ohlcv_bars (timeframe='1D').
       - Look up shares as-of the trade_date from instrument_shares.
       - Multiply, write a COMPUTED row.
     Tickers without a close (no bar that day) are skipped.
@@ -157,7 +157,7 @@ def compute_market_cap_for_date(
                 f"""
                 SELECT b.ticker_id, {_price_expr}
                 FROM ohlcv_bars b
-                WHERE b.timeframe = '1d'
+                WHERE b.timeframe = '1D'
                   AND b.bar_timestamp >= :start
                   AND b.bar_timestamp <= :end
                 """
@@ -275,7 +275,7 @@ def _trading_days_from_bars(
                 SELECT DISTINCT b.bar_timestamp::date AS d
                 FROM ohlcv_bars b
                 JOIN tickers t ON t.ticker_id = b.ticker_id
-                WHERE b.timeframe = '1d'
+                WHERE b.timeframe = '1D'
                   AND t.exchange = :ex
                   AND b.bar_timestamp >= :start
                   AND b.bar_timestamp <= :end

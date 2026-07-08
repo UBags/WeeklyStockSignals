@@ -62,7 +62,7 @@ def _insert_bar(db_engine, ticker_id: int, dt: datetime, close: float):
         conn.execute(text("""
             INSERT INTO ohlcv_bars
                 (ticker_id, timeframe, bar_timestamp, open, high, low, close, volume)
-            VALUES (:tid, '1d', :ts, :c, :c, :c, :c, 0.0)
+            VALUES (:tid, '1D', :ts, :c, :c, :c, :c, 0.0)
         """), {"tid": ticker_id, "ts": dt, "c": close})
 
 

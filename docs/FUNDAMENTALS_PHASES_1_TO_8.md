@@ -1227,7 +1227,7 @@ diagnostic is the SQL provided in this session's exchange:
 SELECT trade_date, COUNT(*) FROM (
     SELECT DATE(bar_timestamp) AS trade_date
     FROM ohlcv_bars
-    WHERE timeframe = '1d'
+    WHERE timeframe = '1D'
       AND bar_timestamp >= NOW() - INTERVAL '7 days'
 ) sub
 GROUP BY trade_date
