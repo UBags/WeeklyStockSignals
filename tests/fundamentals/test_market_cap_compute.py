@@ -137,6 +137,71 @@ class TestComputeHappyPath:
         assert r1.succeeded_computed == r2.succeeded_computed == 0
         assert snap1 == snap2
 
+    def test_upsert_snapshot_many_batches_and_updates(
+        self, db_engine, universe,
+    ):
+        """upsert_snapshot_many writes all rows in one call and updates
+        (not duplicates) on re-run — idempotent on (ticker_id, td)."""
+        td = date(2026, 5, 22)
+        ids = [universe[("NSE", s)] for s in ("RELIANCE", "TCS", "HDFCBANK")]
+        rows = [
+            {"ticker_id": tid, "trade_date": td, "close_price": 100.0 + i,
+             "shares_used": 1_000_000, "market_cap": (100.0 + i) * 1_000_000,
+             "source": "APPROX_TODAYS_SHARES"}
+            for i, tid in enumerate(ids)
+        ]
+        with transaction(db_engine) as conn:
+            n = DailyMarketCapRepository(conn).upsert_snapshot_many(rows)
+        assert n == 3
+        with db_engine.connect() as conn:
+            got = conn.execute(text(
+                "SELECT COUNT(*) FROM daily_market_cap WHERE trade_date = :td"
+            ), {"td": td}).scalar()
+        assert got == 3
+
+        # Re-run with a changed close -> update in place, no duplicate row.
+        rows[0]["close_price"] = 999.0
+        rows[0]["market_cap"] = 999.0 * 1_000_000
+        with transaction(db_engine) as conn:
+            DailyMarketCapRepository(conn).upsert_snapshot_many(rows)
+        with db_engine.connect() as conn:
+            got2 = conn.execute(text(
+                "SELECT COUNT(*) FROM daily_market_cap WHERE trade_date = :td"
+            ), {"td": td}).scalar()
+            price = conn.execute(text(
+                "SELECT close_price FROM daily_market_cap "
+                "WHERE ticker_id = :t AND trade_date = :td"
+            ), {"t": ids[0], "td": td}).scalar()
+        assert got2 == 3
+        assert price == pytest.approx(999.0)
+
+    def test_upsert_snapshot_many_empty_is_noop(self, db_engine):
+        with transaction(db_engine) as conn:
+            assert DailyMarketCapRepository(conn).upsert_snapshot_many([]) == 0
+
+    def test_upsert_snapshot_many_validates_before_writing(
+        self, db_engine, universe,
+    ):
+        """A single invalid row aborts the whole batch — nothing lands."""
+        td = date(2026, 5, 22)
+        good = universe[("NSE", "RELIANCE")]
+        rows = [
+            {"ticker_id": good, "trade_date": td, "close_price": 100.0,
+             "shares_used": 1_000_000, "market_cap": 100_000_000.0,
+             "source": "APPROX_TODAYS_SHARES"},
+            {"ticker_id": good, "trade_date": td, "close_price": 100.0,
+             "shares_used": 1_000_000, "market_cap": -1.0,  # invalid
+             "source": "APPROX_TODAYS_SHARES"},
+        ]
+        with pytest.raises(ValueError):
+            with transaction(db_engine) as conn:
+                DailyMarketCapRepository(conn).upsert_snapshot_many(rows)
+        with db_engine.connect() as conn:
+            got = conn.execute(text(
+                "SELECT COUNT(*) FROM daily_market_cap WHERE trade_date = :td"
+            ), {"td": td}).scalar()
+        assert got == 0
+
     def test_all_three_NSE_tickers_get_COMPUTED_rows(self, db_engine, universe):
         """The base case: bars + shares both present → all 3 NSE EQ
         tickers get COMPUTED rows. BSE ticker untouched (different

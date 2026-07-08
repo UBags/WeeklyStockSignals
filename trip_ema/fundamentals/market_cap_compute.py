@@ -227,34 +227,35 @@ def compute_market_cap_for_date(
                 # Nothing we can use.
                 ticker_shares_info[tid] = (None, "")
 
-    # Write the rows in one transaction. Each upsert is one
-    # statement; for ~2300 tickers this is ~2300 INSERT/UPSERT
-    # statements per date which is fine for a single backfill
-    # date, and the runner will paginate dates.
-    with transaction(db_engine) as conn:
-        mcap_repo = DailyMarketCapRepository(conn)
-        for tid, _sym in universe:
-            close_price = closes.get(tid)
-            if close_price is None:
-                skipped_no_close += 1
-                continue
-            shares, src = ticker_shares_info[tid]
-            if shares is None:
-                skipped_no_shares += 1
-                continue
-            mcap = close_price * shares
-            mcap_repo.upsert_snapshot(
-                tid,
-                trade_date=trade_date,
-                close_price=close_price,
-                shares_used=shares,
-                market_cap=mcap,
-                source=src,
+    # Collect this date's rows, then write them all in ONE batched
+    # upsert (executemany) rather than ~2300 single-row statements.
+    rows_to_write: list[dict] = []
+    for tid, _sym in universe:
+        close_price = closes.get(tid)
+        if close_price is None:
+            skipped_no_close += 1
+            continue
+        shares, src = ticker_shares_info[tid]
+        if shares is None:
+            skipped_no_shares += 1
+            continue
+        rows_to_write.append({
+            "ticker_id": tid,
+            "trade_date": trade_date,
+            "close_price": close_price,
+            "shares_used": shares,
+            "market_cap": close_price * shares,
+            "source": src,
+        })
+        if src == "COMPUTED":
+            succeeded_computed += 1
+        else:
+            succeeded_approx += 1
+    if rows_to_write:
+        with transaction(db_engine) as conn:
+            DailyMarketCapRepository(conn).upsert_snapshot_many(
+                rows_to_write,
             )
-            if src == "COMPUTED":
-                succeeded_computed += 1
-            else:
-                succeeded_approx += 1
 
     logger.info(
         "compute_market_cap_for_date %s/%s: "

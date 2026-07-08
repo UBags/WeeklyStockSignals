@@ -1264,6 +1264,60 @@ class DailyMarketCapRepository:
              "su": shares_used, "mc": market_cap, "src": source},
         )
 
+    def upsert_snapshot_many(self, rows: list[dict]) -> int:
+        """Batch upsert of daily_market_cap rows in one executemany.
+
+        Each row is a dict with keys ticker_id, trade_date, close_price,
+        shares_used, market_cap, source. Validated identically to
+        upsert_snapshot (source membership, market_cap >= 0, shares_used
+        required for derived sources). ALL rows are validated BEFORE any
+        write, so an invalid row aborts the whole batch rather than
+        half-writing. Idempotent on (ticker_id, trade_date). Returns the
+        number of rows submitted.
+        """
+        from ..fundamentals import MARKET_CAP_SOURCES
+        if not rows:
+            return 0
+        for r in rows:
+            src = r["source"]
+            if src not in MARKET_CAP_SOURCES:
+                raise ValueError(
+                    f"source must be one of {MARKET_CAP_SOURCES}, "
+                    f"got {src!r}"
+                )
+            if r["market_cap"] < 0:
+                raise ValueError(
+                    f"market_cap must be >= 0, got {r['market_cap']!r}"
+                )
+            if src in ("COMPUTED", "APPROX_TODAYS_SHARES",
+                       "MANUAL_OVERRIDE") and r["shares_used"] is None:
+                raise ValueError(
+                    f"shares_used is required when source={src!r}; "
+                    f"it is the multiplicand used to derive market_cap"
+                )
+        params = [
+            {"tid": r["ticker_id"], "td": r["trade_date"],
+             "cp": r["close_price"], "su": r["shares_used"],
+             "mc": r["market_cap"], "src": r["source"]}
+            for r in rows
+        ]
+        self._conn.execute(
+            text("""
+                INSERT INTO daily_market_cap
+                    (ticker_id, trade_date, close_price, shares_used,
+                     market_cap, source, computed_at)
+                VALUES (:tid, :td, :cp, :su, :mc, :src, NOW())
+                ON CONFLICT (ticker_id, trade_date) DO UPDATE SET
+                    close_price = EXCLUDED.close_price,
+                    shares_used = EXCLUDED.shares_used,
+                    market_cap = EXCLUDED.market_cap,
+                    source = EXCLUDED.source,
+                    computed_at = NOW()
+            """),
+            params,
+        )
+        return len(params)
+
     def delete_for_date(self, trade_date: date) -> int:
         """Remove all mcap rows for one trade_date. Used by tests
         and by the runner's "wipe and rebuild this date" admin
