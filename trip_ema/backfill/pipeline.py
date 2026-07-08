@@ -668,18 +668,51 @@ def _stage_market_cap(
         date_from=date_from, date_to=date_to,
         use_current_shares_always=True,
     )
-    return int(res.get("approx", 0)) if isinstance(res, dict) else 0
+    if not isinstance(res, dict):
+        return 0
+    # Total mcap rows written = exact (computed) + approximate (approx).
+    n_rows = int(res.get("computed", 0)) + int(res.get("approx", 0))
+    logger.info(
+        "market_cap: %d rows (computed=%d, approx=%d, "
+        "no_close=%d, no_shares=%d)",
+        n_rows, res.get("computed", 0), res.get("approx", 0),
+        res.get("skipped_no_close", 0), res.get("skipped_no_shares", 0),
+    )
+    return n_rows
 
 
 def _stage_industry_index_build(
     db_engine: Engine, *, exchange: str, through: date,
 ) -> int:
     """Build per-exchange annual-April chain-linked industry indices
-    (top 12, min 4). Returns number of chains built."""
+    (top 12, min 4).
+
+    Visible-tolerance (Option 3): the phase completes even if some
+    industries were skipped (too few tickers — structural, not a failure)
+    or failed (a real error). Both are LOGGED (log file + terminal, since
+    the CLI streams logger output), so nothing is lost silently. Failed
+    industries are named so they can be chased. Returns chains built.
+    """
     out = build_all_industry_index_chains(
         db_engine, exchange, through=through, n=12, min_constituents=4,
     )
-    return len(out.get("chains", [])) if isinstance(out, dict) else 0
+    if not isinstance(out, dict):
+        return 0
+    n_built = len(out.get("chains", []))
+    unqualified = out.get("unqualified", [])
+    failed = out.get("failed", [])
+    logger.info(
+        "industry_index_build: built %d, skipped %d (insufficient "
+        "tickers), failed %d",
+        n_built, len(unqualified), len(failed),
+    )
+    if failed:
+        _names = ", ".join(str(f[0]) for f in failed)
+        logger.warning(
+            "industry_index_build: %d industries FAILED (real errors, "
+            "not structural): %s", len(failed), _names,
+        )
+    return n_built
 
 
 def _stage_industry_index_values(

@@ -2348,6 +2348,14 @@ def build_all_industry_index_chains(
         (qualified if int(c) >= min_constituents else unqualified).append(
             (industry, sector or "Unknown", int(c))
         )
+    # Structural skips (not failures): industries with too few tickers to
+    # form an index. Logged explicitly so the gap is visible, not silent.
+    for _iname, _isec, _icount in unqualified:
+        logger.info(
+            "insufficient tickers (number = %d) to build industry "
+            "index for %s",
+            _icount, _iname,
+        )
 
     # ---- 2. earliest mcap date → first April rebalance ----
     with db_engine.connect() as conn:
