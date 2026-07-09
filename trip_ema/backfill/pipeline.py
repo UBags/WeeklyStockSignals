@@ -64,6 +64,7 @@ from .phase_ledger import run_phase, reset_phases
 from ..fundamentals.parallel import fan_out
 from ..fundamentals.market_cap_compute import populate_market_cap_range
 from ..fundamentals.runners import build_all_industry_index_chains
+from ..fundamentals.signal_enrichment_runner import backfill_signal_enrichment
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.historical_signals_repo import (
     HistoricalSignalsRepository,
@@ -455,6 +456,26 @@ def backfill(
             # daywalk already COMPLETE (resume) — don't notify off a walk
             # we didn't run; today_walked stays False.
             today_walked = False
+
+        # ---- Stage 8b: per-signal enrichment ----
+        # Reads the historical_signals the daywalk just wrote and
+        # materialises the causal per-signal feature vector.
+        _emit_progress(
+            progress_cb, "stage_8b_signal_enrichment", "starting",
+        )
+        _enr = run_phase(
+            db_engine, exchange, "signal_enrichment",
+            lambda: backfill_signal_enrichment(
+                db_engine, exchange,
+                scoped_tickers=scoped_tickers,
+                progress_cb=progress_cb,
+            ),
+            backfill_run_id=run_id, force=_force,
+        )
+        _emit_progress(
+            progress_cb, "stage_8b_signal_enrichment",
+            "done" if _enr is not None else "skipped (resume)",
+        )
 
         # ---- Notify subscribers — IFF this backfill is current
         # through today (to_monday == the current IST week's Monday).
