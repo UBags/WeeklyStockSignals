@@ -165,6 +165,24 @@ class SignalFeatureAssembler:
             else:
                 out[f"pdisp_{name}"] = _NAN
 
+            lpb, ltb = trk.last_peak_bar, trk.last_trough_bar
+            lpv, ltv = trk.last_peak_value, trk.last_trough_value
+            out[f"bars_since_{name}_peak"] = (
+                self._bar - lpb if lpb is not None else None
+            )
+            out[f"bars_since_{name}_trough"] = (
+                self._bar - ltb if ltb is not None else None
+            )
+            if (lpv is not None and ltv is not None
+                    and lpb is not None and ltb is not None
+                    and lpb != ltb):
+                amp = abs(lpv - ltv)
+                out[f"{name}_leg_amplitude"] = amp
+                out[f"{name}_leg_velocity"] = amp / abs(lpb - ltb)
+            else:
+                out[f"{name}_leg_amplitude"] = _NAN
+                out[f"{name}_leg_velocity"] = _NAN
+
         p_peak, p_trough = rels["med_ema"]
         for osc in _DIV_OSC:
             o_peak, o_trough = rels[osc]

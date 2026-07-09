@@ -50,7 +50,9 @@ def test_produces_rows_at_signal_days():
     assert r.signal_date == sig_day
     assert r.industry_id == 7
     assert r.feature_spec_version == "v0.3"
-    assert isinstance(r.features, dict) and len(r.features) == 50
+    assert isinstance(r.features, dict)
+    assert {"med_ema_structure", "med_ema_leg_amplitude",
+            "atr28"}.issubset(r.features)
     assert "med_ema_structure" in r.features
     assert "div_srsi14" in r.features
     assert "atr28" in r.features

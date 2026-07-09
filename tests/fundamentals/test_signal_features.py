@@ -56,7 +56,9 @@ class TestAssembly:
         exp = set()
         for name, _s, _k in _MEMBERS:
             exp |= {f"{name}_structure", f"bars_since_{name}_turn",
-                    f"pdisp_{name}"}
+                    f"pdisp_{name}",
+                    f"bars_since_{name}_peak", f"bars_since_{name}_trough",
+                    f"{name}_leg_amplitude", f"{name}_leg_velocity"}
         exp |= {f"div_{o}" for o in ("srsi14", "smacd", "smoothed_RSI_diff")}
         exp |= {"srsi14", "srsi28", "smoothed_RSI_diff",
                 "ema_smoothed_RSI_diff", "smacd", "macd_hist", "sdosc",
