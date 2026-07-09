@@ -63,7 +63,8 @@ class TestAssembly:
                     f"move_since_{name}_turn",
                     f"{name}_n_successive", f"{name}_leg_maturity",
                     f"{name}_pattern_label"}
-        exp |= {f"div_{o}" for o in ("srsi14", "smacd", "smoothed_RSI_diff")}
+        for o in ("srsi14", "smacd", "smoothed_RSI_diff"):
+            exp |= {f"div_{o}_class", f"div_{o}_strength", f"div_{o}_age"}
         exp |= {"srsi14", "srsi28", "smoothed_RSI_diff",
                 "ema_smoothed_RSI_diff", "smacd", "macd_hist", "sdosc",
                 "ema_diff_1", "ema_diff_2", "ema_diff_3", "ema_ema_diff_1",
@@ -73,7 +74,7 @@ class TestAssembly:
         assert all(f[f"{n}_structure"] in valid for n, _s, _k in _MEMBERS)
         divs = {DIV_NONE, DIV_REG_BEAR, DIV_REG_BULL, DIV_HID_BEAR,
                 DIV_HID_BULL}
-        assert all(f[f"div_{o}"] in divs
+        assert all(f[f"div_{o}_class"] in divs
                    for o in ("srsi14", "smacd", "smoothed_RSI_diff"))
 
     def test_distances_on_controlled_series(self):

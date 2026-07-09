@@ -54,7 +54,7 @@ def test_produces_rows_at_signal_days():
     assert {"med_ema_structure", "med_ema_leg_amplitude",
             "atr28"}.issubset(r.features)
     assert "med_ema_structure" in r.features
-    assert "div_srsi14" in r.features
+    assert "div_srsi14_class" in r.features
     assert "atr28" in r.features
 
 

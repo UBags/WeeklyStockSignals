@@ -100,6 +100,36 @@ def _divergence(
     return DIV_NONE
 
 
+def _slope(v1, v0, b1, b0):
+    if v1 is None or v0 is None or b1 is None or b0 is None or b1 == b0:
+        return None
+    return (v1 - v0) / (b1 - b0)
+
+
+def _div_strength_age(cls, p_trk, o_trk, cur_bar):
+    """(strength, age) for a divergence class (spec §10): strength is the
+    absolute slope gap between the price and oscillator legs over their
+    paired pivots; age is bars since the price pivot that completed it."""
+    if cls in (DIV_REG_BEAR, DIV_HID_BEAR):
+        p_sl = _slope(p_trk.last_peak_value, p_trk.prev_peak_value,
+                      p_trk.last_peak_bar, p_trk.prev_peak_bar)
+        o_sl = _slope(o_trk.last_peak_value, o_trk.prev_peak_value,
+                      o_trk.last_peak_bar, o_trk.prev_peak_bar)
+        comp_bar = p_trk.last_peak_bar
+    elif cls in (DIV_REG_BULL, DIV_HID_BULL):
+        p_sl = _slope(p_trk.last_trough_value, p_trk.prev_trough_value,
+                      p_trk.last_trough_bar, p_trk.prev_trough_bar)
+        o_sl = _slope(o_trk.last_trough_value, o_trk.prev_trough_value,
+                      o_trk.last_trough_bar, o_trk.prev_trough_bar)
+        comp_bar = p_trk.last_trough_bar
+    else:
+        return _NAN, None
+    if p_sl is None or o_sl is None:
+        return _NAN, None
+    age = cur_bar - comp_bar if comp_bar is not None else None
+    return abs(p_sl - o_sl), age
+
+
 class SignalFeatureAssembler:
     """One instance per (ticker, timeframe); feed bars in order."""
 
@@ -301,9 +331,14 @@ class SignalFeatureAssembler:
             out[f"{name}_pattern_label"] = self._plabel.get(name, LABEL_NA)
 
         p_peak, p_trough = rels["med_ema"]
+        p_trk = self._trk["med_ema"]
         for osc in _DIV_OSC:
             o_peak, o_trough = rels[osc]
-            out[f"div_{osc}"] = _divergence(
-                p_peak, p_trough, o_peak, o_trough,
+            cls = _divergence(p_peak, p_trough, o_peak, o_trough)
+            out[f"div_{osc}_class"] = cls
+            strength, age = _div_strength_age(
+                cls, p_trk, self._trk[osc], self._bar
             )
+            out[f"div_{osc}_strength"] = strength
+            out[f"div_{osc}_age"] = age
         return out
