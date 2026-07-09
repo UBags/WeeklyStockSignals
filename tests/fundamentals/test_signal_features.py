@@ -69,6 +69,12 @@ class TestAssembly:
                 "ema_smoothed_RSI_diff", "smacd", "macd_hist", "sdosc",
                 "ema_diff_1", "ema_diff_2", "ema_diff_3", "ema_ema_diff_1",
                 "ema_ema_diff_2", "ema_ema_diff_3", "atr28"}
+        for k in ("med", "long", "longest"):
+            exp |= {f"dist_to_{k}_in_hl_units",
+                    f"mean_dist_to_{k}_in_hl_units"}
+        for k in ("srsi14", "smacd", "sdosc",
+                  "smoothed_RSI_diff", "ema_smoothed_RSI_diff"):
+            exp |= {f"z_{k}", f"pctrank_{k}"}
         assert set(f) == exp
         valid = {"NA", "UPTREND", "DOWNTREND", "BROADENING", "CONTRACTING"}
         assert all(f[f"{n}_structure"] in valid for n, _s, _k in _MEMBERS)

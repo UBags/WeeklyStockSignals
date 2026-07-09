@@ -16,7 +16,7 @@ per-ticker (re-walk from the first bar), so no snapshot/restore here.
 from __future__ import annotations
 
 from collections import deque
-from statistics import median
+from statistics import mean, median, pstdev
 
 import math
 
@@ -66,6 +66,14 @@ _OSC_MEMBERS = frozenset({
 })
 _BUY_LABELS = frozenset({LABEL_2_HIGHER_VALLEYS, LABEL_1_HIGHER_VALLEY})
 _SELL_LABELS = frozenset({LABEL_2_LOWER_TOPS, LABEL_1_LOWER_TOP})
+
+_DIST_KEYS = (("med", "med_ema"), ("long", "long_ema"),
+              ("longest", "longest_ema"))
+_NORM_SERIES = (
+    "srsi14", "smacd", "sdosc",
+    "smoothed_RSI_diff", "ema_smoothed_RSI_diff",
+)
+_WINDOW = 52
 
 # §4 raw levels this assembler owns (snapshotted into the S-group).
 _SERIES_KEYS = (
@@ -130,6 +138,17 @@ def _div_strength_age(cls, p_trk, o_trk, cur_bar):
     return abs(p_sl - o_sl), age
 
 
+def _z_pctrank(cur, buf):
+    """(z-score, percentile-rank) of cur within buf (spec §9)."""
+    if _isnan(cur) or len(buf) < 2:
+        return _NAN, _NAN
+    m = mean(buf)
+    sd = pstdev(buf)
+    z = (cur - m) / sd if sd > 0.0 else _NAN
+    rank = sum(1 for x in buf if x <= cur) / len(buf)
+    return z, rank
+
+
 class SignalFeatureAssembler:
     """One instance per (ticker, timeframe); feed bars in order."""
 
@@ -151,6 +170,13 @@ class SignalFeatureAssembler:
         self._lbl_buy: dict = {name: LABEL_NA for name, _s, _k in _MEMBERS}
         self._lbl_sell: dict = {name: LABEL_NA for name, _s, _k in _MEMBERS}
         self._plabel: dict = {}
+        self._distbuf: dict = {
+            k: deque(maxlen=_WINDOW) for k, _e in _DIST_KEYS
+        }
+        self._normbuf: dict = {
+            k: deque(maxlen=_WINDOW) for k in _NORM_SERIES
+        }
+        self._curdist: dict = {}
 
     def update(
         self, *,
@@ -213,6 +239,22 @@ class SignalFeatureAssembler:
             if ret["peak_confirmed"] and plbl in _SELL_LABELS:
                 self._lbl_sell[name] = plbl
 
+        self._curdist = {}
+        ok_atr = atr is not None and not _isnan(atr) and atr > 0.0
+        for k, ekey in _DIST_KEYS:
+            ev = src.get(ekey)
+            if ok_atr and ev is not None and not _isnan(ev):
+                d = (close - ev) / atr
+            else:
+                d = _NAN
+            self._curdist[k] = d
+            if not _isnan(d):
+                self._distbuf[k].append(d)
+        for k in _NORM_SERIES:
+            v = s.get(k, _NAN)
+            if not _isnan(v):
+                self._normbuf[k].append(v)
+
     def snapshot(self) -> tuple:
         """Capture engine + per-member tracker state + the closes length,
         bar index, and last series dict — for branching at signal weeks.
@@ -231,12 +273,16 @@ class SignalFeatureAssembler:
             dict(self._lbl_buy),
             dict(self._lbl_sell),
             dict(self._plabel),
+            {k: tuple(d) for k, d in self._distbuf.items()},
+            {k: tuple(d) for k, d in self._normbuf.items()},
+            dict(self._curdist),
         )
 
     def restore(self, snap: tuple) -> None:
         (series_snap, trk_snaps, n_closes, bar, latest,
          mval, mret, nsucc, lastdir, legamps,
-         lbl_buy, lbl_sell, plabel) = snap
+         lbl_buy, lbl_sell, plabel,
+         distbuf, normbuf, curdist) = snap
         self._series.restore(series_snap)
         for name, s in trk_snaps.items():
             self._trk[name].restore(s)
@@ -253,6 +299,13 @@ class SignalFeatureAssembler:
         self._lbl_buy = dict(lbl_buy)
         self._lbl_sell = dict(lbl_sell)
         self._plabel = dict(plabel)
+        self._distbuf = {
+            k: deque(v, maxlen=_WINDOW) for k, v in distbuf.items()
+        }
+        self._normbuf = {
+            k: deque(v, maxlen=_WINDOW) for k, v in normbuf.items()
+        }
+        self._curdist = dict(curdist)
 
     def features(self) -> dict:
         """The derived feature vector at the current bar (call at a
@@ -341,4 +394,15 @@ class SignalFeatureAssembler:
             )
             out[f"div_{osc}_strength"] = strength
             out[f"div_{osc}_age"] = age
+
+        for k, _e in _DIST_KEYS:
+            out[f"dist_to_{k}_in_hl_units"] = self._curdist.get(k, _NAN)
+            buf = self._distbuf[k]
+            out[f"mean_dist_to_{k}_in_hl_units"] = (
+                mean(buf) if buf else _NAN
+            )
+        for k in _NORM_SERIES:
+            z, rank = _z_pctrank(self._latest.get(k, _NAN), self._normbuf[k])
+            out[f"z_{k}"] = z
+            out[f"pctrank_{k}"] = rank
         return out
