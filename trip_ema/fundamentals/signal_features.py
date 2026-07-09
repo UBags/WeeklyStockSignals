@@ -114,6 +114,27 @@ class SignalFeatureAssembler:
         for name, key, _k in _MEMBERS:
             self._trk[name].update(self._bar, src[key])
 
+    def snapshot(self) -> tuple:
+        """Capture engine + per-member tracker state + the closes length,
+        bar index, and last series dict — for branching at signal weeks.
+        The closes list is not copied; restore() truncates it back."""
+        return (
+            self._series.snapshot(),
+            {name: self._trk[name].snapshot() for name in self._trk},
+            len(self._closes),
+            self._bar,
+            dict(self._latest),
+        )
+
+    def restore(self, snap: tuple) -> None:
+        series_snap, trk_snaps, n_closes, bar, latest = snap
+        self._series.restore(series_snap)
+        for name, s in trk_snaps.items():
+            self._trk[name].restore(s)
+        del self._closes[n_closes:]
+        self._bar = bar
+        self._latest = dict(latest)
+
     def features(self) -> dict:
         """The derived feature vector at the current bar (call at a
         signal bar). Structure + distances + divergence + §4 levels;

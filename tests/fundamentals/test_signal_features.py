@@ -83,3 +83,38 @@ class TestAssembly:
         assert f["bars_since_med_ema_turn"] == 1
         assert not math.isnan(f["pdisp_med_ema"])
         assert f["pdisp_med_ema"] > 0
+
+
+class TestSnapshotRestore:
+    def test_branch_and_restore_identical_continuation(self):
+        close, high, low, med, lng, lst, atr = _fixture(n=140)
+
+        def feed(a, i):
+            a.update(close=float(close[i]), high=float(high[i]),
+                     low=float(low[i]), med_ema=float(med[i]),
+                     long_ema=float(lng[i]), longest_ema=float(lst[i]),
+                     atr=float(atr[i]))
+
+        a1 = SignalFeatureAssembler()
+        for i in range(80):
+            feed(a1, i)
+        snap = a1.snapshot()
+        for i in range(80, 88):          # branch (must be discarded)
+            feed(a1, i)
+        a1.features()
+        a1.restore(snap)
+        feed(a1, 88)
+        f1 = a1.features()
+
+        a2 = SignalFeatureAssembler()
+        for i in range(80):
+            feed(a2, i)
+        feed(a2, 88)                      # never branched
+        f2 = a2.features()
+
+        for k in f1:
+            v1, v2 = f1[k], f2[k]
+            if isinstance(v1, float) and isinstance(v2, float):
+                assert (math.isnan(v1) and math.isnan(v2)) or v1 == v2
+            else:
+                assert v1 == v2
