@@ -50,6 +50,12 @@ _MEMBERS: list[tuple[str, str, int]] = [
     ("ema_ema_diff_3", "ema_ema_diff_3", 2),
 ]
 
+# oscillator members use native move-since-turn; price/EMA/spread use pct.
+_OSC_MEMBERS = frozenset({
+    "srsi14", "smacd", "sdosc",
+    "smoothed_RSI_diff", "ema_smoothed_RSI_diff",
+})
+
 # §4 raw levels this assembler owns (snapshotted into the S-group).
 _SERIES_KEYS = (
     "srsi14", "srsi28", "smoothed_RSI_diff", "ema_smoothed_RSI_diff",
@@ -94,6 +100,8 @@ class SignalFeatureAssembler:
         self._closes: list[float] = []
         self._bar = -1
         self._latest: dict = {}
+        self._mval: dict = {}
+        self._mret: dict = {}
 
     def update(
         self, *,
@@ -111,8 +119,11 @@ class SignalFeatureAssembler:
         self._latest = s
         src = {"med_ema": med_ema, "long_ema": long_ema,
                "longest_ema": longest_ema, **s}
+        self._mval = {}
+        self._mret = {}
         for name, key, _k in _MEMBERS:
-            self._trk[name].update(self._bar, src[key])
+            self._mval[name] = src[key]
+            self._mret[name] = self._trk[name].update(self._bar, src[key])
 
     def snapshot(self) -> tuple:
         """Capture engine + per-member tracker state + the closes length,
@@ -124,16 +135,21 @@ class SignalFeatureAssembler:
             len(self._closes),
             self._bar,
             dict(self._latest),
+            dict(self._mval),
+            dict(self._mret),
         )
 
     def restore(self, snap: tuple) -> None:
-        series_snap, trk_snaps, n_closes, bar, latest = snap
+        (series_snap, trk_snaps, n_closes, bar, latest,
+         mval, mret) = snap
         self._series.restore(series_snap)
         for name, s in trk_snaps.items():
             self._trk[name].restore(s)
         del self._closes[n_closes:]
         self._bar = bar
         self._latest = dict(latest)
+        self._mval = dict(mval)
+        self._mret = dict(mret)
 
     def features(self) -> dict:
         """The derived feature vector at the current bar (call at a
@@ -182,6 +198,22 @@ class SignalFeatureAssembler:
             else:
                 out[f"{name}_leg_amplitude"] = _NAN
                 out[f"{name}_leg_velocity"] = _NAN
+
+            ret = self._mret.get(name) or {}
+            out[f"{name}_turn_buy"] = bool(ret.get("trough_confirmed"))
+            out[f"{name}_turn_sell"] = bool(ret.get("peak_confirmed"))
+            mv = self._mval.get(name, _NAN)
+            origin = (lpv if npb == lpb else ltv) if npb is not None else None
+            if (npb is not None and not _isnan(mv)
+                    and origin is not None and not _isnan(origin)):
+                if name in _OSC_MEMBERS:
+                    out[f"move_since_{name}_turn"] = mv - origin
+                elif origin != 0.0:
+                    out[f"move_since_{name}_turn"] = (mv - origin) / abs(origin)
+                else:
+                    out[f"move_since_{name}_turn"] = _NAN
+            else:
+                out[f"move_since_{name}_turn"] = _NAN
 
         p_peak, p_trough = rels["med_ema"]
         for osc in _DIV_OSC:
