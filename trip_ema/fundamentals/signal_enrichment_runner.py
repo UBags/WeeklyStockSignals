@@ -19,12 +19,11 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 
 from ..domain import Timeframe
 from ..persistence import transaction
 from ..persistence.bars_repo import BarsRepository
-from ..persistence.historical_signals_repo import HistoricalSignalsRepository
 from ..persistence.signal_enrichment_repo import SignalEnrichmentRepository
 from ..persistence.stock_indicator_state_repo import (
     StockIndicatorStateRepository,
@@ -80,15 +79,26 @@ def _resolve_ticker_inputs(conn, ticker_id, timeframe):
     )
     if len(states) < 2:
         return None
-    signals = HistoricalSignalsRepository(conn).get_for_ticker(ticker_id)
-    if not signals:
+    # historical_signals_repo.get_for_ticker does not surface signal_date
+    # (curated _SELECT_COLS); read the flip-day + type directly. One row
+    # per (ticker, tf, signal_date) by the unique constraint.
+    signal_rows = conn.execute(
+        text(
+            "SELECT DISTINCT signal_date, signal_type "
+            "FROM historical_signals "
+            "WHERE ticker_id = :tid AND timeframe = :tf "
+            "  AND signal_date IS NOT NULL"
+        ),
+        {"tid": ticker_id, "tf": str(timeframe)},
+    ).all()
+    if not signal_rows:
         return None
     daily = BarsRepository(conn).fetch_since(ticker_id, Timeframe.DAILY,
                                              _EPOCH)
     if not daily:
         return None
     state_by_date, conv_by_monday, signals_by_date = _fold_inputs(
-        states, signals,
+        states, signal_rows,
     )
     return daily, state_by_date, conv_by_monday, signals_by_date
 
