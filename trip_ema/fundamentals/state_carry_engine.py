@@ -31,15 +31,15 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime
 
 from ..domain import OHLCVBar
-from ..indicators.aggregation import _monday_of, daily_to_weekly
 from ..indicators.vw_ema import VolumeWeightedTripleEMA
 from ..regime import BarInputs, Regime, compute_regime
 from .market_session import MarketSession
 from .pattern_rules import bars_and_pct_since_turn, pattern_label
+from .weekly_walk import weekly_forming_walk
 
 _LEGS = ("med", "long", "longest")
 
@@ -138,8 +138,10 @@ class StatefulIndicatorEngine:
          self._r_prev_low_env, self._r_prev_up_env, self._i) = s
         for leg in _LEGS:
             self._ema[leg]._restore(emas[leg])
-            self._hlra.clear(); self._hlra.extend(hlra)
-            self._dist[leg].clear(); self._dist[leg].extend(dist[leg])
+            self._hlra.clear()
+            self._hlra.extend(hlra)
+            self._dist[leg].clear()
+            self._dist[leg].extend(dist[leg])
             self._trk[leg].restore(trks[leg])
         self._ema_p1 = dict(p1)
         self._ema_p2 = dict(p2)
@@ -384,70 +386,35 @@ def compute_daily_grain_via_engine(
     off it with a prorated forming bar, then advance past the week with
     its real full-volume bar. O(weeks+days) — not O(weeks*days).
     """
-    from collections import defaultdict as _dd
-
-    if not daily_bars:
-        return [], []
-
-    zone = session.zone
-    now_local = now.astimezone(zone)
-
-    completed = daily_to_weekly(
-        daily_bars, include_partial_last_week=False, tz=session.tz,
-    )
-    real_by_monday = {wb.timestamp: wb for wb in completed}
-
-    by_week: dict = _dd(list)
-    for b in daily_bars:
-        w = _monday_of(b.timestamp, tz=session.tz)
-        by_week[w].append((b.timestamp.astimezone(zone).date(), b))
-    for w in by_week:
-        by_week[w].sort(key=lambda p: p[0])
-    weeks_in_order = sorted(by_week.keys())
-
-    tset = set(target_days) if target_days is not None else None
-
     engine = StatefulIndicatorEngine(
         params, synthetic_atr_for_index=synthetic_atr_for_index,
     )
     state_rows: list[dict] = []
     enrich_rows: list[dict] = []
 
-    for w_monday in weeks_in_order:
-        monday_local = w_monday.astimezone(zone).date()
-        week_pairs = by_week[w_monday]
+    for week in weekly_forming_walk(
+        daily_bars, session=session, now=now,
+        target_days=target_days, constant_volume=constant_volume,
+    ):
         snap = engine.snapshot()
-
-        for (ld, _b) in week_pairs:
-            if tset is not None and ld not in tset:
-                continue
-            week_daily = [b for (l, b) in week_pairs if l <= ld]
-            open_ = week_daily[0].open
-            hi = max(b.high for b in week_daily)
-            lo = min(b.low for b in week_daily)
-            cl = week_daily[-1].close
-            wtd_vol = sum(b.volume for b in week_daily)
-            if constant_volume is not None:
-                vol = constant_volume
-            else:
-                vol = session.imputed_weekly_volume(
-                    wtd_vol, monday_local, ld, now_local,
-                )
+        for day in week.days:
             engine.restore(snap)
-            s, e = engine.apply(hi, lo, cl, vol)
+            s, e = engine.apply(day.high, day.low, day.close, day.volume)
             if _is_state_warmup(s):
                 continue
-            s = dict(s); s["trade_date"] = ld; s["bar_timestamp"] = w_monday
-            e = dict(e); e["trade_date"] = ld; e["bar_timestamp"] = w_monday
+            s = dict(s)
+            s["trade_date"] = day.date
+            s["bar_timestamp"] = week.monday
+            e = dict(e)
+            e["trade_date"] = day.date
+            e["bar_timestamp"] = week.monday
             state_rows.append(s)
             enrich_rows.append(e)
 
-        # advance past the week with its real full-volume bar
         engine.restore(snap)
-        real = real_by_monday.get(w_monday)
-        if real is not None:
-            adv_vol = (constant_volume if constant_volume is not None
-                       else real.volume)
-            engine.apply(real.high, real.low, real.close, adv_vol)
+        if week.real is not None:
+            engine.apply(
+                week.real.high, week.real.low, week.real.close, week.real_vol,
+            )
 
     return state_rows, enrich_rows
