@@ -60,7 +60,8 @@ class TestAssembly:
                     f"bars_since_{name}_peak", f"bars_since_{name}_trough",
                     f"{name}_leg_amplitude", f"{name}_leg_velocity",
                     f"{name}_turn_buy", f"{name}_turn_sell",
-                    f"move_since_{name}_turn"}
+                    f"move_since_{name}_turn",
+                    f"{name}_n_successive", f"{name}_leg_maturity"}
         exp |= {f"div_{o}" for o in ("srsi14", "smacd", "smoothed_RSI_diff")}
         exp |= {"srsi14", "srsi28", "smoothed_RSI_diff",
                 "ema_smoothed_RSI_diff", "smacd", "macd_hist", "sdosc",

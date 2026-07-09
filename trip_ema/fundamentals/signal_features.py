@@ -15,6 +15,9 @@ per-ticker (re-walk from the first bar), so no snapshot/restore here.
 """
 from __future__ import annotations
 
+from collections import deque
+from statistics import median
+
 import math
 
 from .causal_pivots import CausalPivotTracker
@@ -102,6 +105,11 @@ class SignalFeatureAssembler:
         self._latest: dict = {}
         self._mval: dict = {}
         self._mret: dict = {}
+        self._nsucc: dict = {}
+        self._lastdir: dict = {}
+        self._legamps: dict = {
+            name: deque(maxlen=52) for name, _s, _k in _MEMBERS
+        }
 
     def update(
         self, *,
@@ -123,7 +131,26 @@ class SignalFeatureAssembler:
         self._mret = {}
         for name, key, _k in _MEMBERS:
             self._mval[name] = src[key]
-            self._mret[name] = self._trk[name].update(self._bar, src[key])
+            trk = self._trk[name]
+            ret = trk.update(self._bar, src[key])
+            self._mret[name] = ret
+            if ret["peak_confirmed"] or ret["trough_confirmed"]:
+                if (trk.last_peak_value is not None
+                        and trk.last_trough_value is not None):
+                    self._legamps[name].append(
+                        abs(trk.last_peak_value - trk.last_trough_value)
+                    )
+                if ret["peak_confirmed"]:
+                    v, pv = trk.last_peak_value, trk.prev_peak_value
+                else:
+                    v, pv = trk.last_trough_value, trk.prev_trough_value
+                newdir = None if pv is None else ("UP" if v > pv else "DOWN")
+                if newdir is not None:
+                    if newdir == self._lastdir.get(name):
+                        self._nsucc[name] = self._nsucc.get(name, 0) + 1
+                    else:
+                        self._nsucc[name] = 1
+                    self._lastdir[name] = newdir
 
     def snapshot(self) -> tuple:
         """Capture engine + per-member tracker state + the closes length,
@@ -137,11 +164,14 @@ class SignalFeatureAssembler:
             dict(self._latest),
             dict(self._mval),
             dict(self._mret),
+            dict(self._nsucc),
+            dict(self._lastdir),
+            {n: tuple(d) for n, d in self._legamps.items()},
         )
 
     def restore(self, snap: tuple) -> None:
         (series_snap, trk_snaps, n_closes, bar, latest,
-         mval, mret) = snap
+         mval, mret, nsucc, lastdir, legamps) = snap
         self._series.restore(series_snap)
         for name, s in trk_snaps.items():
             self._trk[name].restore(s)
@@ -150,6 +180,11 @@ class SignalFeatureAssembler:
         self._latest = dict(latest)
         self._mval = dict(mval)
         self._mret = dict(mret)
+        self._nsucc = dict(nsucc)
+        self._lastdir = dict(lastdir)
+        self._legamps = {
+            n: deque(v, maxlen=52) for n, v in legamps.items()
+        }
 
     def features(self) -> dict:
         """The derived feature vector at the current bar (call at a
@@ -214,6 +249,17 @@ class SignalFeatureAssembler:
                     out[f"move_since_{name}_turn"] = _NAN
             else:
                 out[f"move_since_{name}_turn"] = _NAN
+
+            out[f"{name}_n_successive"] = self._nsucc.get(name, 0)
+            amps = self._legamps.get(name)
+            if (npb is not None and not _isnan(mv) and origin is not None
+                    and not _isnan(origin) and amps):
+                med_amp = median(amps)
+                out[f"{name}_leg_maturity"] = (
+                    abs(mv - origin) / med_amp if med_amp > 0 else _NAN
+                )
+            else:
+                out[f"{name}_leg_maturity"] = _NAN
 
         p_peak, p_trough = rels["med_ema"]
         for osc in _DIV_OSC:
