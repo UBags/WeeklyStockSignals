@@ -22,10 +22,16 @@ import math
 
 from .causal_pivots import CausalPivotTracker
 from .pattern_rules import (
+    LABEL_1_HIGHER_VALLEY,
+    LABEL_1_LOWER_TOP,
+    LABEL_2_HIGHER_VALLEYS,
+    LABEL_2_LOWER_TOPS,
+    LABEL_NA,
     REL_HH,
     REL_HL,
     REL_LH,
     REL_LL,
+    pattern_label,
     structure_labels,
 )
 from .structure_series import StructureSeriesEngine
@@ -58,6 +64,8 @@ _OSC_MEMBERS = frozenset({
     "srsi14", "smacd", "sdosc",
     "smoothed_RSI_diff", "ema_smoothed_RSI_diff",
 })
+_BUY_LABELS = frozenset({LABEL_2_HIGHER_VALLEYS, LABEL_1_HIGHER_VALLEY})
+_SELL_LABELS = frozenset({LABEL_2_LOWER_TOPS, LABEL_1_LOWER_TOP})
 
 # §4 raw levels this assembler owns (snapshotted into the S-group).
 _SERIES_KEYS = (
@@ -110,6 +118,9 @@ class SignalFeatureAssembler:
         self._legamps: dict = {
             name: deque(maxlen=52) for name, _s, _k in _MEMBERS
         }
+        self._lbl_buy: dict = {name: LABEL_NA for name, _s, _k in _MEMBERS}
+        self._lbl_sell: dict = {name: LABEL_NA for name, _s, _k in _MEMBERS}
+        self._plabel: dict = {}
 
     def update(
         self, *,
@@ -151,6 +162,26 @@ class SignalFeatureAssembler:
                     else:
                         self._nsucc[name] = 1
                     self._lastdir[name] = newdir
+            plbl = pattern_label(
+                ret["trough_confirmed"], ret["peak_confirmed"], src[key],
+                trk.last_trough_value, trk.prev_trough_value,
+                trk.last_peak_value, trk.prev_peak_value,
+                self._lbl_buy.get(name, LABEL_NA),
+                self._lbl_sell.get(name, LABEL_NA),
+                bars_since_last_buy=(
+                    self._bar - trk.last_trough_bar
+                    if trk.last_trough_bar is not None else None
+                ),
+                bars_since_last_sell=(
+                    self._bar - trk.last_peak_bar
+                    if trk.last_peak_bar is not None else None
+                ),
+            )
+            self._plabel[name] = plbl
+            if ret["trough_confirmed"] and plbl in _BUY_LABELS:
+                self._lbl_buy[name] = plbl
+            if ret["peak_confirmed"] and plbl in _SELL_LABELS:
+                self._lbl_sell[name] = plbl
 
     def snapshot(self) -> tuple:
         """Capture engine + per-member tracker state + the closes length,
@@ -167,11 +198,15 @@ class SignalFeatureAssembler:
             dict(self._nsucc),
             dict(self._lastdir),
             {n: tuple(d) for n, d in self._legamps.items()},
+            dict(self._lbl_buy),
+            dict(self._lbl_sell),
+            dict(self._plabel),
         )
 
     def restore(self, snap: tuple) -> None:
         (series_snap, trk_snaps, n_closes, bar, latest,
-         mval, mret, nsucc, lastdir, legamps) = snap
+         mval, mret, nsucc, lastdir, legamps,
+         lbl_buy, lbl_sell, plabel) = snap
         self._series.restore(series_snap)
         for name, s in trk_snaps.items():
             self._trk[name].restore(s)
@@ -185,6 +220,9 @@ class SignalFeatureAssembler:
         self._legamps = {
             n: deque(v, maxlen=52) for n, v in legamps.items()
         }
+        self._lbl_buy = dict(lbl_buy)
+        self._lbl_sell = dict(lbl_sell)
+        self._plabel = dict(plabel)
 
     def features(self) -> dict:
         """The derived feature vector at the current bar (call at a
@@ -260,6 +298,7 @@ class SignalFeatureAssembler:
                 )
             else:
                 out[f"{name}_leg_maturity"] = _NAN
+            out[f"{name}_pattern_label"] = self._plabel.get(name, LABEL_NA)
 
         p_peak, p_trough = rels["med_ema"]
         for osc in _DIV_OSC:
