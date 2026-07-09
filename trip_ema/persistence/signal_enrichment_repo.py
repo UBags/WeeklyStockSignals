@@ -9,11 +9,24 @@ signal_type).
 from __future__ import annotations
 
 import json
+import math
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from ..domain.signal_enrichment import SignalEnrichment
+
+
+def _json_safe(obj):
+    """Recursively replace non-finite floats (NaN/Inf) with None so the
+    result is valid JSON for a JSONB column (Postgres rejects NaN)."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 _COLUMNS = """
     ticker_id, timeframe, signal_date, signal_type,
@@ -100,7 +113,7 @@ class SignalEnrichmentRepository:
             "tid": row.ticker_id, "tf": row.timeframe,
             "sd": row.signal_date, "st": row.signal_type,
             "ind": row.industry_id,
-            "feat": json.dumps(row.features),
+            "feat": json.dumps(_json_safe(row.features)),
             "ver": row.feature_spec_version,
             "r4": row.fwd_ret_4w, "r8": row.fwd_ret_8w,
             "r13": row.fwd_ret_13w, "dd": row.fwd_max_dd,
