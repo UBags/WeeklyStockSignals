@@ -61,8 +61,20 @@ def _metrics_for_industry(conn, industry, session, window):
         else:
             active[c.ticker_id] = (fm, to)
 
+    # ranked set = every stock mapped to this industry, plus the
+    # constituents; reference (distribution) set = the constituents.
+    ranked_ids = {
+        r.ticker_id
+        for r in conn.execute(
+            text("SELECT ticker_id FROM instrument_industry "
+                 "WHERE industry = :ind"),
+            {"ind": industry},
+        ).all()
+    }
+    ranked_ids |= set(active)
+
     closes: dict = {}
-    for t in active:
+    for t in ranked_ids:
         daily = BarsRepository(conn).fetch_since(t, Timeframe.DAILY, _EPOCH)
         if not daily:
             continue
@@ -71,7 +83,10 @@ def _metrics_for_industry(conn, industry, session, window):
         )
         closes[t] = {b.timestamp: b.close for b in weekly}
 
-    ranks = compute_rs_rank_by_week(closes, active, window=window)
+    reference_closes = {t: closes[t] for t in active if t in closes}
+    ranks = compute_rs_rank_by_week(
+        closes, reference_closes, active, window=window,
+    )
     out: list[SectorStockMetric] = []
     for t, rmap in ranks.items():
         for monday, rr in rmap.items():
