@@ -1,10 +1,16 @@
-# WeeklyStockSignals — Enrichment Feature Spec (v0.3, design/review)
+# WeeklyStockSignals — Enrichment Feature Spec (v0.4, AS-BUILT)
 
 Causal feature definitions for the signal-quality model (Bad / Good / Very Good).
 All features are computed on **weekly** bars and are **strictly causal** (no
 lookahead); forward returns / drawdowns are *labels*, defined separately in §13.
 
-Status: **design draft for review** — not yet implemented. Build order in §14.
+Status: **IMPLEMENTED** — the full 217 are built, populated, and verified on NSE
+(`feature_spec_version = 'v0.4'`). This document now has two layers: §1–§19 +
+Appendix A are the **original design** (kept verbatim for provenance), and
+**Part II — As-Built Record** (after Appendix A) documents what was actually
+built, every deviation from this design, the data we saw at each step, and
+commentary. Where the two disagree, **Part II is authoritative.** Inline
+`> **As-built:**` notes flag the load-bearing deviations at their point of use.
 
 ---
 
@@ -237,6 +243,14 @@ rs_rank_t = pctrank of the stock's N-week return among its industry's constituen
 A stock making HH+HL on `rs` (structurally outperforming its sector) is a strong
 Very-Good filter.
 
+> **As-built (§20.2.a):** only the two manifest columns shipped — `rs_ema`
+> (Tier-2, merged into the JSONB at the walk) and `rs_rank` (Tier-3, in
+> `sector_stock_leadlag`). "Run §5–§8 structure on `rs`" was **deferred** — the
+> manifest never counted those columns. `rs_rank` uses an **N=4-week** return
+> window and, by an explicit coverage decision, ranks **every** stock mapped to
+> the industry against the **constituent** reference set (not just constituents
+> among themselves) — see §20.3.b for why and the coverage payoff.
+
 ---
 
 ## 12. Other curated features
@@ -269,6 +283,13 @@ class:  Bad       = fwd_ret < 0  or  fwd_max_dd large
 ```
 Thresholds tuned on data. These use future bars — computed offline for labeling
 only; never present in the live feature vector.
+
+> **As-built (§20.2.c):** labels were moved **out of the 217 vector entirely**
+> into a dedicated `signal_labels` table (FK to `signal_enrichment`, cascade),
+> with a `horizon_complete` flag so incomplete-horizon signals are excluded from
+> training. They are targets, not features, and keeping them physically separate
+> from the causal vector removes any risk of leakage. Thresholds shipped as
+> **untuned placeholders** (see §20.2.c); the observed class split is in §20.3.a.
 
 ---
 
@@ -332,6 +353,11 @@ r^{I\s}_t = r^I_t                                # non-constituents (w_s=0)
 ```
 Carry `is_constituent` so the model can weight the two groups differently.
 
+>  **As-built (§20.2.d):** both windows shipped as **separate rows**
+> (`window=52` and `window=260`) in `sector_stock_leadlag`, sharing the table
+> with `rs_rank` (`window=4`). `is_constituent` was added (migration 0043). The
+> at-signal features (§16.5) read the `window=52` row. Data + commentary: §20.3.c.
+
 ### 16.3 Measures (rolling 52w AND full 5y)
 ```
 insync_corr   = corr(r^s_t, r^{I\s}_t)                       # lag 0
@@ -362,6 +388,13 @@ coupling_class:
 ---
 
 ## 17. Industry × industry regime correlation matrix + influential ensemble (item 2)
+
+>  **As-built (§20.2.e):** shipped with **breadth** as the regime proxy
+> (the spec's *best* option), the **cross-industry mean** as the market factor,
+> and **three ensemble variants** (`floor`/`mid`/`strict`) instead of a single
+> (θ, M). A **single current matrix snapshot** is stored (per §17.3), which
+> means historical signals read current correlations — a known, bounded
+> look-ahead (§20.6). Data + the payoff: §20.3.d–f.
 
 ### 17.1 Regime proxy (continuous ≫ discrete)
 Step-function `{−1,0,+1}` labels correlate poorly. Prefer a continuous regime
@@ -601,3 +634,316 @@ prune ≈ 103   (T 77 + N 10 + C 3 + …)   ← widen only on proven importance
 ```
 If you want the lean first cut, drop groups T-prune + N + C-prune → **~114 core**;
 the full **217** is the ceiling as requested.
+
+
+---
+---
+
+# Part II — As-Built Record (implementation, deviations, data & commentary)
+
+> Everything below reflects what was actually built and measured on the NSE
+> universe (~2,673 active tickers, 93 indexed industries, ~45.5k historical
+> signals). Numbers are from the live `trip_ema` PostgreSQL 18 database at build
+> time. Commentary is the engineer's read of each result — flagged **‹comment›**.
+
+## 20.1 The architecture that emerged — three tiers
+
+The single biggest design decision (not spelled out in §1–§19) was **where each
+feature physically lives and computes**, driven by a hard rule: *keep the
+per-signal causal engine pure single-entity.* Features were sorted into three
+tiers by their data dependency and cadence:
+
+| Tier | What | Where it lives | Cadence |
+|---|---|---|---|
+| 1 | Single-entity causal (the stock's own series) | `signal_enrichment.features` JSONB | per signal |
+| 2 | Per-stock cross-entity **causal series** (`rs_ema`) | merged into the same JSONB at the walk | per signal |
+| 3 | Cross-sectional / cross-industry **materialized analytics** | dedicated tables, joined at read-time | weekly |
+
+**The load-bearing decision.** The `SignalFeatureAssembler` has one invariant —
+*given one stock's bar stream, emit its causal per-bar vector.* Cross-entity
+inputs (`rs_ema` needs the industry index; `rs_rank` needs all constituents; §16
+needs the index return series; §17 needs every industry) were **not** threaded
+through `update()`. Instead:
+
+- **Tier 2** (`rs_ema`) is computed in a separate `signal_cross_entity` layer and
+  **merged into the feature dict at the walk** as-of the last converged week —
+  the assembler never sees the industry index.
+- **Tier 3** (`rs_rank`, §16, §17) is **materialized in weekly-recompute tables**
+  and joined at training-load time, exactly as §16.4/§17.3 designed.
+
+**‹comment›** This is the decision I'd defend hardest. Smuggling a second
+entity's data through the single-entity `update()` works for one scalar
+(`rs_ema`) but poisons the abstraction: it doesn't generalize to `rs_rank`
+(N constituents), §16 (cross-industry series), or §17 (a 93×93 matrix), and it
+couples a weekly-cadence value into a signal-cadence engine. Two clean layers —
+a pure assembler and a materialized analytics layer joined by key — cost more
+plumbing but keep every future cross-sectional feature a *table + join*, not a
+fresh hack in the hot path. "Complete" therefore means **all 217 reachable**
+(194 in the JSONB + 13 already-joined + 10 in Tier-3 tables), not all 217 in one
+column.
+
+## 20.2 Deviations from the design (§1–§19), by section
+
+**(a) §4.7 / §11 — relative strength.** Only `rs_ema` (Tier 2) and `rs_rank`
+(Tier 3) shipped. "Run §5–§8 structure on `rs`" (an `rs_pattern` / `rs`
+lag/pdisp member) was **deferred** — the 217 manifest only ever counted the two
+scalar columns. `rs_ema = EMA₁₃(close/industry_index)`, rebased to 1.0 at the
+first week both series exist, merged at the walk as-of the last converged week
+(the slow EMA makes the ≤1-week forming lag immaterial).
+
+**(b) §11 — `rs_rank` coverage.** The spec phrase "pctrank of the stock's N-week
+return among its industry's constituents" was implemented as **coverage (b)**:
+rank *every* stock mapped to the industry against the **constituent reference
+set**, rather than ranking constituents among themselves. This changed coverage
+of index-era signals from ~19% to ~90% (§20.3.b). `N = 4` weeks (monthly
+momentum). Active `[effective_from, effective_to]` windows gate which
+constituents form each week's reference distribution.
+
+**(c) §13 — labels out of the vector.** Labels live in a separate `signal_labels`
+table (migration 0041), never in the 217 JSONB. Directional convention:
+`BUY`/`EXIT_FROM_SELL` → +1, `SELL`/`EXIT_FROM_BUY` → −1; the quality class is
+judged on the directional return. `horizon_complete` gates training rows.
+**Thresholds are untuned placeholders** (`RET_VERYGOOD=0.10`, `DD_VERYGOOD=0.08`,
+`RR_VERYGOOD=1.5`, `DD_BAD=0.15`) — deliberately parked for a separate
+results-table tuning pass, so the split in §20.3.a should be read as a sanity
+check, not a calibrated target.
+
+**(d) §16 — sector lead/lag.** Built as **column-fills on `sector_stock_leadlag`**
+(not a new table), with `is_constituent` added (migration 0043). Both windows
+(52w, 260w) stored as **separate rows**; the `window` column therefore does
+double duty (`4` = `rs_rank`'s return window, `52`/`260` = §16's correlation
+window). The §16.5 at-signal features read the `window=52` row via read-time
+join — they are **not** copied into the JSONB (deviates from §19's "copied into
+the signal row" — see (g)). Debias, ±4 lag scan, `2/√n_obs` floor, and
+LEADER/LAGGARD/COUPLED/DECOUPLED all per spec.
+
+**(e) §17 — regime matrix + ensemble.** Regime proxy = **breadth** (mean
+constituent `display_regime`; the spec's *best* option). Market factor = the
+**cross-industry mean** (not NIFTY). The ensemble was materialized under **three
+(θ, M) variants** — `floor` (2/√n, M=10), `mid` (max(2/√n, 0.15), M=10),
+`strict` (0.25, M=8) — rather than one, so a model can learn which coupling
+strictness is most predictive. A **single current matrix snapshot** is stored.
+The four §17.5 features are materialized per signal **per variant** in
+`signal_ensemble_features`.
+
+**(f) §19 — persistence grain.** Kept signal-grain, but the 194 causal features
+live in a **JSONB `features` column** rather than 194 physical columns (cleaner
+migrations; the manifest is logical, not a table DDL). Tier-3 features are **not
+copied into the signal row** — they stay in their weekly tables and are joined
+at read-time. This is a deliberate departure from §19's "looked up and copied
+into the signal row": copying would re-introduce the weekly→signal cadence
+coupling the tiering exists to avoid, and duplicate ~10 columns × 3 variants
+across 45k rows for no benefit over a keyed join.
+
+**(g) Manifest reconciliation, as-built.** 217 = **194** JSONB (191 assembler +
+`vol_at_pivot` + `accumulation` + `rs_ema`) **+ 13** already-joined (11 from
+`stock_indicator_state`, 2 pierces from `stock_indicator_enrichment`) **+ 10**
+Tier-3 (`rs_rank` ×1, §16 ×4, §17.5 ×5). The manifest's group boundaries (S/T/…)
+are preserved; only the physical home changed.
+
+## 20.3 Data findings & commentary
+
+### 20.3.a Labels — the training target's shape
+Full NSE, `horizon_complete`:
+
+| class | count | pct |
+|---|---|---|
+| BAD | 27,477 | 62.6% |
+| GOOD | 12,339 | 28.1% |
+| VERY_GOOD | 4,047 | 9.2% |
+
+By signal type (BAD / GOOD / VERY_GOOD): BUY 11,827 / 5,025 / 2,227 ·
+SELL 12,329 / 5,822 / 1,337 · EXIT_FROM_BUY 1,656 / 761 / 202 ·
+EXIT_FROM_SELL 1,665 / 731 / 281.
+
+**‹comment›** The ~63/28/9 split is healthy for an untuned labeller — most
+signals *don't* lead to a large clean directional move over 13 weeks, which is
+exactly what you'd expect and why a quality model is worth building. The
+BUY-vs-SELL asymmetry in VERY_GOOD (2,227 vs 1,337) is real economics, not a
+bug: over 2004–2026 (a broadly rising market) long setups produced clean moves
+more often than shorts. This is a *sanity* distribution — with thresholds
+untuned, don't read 9.2% VERY_GOOD as a calibrated base rate.
+
+### 20.3.b `rs_rank` — the coverage decision paid off
+Constituents-only first cut: 264,623 rows / 1,143 tickers / 93 industries,
+mean rank 0.551, but only **~19%** of index-era signals joined (constituents are
+a minority of tradeable stocks). After coverage (b) — ranking all industry
+stocks against the constituent set — the at-signal join reached **18,503 signals,
+89.5% of index-era, mean rank 0.525.**
+
+**‹comment›** A relative-strength feature present on only a fifth of signals is
+near-useless to a model; 90% coverage makes it a first-class input. The mean
+sitting slightly above 0.5 (0.525–0.551) is expected, not a bug: it's a
+percentile, so it *must* center near 0.5, and the small upward bias comes from
+survivorship (tickers with full history skew mildly positive) plus ties
+resolving upward (`≤` in the rank). The ~10% still-uncovered are correct NULLs —
+pre-2020 (before the index `base_date`) or industries with no reference set.
+
+### 20.3.c §16 — the debias signature is unmistakable
+`sector_stock_leadlag` by window:
+
+| window | rows | has_corr | mean_insync | constituent_rows |
+|---|---|---|---|---|
+| 4 (rs_rank) | 579,885 | 0 | — | 0 |
+| 52 | 462,987 | 462,987 | 0.376 | 207,087 |
+| 260 | 96,309 | 96,309 | 0.373 | 40,536 |
+
+Coupling (window 52): COUPLED 300,382 · DECOUPLED 90,590 · LAGGARD 38,519 ·
+LEADER 33,496. At-signal join (window 52): 15,026 signals, **72.3%** of
+index-era, mean insync 0.383.
+
+**‹comment›** `mean_insync ≈ 0.376` is the tell that the leave-one-out debias is
+*working*. Without it you'd see ~0.7+ (a stock is mechanically correlated with an
+index it's part of); with it you get the genuine co-movement after the
+self-inclusion is removed — positive (stocks do follow their sector) but not
+degenerate. The coupling mix (~65% COUPLED, ~20% DECOUPLED, LEADER≈LAGGARD) is
+economically sane and, crucially, LEADER and LAGGARD are near-symmetric, which is
+what an unbiased lead/lag estimator should produce. The 72.3% coverage (vs
+`rs_rank`'s 89.5%) is the price of a 52-week correlation warm-up — signals in a
+stock's first index-era year legitimately have no correlation history yet.
+
+### 20.3.d §17 — the matrix is textbook-clean
+`industry_regime_corr` (window 260): **8,556 directed pairs** (= 93×92, complete),
+93 industries, **mean_corr = −0.012**, **mean_abs_corr = 0.196**, and
+**leads = lags = 3,885** with 786 contemporaneous.
+
+**‹comment›** Three things here are the good kind of boring. `mean_corr ≈ 0`
+proves the §17.2 market-factor removal centered the distribution — the
+"everything's bullish in a bull market" factor is gone. `mean_abs_corr ≈ 0.20`
+says real structure survives without a common factor dominating. And
+`leads == lags` *exactly* (3,885 = 3,885) is the strongest possible check on the
+sign convention: the matrix must be anti-symmetric in `best_lag` (if j leads i,
+then i lags j), and it is, to the row. If that had been asymmetric I'd have
+suspected a shift-direction bug immediately.
+
+### 20.3.e §17 — ensembles, and a redundancy worth noting
+`influential_industry_ensemble`: `floor` 922 members, `mid` 922, `strict` 743;
+leaders 326/326/270; counter-movers 491/491/400. Breadth series: 26,850 rows,
+93 industries, mean 0.032, spanning 2020-03-30 … 2026-07-06.
+
+**‹comment›** `floor` and `mid` came out **identical** (922 each). Not a bug: the
+M=10 cap selects each industry's top-10 strongest couplings, which all clear both
+thresholds (0.124 and 0.15), so the [0.124, 0.15) band only holds rank-11+
+members that are capped out anyway. The variants would diverge only if M rose or
+an industry were sparsely coupled. Harmless to keep, but if trimming, drop `mid`
+or raise its M. More interesting: **counter-movers (491) outnumber co-movers
+(431)**. That's a feature of *residualized* regime correlation — once the common
+market factor is removed, sector rotation shows up as anti-correlation (money
+leaving one sector for another), so negative couplings are expected to be common.
+Breadth mean ≈ 0.03 (near zero, slight bull tilt) confirms the regime proxy is
+balanced over time rather than stuck.
+
+### 20.3.f §17.5 — the payoff: the ensemble carries real signal
+`signal_ensemble_features` per variant: rows 18,808 (floor=mid), 18,808 (strict);
+confirm_rate ≈ 0.506/0.503; mean_score ≈ 0.02/0.05; mean_agreement ≈ 0.457.
+The discriminating test (`mid`, horizon-complete signals joined to labels):
+
+| `ensemble_confirms` | n | GOOD+VERY_GOOD | VERY_GOOD | BAD |
+|---|---|---|---|---|
+| false | 8,660 | 36.9% | 9.0% | 63.1% |
+| true | 8,845 | **40.4%** | **10.7%** | **59.6%** |
+
+**‹comment›** This is the whole point of §11→§17 justifying itself. A confirming
+industry-regime ensemble lifts the good-outcome rate by **+3.5pp** and VERY_GOOD
+by **+1.7pp**. With ~8.8k signals per group the standard error on a ~40% rate is
+~0.5pp, so a 3.5pp separation is roughly **4–5σ** — not noise. The
+`confirm_rate ≈ 0.50` and `mean_score ≈ 0` confirm the feature is *balanced*
+(it's not trivially predicting "everything up"), so the lift is genuine
+discrimination, not a base-rate artifact. It's a modest edge in absolute terms —
+this is one feature family among ~217, not a standalone strategy — but it's a
+real, measurable, independent signal, which is exactly what you want feeding a
+quality model.
+
+## 20.4 Bugs found & fixed (hard-won, worth remembering)
+
+- **`window` is a reserved word in PostgreSQL.** Unquoted in raw SQL it's a
+  parser error. Bit us **twice** — first in the `rs_rank` INSERT, then again when
+  the §16a repo overwrite silently reverted the fix (the overwrite was rebased
+  from a stale local copy that predated the quote-fix). Lesson: *quote reserved
+  identifiers* (`"window"`, and screen `order`/`user`/`value`), and *rebase every
+  file overwrite from the live tree, never a local canonical.*
+- **tz-boundary `.date()` → Sunday.** Weekly bar timestamps are Monday-00:00-IST
+  stored as UTC (Sunday 18:30 UTC), so `.date()` on the raw instant yields
+  **Sunday**, one day off from `date_trunc('week')`'s Monday — every read-time
+  join returned 0 rows. Fix: `ts.astimezone(session.zone).date()` before storing
+  any "week date." This hazard recurs anywhere a week key is derived from these
+  timestamps (§16/§17 all convert to IST before `.date()`).
+- **`run_phase` marked FAILED-as-COMPLETE.** A phase whose runner returned a
+  `FanOutOutcome` with failed items was still recorded COMPLETE (it returned
+  without raising), so a resume *skipped* it — which is precisely how the first
+  `window` bug "silently completed." Fix: duck-type on `.failed`; non-empty →
+  record FAILED (resume retries) without raising (backfill continues). The
+  pipeline is now fail-loud across every fan-out phase.
+
+## 20.5 Physical layout & the training-matrix join
+
+```
+signal_enrichment.features   JSONB, 194, feature_spec_version='v0.4'
+  191 assembler  +  vol_at_pivot, accumulation (C3)  +  rs_ema (§11a merge)
+
+sector_stock_leadlag         (ticker_id, asof_date, "window")
+  window=4  : rs_rank                                        (§11b)
+  window=52 : insync_corr, best_lag, lead_lag_corr,
+              beta_sector, coupling_class, is_constituent    (§16, primary)
+  window=260: same, 5y                                       (§16)
+  join: ticker_id + asof_date=date_trunc('week',signal_date)::date + "window"
+
+signal_ensemble_features     (signal_enrichment_id, variant)
+  ensemble_score, ensemble_confirms, ensemble_agreement,
+  n_leaders_bull, n_leaders_bear                             (§17.5)
+  join: signal_enrichment_id + variant
+
+industry_regime_corr / industry_regime_breadth /
+influential_industry_ensemble  — FEED §17.5; not joined to signals directly
+
+signal_labels                (signal_enrichment_id)          ← targets, not features
+  fwd_ret_4w/8w/13w, fwd_max_dd, fwd_rr, quality_class, horizon_complete
+```
+
+Full training matrix (note the **two** `sector_stock_leadlag` joins — `rs_rank`
+at window 4, §16 at window 52):
+
+```sql
+SELECT e.signal_enrichment_id, e.ticker_id, e.signal_date, e.signal_type,
+       e.features,                                          -- 194 (JSONB)
+       rr.rs_rank,                                          -- §11b
+       s16.insync_corr, s16.best_lag AS sector_lead_lag,
+       s16.beta_sector, s16.coupling_class, s16.is_constituent,   -- §16
+       sef.ensemble_score, sef.ensemble_confirms, sef.ensemble_agreement,
+       sef.n_leaders_bull, sef.n_leaders_bear,              -- §17.5
+       l.quality_class, l.fwd_ret_13w                       -- targets
+FROM signal_enrichment e
+LEFT JOIN sector_stock_leadlag rr
+  ON rr.ticker_id=e.ticker_id
+ AND rr.asof_date=date_trunc('week',e.signal_date)::date AND rr."window"=4
+LEFT JOIN sector_stock_leadlag s16
+  ON s16.ticker_id=e.ticker_id
+ AND s16.asof_date=date_trunc('week',e.signal_date)::date AND s16."window"=52
+LEFT JOIN signal_ensemble_features sef
+  ON sef.signal_enrichment_id=e.signal_enrichment_id AND sef.variant='mid'
+LEFT JOIN signal_labels l
+  ON l.signal_enrichment_id=e.signal_enrichment_id;
+```
+
+## 20.6 Known caveats & future work (none blocking)
+
+1. **§17 look-ahead.** A single *current* matrix snapshot is stored, so historical
+   signals read present-day correlations. Regime correlations are slow-moving so
+   the bias is mild, but for clean point-in-time training the matrix should be
+   recomputed per-week-historical (≈260× the compute; the spec's "store the whole
+   matrix" chose the snapshot). Until then, treat §17.5 features on old signals as
+   mildly optimistic.
+2. **§16 recompute cost.** The 52w+260w correlations over full history × all
+   industry stocks is the heaviest phase (~17 min). An incremental mode (recompute
+   only recent weeks; old correlations don't change) would cut it sharply.
+3. **Significance floor under a lag scan.** `2/√n_obs` is the single-correlation
+   threshold; scanning 9 lags and taking the max inflates false positives
+   (multiple comparisons). Spec-literal for now; a Bonferroni/√(scan) adjustment
+   would tighten DECOUPLED classification.
+4. **`floor` ≡ `mid` ensemble variants** (§20.3.e) — currently identical; drop one
+   or re-tune M if the storage/compute matters.
+5. **Label thresholds untuned** (§20.2.c) — parked for the results-table tuning
+   pass; the §20.3.a split is a placeholder, not a calibrated target.
+6. **`rs` structure member deferred** (§20.2.a) — if `rs_pattern`/`rs` lag/pdisp
+   prove wanted, they slot into the Tier-2 cross-entity layer via the existing
+   structure engine on the `rs` series.
