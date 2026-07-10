@@ -37,7 +37,7 @@ from .signal_enrichment_walk import compute_ticker_signal_enrichments
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SPEC_VERSION = "v0.3"
+DEFAULT_SPEC_VERSION = "v0.4"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
