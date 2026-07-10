@@ -2073,6 +2073,35 @@ def build_rebalance_chain(
     }
 
 
+def clear_industry_derived_for_rebuild(db_engine: Engine) -> dict:
+    """Delete all DERIVED industry data for ACTIVE indices so a forced
+    (--rebuild) run rebuilds from scratch.
+
+    The industry pipeline's writes are insert-if-missing (ON CONFLICT DO
+    NOTHING), so a plain re-run keeps stale values / state / enrichment, and
+    the rebalance chain inverts an effective period when it re-closes an
+    already-open row. Clearing the derived tables first makes --rebuild a
+    true from-scratch rebuild. Index DEFINITIONS (industry_index) are left
+    intact. Delete order respects FKs (enrichment cascades from state)."""
+    active = (
+        "industry_name IN (SELECT industry_name FROM industry_index "
+        "WHERE status = 'ACTIVE')"
+    )
+    counts: dict[str, int] = {}
+    with transaction(db_engine) as conn:
+        for tbl in (
+            "industry_indicator_enrichment",
+            "industry_indicator_state",
+            "industry_index_value",
+            "industry_index_constituent",
+            "industry_index_period",
+        ):
+            res = conn.execute(text(f"DELETE FROM {tbl} WHERE {active}"))
+            counts[tbl] = res.rowcount
+    logger.info("clear_industry_derived_for_rebuild: %s", counts)
+    return counts
+
+
 def build_all_industry_index_chains(
     db_engine: Engine,
     exchange: str,

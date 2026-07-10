@@ -63,7 +63,10 @@ from ..persistence import transaction
 from .phase_ledger import run_phase, reset_phases
 from ..fundamentals.parallel import fan_out
 from ..fundamentals.market_cap_compute import populate_market_cap_range
-from ..fundamentals.runners import build_all_industry_index_chains
+from ..fundamentals.runners import (
+    build_all_industry_index_chains,
+    clear_industry_derived_for_rebuild,
+)
 from ..fundamentals.signal_enrichment_runner import backfill_signal_enrichment
 from ..fundamentals.sector_metrics_runner import backfill_sector_metrics
 from ..fundamentals.industry_regime_runner import backfill_industry_regime_matrix
@@ -336,6 +339,17 @@ def backfill(
                 progress_cb, "stage_3b_market_cap",
                 f"completed: ~{_r} mcap rows",
             )
+
+        # ---- On --rebuild only: clear DERIVED industry data so the
+        # rebuild is from-scratch. The index pipeline writes insert-if-
+        # missing (ON CONFLICT DO NOTHING), so a forced re-run would else
+        # keep stale values/state and invert rebalance periods. ----
+        if _force:
+            _emit_progress(
+                progress_cb, "industry_rebuild_clear",
+                "clearing derived industry tables for --rebuild",
+            )
+            clear_industry_derived_for_rebuild(db_engine)
 
         # ---- Stage 3c: build industry indices (per exchange) ----
         _emit_progress(
