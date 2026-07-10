@@ -340,34 +340,83 @@ def backfill(
                 f"completed: ~{_r} mcap rows",
             )
 
-        # ---- On --rebuild only: clear DERIVED industry data so the
-        # rebuild is from-scratch. The index pipeline writes insert-if-
-        # missing (ON CONFLICT DO NOTHING), so a forced re-run would else
-        # keep stale values/state and invert rebalance periods. ----
+        # ---- SCOPED-INDUSTRY-REBUILD: chain build vs scoped reuse. ----
+        # A forced run is FULL (rebuild chains from origin) when date_from
+        # reaches the index origin, and SCOPED (reuse existing constituents)
+        # when date_from is after it. Chain-building is inherently a
+        # from-origin operation (build_all_industry_index_chains anchors on
+        # the earliest mcap date), so a later date_from can only reuse chains,
+        # never rebuild them for a window. iiv[D] is date-independent (a
+        # weighted sum of constituent closes on D), so windowing iiv is
+        # correct; the full state+enrichment recompute in stages 5/6 then
+        # propagates the windowed iiv change forward through the stateful
+        # EMA/ATR indicators. origin = MIN(base_date) over ACTIVE indices;
+        # chains are "built" iff industry_index_period has rows for an
+        # ACTIVE index (the global clear wipes periods+constituents but keeps
+        # the industry_index definitions, so base_date alone is insufficient).
+        _scoped_industry_rebuild = False
         if _force:
-            _emit_progress(
-                progress_cb, "industry_rebuild_clear",
-                "clearing derived industry tables for --rebuild",
+            with db_engine.connect() as _c:
+                _origin = _c.execute(text(
+                    "SELECT MIN(base_date) FROM industry_index "
+                    "WHERE status = 'ACTIVE'"
+                )).scalar()
+                _chains_built = bool(_c.execute(text(
+                    "SELECT EXISTS (SELECT 1 FROM industry_index_period p "
+                    "JOIN industry_index i "
+                    "ON i.industry_name = p.industry_name "
+                    "WHERE i.status = 'ACTIVE')"
+                )).scalar())
+            _scoped_industry_rebuild = (
+                _origin is not None and date_from > _origin
             )
-            clear_industry_derived_for_rebuild(db_engine)
+            if _scoped_industry_rebuild and not _chains_built:
+                raise ValueError(
+                    f"scoped rebuild: date_from ({date_from}) is after the "
+                    f"industry index origin ({_origin}), which reuses existing "
+                    f"constituents — but no industry chains are built. Run a "
+                    f"full rebuild first with --date_from <= {_origin}."
+                )
 
-        # ---- Stage 3c: build industry indices (per exchange) ----
-        _emit_progress(
-            progress_cb, "stage_3c_industry_index_build", "starting",
-        )
-        _r = run_phase(
-            db_engine, exchange, "industry_index_build",
-            lambda: _stage_industry_index_build(
-                db_engine, exchange=exchange, through=date_to,
-                progress_cb=progress_cb,
-            ),
-            backfill_run_id=run_id, force=_force,
-        )
-        if _r is not None:
+        if _scoped_industry_rebuild:
+            # SCOPED: reuse constituents. Skip the global (unscoped) clear —
+            # it deletes constituents+periods for ALL active industries and
+            # would force a from-scratch rebuild — and skip stage_3c chain
+            # build. Derived data for [date_from, today] is recomputed by
+            # stages 3d/5/6 below.
             _emit_progress(
                 progress_cb, "stage_3c_industry_index_build",
-                f"completed: {_r} chains",
+                "skipped (scoped rebuild — reusing existing constituents)",
             )
+        else:
+            # FULL: clear DERIVED industry data so the rebuild is from-scratch.
+            # The index pipeline writes insert-if-missing (ON CONFLICT DO
+            # NOTHING), so a forced re-run would else keep stale values/state
+            # and invert rebalance periods.
+            if _force:
+                _emit_progress(
+                    progress_cb, "industry_rebuild_clear",
+                    "clearing derived industry tables for --rebuild",
+                )
+                clear_industry_derived_for_rebuild(db_engine)
+
+            # ---- Stage 3c: build industry indices (per exchange) ----
+            _emit_progress(
+                progress_cb, "stage_3c_industry_index_build", "starting",
+            )
+            _r = run_phase(
+                db_engine, exchange, "industry_index_build",
+                lambda: _stage_industry_index_build(
+                    db_engine, exchange=exchange, through=date_to,
+                    progress_cb=progress_cb,
+                ),
+                backfill_run_id=run_id, force=_force,
+            )
+            if _r is not None:
+                _emit_progress(
+                    progress_cb, "stage_3c_industry_index_build",
+                    f"completed: {_r} chains",
+                )
 
         # ---- Stage 3d: backfill industry index values ----
         # The ONLY industry-index-value pass. Shares the
@@ -470,6 +519,7 @@ def backfill(
                 db_engine,
                 scoped_tickers=scoped_tickers,
                 from_monday=from_monday,
+                to_date=date_to,
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -810,12 +860,20 @@ def _stage_delete_historical(
     db_engine, *,
     scoped_tickers: list[int],
     from_monday: date,
+    to_date: date,
 ) -> int:
-    """Stage 7: DELETE historical_signals for scoped tickers where
-    `computed_at >= from_monday`. Uses the new
-    `delete_for_tickers_from_date` repo method."""
+    """Stage 7: DELETE historical_signals for scoped tickers with
+    computed_at in [from_monday, end-of-day(to_date)].
+
+    DELETE-UPPER-BOUND: bounding the upper edge to the walk's date_to is
+    required — the daywalk only regenerates [date_from, date_to], so an
+    unbounded delete would leave a hole of missing signals in
+    (date_to, today] on any bounded (to_date < today) run."""
     from_dt = datetime.combine(
         from_monday, time(0, 0), tzinfo=UTC,
+    )
+    to_dt = datetime.combine(
+        to_date, time(23, 59, 59, 999999), tzinfo=UTC,
     )
     with transaction(db_engine) as conn:
         return HistoricalSignalsRepository(
@@ -823,6 +881,7 @@ def _stage_delete_historical(
         ).delete_for_tickers_from_date(
             ticker_ids=scoped_tickers,
             from_date=from_dt,
+            to_date=to_dt,
         )
 
 

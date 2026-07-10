@@ -64,27 +64,36 @@ class HistoricalSignalsRepository:
         *,
         ticker_ids: list[int],
         from_date: datetime,
+        to_date: datetime | None = None,
     ) -> int:
         """Delete historical_signals rows for the given ticker_ids
-        where computed_at >= from_date.
+        where computed_at >= from_date (and <= to_date when given).
 
         Step 11b1 (backfill): breaks the original "pure append-only"
         invariant — backfill needs to wipe rows in a historical range
         before re-inserting fresh ones. The rotation primitive (Step 4)
         still treats historical as append-only.
 
+        DELETE-UPPER-BOUND: to_date bounds the delete to the walk's upper
+        edge. The daywalk only regenerates [date_from, date_to], so an
+        unbounded delete on a bounded run would leave a hole of missing
+        signals in (date_to, today]. to_date=None preserves the original
+        unbounded behaviour for non-backfill callers.
+
         Returns the row count deleted.
         """
         if not ticker_ids:
             return 0
-        result = self._conn.execute(
-            text("""
-                DELETE FROM historical_signals
-                 WHERE ticker_id = ANY(:ids)
-                   AND computed_at >= :from_dt
-            """),
-            {"ids": ticker_ids, "from_dt": from_date},
+        sql = (
+            "DELETE FROM historical_signals "
+            "WHERE ticker_id = ANY(:ids) "
+            "AND computed_at >= :from_dt"
         )
+        params: dict = {"ids": ticker_ids, "from_dt": from_date}
+        if to_date is not None:
+            sql += " AND computed_at <= :to_dt"
+            params["to_dt"] = to_date
+        result = self._conn.execute(text(sql), params)
         return result.rowcount
 
     def delete_for_tickers_on_date(
