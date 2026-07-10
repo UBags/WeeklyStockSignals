@@ -31,11 +31,13 @@ def compute_ticker_signal_enrichments(
     session,
     now,
     feature_spec_version: str,
+    rs_ema_by_monday: dict | None = None,
     industry_id: int | None = None,
 ) -> list[SignalEnrichment]:
     signal_dates = list(signals_by_date.keys())
     asm = SignalFeatureAssembler()
     rows: list[SignalEnrichment] = []
+    cur_rs_ema = _NAN
 
     for week in weekly_forming_walk(
         daily_bars, session=session, now=now,
@@ -55,6 +57,7 @@ def compute_ticker_signal_enrichments(
                 regime=st[6], volume=day.volume,
             )
             feats = asm.features()
+            feats["rs_ema"] = cur_rs_ema
             for stype in signals_by_date[day.date]:
                 rows.append(SignalEnrichment(
                     ticker_id=ticker_id, timeframe=timeframe,
@@ -75,4 +78,6 @@ def compute_ticker_signal_enrichments(
                 longest_ema=lg, atr=a, upper_outer=uo,
                 lower_outer=lob, regime=rg, volume=week.real.volume,
             )
+            if rs_ema_by_monday is not None:
+                cur_rs_ema = rs_ema_by_monday.get(week.monday, _NAN)
     return rows

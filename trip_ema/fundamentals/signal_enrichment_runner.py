@@ -17,11 +17,12 @@ Alignment (diagnosed against the domain + signal write path):
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 
 from sqlalchemy import Engine, text
 
 from ..domain import Timeframe
+from ..indicators.aggregation import _monday_of, daily_to_weekly
 from ..persistence import transaction
 from ..persistence.bars_repo import BarsRepository
 from ..persistence.signal_enrichment_repo import SignalEnrichmentRepository
@@ -31,6 +32,7 @@ from ..persistence.stock_indicator_state_repo import (
 from .market_session import market_session_for
 from .parallel import fan_out
 from .runners import _load_active_tickers_for_exchange
+from .signal_cross_entity import compute_rs_ema_by_week, index_by_week
 from .signal_enrichment_walk import compute_ticker_signal_enrichments
 
 logger = logging.getLogger(__name__)
@@ -106,6 +108,40 @@ def _resolve_ticker_inputs(conn, ticker_id, timeframe):
     return daily, state_by_date, conv_by_monday, signals_by_date
 
 
+def _resolve_rs_ema_by_monday(conn, ticker_id, daily, session):
+    """§11 rs_ema per week (stock vs its industry index), or None if the
+    stock has no industry mapping or the index has no values."""
+    industry = conn.execute(
+        text("SELECT industry FROM instrument_industry "
+             "WHERE ticker_id = :t"),
+        {"t": ticker_id},
+    ).scalar()
+    if not industry:
+        return None
+    idx_rows = conn.execute(
+        text("SELECT trade_date, value FROM industry_index_value "
+             "WHERE industry_name = :ind ORDER BY trade_date"),
+        {"ind": industry},
+    ).all()
+    if not idx_rows:
+        return None
+
+    def week_of(d):
+        return _monday_of(
+            datetime.combine(d, time(0, 0), tzinfo=session.zone),
+            tz=session.tz,
+        )
+
+    idx_wk = index_by_week(
+        [(r.trade_date, r.value) for r in idx_rows], week_of,
+    )
+    weekly = daily_to_weekly(
+        daily, include_partial_last_week=False, tz=session.tz,
+    )
+    weekly_closes = [(b.timestamp, b.close) for b in weekly]
+    return compute_rs_ema_by_week(weekly_closes, idx_wk)
+
+
 def backfill_signal_enrichment(
     db_engine: Engine,
     exchange: str,
@@ -134,12 +170,16 @@ def backfill_signal_enrichment(
             if resolved is None:
                 return 0
             daily, state_by_date, conv_by_monday, signals_by_date = resolved
+            rs_ema_by_monday = _resolve_rs_ema_by_monday(
+                conn, ticker_id, daily, session,
+            )
             rows = compute_ticker_signal_enrichments(
                 ticker_id=ticker_id, timeframe=str(timeframe),
                 daily_bars=daily, state_by_date=state_by_date,
                 conv_by_monday=conv_by_monday,
                 signals_by_date=signals_by_date, session=session, now=now,
                 feature_spec_version=feature_spec_version,
+                rs_ema_by_monday=rs_ema_by_monday,
             )
             if rows:
                 SignalEnrichmentRepository(conn).upsert_many(rows)
