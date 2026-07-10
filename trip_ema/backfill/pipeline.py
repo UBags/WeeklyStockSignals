@@ -65,6 +65,7 @@ from ..fundamentals.parallel import fan_out
 from ..fundamentals.market_cap_compute import populate_market_cap_range
 from ..fundamentals.runners import build_all_industry_index_chains
 from ..fundamentals.signal_enrichment_runner import backfill_signal_enrichment
+from ..fundamentals.sector_metrics_runner import backfill_sector_metrics
 from ..fundamentals.signal_labels_runner import backfill_signal_labels
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.historical_signals_repo import (
@@ -408,6 +409,24 @@ def backfill(
                 progress_cb, "stage_6_industry_enrichment",
                 f"completed: {_r} indicators",
             )
+
+        # ---- Stage 6b: sector cross-section (rs_rank) ----
+        # Per-industry weekly rs_rank into sector_stock_leadlag; joined at
+        # read-time, independent of the per-signal enrichment vector.
+        _emit_progress(
+            progress_cb, "stage_6b_sector_metrics", "starting",
+        )
+        _sm = run_phase(
+            db_engine, exchange, "sector_metrics",
+            lambda: backfill_sector_metrics(
+                db_engine, exchange, progress_cb=progress_cb,
+            ),
+            backfill_run_id=run_id, force=_force,
+        )
+        _emit_progress(
+            progress_cb, "stage_6b_sector_metrics",
+            "done" if _sm is not None else "skipped (resume)",
+        )
 
         # ---- Stage 7: DELETE historical_signals in range ----
         _emit_progress(
