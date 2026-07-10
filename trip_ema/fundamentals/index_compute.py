@@ -398,6 +398,94 @@ def compute_index_value_for_date(
     )
 
 
+def compute_index_values_for_range(
+    db_engine: Engine,
+    industry_name: str,
+    dates: list[date],
+) -> list[ComputedValue]:
+    """Preloaded batch equivalent of compute_index_value_for_date over many
+    dates. Loads the index def, every constituent, the mcap close range and
+    the per-rebalance link factors ONCE, then computes each date in memory
+    with the identical modified-Laspeyres formula. Returns a ComputedValue
+    for each date that produces a value; dates that the per-day form would
+    return None for (pre-base / no active constituents / all missing /
+    value<=0) are omitted.
+
+    PARITY: value-for-value identical to compute_index_value_for_date —
+    proven by parity_check_index.py before this is wired into the runner.
+    """
+    from ..persistence.fundamentals_repo import (
+        IndustryIndexPeriodRepository,
+    )
+    if not dates:
+        return []
+    lo, hi = min(dates), max(dates)
+    with db_engine.connect() as conn:
+        idx = IndustryIndexRepository(conn).get(industry_name)
+        if idx is None:
+            return []
+        all_cons = IndustryIndexConstituentRepository(
+            conn,
+        ).list_all_for_index(industry_name)
+        closes_by_date = DailyMarketCapRepository(
+            conn,
+        ).list_for_date_range(lo, hi)
+
+    link_cache: dict = {}
+
+    def _link(erd):
+        if erd not in link_cache:
+            with db_engine.connect() as _c:
+                lf = IndustryIndexPeriodRepository(_c).get_link_factor(
+                    industry_name, erd,
+                )
+            link_cache[erd] = lf if lf is not None else 1.0
+        return link_cache[erd]
+
+    out: list[ComputedValue] = []
+    for d in sorted(dates):
+        if d < idx.base_date:
+            continue
+        active = [
+            c for c in all_cons
+            if c.effective_from <= d
+            and (c.effective_to is None or c.effective_to >= d)
+        ]
+        if not active:
+            continue
+        active.sort(key=lambda c: c.weight_at_rebalance, reverse=True)
+        erd = active[0].rebalance_date
+        if any(c.rebalance_date != erd for c in active):
+            erd = max(c.rebalance_date for c in active)
+        close_on_t = closes_by_date.get(d, {})
+        present: list[tuple[float, float]] = []
+        missing = 0
+        for c in active:
+            ct = close_on_t.get(c.ticker_id)
+            if ct is None:
+                missing += 1
+                continue
+            present.append(
+                (c.weight_at_rebalance, ct / c.close_at_rebalance)
+            )
+        if not present:
+            continue
+        renormalized = missing > 0
+        sw = sum(w for w, _ in present)
+        if sw <= 0:
+            continue
+        weighted = sum((w / sw) * r for w, r in present)
+        value = idx.base_value * _link(erd) * weighted
+        if value <= 0:
+            continue
+        out.append(ComputedValue(
+            industry_name=industry_name, trade_date=d, value=value,
+            constituents_used=len(present), constituents_missing=missing,
+            renormalized=renormalized, effective_rebalance_date=erd,
+        ))
+    return out
+
+
 # ---------- chain-link helper ---------- #
 
 

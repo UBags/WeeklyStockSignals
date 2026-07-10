@@ -1145,6 +1145,19 @@ class DailyMarketCapRepository:
         rows = self._conn.execute(text(sql), params)
         return [_mcap_from_row(r) for r in rows]
 
+    def list_for_date_range(self, from_date, to_date) -> dict:
+        """{trade_date: {ticker_id: close_price}} across a date range in
+        one query — the mcap preload for compute_index_values_for_range."""
+        rows = self._conn.execute(text("""
+            SELECT mc.ticker_id, mc.trade_date, mc.close_price
+            FROM daily_market_cap mc
+            WHERE mc.trade_date BETWEEN :lo AND :hi
+        """), {"lo": from_date, "hi": to_date})
+        out: dict = {}
+        for r in rows:
+            out.setdefault(r.trade_date, {})[r.ticker_id] = r.close_price
+        return out
+
     def list_history(self, ticker_id: int, *, limit: int = 365) -> list:
         """All daily mcap rows for one ticker, newest first.
 
@@ -1562,6 +1575,20 @@ class IndustryIndexConstituentRepository:
               AND (effective_to IS NULL OR effective_to >= :td)
             ORDER BY weight_at_rebalance DESC
         """), {"n": industry_name, "td": trade_date})
+        return [_constituent_from_row(r) for r in rows]
+
+    def list_all_for_index(self, industry_name: str) -> list:
+        """Every constituent row (all rebalance periods) for one index —
+        the preload feed for compute_index_values_for_range."""
+        rows = self._conn.execute(text("""
+            SELECT industry_name, ticker_id, rebalance_date,
+                   effective_from, effective_to,
+                   weight_at_rebalance, market_cap_at_rebalance,
+                   close_at_rebalance, removed_reason
+            FROM industry_index_constituent
+            WHERE industry_name = :n
+            ORDER BY effective_from, weight_at_rebalance DESC
+        """), {"n": industry_name})
         return [_constituent_from_row(r) for r in rows]
 
     def list_history_for_ticker(
