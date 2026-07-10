@@ -65,6 +65,7 @@ from ..fundamentals.parallel import fan_out
 from ..fundamentals.market_cap_compute import populate_market_cap_range
 from ..fundamentals.runners import build_all_industry_index_chains
 from ..fundamentals.signal_enrichment_runner import backfill_signal_enrichment
+from ..fundamentals.signal_labels_runner import backfill_signal_labels
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.historical_signals_repo import (
     HistoricalSignalsRepository,
@@ -475,6 +476,27 @@ def backfill(
         _emit_progress(
             progress_cb, "stage_8b_signal_enrichment",
             "done" if _enr is not None else "skipped (resume)",
+        )
+
+        # ---- Stage 8c: per-signal labels (retrospective target y) ----
+        # Computes forward-return labels for the signal_enrichment rows
+        # into signal_labels; re-runs finalise a label (horizon_complete)
+        # once all 13 forward weeks exist.
+        _emit_progress(
+            progress_cb, "stage_8c_signal_labels", "starting",
+        )
+        _lbl = run_phase(
+            db_engine, exchange, "signal_labels",
+            lambda: backfill_signal_labels(
+                db_engine, exchange,
+                scoped_tickers=scoped_tickers,
+                progress_cb=progress_cb,
+            ),
+            backfill_run_id=run_id, force=_force,
+        )
+        _emit_progress(
+            progress_cb, "stage_8c_signal_labels",
+            "done" if _lbl is not None else "skipped (resume)",
         )
 
         # ---- Notify subscribers — IFF this backfill is current
