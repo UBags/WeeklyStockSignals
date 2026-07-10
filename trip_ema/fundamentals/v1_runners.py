@@ -58,7 +58,9 @@ from ..persistence.stock_indicator_state_repo import (
 )
 from ..persistence.tickers_repo import TickersRepository
 from ..persistence import transaction
-from .index_compute import compute_index_value_for_date
+from .index_compute import (
+    compute_index_values_for_range,
+)
 from .parallel import fan_out
 from .runners import (
     _list_trading_days_in_range,
@@ -755,12 +757,19 @@ def populate_industry_index_value_for_industry(
     # date. Replaces the former per-day transaction (~1 BEGIN/COMMIT per
     # trading day, the dominant write cost of a full rebuild).
     pending: list = []
+    # Preloaded range compute (parity-proven identical to the per-day
+    # form) — one pass loads index def + constituents + mcap range + link
+    # factors, replacing ~2+2N DB reads per trading day.
+    computed_by_date = {
+        cv.trade_date: cv
+        for cv in compute_index_values_for_range(
+            db_engine, industry_name, date_list[cursor_index:],
+        )
+    }
     for i in range(cursor_index, len(date_list)):
         d = date_list[i]
         try:
-            computed = compute_index_value_for_date(
-                db_engine, industry_name, d,
-            )
+            computed = computed_by_date.get(d)
             if computed is None:
                 # Pre-base date, or empty rebalance, or missing
                 # mcap — None is "nothing to write", not an error.
