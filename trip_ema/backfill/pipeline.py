@@ -67,6 +67,7 @@ from ..fundamentals.runners import build_all_industry_index_chains
 from ..fundamentals.signal_enrichment_runner import backfill_signal_enrichment
 from ..fundamentals.sector_metrics_runner import backfill_sector_metrics
 from ..fundamentals.industry_regime_runner import backfill_industry_regime_matrix
+from ..fundamentals.signal_ensemble_runner import backfill_signal_ensemble_features
 from ..fundamentals.signal_labels_runner import backfill_signal_labels
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.historical_signals_repo import (
@@ -533,6 +534,22 @@ def backfill(
         _emit_progress(
             progress_cb, "stage_8c_signal_labels",
             "done" if _lbl is not None else "skipped (resume)",
+        )
+
+        # ---- Stage 8d: per-signal ensemble features (§17.5) ----
+        _emit_progress(
+            progress_cb, "stage_8d_signal_ensemble", "starting",
+        )
+        _sef = run_phase(
+            db_engine, exchange, "signal_ensemble_features",
+            lambda: backfill_signal_ensemble_features(
+                db_engine, exchange, progress_cb=progress_cb,
+            ),
+            backfill_run_id=run_id, force=_force,
+        )
+        _emit_progress(
+            progress_cb, "stage_8d_signal_ensemble",
+            "done" if _sef is not None else "skipped (resume)",
         )
 
         # ---- Notify subscribers — IFF this backfill is current
