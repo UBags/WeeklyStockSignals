@@ -52,7 +52,7 @@ def compute_ticker_signal_enrichments(
                 close=day.close, high=day.high, low=day.low,
                 med_ema=st[0], long_ema=st[1], longest_ema=st[2],
                 atr=st[3], upper_outer=st[4], lower_outer=st[5],
-                regime=st[6],
+                regime=st[6], volume=day.volume,
             )
             feats = asm.features()
             for stype in signals_by_date[day.date]:
@@ -73,6 +73,6 @@ def compute_ticker_signal_enrichments(
                 close=week.real.close, high=week.real.high,
                 low=week.real.low, med_ema=m, long_ema=lo,
                 longest_ema=lg, atr=a, upper_outer=uo,
-                lower_outer=lob, regime=rg,
+                lower_outer=lob, regime=rg, volume=week.real.volume,
             )
     return rows

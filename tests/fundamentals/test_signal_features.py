@@ -78,6 +78,7 @@ class TestAssembly:
         exp |= {"extension_z", "frac_above_med", "chop", "trend_r2",
                 "ema_agreement"}
         exp |= {"bw", "squeeze", "squeeze_release", "weeks_in_regime"}
+        exp |= {"vol_at_pivot", "accumulation"}
         assert set(f) == exp
         valid = {"NA", "UPTREND", "DOWNTREND", "BROADENING", "CONTRACTING"}
         assert all(f[f"{n}_structure"] in valid for n, _s, _k in _MEMBERS)

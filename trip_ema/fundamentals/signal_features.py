@@ -189,6 +189,7 @@ class SignalFeatureAssembler:
             name: CausalPivotTracker(k=k) for name, _src, k in _MEMBERS
         }
         self._closes: list[float] = []
+        self._vols: list[float] = []
         self._bar = -1
         self._latest: dict = {}
         self._mval: dict = {}
@@ -226,9 +227,11 @@ class SignalFeatureAssembler:
         upper_outer: float | None = None,
         lower_outer: float | None = None,
         regime: int | None = None,
+        volume: float | None = None,
     ) -> None:
         self._bar += 1
         self._closes.append(close)
+        self._vols.append(volume if volume is not None else _NAN)
         s = self._series.update(
             close=close, high=high, low=low,
             med_ema=med_ema, long_ema=long_ema,
@@ -371,6 +374,7 @@ class SignalFeatureAssembler:
         for name, s in trk_snaps.items():
             self._trk[name].restore(s)
         del self._closes[n_closes:]
+        del self._vols[n_closes:]
         self._bar = bar
         self._latest = dict(latest)
         self._mval = dict(mval)
@@ -516,4 +520,19 @@ class SignalFeatureAssembler:
         out["squeeze"] = self._cur_squeeze
         out["squeeze_release"] = self._cur_release
         out["weeks_in_regime"] = self._cur_wir
+
+        tb = self._trk["med_ema"].last_trough_bar
+        if tb is not None and 0 <= tb < len(self._vols):
+            vtb = self._vols[tb]
+            win = [v for v in self._vols[max(0, tb - 19): tb + 1]
+                   if not _isnan(v)]
+            sma = mean(win) if win else _NAN
+            if not _isnan(vtb) and not _isnan(sma) and sma > 0.0:
+                out["vol_at_pivot"] = vtb / sma
+            else:
+                out["vol_at_pivot"] = _NAN
+        else:
+            out["vol_at_pivot"] = _NAN
+        vap = out["vol_at_pivot"]
+        out["accumulation"] = (not _isnan(vap)) and vap > 1.5
         return out
