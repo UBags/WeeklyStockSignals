@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Callable, TypeVar
+from typing import TypeVar
+from collections.abc import Callable
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -148,6 +149,18 @@ def run_phase(
             rows = rows_of(result)
         except Exception:  # noqa: BLE001 — rows accounting is best-effort
             rows = None
+    failed_items = getattr(result, "failed", None)
+    if failed_items:
+        _mark(
+            db_engine, exchange, phase_name, FAILED,
+            backfill_run_id=backfill_run_id, started_at=started,
+            last_error=f"{len(failed_items)} item(s) failed"[:2000],
+        )
+        logger.warning(
+            "phase %s/%s recorded FAILED: %d item(s) failed - resume "
+            "will retry", exchange, phase_name, len(failed_items),
+        )
+        return result
     _mark(
         db_engine, exchange, phase_name, COMPLETE,
         backfill_run_id=backfill_run_id, started_at=started,
