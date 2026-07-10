@@ -22,8 +22,3 @@ class SignalEnrichment:
     features: dict
     feature_spec_version: str
     industry_id: int | None = None
-    fwd_ret_4w: float | None = None
-    fwd_ret_8w: float | None = None
-    fwd_ret_13w: float | None = None
-    fwd_max_dd: float | None = None
-    quality_class: str | None = None

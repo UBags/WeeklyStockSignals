@@ -37,7 +37,6 @@ class TestSignalEnrichmentRepo:
         assert got.features["med_ema_structure"] == "UPTREND"
         assert got.industry_id == 7
         assert got.feature_spec_version == "v0.3"
-        assert got.quality_class is None          # label not filled yet
 
     def test_upsert_updates_in_place(self, db_engine):
         with transaction(db_engine) as conn:

@@ -31,14 +31,12 @@ def _json_safe(obj):
 _COLUMNS = """
     ticker_id, timeframe, signal_date, signal_type,
     industry_id, features, feature_spec_version,
-    fwd_ret_4w, fwd_ret_8w, fwd_ret_13w, fwd_max_dd,
-    quality_class, computed_at
+    computed_at
 """
 _VALUES = """
     :tid, :tf, :sd, :st,
     :ind, CAST(:feat AS JSONB), :ver,
-    :r4, :r8, :r13, :dd,
-    :qc, NOW()
+    NOW()
 """
 _ON_CONFLICT = """
     ON CONFLICT (ticker_id, timeframe, signal_date, signal_type)
@@ -46,11 +44,6 @@ _ON_CONFLICT = """
         industry_id = EXCLUDED.industry_id,
         features = EXCLUDED.features,
         feature_spec_version = EXCLUDED.feature_spec_version,
-        fwd_ret_4w = EXCLUDED.fwd_ret_4w,
-        fwd_ret_8w = EXCLUDED.fwd_ret_8w,
-        fwd_ret_13w = EXCLUDED.fwd_ret_13w,
-        fwd_max_dd = EXCLUDED.fwd_max_dd,
-        quality_class = EXCLUDED.quality_class,
         computed_at = NOW()
 """
 _INSERT = (
@@ -78,9 +71,8 @@ class SignalEnrichmentRepository:
         row = self._conn.execute(
             text(
                 "SELECT ticker_id, timeframe, signal_date, signal_type, "
-                "industry_id, features, feature_spec_version, "
-                "fwd_ret_4w, fwd_ret_8w, fwd_ret_13w, fwd_max_dd, "
-                "quality_class FROM signal_enrichment "
+                "industry_id, features, feature_spec_version "
+                "FROM signal_enrichment "
                 "WHERE ticker_id = :tid AND timeframe = :tf "
                 "AND signal_date = :sd AND signal_type = :st"
             ),
@@ -97,9 +89,6 @@ class SignalEnrichmentRepository:
             signal_date=row.signal_date, signal_type=row.signal_type,
             features=feats, feature_spec_version=row.feature_spec_version,
             industry_id=row.industry_id,
-            fwd_ret_4w=row.fwd_ret_4w, fwd_ret_8w=row.fwd_ret_8w,
-            fwd_ret_13w=row.fwd_ret_13w, fwd_max_dd=row.fwd_max_dd,
-            quality_class=row.quality_class,
         )
 
     def count(self) -> int:
@@ -115,7 +104,4 @@ class SignalEnrichmentRepository:
             "ind": row.industry_id,
             "feat": json.dumps(_json_safe(row.features)),
             "ver": row.feature_spec_version,
-            "r4": row.fwd_ret_4w, "r8": row.fwd_ret_8w,
-            "r13": row.fwd_ret_13w, "dd": row.fwd_max_dd,
-            "qc": row.quality_class,
         }
