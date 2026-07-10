@@ -26,10 +26,12 @@ def _scenario():
         for b in bars:
             d = b.timestamp.astimezone(session.zone).date()
             state_by_date[d] = (b.close - 0.5, b.close - 1.0,
-                                b.close - 1.5, 1.2)
+                                b.close - 1.5, 1.2,
+                                b.close + 2.0, b.close - 2.0, 1)
         last = bars[-1]
         conv_by_monday[m] = (last.close - 0.5, last.close - 1.0,
-                             last.close - 1.5, 1.2)
+                             last.close - 1.5, 1.2,
+                             last.close + 2.0, last.close - 2.0, 1)
     return daily, session, state_by_date, conv_by_monday, weeks
 
 

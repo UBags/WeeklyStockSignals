@@ -50,7 +50,9 @@ def compute_ticker_signal_enrichments(
             asm.restore(snap)
             asm.update(
                 close=day.close, high=day.high, low=day.low,
-                med_ema=st[0], long_ema=st[1], longest_ema=st[2], atr=st[3],
+                med_ema=st[0], long_ema=st[1], longest_ema=st[2],
+                atr=st[3], upper_outer=st[4], lower_outer=st[5],
+                regime=st[6],
             )
             feats = asm.features()
             for stype in signals_by_date[day.date]:
@@ -64,12 +66,13 @@ def compute_ticker_signal_enrichments(
         asm.restore(snap)                   # discard the forming branch
         if week.real is not None:
             conv = conv_by_monday.get(week.monday)
-            m, lo, lg, a = conv if conv is not None else (
-                _NAN, _NAN, _NAN, _NAN
+            m, lo, lg, a, uo, lob, rg = conv if conv is not None else (
+                _NAN, _NAN, _NAN, _NAN, None, None, None
             )
             asm.update(
                 close=week.real.close, high=week.real.high,
                 low=week.real.low, med_ema=m, long_ema=lo,
-                longest_ema=lg, atr=a,
+                longest_ema=lg, atr=a, upper_outer=uo,
+                lower_outer=lob, regime=rg,
             )
     return rows

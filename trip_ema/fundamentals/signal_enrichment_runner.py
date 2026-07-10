@@ -45,7 +45,8 @@ def _fold_inputs(states, signals):
     Returns (state_by_date, conv_by_monday, signals_by_date).
     """
     state_by_date = {
-        s.date: (s.med_ema, s.long_ema, s.longest_ema, s.atr)
+        s.date: (s.med_ema, s.long_ema, s.longest_ema, s.atr,
+                 s.upper_outer_band, s.lower_outer_band, s.display_regime)
         for s in states
     }
     # converged EMAs per week = its last (max-date) state row; explicit
@@ -56,7 +57,9 @@ def _fold_inputs(states, signals):
         cur = conv_tmp.get(m)
         if cur is None or s.date > cur[0]:
             conv_tmp[m] = (s.date,
-                           (s.med_ema, s.long_ema, s.longest_ema, s.atr))
+                           (s.med_ema, s.long_ema, s.longest_ema, s.atr,
+                            s.upper_outer_band, s.lower_outer_band,
+                            s.display_regime))
     conv_by_monday = {m: v[1] for m, v in conv_tmp.items()}
 
     signals_by_date: dict = {}

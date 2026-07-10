@@ -9,7 +9,9 @@ UTC = timezone.utc
 
 def _state(d, monday, med):
     return NS(date=d, bar_timestamp=monday, med_ema=med,
-              long_ema=med - 1, longest_ema=med - 2, atr=1.2)
+              long_ema=med - 1, longest_ema=med - 2, atr=1.2,
+              upper_outer_band=med + 2, lower_outer_band=med - 3,
+              display_regime=1)
 
 
 def test_fold_inputs_converged_is_max_date_and_signals_dedup():
@@ -34,10 +36,10 @@ def test_fold_inputs_converged_is_max_date_and_signals_dedup():
     assert set(sbd) == {date(2024, 1, 1), date(2024, 1, 2),
                         date(2024, 1, 3), date(2024, 1, 8),
                         date(2024, 1, 9)}
-    assert sbd[date(2024, 1, 3)] == (12.0, 11.0, 10.0, 1.2)
+    assert sbd[date(2024, 1, 3)] == (12.0, 11.0, 10.0, 1.2, 14.0, 9.0, 1)
     # converged = the week's last (max-date) row, not first-seen
-    assert cbm[m1] == (12.0, 11.0, 10.0, 1.2)
-    assert cbm[m2] == (21.0, 20.0, 19.0, 1.2)
+    assert cbm[m1] == (12.0, 11.0, 10.0, 1.2, 14.0, 9.0, 1)
+    assert cbm[m2] == (21.0, 20.0, 19.0, 1.2, 23.0, 18.0, 1)
     assert set(cbm) == {m1, m2}
     # grouped + deduped by (date, type); None dropped
     assert sorted(sbday[date(2024, 1, 3)]) == ["BUY", "EXIT_FROM_SELL"]
