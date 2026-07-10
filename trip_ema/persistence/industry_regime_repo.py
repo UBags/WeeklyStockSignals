@@ -45,3 +45,58 @@ class IndustryRegimeCorrRepository:
         return int(self._conn.execute(
             text("SELECT count(*) FROM industry_regime_corr")
         ).scalar_one())
+
+
+_INSERT_BREADTH = text(
+    """
+    INSERT INTO industry_regime_breadth (
+        industry_name, asof_date, breadth, computed_at
+    ) VALUES (:ind, :d, :b, NOW())
+    ON CONFLICT (industry_name, asof_date) DO UPDATE SET
+        breadth = EXCLUDED.breadth, computed_at = NOW()
+    """
+)
+
+_INSERT_ENS = text(
+    """
+    INSERT INTO influential_industry_ensemble (
+        industry_i, member_j, variant, corr, best_lag, is_leader, sign,
+        asof_date, computed_at
+    ) VALUES (:i, :j, :v, :c, :bl, :isl, :sg, :d, NOW())
+    """
+)
+
+
+class IndustryBreadthRepository:
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    def upsert_many(self, rows) -> int:
+        if not rows:
+            return 0
+        self._conn.execute(_INSERT_BREADTH, [
+            {"ind": r.industry_name, "d": r.asof_date, "b": r.breadth}
+            for r in rows
+        ])
+        return len(rows)
+
+
+class InfluentialEnsembleRepository:
+    def __init__(self, conn: Connection):
+        self._conn = conn
+
+    def replace_all(self, rows) -> int:
+        """Full rebuild — membership changes between runs, so clear and
+        reinsert (safe: the regime phase is a single global pass)."""
+        self._conn.execute(text("DELETE FROM influential_industry_ensemble"))
+        if not rows:
+            return 0
+        self._conn.execute(_INSERT_ENS, [
+            {
+                "i": r.industry_i, "j": r.member_j, "v": r.variant,
+                "c": r.corr, "bl": r.best_lag, "isl": r.is_leader,
+                "sg": r.sign, "d": r.asof_date,
+            }
+            for r in rows
+        ])
+        return len(rows)

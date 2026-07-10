@@ -9,10 +9,17 @@ import logging
 
 from sqlalchemy import Engine, text
 
+from ..domain.ensemble_member import EnsembleMember
+from ..domain.industry_breadth import IndustryBreadth
 from ..domain.industry_regime_corr import IndustryRegimeCorr
 from ..persistence import transaction
-from ..persistence.industry_regime_repo import IndustryRegimeCorrRepository
+from ..persistence.industry_regime_repo import (
+    IndustryBreadthRepository,
+    IndustryRegimeCorrRepository,
+    InfluentialEnsembleRepository,
+)
 from .market_session import market_session_for
+from .ensemble import compute_ensembles
 from .regime_matrix import compute_regime_matrix
 
 logger = logging.getLogger(__name__)
@@ -76,8 +83,31 @@ def backfill_industry_regime_matrix(
             for (i, j, c, bl, llc, n) in rows
         ]
         n_up = IndustryRegimeCorrRepository(conn).upsert_many(metrics)
+
+        # breadth series (for §17c point-in-time regime lookup)
+        breadth_rows = [
+            IndustryBreadth(
+                industry_name=ind,
+                asof_date=wk.astimezone(session.zone).date(),
+                breadth=val,
+            )
+            for ind, series in regime.items()
+            for wk, val in series.items()
+        ]
+        IndustryBreadthRepository(conn).upsert_many(breadth_rows)
+
+        # influential ensembles (3 variants) derived from the matrix
+        ens = compute_ensembles(rows)
+        ens_rows = [
+            EnsembleMember(
+                industry_i=i, member_j=j, variant=v, corr=c,
+                best_lag=bl, is_leader=isl, sign=sg, asof_date=asof,
+            )
+            for (i, j, v, c, bl, isl, sg) in ens
+        ]
+        n_ens = InfluentialEnsembleRepository(conn).replace_all(ens_rows)
     logger.info(
-        "regime matrix: %d industries -> %d pairs (asof %s)",
-        len(regime), n_up, asof,
+        "regime matrix: %d industries -> %d pairs, %d breadth, %d ensemble "
+        "(asof %s)", len(regime), n_up, len(breadth_rows), n_ens, asof,
     )
     return n_up
