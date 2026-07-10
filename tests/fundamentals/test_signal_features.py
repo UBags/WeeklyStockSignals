@@ -75,6 +75,9 @@ class TestAssembly:
         for k in ("srsi14", "smacd", "sdosc",
                   "smoothed_RSI_diff", "ema_smoothed_RSI_diff"):
             exp |= {f"z_{k}", f"pctrank_{k}"}
+        exp |= {"extension_z", "frac_above_med", "chop", "trend_r2",
+                "ema_agreement"}
+        exp |= {"bw", "squeeze", "squeeze_release", "weeks_in_regime"}
         assert set(f) == exp
         valid = {"NA", "UPTREND", "DOWNTREND", "BROADENING", "CONTRACTING"}
         assert all(f[f"{n}_structure"] in valid for n, _s, _k in _MEMBERS)

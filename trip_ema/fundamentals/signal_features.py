@@ -23,6 +23,7 @@ import math
 from .causal_pivots import CausalPivotTracker
 from .pattern_rules import (
     LABEL_1_HIGHER_VALLEY,
+    STRUCT_UPTREND,
     LABEL_1_LOWER_TOP,
     LABEL_2_HIGHER_VALLEYS,
     LABEL_2_LOWER_TOPS,
@@ -149,6 +150,36 @@ def _z_pctrank(cur, buf):
     return z, rank
 
 
+def _trend_r2(closes, n):
+    """R-squared of close ~ bar over the last n closes (spec §12)."""
+    ys = closes[-n:]
+    m = len(ys)
+    if m < 3:
+        return _NAN
+    mx = (m - 1) / 2.0
+    my = sum(ys) / m
+    sxx = sum((i - mx) ** 2 for i in range(m))
+    sxy = sum((i - mx) * (y - my) for i, y in enumerate(ys))
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx <= 0.0 or syy <= 0.0:
+        return _NAN
+    r = sxy / ((sxx ** 0.5) * (syy ** 0.5))
+    return r * r
+
+
+def _pctile(buf, q):
+    """Linear-interpolated q-quantile of buf (0<=q<=1)."""
+    xs = sorted(buf)
+    if not xs:
+        return None
+    idx = q * (len(xs) - 1)
+    lo = int(idx)
+    frac = idx - lo
+    if lo + 1 < len(xs):
+        return xs[lo] + frac * (xs[lo + 1] - xs[lo])
+    return xs[lo]
+
+
 class SignalFeatureAssembler:
     """One instance per (ticker, timeframe); feed bars in order."""
 
@@ -177,12 +208,24 @@ class SignalFeatureAssembler:
             k: deque(maxlen=_WINDOW) for k in _NORM_SERIES
         }
         self._curdist: dict = {}
+        self._abovemed: deque = deque(maxlen=_WINDOW)
+        self._bwbuf: deque = deque(maxlen=_WINDOW)
+        self._prev_squeeze = False
+        self._last_regime = None
+        self._regime_change_bar = None
+        self._cur_bw = _NAN
+        self._cur_squeeze = False
+        self._cur_release = False
+        self._cur_wir = None
 
     def update(
         self, *,
         close: float, high: float, low: float,
         med_ema: float | None, long_ema: float | None,
         longest_ema: float | None, atr: float | None,
+        upper_outer: float | None = None,
+        lower_outer: float | None = None,
+        regime: int | None = None,
     ) -> None:
         self._bar += 1
         self._closes.append(close)
@@ -254,6 +297,36 @@ class SignalFeatureAssembler:
             v = s.get(k, _NAN)
             if not _isnan(v):
                 self._normbuf[k].append(v)
+        if med_ema is not None and not _isnan(med_ema):
+            self._abovemed.append(1 if close > med_ema else 0)
+
+        if (upper_outer is not None and lower_outer is not None
+                and not _isnan(upper_outer) and not _isnan(lower_outer)
+                and close != 0.0):
+            bw = (upper_outer - lower_outer) / close
+        else:
+            bw = _NAN
+        self._cur_bw = bw
+        if not _isnan(bw):
+            self._bwbuf.append(bw)
+        if not _isnan(bw) and len(self._bwbuf) >= 2:
+            p20 = _pctile(self._bwbuf, 0.2)
+            sq = bool(p20 is not None and bw < p20)
+        else:
+            sq = False
+        self._cur_release = bool(self._prev_squeeze and not sq)
+        self._cur_squeeze = sq
+        self._prev_squeeze = sq
+        if regime is not None:
+            if regime != self._last_regime:
+                self._regime_change_bar = self._bar
+                self._last_regime = regime
+            self._cur_wir = (
+                self._bar - self._regime_change_bar
+                if self._regime_change_bar is not None else None
+            )
+        else:
+            self._cur_wir = None
 
     def snapshot(self) -> tuple:
         """Capture engine + per-member tracker state + the closes length,
@@ -276,13 +349,24 @@ class SignalFeatureAssembler:
             {k: tuple(d) for k, d in self._distbuf.items()},
             {k: tuple(d) for k, d in self._normbuf.items()},
             dict(self._curdist),
+            tuple(self._abovemed),
+            tuple(self._bwbuf),
+            self._prev_squeeze,
+            self._last_regime,
+            self._regime_change_bar,
+            self._cur_bw,
+            self._cur_squeeze,
+            self._cur_release,
+            self._cur_wir,
         )
 
     def restore(self, snap: tuple) -> None:
         (series_snap, trk_snaps, n_closes, bar, latest,
          mval, mret, nsucc, lastdir, legamps,
          lbl_buy, lbl_sell, plabel,
-         distbuf, normbuf, curdist) = snap
+         distbuf, normbuf, curdist, abovemed,
+         bwbuf, prev_sq, last_reg, reg_bar,
+         cur_bw, cur_sq, cur_rel, cur_wir) = snap
         self._series.restore(series_snap)
         for name, s in trk_snaps.items():
             self._trk[name].restore(s)
@@ -306,6 +390,15 @@ class SignalFeatureAssembler:
             k: deque(v, maxlen=_WINDOW) for k, v in normbuf.items()
         }
         self._curdist = dict(curdist)
+        self._abovemed = deque(abovemed, maxlen=_WINDOW)
+        self._bwbuf = deque(bwbuf, maxlen=_WINDOW)
+        self._prev_squeeze = prev_sq
+        self._last_regime = last_reg
+        self._regime_change_bar = reg_bar
+        self._cur_bw = cur_bw
+        self._cur_squeeze = cur_sq
+        self._cur_release = cur_rel
+        self._cur_wir = cur_wir
 
     def features(self) -> dict:
         """The derived feature vector at the current bar (call at a
@@ -405,4 +498,22 @@ class SignalFeatureAssembler:
             z, rank = _z_pctrank(self._latest.get(k, _NAN), self._normbuf[k])
             out[f"z_{k}"] = z
             out[f"pctrank_{k}"] = rank
+
+        out["extension_z"] = _z_pctrank(
+            self._curdist.get("longest", _NAN), self._distbuf["longest"]
+        )[0]
+        dmed = self._distbuf["med"]
+        out["chop"] = pstdev(dmed) if len(dmed) >= 2 else _NAN
+        out["frac_above_med"] = (
+            mean(self._abovemed) if self._abovemed else _NAN
+        )
+        out["trend_r2"] = _trend_r2(self._closes, _WINDOW)
+        out["ema_agreement"] = sum(
+            1 for x in ("med_ema", "long_ema", "longest_ema")
+            if out.get(f"{x}_structure") == STRUCT_UPTREND
+        )
+        out["bw"] = self._cur_bw
+        out["squeeze"] = self._cur_squeeze
+        out["squeeze_release"] = self._cur_release
+        out["weeks_in_regime"] = self._cur_wir
         return out
