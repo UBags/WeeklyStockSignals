@@ -11,9 +11,9 @@ from ..domain.sector_metric import SectorStockMetric
 _INSERT = text(
     """
     INSERT INTO sector_stock_leadlag (
-        ticker_id, asof_date, window, industry_name, rs_rank, computed_at
+        ticker_id, asof_date, "window", industry_name, rs_rank, computed_at
     ) VALUES (:t, :d, :w, :ind, :rr, NOW())
-    ON CONFLICT (ticker_id, asof_date, window) DO UPDATE SET
+    ON CONFLICT (ticker_id, asof_date, "window") DO UPDATE SET
         industry_name = EXCLUDED.industry_name,
         rs_rank = EXCLUDED.rs_rank,
         computed_at = NOW()
