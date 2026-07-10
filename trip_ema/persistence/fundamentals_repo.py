@@ -1819,6 +1819,44 @@ class IndustryIndexValueRepository:
                "cu": constituents_used, "cm": constituents_missing,
                "rn": renormalized, "erd": effective_rebalance_date})
 
+    def upsert_values(self, industry_name: str, rows) -> int:
+        """Batch form of upsert_value — one executemany for many days.
+
+        `rows` is an iterable of objects carrying trade_date / value /
+        constituents_used / constituents_missing / renormalized /
+        effective_rebalance_date (the compute_index_value_for_date result).
+        Same idempotent ON CONFLICT semantics as upsert_value; replaces the
+        per-day transaction in the value backfill loop."""
+        params = []
+        for r in rows:
+            if r.value <= 0:
+                raise ValueError("value must be > 0")
+            if r.constituents_used < 0 or r.constituents_missing < 0:
+                raise ValueError("constituent counts must be >= 0")
+            params.append({
+                "n": industry_name, "td": r.trade_date, "v": r.value,
+                "cu": r.constituents_used, "cm": r.constituents_missing,
+                "rn": r.renormalized,
+                "erd": r.effective_rebalance_date,
+            })
+        if not params:
+            return 0
+        self._conn.execute(text("""
+            INSERT INTO industry_index_value
+                (industry_name, trade_date, value,
+                 constituents_used, constituents_missing,
+                 renormalized, effective_rebalance_date, computed_at)
+            VALUES (:n, :td, :v, :cu, :cm, :rn, :erd, NOW())
+            ON CONFLICT (industry_name, trade_date) DO UPDATE SET
+                value = EXCLUDED.value,
+                constituents_used = EXCLUDED.constituents_used,
+                constituents_missing = EXCLUDED.constituents_missing,
+                renormalized = EXCLUDED.renormalized,
+                effective_rebalance_date = EXCLUDED.effective_rebalance_date,
+                computed_at = NOW()
+        """), params)
+        return len(params)
+
     def delete_for_index(self, industry_name: str) -> int:
         """Wipe all value rows for one index. Used by tests and
         by the admin "recompute from scratch" path."""

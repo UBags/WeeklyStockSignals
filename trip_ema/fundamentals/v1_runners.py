@@ -748,7 +748,13 @@ def populate_industry_index_value_for_industry(
                 },
             )
 
-    # --- walk dates ---
+    # --- walk dates (batched writes per checkpoint window) ---
+    # Accumulate each window's computed values and write them in ONE
+    # transaction at the checkpoint, advancing the resume cursor only
+    # after the batch is flushed — so a resume never skips an unwritten
+    # date. Replaces the former per-day transaction (~1 BEGIN/COMMIT per
+    # trading day, the dominant write cost of a full rebuild).
+    pending: list = []
     for i in range(cursor_index, len(date_list)):
         d = date_list[i]
         try:
@@ -760,18 +766,7 @@ def populate_industry_index_value_for_industry(
                 # mcap — None is "nothing to write", not an error.
                 skipped += 1
             else:
-                with transaction(db_engine) as conn:
-                    IndustryIndexValueRepository(conn).upsert_value(
-                        industry_name,
-                        trade_date=computed.trade_date,
-                        value=computed.value,
-                        constituents_used=computed.constituents_used,
-                        constituents_missing=
-                            computed.constituents_missing,
-                        renormalized=computed.renormalized,
-                        effective_rebalance_date=
-                            computed.effective_rebalance_date,
-                    )
+                pending.append(computed)
                 succeeded += 1
         except Exception as e:
             failed += 1
@@ -780,25 +775,33 @@ def populate_industry_index_value_for_industry(
                 industry_name, d, e, exc_info=True,
             )
 
-        # Checkpoint progress every N dates so a crash here doesn't
-        # lose more than `checkpoint_every` dates worth of work.
+        # Flush the accumulated batch + advance the cursor together.
         if (i + 1) % checkpoint_every == 0:
             with transaction(db_engine) as conn:
+                if pending:
+                    IndustryIndexValueRepository(conn).upsert_values(
+                        industry_name, pending,
+                    )
                 FundamentalsRunRepository(conn).update_progress(
                     run_id,
                     succeeded=succeeded, failed=failed, skipped=skipped,
                     progress_json={
                         "industry_name": industry_name,
-                        "date_list": [d.isoformat() for d in date_list],
+                        "date_list": [dd.isoformat() for dd in date_list],
                         "cursor_index": i + 1,
                         "from_date": from_date.isoformat(),
                         "to_date": to_date.isoformat(),
                     },
                 )
+            pending = []
 
-    # --- close the run ---
+    # --- flush the tail + close the run (one transaction) ---
     status = "SUCCESS" if failed == 0 else "PARTIAL"
     with transaction(db_engine) as conn:
+        if pending:
+            IndustryIndexValueRepository(conn).upsert_values(
+                industry_name, pending,
+            )
         FundamentalsRunRepository(conn).close(
             run_id, status=status,
             succeeded=succeeded, failed=failed, skipped=skipped,
