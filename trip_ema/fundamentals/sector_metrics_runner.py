@@ -78,8 +78,9 @@ def _metrics_for_industry(conn, industry, session, window):
             if rr is None or (isinstance(rr, float) and math.isnan(rr)):
                 continue
             out.append(SectorStockMetric(
-                ticker_id=t, asof_date=monday.date(), window=window,
-                industry_name=industry, rs_rank=rr,
+                ticker_id=t,
+                asof_date=monday.astimezone(session.zone).date(),
+                window=window, industry_name=industry, rs_rank=rr,
             ))
     return out
 
