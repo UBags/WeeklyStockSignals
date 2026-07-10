@@ -66,6 +66,7 @@ from ..fundamentals.market_cap_compute import populate_market_cap_range
 from ..fundamentals.runners import build_all_industry_index_chains
 from ..fundamentals.signal_enrichment_runner import backfill_signal_enrichment
 from ..fundamentals.sector_metrics_runner import backfill_sector_metrics
+from ..fundamentals.industry_regime_runner import backfill_industry_regime_matrix
 from ..fundamentals.signal_labels_runner import backfill_signal_labels
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.historical_signals_repo import (
@@ -426,6 +427,22 @@ def backfill(
         _emit_progress(
             progress_cb, "stage_6b_sector_metrics",
             "done" if _sm is not None else "skipped (resume)",
+        )
+
+        # ---- Stage 6c: industry x industry regime matrix (§17) ----
+        _emit_progress(
+            progress_cb, "stage_6c_regime_matrix", "starting",
+        )
+        _rm = run_phase(
+            db_engine, exchange, "regime_matrix",
+            lambda: backfill_industry_regime_matrix(
+                db_engine, exchange, progress_cb=progress_cb,
+            ),
+            backfill_run_id=run_id, force=_force,
+        )
+        _emit_progress(
+            progress_cb, "stage_6c_regime_matrix",
+            "done" if _rm is not None else "skipped (resume)",
         )
 
         # ---- Stage 7: DELETE historical_signals in range ----
