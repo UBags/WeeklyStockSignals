@@ -33,7 +33,8 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Callable, Sequence, TypeVar
+from typing import TypeVar
+from collections.abc import Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ def fan_out(
     *,
     label: str,
     max_workers: int | None = None,
-    progress_cb: "Callable[[str, str], None] | None" = None,
+    progress_cb: Callable[[str, str], None] | None = None,
     heartbeat_pct: int = 1,
 ) -> FanOutOutcome:
     """Run ``worker_fn(item)`` over ``items`` on a bounded thread pool.
@@ -178,7 +179,7 @@ def fan_out(
 
 
 def _emit(
-    progress_cb: "Callable[[str, str], None] | None",
+    progress_cb: Callable[[str, str], None] | None,
     label: str,
     message: str,
 ) -> None:
