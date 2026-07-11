@@ -427,9 +427,14 @@ def compute_index_values_for_range(
         all_cons = IndustryIndexConstituentRepository(
             conn,
         ).list_all_for_index(industry_name)
+        # MCAP-SCOPED-PRELOAD: only this index's constituents. all_cons is
+        # already loaded above, so the exact ticker set is known — without
+        # this the preload scans daily_market_cap for every ticker in the DB.
         closes_by_date = DailyMarketCapRepository(
             conn,
-        ).list_for_date_range(lo, hi)
+        ).list_for_date_range(
+            lo, hi, ticker_ids=sorted({c.ticker_id for c in all_cons}),
+        )
 
     link_cache: dict = {}
 

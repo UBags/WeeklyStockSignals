@@ -1145,14 +1145,31 @@ class DailyMarketCapRepository:
         rows = self._conn.execute(text(sql), params)
         return [_mcap_from_row(r) for r in rows]
 
-    def list_for_date_range(self, from_date, to_date) -> dict:
+    def list_for_date_range(
+        self, from_date, to_date, ticker_ids: list[int] | None = None,
+    ) -> dict:
         """{trade_date: {ticker_id: close_price}} across a date range in
-        one query — the mcap preload for compute_index_values_for_range."""
-        rows = self._conn.execute(text("""
-            SELECT mc.ticker_id, mc.trade_date, mc.close_price
-            FROM daily_market_cap mc
-            WHERE mc.trade_date BETWEEN :lo AND :hi
-        """), {"lo": from_date, "hi": to_date})
+        one query — the mcap preload for compute_index_values_for_range.
+
+        MCAP-SCOPED-PRELOAD: ticker_ids restricts the load to the caller's
+        constituents. Without it this pulls daily_market_cap for EVERY ticker
+        across the full range (~10M+ rows on a 2006.. rebuild) and throws away
+        all but the ~30 the caller needs — once per industry, 93x. The table's
+        PRIMARY KEY is (ticker_id, trade_date), so the ANY(:ids) filter rides
+        the PK index. ticker_ids=None keeps the original unfiltered behaviour.
+        """
+        sql = (
+            "SELECT mc.ticker_id, mc.trade_date, mc.close_price "
+            "FROM daily_market_cap mc "
+            "WHERE mc.trade_date BETWEEN :lo AND :hi"
+        )
+        params: dict = {"lo": from_date, "hi": to_date}
+        if ticker_ids is not None:
+            if not ticker_ids:
+                return {}
+            sql += " AND mc.ticker_id = ANY(:ids)"
+            params["ids"] = list(ticker_ids)
+        rows = self._conn.execute(text(sql), params)
         out: dict = {}
         for r in rows:
             out.setdefault(r.trade_date, {})[r.ticker_id] = r.close_price
