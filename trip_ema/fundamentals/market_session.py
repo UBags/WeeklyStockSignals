@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from functools import lru_cache
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -80,17 +81,7 @@ class ExchangeCalendar:
         if not self._country:
             return set()
         if year not in self._holiday_cache:
-            try:
-                import holidays as hpkg
-                self._holiday_cache[year] = set(
-                    hpkg.country_holidays(self._country, years=year).keys()
-                )
-            except Exception:
-                logger.warning(
-                    "ExchangeCalendar: holidays unavailable for %s/%d; "
-                    "weekday-only calendar", self._country, year,
-                )
-                self._holiday_cache[year] = set()
+            self._holiday_cache[year] = _holidays_for(self._country, year)
         return self._holiday_cache[year]
 
     def is_trading_day(self, d: date) -> bool:
@@ -107,6 +98,28 @@ class ExchangeCalendar:
 # MarketSession
 # ------------------------------------------------------------------ #
 
+@lru_cache(maxsize=None)
+def _holidays_for(country: str, year: int) -> frozenset:
+    """PERF-NAN-COUNT (same batch): process-wide holiday cache.
+
+    ExchangeCalendar._holiday_cache is per-INSTANCE, and market_session_for()
+    builds a fresh session per ticker — so every one of ~2,673 tickers was
+    reconstructing all ~21 years of holiday objects (~2.9s each, profiled).
+    Holidays for a (country, year) are immutable: build them once per process.
+
+    Returns a frozenset so the cached value cannot be mutated by a caller.
+    """
+    try:
+        import holidays as hpkg
+        return frozenset(hpkg.country_holidays(country, years=year).keys())
+    except Exception:
+        logger.warning(
+            "ExchangeCalendar: holidays unavailable for %s/%d; "
+            "weekday-only calendar", country, year,
+        )
+        return frozenset()
+
+
 @dataclass(frozen=True)
 class MarketSession:
     """One exchange's session window, timezone and calendar, plus the
@@ -116,6 +129,11 @@ class MarketSession:
     open_time: time
     close_time: time
     calendar: ExchangeCalendar = field(compare=False)
+    # Memo for week_total_hours (see below). compare/repr excluded so it plays
+    # no part in equality or hashing.
+    _wth_cache: dict = field(
+        default_factory=dict, compare=False, repr=False,
+    )
 
     @property
     def zone(self) -> ZoneInfo:
@@ -145,11 +163,21 @@ class MarketSession:
 
     def week_total_hours(self, monday_local: date) -> float:
         """Total scheduled trading hours in the Mon-Fri week starting
-        `monday_local`, counting only calendar trading days."""
-        return self.session_hours * sum(
+        `monday_local`, counting only calendar trading days.
+
+        Memoized: a pure function of the Monday, but called once per DAY
+        (5,003x per ticker) when only ~1,000 distinct Mondays exist. Mutating
+        the cache dict is fine on a frozen dataclass; rebinding it is not.
+        """
+        hit = self._wth_cache.get(monday_local)
+        if hit is not None:
+            return hit
+        v = self.session_hours * sum(
             1 for i in range(5)
             if self.is_trading_day(monday_local + timedelta(days=i))
         )
+        self._wth_cache[monday_local] = v
+        return v
 
     def week_hours_elapsed(
         self,

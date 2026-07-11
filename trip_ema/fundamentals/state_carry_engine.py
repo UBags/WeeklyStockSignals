@@ -104,6 +104,10 @@ class StatefulIndicatorEngine:
         self._dist: dict[str, deque] = {
             leg: deque(maxlen=52) for leg in _LEGS
         }
+        # PERF-NAN-COUNT: how many NaNs are currently in each ring. Maintained
+        # incrementally so apply() never rescans all 52 elements. An int, so it
+        # cannot perturb any float output.
+        self._dist_nan: dict[str, int] = {leg: 0 for leg in _LEGS}
         # turn trackers: last two EMA values per leg
         self._ema_p1: dict[str, float | None] = {leg: None for leg in _LEGS}
         self._ema_p2: dict[str, float | None] = {leg: None for leg in _LEGS}
@@ -130,21 +134,28 @@ class StatefulIndicatorEngine:
             self._regime, self._r_prev_close,
             self._r_prev_low_env, self._r_prev_up_env,
             self._i,
+            dict(self._dist_nan),   # PERF-NAN-COUNT
         )
 
     def restore(self, s: tuple) -> None:
         (emas, self._atr_rma, self._atr_prev_close, hlra, dist,
          p1, p2, trks, self._regime, self._r_prev_close,
-         self._r_prev_low_env, self._r_prev_up_env, self._i) = s
+         self._r_prev_low_env, self._r_prev_up_env, self._i,
+         dist_nan) = s
+        # _hlra is ONE shared deque, not per-leg: rebuilding it inside the
+        # per-leg loop below did the same work 3x on the engine's hottest path.
+        self._hlra.clear()
+        self._hlra.extend(hlra)
         for leg in _LEGS:
             self._ema[leg]._restore(emas[leg])
-            self._hlra.clear()
-            self._hlra.extend(hlra)
             self._dist[leg].clear()
             self._dist[leg].extend(dist[leg])
             self._trk[leg].restore(trks[leg])
         self._ema_p1 = dict(p1)
         self._ema_p2 = dict(p2)
+        # PERF-NAN-COUNT: carried, never recomputed — restore() runs ~6,000x
+        # per ticker and recounting here would give the whole win back.
+        self._dist_nan = dict(dist_nan)
 
     # -------------------- per-bar advance -------------------- #
 
@@ -209,9 +220,18 @@ class StatefulIndicatorEngine:
             else:
                 d = float("nan")
             dist_v[leg] = d
-            self._dist[leg].append(d)
             ring = self._dist[leg]
-            if len(ring) == 52 and not any(_isnan(x) for x in ring):
+            # PERF-NAN-COUNT: the ring changes by one element per bar, so track
+            # the NaN count incrementally instead of rescanning all 52. The
+            # deque has maxlen=52, so a full ring evicts ring[0] on append.
+            if len(ring) == 52 and _isnan(ring[0]):
+                self._dist_nan[leg] -= 1
+            ring.append(d)
+            if _isnan(d):
+                self._dist_nan[leg] += 1
+            # sum(ring) is UNCHANGED on purpose: a running float sum would
+            # accumulate rounding differently and break bit-parity.
+            if len(ring) == 52 and self._dist_nan[leg] == 0:
                 mean_dist_v[leg] = sum(ring) / 52.0
             else:
                 mean_dist_v[leg] = float("nan")
