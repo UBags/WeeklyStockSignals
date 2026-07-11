@@ -537,7 +537,16 @@ def backfill(
         _today = datetime.now(_IST).date()
         _r = run_phase(
             db_engine, exchange, "daywalk",
-            lambda: _stage_backfill_daywalk(
+            # BULK-DAYWALK: the per-day walk ran process_signals_for_day once
+            # per trading day, fanning out over every ticker, each doing two
+            # point queries -> ~13.3M derive calls on a full NSE rebuild.
+            # Walked days ARE the distinct stock_indicator_state dates, and
+            # derive compares state[D] vs state[D-1], so the whole walk is
+            # equivalent to "emit on every consecutive state-row pair whose
+            # regimes differ" — ~2 queries per ticker. Same _classify_regime_
+            # change, same price lookup, same computed_at. Parity-verified
+            # against the per-day path (0 missing / 0 extra / 0 mismatch).
+            lambda: backfill_daywalk_bulk(
                 db_engine,
                 scoped_tickers=scoped_tickers,
                 date_from=date_from,
@@ -883,6 +892,9 @@ def _stage_delete_historical(
             from_date=from_dt,
             to_date=to_dt,
         )
+
+
+from .bulk_daywalk import backfill_daywalk_bulk  # BULK-DAYWALK
 
 
 def _walk_trading_days(
