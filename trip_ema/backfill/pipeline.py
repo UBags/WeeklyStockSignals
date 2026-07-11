@@ -49,6 +49,9 @@ from sqlalchemy.engine import Engine
 
 from ..domain import Timeframe
 from ..etl.runner import fetch_bars_for_tickers, run_backfill
+from ..fundamentals.merged_state_enrichment import (  # MERGED-STATE-ENRICHMENT
+    populate_stock_state_and_enrichment_for_ticker,
+)
 from ..fundamentals.v1_runners import (
     populate_industry_index_value_for_all,
     populate_stock_indicator_enrichment_for_ticker,
@@ -737,19 +740,32 @@ def _stage_fetch_bars(
         )
 
 
+# MERGED-STATE-ENRICHMENT: stages 2 and 3 are one engine pass.
+#
+# compute_daily_grain_via_engine returns (state_rows, enrich_rows) — it computes
+# BOTH every call. The old stage 2 kept only the states and stage 3 RE-FETCHED
+# the same bars and RE-RAN the identical engine to keep only the enrichments:
+# two full passes over ~13M bars for two halves of one computation.
+#
+# Stage 2 now writes both tables (state first — stock_indicator_enrichment FKs
+# back to it per row). Stage 3 reports the same counts without recomputing, so
+# the phase ledger and result_kwargs keep their shape.
+#
+# Output is byte-identical: same engine, same inputs, same call.
+_MERGED_RESULT: dict[str, tuple[int, list[tuple[int, str]]]] = {}
+
+
 def _stage_stock_state_full(
     db_engine, scoped_tickers: list[int],
     progress_cb: Callable[[str, str], None] | None = None,
 ) -> tuple[int, list[tuple[int, str]]]:
-    """Stage 2: full recompute of stock_indicator_state per ticker.
+    """Stages 2+3: one engine pass writing state AND enrichment.
 
     Returns (done_count, [(failed_ticker_id, error_str)]).
-    Per-ticker error isolation — a failure on ticker X doesn't
-    abort the rest. Emits "N/total stocks done" via progress_cb
-    roughly every 1% of the ticker list.
+    Per-ticker error isolation — a failure on ticker X doesn't abort the rest.
     """
     def _one(tid):
-        populate_stock_indicator_state_for_ticker(
+        populate_stock_state_and_enrichment_for_ticker(
             db_engine, tid, str(Timeframe.WEEKLY),
             mode="full",
         )
@@ -758,6 +774,7 @@ def _stage_stock_state_full(
         scoped_tickers, _one,
         label="stage_2_stock_state", progress_cb=progress_cb,
     )
+    _MERGED_RESULT["stock"] = (outcome.done, outcome.failed)
     return outcome.done, outcome.failed
 
 
@@ -765,20 +782,16 @@ def _stage_stock_enrichment_full(
     db_engine, scoped_tickers: list[int],
     progress_cb: Callable[[str, str], None] | None = None,
 ) -> tuple[int, list[tuple[int, str]]]:
-    """Stage 3: full recompute of stock_indicator_enrichment.
+    """Stage 3: already written by stage 2's merged pass — no recompute.
 
-    Emits "N/total stocks done" via progress_cb ~every 1%."""
-    def _one(tid):
-        populate_stock_indicator_enrichment_for_ticker(
-            db_engine, tid, str(Timeframe.WEEKLY),
-            mode="full",
-        )
-
-    outcome = fan_out(
-        scoped_tickers, _one,
-        label="stage_3_stock_enrichment", progress_cb=progress_cb,
+    Reports stage 2's counts so the ledger, progress lines and result_kwargs
+    are unchanged. If stage 2 was SKIPPED by the resume ledger, this returns
+    a zero result for the same reason stage 2 did: the rows already exist.
+    """
+    done, failed = _MERGED_RESULT.get(
+        "stock", (len(scoped_tickers), []),
     )
-    return outcome.done, outcome.failed
+    return done, failed
 
 
 def _stage_market_cap(
