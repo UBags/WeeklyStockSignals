@@ -134,9 +134,16 @@ def derive_signal_for_ticker_this_cycle(
     # Step 11b1: when as_of is set (backfill caller), bound the
     # state-row read so we see the two most recent rows AS OF that
     # historical instant — not the absolute latest.
+    # DAILY-GRAIN-BOUND: bound on `date`, NOT bar_timestamp. bar_timestamp is
+    # the week anchor shared by every daily row of the week, so `to_dt=as_of`
+    # would also admit the rest of D's week and hand back the week's last two
+    # rows instead of (D, D-1) -- lookahead, and every intra-week signal lost.
+    # as_of is IST-aware (datetime.combine(d, time(16,30), tzinfo=IST)), so
+    # .date() is exactly day d. as_of is None in live mode -> unbounded.
     states = repo.get_history_for_ticker(
         ticker_id, str(timeframe),
-        to_dt=as_of, limit=2,
+        to_date=as_of.date() if as_of is not None else None,
+        limit=2,
     )
     if len(states) < 2:
         return None

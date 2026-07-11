@@ -9,7 +9,7 @@ Enrichment fields are handled by a separate repository
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -218,12 +218,22 @@ class StockIndicatorStateRepository:
         *,
         from_dt: datetime | None = None,
         to_dt: datetime | None = None,
+        to_date: date | None = None,
         limit: int | None = None,
     ) -> list[StockIndicatorState]:
         """Historical rows for this (ticker, timeframe), newest-first.
 
         Optional `from_dt` / `to_dt` bound the bar_timestamp range
         (inclusive). Optional `limit` caps the result count.
+
+        DAILY-GRAIN-BOUND: `to_date` bounds on `date` (the daily-grain
+        column, and part of the PK) rather than `bar_timestamp`. Callers that
+        need "the state as of day D" MUST use `to_date`, not `to_dt`:
+        bar_timestamp is the IST-Monday week anchor shared by all ~5 daily
+        rows of a week, so `bar_timestamp <= D 16:30` also admits the REST OF
+        THAT WEEK (Thu/Fri when D is Tue), and `ORDER BY date DESC` then
+        returns the week's last rows instead of D and D-1. In backfill that is
+        both lookahead and a silent loss of every intra-week signal.
         """
         sql_parts = [
             "SELECT ticker_id, timeframe, bar_timestamp,",
@@ -242,6 +252,10 @@ class StockIndicatorStateRepository:
         if to_dt is not None:
             sql_parts.append("  AND bar_timestamp <= :to")
             params["to"] = to_dt
+        if to_date is not None:
+            # DAILY-GRAIN-BOUND: see docstring.
+            sql_parts.append("  AND date <= :to_date")
+            params["to_date"] = to_date
         sql_parts.append("ORDER BY date DESC")
         if limit is not None:
             sql_parts.append("LIMIT :lim")
