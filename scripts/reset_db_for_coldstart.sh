@@ -145,6 +145,46 @@ TRUNCATE TABLE ${LIST} RESTART IDENTITY CASCADE;
 COMMIT;
 "
 
+# ---------------------------------------------------------------------------
+# Reset the subscriber notification CADENCE.
+#
+# `subscribers` is deliberately PRESERVED (no subscriber = no email), but that
+# means last_notified_at SURVIVES the wipe. find_due_for_notification gates on:
+#
+#     is_active = TRUE
+#     AND (last_notified_at IS NULL
+#          OR last_notified_at <= now - make_interval(mins => notify_cadence_minutes))
+#
+# So if the subscriber was notified inside their cadence window, they are NOT
+# DUE, notify_subscribers gets an empty list, and the cold start completes the
+# entire pipeline and sends NOTHING — reporting success the whole way.
+#
+# A cold start must present the subscriber as "never notified".
+# ---------------------------------------------------------------------------
+echo
+echo "==================================================================="
+echo " Resetting subscriber notification cadence"
+echo "==================================================================="
+psql -U "$ROLE" -d "$DB" -v ON_ERROR_STOP=1 -c "
+UPDATE subscribers SET last_notified_at = NULL;
+"
+echo "  last_notified_at = NULL  -> every active subscriber is now DUE"
+
+DUE=$(psql -U "$READ_ROLE" -d "$DB" -tAc "
+  SELECT count(*) FROM subscribers
+   WHERE is_active = TRUE
+     AND (last_notified_at IS NULL
+          OR last_notified_at <= NOW() - make_interval(mins => notify_cadence_minutes))")
+echo "  subscribers DUE for notification: $DUE"
+if [[ "${DUE:-0}" -eq 0 ]]; then
+  echo
+  echo "  WARNING: still 0 due. Check is_active — an inactive subscriber is never"
+  echo "           returned by find_due_for_notification, so no email will be sent."
+  psql -U "$READ_ROLE" -d "$DB" -c \
+    "SELECT subscriber_id, email, is_active, notify_cadence_minutes,
+            last_notified_at FROM subscribers;"
+fi
+
 echo
 echo "==================================================================="
 echo " AFTER"
