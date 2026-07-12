@@ -369,8 +369,9 @@ class TripEmaHttpClient:
         index. Synthetic OHLC (open/high/low/close) is generated
         server-side from `industry_index_value` as a ±0.25% box
         around each weekly close, colored by week-over-week
-        direction. EMAs / bands / regime come from `indicator_state`,
-        sampled at the last trading day of each week.
+        direction. EMAs / bands / regime come from
+        `industry_indicator_state`, sampled at the last trading day
+        of each week (the converged end-of-week state).
 
         Used by the GUI's IndustryPanel for the top-of-left chart.
         """

@@ -247,11 +247,11 @@ PSQL_RUN() {
     psql -U "$PG_USER_ETL" -d "$PG_DB" -tA -F'|' -c "$1" 2>/dev/null
 }
 
-# Most recent indicator_state row.
+# Most recent stock_indicator_state row.
 # Strip newlines only (not spaces) — the timestamp string contains an
 # internal space (e.g. "2026-06-24 01:38:38.756861+05:30") which date -d
 # needs to parse correctly.
-LAST_IND="$(PSQL_RUN "SELECT MAX(computed_at)::text FROM indicator_state WHERE ticker_id IS NOT NULL;" | tr -d '\r\n')"
+LAST_IND="$(PSQL_RUN "SELECT MAX(computed_at)::text FROM stock_indicator_state;" | tr -d '\r\n')"
 if [[ -n "$LAST_IND" ]]; then
     LAST_IND_EPOCH="$(date -d "$LAST_IND" +%s 2>/dev/null || echo 0)"
     AGE_H=$(( ( $(date +%s) - LAST_IND_EPOCH ) / 3600 ))
@@ -261,7 +261,7 @@ if [[ -n "$LAST_IND" ]]; then
         pass "ticker indicator_state fresh (latest ${AGE_H}h ago)"
     fi
 else
-    fail "could not read indicator_state from DB"
+    fail "could not read stock_indicator_state from DB"
 fi
 
 # Signal events generated within the window.
@@ -270,8 +270,8 @@ fi
 # timezone (Asia/Kolkata here), which would silently widen the window
 # by IST_OFFSET (5.5h) and pull in pre-window rows. Epoch seconds are
 # absolute and unambiguous.
-SIG_WIN="$(PSQL_RUN "SELECT COUNT(*) FROM signal_events WHERE computed_at >= to_timestamp($SINCE_EPOCH);" | tr -d '\r\n')"
-info "signal_events written in window: ${SIG_WIN:-0}"
+SIG_WIN="$(PSQL_RUN "SELECT COUNT(*) FROM historical_signals WHERE computed_at >= to_timestamp($SINCE_EPOCH);" | tr -d '\r\n')"
+info "historical_signals written in window: ${SIG_WIN:-0}"
 
 # Notification log activity in window
 NOTIF_WIN="$(psql -U "$PG_USER_ENGINE" -d "$PG_DB" -tA -F'|' -c \
@@ -279,8 +279,8 @@ NOTIF_WIN="$(psql -U "$PG_USER_ENGINE" -d "$PG_DB" -tA -F'|' -c \
 info "notification_log rows in window: ${NOTIF_WIN:-0}"
 
 # Total signal events (overall scale check)
-SIG_TOTAL="$(PSQL_RUN "SELECT COUNT(*) FROM signal_events WHERE ticker_id IS NOT NULL;" | tr -d '\r\n')"
-info "signal_events total: ${SIG_TOTAL:-?}"
+SIG_TOTAL="$(PSQL_RUN "SELECT COUNT(*) FROM historical_signals;" | tr -d '\r\n')"
+info "historical_signals total: ${SIG_TOTAL:-?}"
 
 # ===== 6. Chart endpoint data integrity =====
 # End-to-end check that the chart endpoint returns the LATEST bar with

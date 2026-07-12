@@ -6,7 +6,8 @@ current_bar_inputs), returns the current bar's `Regime`.
 No I/O. No state. No imports outside `domain/`. This function is the
 only file in the codebase that implements the regime rules — every
 other consumer either calls this directly or reads the persisted
-`indicator_state.display_regime` column populated from this call.
+`stock_indicator_state.display_regime` (and the industry table's)
+column populated from this call.
 
 Threading: stateless and idempotent. Safe to call concurrently.
 

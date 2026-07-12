@@ -276,7 +276,21 @@ state.
 
 1. Open a read-only connection.
 2. `_load_latest_indicator_states(conn, timeframe)`:
+
+   > **HISTORICAL — this code no longer exists.** It is kept here only to
+   > explain what the removed cache-priming path used to do. `indicator_state`
+   > was dropped in migration `0032`; ticker state now lives in
+   > `stock_indicator_state`, which is DAILY grain (`0034`) with a `date`
+   > column — there is no `trade_date` any more, and `bar_timestamp` is the
+   > IST-Monday WEEK anchor, shared by every daily row of the week. An
+   > equivalent query today would be
+   > `DISTINCT ON (ticker_id) ... ORDER BY ticker_id, date DESC`, ordering on
+   > the DAY, never on the anchor (which ties across the whole week and would
+   > hand back an arbitrary day). Nothing primes a cache from the DB at startup
+   > now: `CurrentSignalsCache` is filled by the compute cycle itself.
+
    ```sql
+   -- HISTORICAL: indicator_state was dropped in 0032.
    SELECT DISTINCT ON (ticker_id)
           ticker_id, trade_date,
           med_ema, long_ema, longest_ema, atr,
@@ -289,10 +303,6 @@ state.
       AND timeframe = :tf
     ORDER BY ticker_id, trade_date DESC
    ```
-   `DISTINCT ON (ticker_id) ORDER BY trade_date DESC` gives the
-   latest row per ticker — Postgres-specific construction that is
-   simpler and faster than the equivalent `GROUP BY` + `MAX` +
-   self-join.
 3. `_load_ticker_refs(conn, ticker_ids)`:
    ```sql
    SELECT ticker_id, exchange, symbol, instrument
@@ -441,13 +451,15 @@ same bars produce the same regime sequence, end-to-end.
    classifies by regime delta only. Don't compare its output to
    `current_signals` row-by-row for the same ticker — they will
    differ.
-2. **`prime_cache_from_db` reads `indicator_state` (legacy table).**
-   That table was dropped by migration `0030_drop_legacy_signal_tables`.
-   **Update needed:** the lifecycle module needs to read
-   `stock_indicator_state` instead, and the cache schema needs to
-   reflect the V1 column set (no `core_regime`, etc.). This is the
-   subject of the pending legacy `indicator_state` demolition
-   listed in the project's pending work.
+2. **`prime_cache_from_db` NO LONGER EXISTS.** It was removed with the
+   rest of the legacy cache-priming path; the sections of this README
+   describing it (7.1 `PrimeCacheResult`, 7.2 `prime_cache_from_db`) are
+   historical and describe code that is gone. The table it read,
+   `indicator_state`, was dropped by `0032`; signals live in
+   `current_signals` + `historical_signals` and state in
+   `stock_indicator_state` / `industry_indicator_state`. Nothing primes a
+   cache from the DB at startup any more — `CurrentSignalsCache` is filled
+   by the compute cycle itself.
 3. **`history` must already be aggregated to the desired timeframe.**
    The route layer is responsible for aggregating daily → weekly
    before calling `compute_full_*`. The function does not aggregate.

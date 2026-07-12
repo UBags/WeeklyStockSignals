@@ -371,7 +371,7 @@ SELECT
     COUNT(*) FILTER (WHERE s.signal_type = 'BUY')                  AS buys,
     COUNT(*) FILTER (WHERE s.signal_type = 'SELL')                 AS sells,
     COUNT(*) FILTER (WHERE s.signal_type LIKE 'EXIT_FROM%')        AS exits
-FROM signal_events s
+FROM historical_signals s
 JOIN tickers t USING (ticker_id)
 WHERE s.computed_at >= NOW() - INTERVAL '60 minutes'
 GROUP BY t.exchange
@@ -388,7 +388,7 @@ SELECT
     COUNT(*) FILTER (WHERE s.signal_type = 'BUY')                  AS buys,
     COUNT(*) FILTER (WHERE s.signal_type = 'SELL')                 AS sells,
     COUNT(*) FILTER (WHERE s.signal_type LIKE 'EXIT_FROM%')        AS exits
-FROM signal_events s
+FROM historical_signals s
 JOIN tickers t USING (ticker_id)
 WHERE s.computed_at >= DATE_TRUNC('day', NOW())
 GROUP BY t.exchange
@@ -409,7 +409,7 @@ SELECT
     COUNT(*) FILTER (WHERE s.signal_type = 'BUY')                  AS buys,
     COUNT(*) FILTER (WHERE s.signal_type = 'SELL')                 AS sells,
     COUNT(*) FILTER (WHERE s.signal_type LIKE 'EXIT_FROM%')        AS exits
-FROM signal_events s
+FROM historical_signals s
 JOIN tickers t USING (ticker_id)
 WHERE s.computed_at >= DATE_TRUNC('week', NOW())
 GROUP BY t.exchange
@@ -427,7 +427,7 @@ SELECT
     s.price_at_signal,
     to_char(s.computed_at, 'YYYY-MM-DD HH24:MI:SS') AS fired_at,
     to_char(s.bar_timestamp, 'YYYY-MM-DD HH24:MI:SS') AS bar
-FROM signal_events s
+FROM historical_signals s
 JOIN tickers t USING (ticker_id)
 WHERE s.computed_at >= NOW() - INTERVAL '60 minutes'
 ORDER BY s.computed_at DESC
@@ -896,45 +896,57 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" \
 Inspecting via SQL:
 
 ```bash
-# Latest regime per industry
-psql -h localhost -U trip_ema_app -d trip_ema -c "
-SELECT i1.industry_name,
-       i1.trade_date,
-       i1.core_regime,
-       i1.display_regime,
-       round(i1.med_ema::numeric, 2) AS med_ema,
-       round(i1.long_ema::numeric, 2) AS long_ema,
-       round(i1.atr::numeric, 2) AS atr
-FROM indicator_state i1
-WHERE i1.industry_name IS NOT NULL
-  AND i1.trade_date = (
-      SELECT MAX(trade_date) FROM indicator_state
-      WHERE industry_name = i1.industry_name
-  )
-ORDER BY i1.display_regime DESC, i1.industry_name;
+# Latest regime per industry.
+# industry_indicator_state is DAILY grain: DISTINCT ON + ORDER BY date DESC
+# takes the genuinely latest row. (`core_regime` was collapsed away in
+# migration 0018 — there is only display_regime now.)
+psql -h localhost -U trip_gui_user -d trip_ema -c "
+SELECT DISTINCT ON (industry_name)
+       industry_name,
+       date,
+       display_regime,
+       round(med_ema::numeric, 2)  AS med_ema,
+       round(long_ema::numeric, 2) AS long_ema,
+       round(atr::numeric, 2)      AS atr
+FROM industry_indicator_state
+WHERE timeframe = '1W'
+ORDER BY industry_name, date DESC;
 "
 
 # Industries currently in bullish display regime (display=+1)
-psql -h localhost -U trip_ema_app -d trip_ema -c "
-SELECT industry_name, trade_date,
+psql -h localhost -U trip_gui_user -d trip_ema -c "
+WITH latest AS (
+    SELECT DISTINCT ON (industry_name)
+           industry_name, date, display_regime, med_ema
+    FROM industry_indicator_state
+    WHERE timeframe = '1W'
+    ORDER BY industry_name, date DESC
+)
+SELECT industry_name, date,
        round(med_ema::numeric, 2) AS med_ema
-FROM indicator_state
-WHERE industry_name IS NOT NULL
-  AND display_regime = 1
-  AND trade_date = (SELECT MAX(trade_date) FROM indicator_state
-                    WHERE industry_name IS NOT NULL)
+FROM latest
+WHERE display_regime = 1
 ORDER BY industry_name;
 "
 
-# Recent buy turns on medium EMA across all industries
-psql -h localhost -U trip_ema_app -d trip_ema -c "
-SELECT industry_name, trade_date,
-       round(med_ema::numeric, 2) AS med_ema
-FROM indicator_state
-WHERE industry_name IS NOT NULL
-  AND med_turn_buy = TRUE
-  AND trade_date >= CURRENT_DATE - INTERVAL '30 days'
-ORDER BY trade_date DESC, industry_name;
+# Recent industry regime FLIPS (last 30 days).
+# `med_turn_buy` no longer exists — the turn/pattern columns went with the
+# 0018 regime collapse. A flip is now a change in display_regime between
+# consecutive daily rows, which is exactly what LAG() finds.
+psql -h localhost -U trip_gui_user -d trip_ema -c "
+WITH d AS (
+    SELECT industry_name, date, display_regime,
+           LAG(display_regime) OVER (
+               PARTITION BY industry_name ORDER BY date
+           ) AS prev_regime
+    FROM industry_indicator_state
+    WHERE timeframe = '1W'
+)
+SELECT industry_name, date, prev_regime, display_regime
+FROM d
+WHERE prev_regime IS DISTINCT FROM display_regime
+  AND date >= CURRENT_DATE - 30
+ORDER BY date DESC, industry_name;
 "
 ```
 
@@ -1091,17 +1103,21 @@ EMAs).
 Querying per-ticker results via SQL:
 
 ```bash
-# Latest indicator state for RELIANCE on weekly bars
-psql -h localhost -U trip_ema_app -d trip_ema -c "
-SELECT i.trade_date,
-       i.core_regime, i.display_regime,
-       round(i.med_ema::numeric, 2) AS med_ema,
+# Latest indicator state for RELIANCE.
+# stock_indicator_state is DAILY grain (0034): each row is the WEEKLY chart
+# recomputed with that day's forming bar. `date` is the trading day;
+# `bar_timestamp` is the IST-Monday week anchor shared by the whole week —
+# order by `date`, never by the anchor. (`core_regime` collapsed away in 0018.)
+psql -h localhost -U trip_gui_user -d trip_ema -c "
+SELECT i.date, i.bar_timestamp AS week_anchor,
+       i.display_regime,
+       round(i.med_ema::numeric, 2)  AS med_ema,
        round(i.long_ema::numeric, 2) AS long_ema
-FROM indicator_state i
+FROM stock_indicator_state i
 JOIN tickers t ON i.ticker_id = t.ticker_id
 WHERE t.symbol = 'RELIANCE' AND t.exchange = 'NSE'
   AND i.timeframe = '1W'
-ORDER BY i.trade_date DESC
+ORDER BY i.date DESC
 LIMIT 5;
 "
 

@@ -143,7 +143,7 @@ psql -h localhost -U trip_ema_app -d trip_ema -c "
 SELECT
     s.signal_type, s.price_at_signal,
     s.bar_timestamp, s.computed_at
-FROM signal_events s
+FROM historical_signals s
 JOIN tickers t USING (ticker_id)
 WHERE t.exchange = 'NSE' AND t.symbol = 'RELIANCE'
 ORDER BY s.computed_at DESC

@@ -162,7 +162,7 @@ SELECT
     COUNT(*) FILTER (WHERE s.computed_at >= b.w_start)                AS this_week,
     COUNT(*) FILTER (WHERE s.signal_type = 'BUY'  AND s.computed_at >= b.w_start) AS week_buys,
     COUNT(*) FILTER (WHERE s.signal_type = 'SELL' AND s.computed_at >= b.w_start) AS week_sells
-FROM signal_events s
+FROM historical_signals s
 JOIN tickers t USING (ticker_id)
 CROSS JOIN bounds b
 GROUP BY t.exchange

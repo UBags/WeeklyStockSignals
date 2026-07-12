@@ -94,9 +94,9 @@ class Baseline:
     captured_at: datetime
     ohlcv_max_bar_ts: datetime | None
     ohlcv_rowcount: int
-    indicator_state_ticker_rowcount: int
-    indicator_state_industry_rowcount: int
-    signal_events_rowcount: int
+    indicator_state_ticker_rowcount: int      # stock_indicator_state
+    indicator_state_industry_rowcount: int   # industry_indicator_state
+    signal_events_rowcount: int              # historical_signals
     industry_index_value_rowcount: int
     notification_log_rowcount: int
     log_pos_bytes: int
@@ -155,11 +155,16 @@ def capture_baseline(conn, log_path: str) -> Baseline:
         captured_at=datetime.now(UTC),
         ohlcv_max_bar_ts=ohlcv_max,
         ohlcv_rowcount=scalar(conn, "SELECT COUNT(*) FROM ohlcv_bars"),
+        # The polymorphic `indicator_state` was split in 0032 into
+        # stock_indicator_state + industry_indicator_state, so the old
+        # "WHERE ticker_id IS NOT NULL" / "WHERE industry_name IS NOT NULL"
+        # discriminators are now just two separate tables.
         indicator_state_ticker_rowcount=scalar(conn,
-            "SELECT COUNT(*) FROM indicator_state WHERE ticker_id IS NOT NULL"),
+            "SELECT COUNT(*) FROM stock_indicator_state"),
         indicator_state_industry_rowcount=scalar(conn,
-            "SELECT COUNT(*) FROM indicator_state WHERE industry_name IS NOT NULL"),
-        signal_events_rowcount=scalar(conn, "SELECT COUNT(*) FROM signal_events"),
+            "SELECT COUNT(*) FROM industry_indicator_state"),
+        signal_events_rowcount=scalar(conn,
+            "SELECT COUNT(*) FROM historical_signals"),
         industry_index_value_rowcount=scalar(conn,
             "SELECT COUNT(*) FROM industry_index_value"),
         notification_log_rowcount=scalar(conn,
@@ -173,8 +178,8 @@ def render_baseline(b: Baseline) -> None:
     print(f"  captured_at:                  {b.captured_at.isoformat()}")
     print(f"  ohlcv_bars rows:              {b.ohlcv_rowcount:>10,}")
     print(f"  ohlcv max bar_timestamp:      {b.ohlcv_max_bar_ts}")
-    print(f"  indicator_state (ticker):     {b.indicator_state_ticker_rowcount:>10,}")
-    print(f"  indicator_state (industry):   {b.indicator_state_industry_rowcount:>10,}")
+    print(f"  stock_indicator_state:        {b.indicator_state_ticker_rowcount:>10,}")
+    print(f"  industry_indicator_state:     {b.indicator_state_industry_rowcount:>10,}")
     print(f"  signal_events rows:           {b.signal_events_rowcount:>10,}")
     print(f"  industry_index_value rows:    {b.industry_index_value_rowcount:>10,}")
     print(f"  notification_log rows:        {b.notification_log_rowcount:>10,}")
@@ -266,8 +271,9 @@ def poll_status(
             new_ohlcv = scalar(conn,
                 "SELECT COUNT(*) FROM ohlcv_bars",
             ) - baseline.ohlcv_rowcount
-            new_indicator = scalar(conn,
-                "SELECT COUNT(*) FROM indicator_state",
+            new_indicator = (
+                scalar(conn, "SELECT COUNT(*) FROM stock_indicator_state")
+                + scalar(conn, "SELECT COUNT(*) FROM industry_indicator_state")
             ) - (baseline.indicator_state_ticker_rowcount +
                  baseline.indicator_state_industry_rowcount)
             if new_ohlcv > 100 and new_indicator > 100:
@@ -282,7 +288,7 @@ def poll_status(
         # Print progress dot
         print(f"  poll #{poll:>3}  "
               f"+{(scalar(conn,'SELECT COUNT(*) FROM ohlcv_bars') - baseline.ohlcv_rowcount):>6,} ohlcv  "
-              f"+{(scalar(conn,'SELECT COUNT(*) FROM signal_events') - baseline.signal_events_rowcount):>5,} signals  "
+              f"+{(scalar(conn,'SELECT COUNT(*) FROM historical_signals') - baseline.signal_events_rowcount):>5,} signals  "
               f"+{(scalar(conn,'SELECT COUNT(*) FROM notification_log') - baseline.notification_log_rowcount):>4,} notifs")
         time.sleep(poll_interval_s)
 
@@ -318,21 +324,21 @@ def run_validations(conn, baseline: Baseline, exchange: str,
             "0 new rows — fetch leg did not run or all tickers stale"))
 
     # B. indicator_state (ticker, 1D): rows populated for latest bar
+    # `trade_date` became `date` when the table went DAILY grain (0034).
     latest_ticker = fetch_one(conn, """
         SELECT
-          MAX(trade_date) AS latest_date,
-          COUNT(*) FILTER (WHERE trade_date = (
-              SELECT MAX(trade_date) FROM indicator_state WHERE ticker_id IS NOT NULL
+          MAX(date) AS latest_date,
+          COUNT(*) FILTER (WHERE date = (
+              SELECT MAX(date) FROM stock_indicator_state
           )) AS rows_latest,
-          COUNT(*) FILTER (WHERE trade_date = (
-              SELECT MAX(trade_date) FROM indicator_state WHERE ticker_id IS NOT NULL
+          COUNT(*) FILTER (WHERE date = (
+              SELECT MAX(date) FROM stock_indicator_state
           ) AND med_ema IS NOT NULL AND long_ema IS NOT NULL
               AND longest_ema IS NOT NULL AND atr IS NOT NULL) AS rows_emas_atr_ok,
-          COUNT(*) FILTER (WHERE trade_date = (
-              SELECT MAX(trade_date) FROM indicator_state WHERE ticker_id IS NOT NULL
+          COUNT(*) FILTER (WHERE date = (
+              SELECT MAX(date) FROM stock_indicator_state
           ) AND display_regime IN (-1, 0, 1)) AS rows_regime_ok
-        FROM indicator_state
-        WHERE ticker_id IS NOT NULL
+        FROM stock_indicator_state
     """)
     if latest_ticker and latest_ticker["rows_latest"]:
         n_latest = latest_ticker["rows_latest"]
@@ -349,13 +355,15 @@ def run_validations(conn, baseline: Baseline, exchange: str,
             f"regime ok={n_regime:,}/{n_latest:,} ({pct_regime:.0%})"))
     else:
         results.append(CheckResult(
-            "B. indicator_state (ticker): latest bar populated", "FAIL",
+            "B. stock_indicator_state: latest bar populated", "FAIL",
             "no rows found"))
 
-    # C. signal_events: new rows (informational only — 0 is legal)
-    new_signals = scalar(conn, "SELECT COUNT(*) FROM signal_events") - baseline.signal_events_rowcount
+    # C. historical_signals: new rows (informational only — 0 is legal)
+    new_signals = scalar(
+        conn, "SELECT COUNT(*) FROM historical_signals"
+    ) - baseline.signal_events_rowcount
     signal_types = fetch_all(conn, """
-        SELECT signal_type, COUNT(*) AS n FROM signal_events
+        SELECT signal_type, COUNT(*) AS n FROM historical_signals
         WHERE computed_at > %(since)s GROUP BY signal_type ORDER BY n DESC
     """, {"since": baseline.captured_at.isoformat()})
     distinct_types = [r["signal_type"] for r in signal_types]
@@ -399,17 +407,16 @@ def run_validations(conn, baseline: Baseline, exchange: str,
     # E. indicator_state (industry, weekly Monday): latest bar populated
     latest_industry = fetch_one(conn, """
         SELECT
-          MAX(trade_date) AS latest_date,
-          COUNT(*) FILTER (WHERE trade_date = (
-              SELECT MAX(trade_date) FROM indicator_state WHERE industry_name IS NOT NULL
+          MAX(date) AS latest_date,
+          COUNT(*) FILTER (WHERE date = (
+              SELECT MAX(date) FROM industry_indicator_state
           )) AS rows_latest,
-          COUNT(*) FILTER (WHERE trade_date = (
-              SELECT MAX(trade_date) FROM indicator_state WHERE industry_name IS NOT NULL
+          COUNT(*) FILTER (WHERE date = (
+              SELECT MAX(date) FROM industry_indicator_state
           ) AND med_ema IS NOT NULL AND long_ema IS NOT NULL
               AND longest_ema IS NOT NULL AND atr IS NOT NULL
               AND display_regime IN (-1, 0, 1)) AS rows_fully_ok
-        FROM indicator_state
-        WHERE industry_name IS NOT NULL
+        FROM industry_indicator_state
     """)
     if latest_industry and latest_industry["rows_latest"]:
         n_latest = latest_industry["rows_latest"]

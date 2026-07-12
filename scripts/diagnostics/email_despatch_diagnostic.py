@@ -1,144 +1,150 @@
-"""Email dispatch diagnostic. Answers:
-  1. How many signal_events match the new 7d bar_timestamp filter?
-  2. What's the most recent bar_timestamp in signal_events?
-  3. Has the notification_log received anything recently?
-  4. What does find_pending_for_subscriber actually return RIGHT NOW for sub 1?
-  5. Subscriber 1's transport config — Brevo or SMTP or null?
+#!/usr/bin/env python3
+"""Why did / didn't subscriber N get an email?
+
+REWRITTEN for V1. The previous version was built on a flow that no longer
+exists, and would have MISLED you on every run:
+
+  * it read `signal_events`, dropped in migration 0030. The V1 notifier reads
+    `current_signals` (the live set) -- see orchestrator/notify_subscribers.py.
+
+  * it deduped with
+        NOT EXISTS (SELECT 1 FROM notification_log WHERE event_id = e.event_id)
+    but notification_log.event_id is LEGACY and NULL for every V1 write
+    (NotificationLogEntry: "event_id (legacy, NULL for V1 writes)"). That
+    predicate is therefore ALWAYS TRUE -- the old tool reported EVERY signal as
+    un-notified, whether or not the email had gone out.
+    The real V1 dedup key is (signal_ticker_id, signal_timeframe,
+    signal_bar_timestamp).
+
+  * it filtered `bar_timestamp >= NOW() - INTERVAL '7 days'`. bar_timestamp is
+    the IST-Monday WEEK anchor shared by every day of the week, so that means
+    "signals whose WEEK started in the last 7 days", not "signals from the last
+    7 days". historical_signals.signal_date is the daily grain -- use it.
+
+Usage:  python email_despatch_diagnostic.py [SUBSCRIBER_ID]
 """
-from datetime import datetime, UTC
-from sqlalchemy import create_engine, text
-import yaml
+from __future__ import annotations
 
-cfg = yaml.safe_load(open("../../config.yaml"))
-db_cfg = cfg["database"]
-url = (
-    f"postgresql://{db_cfg.get('user', 'uddipan')}:"
-    f"{db_cfg.get('password', '')}@"
-    f"{db_cfg.get('host', 'localhost')}:"
-    f"{db_cfg.get('port', 5432)}/"
-    f"{db_cfg['database']}"
-)
-print(f"Connecting to: {url.replace(db_cfg.get('password',''), '***')}\n")
-eng = create_engine(url)
+import sys
 
-now = datetime.now(UTC)
+from sqlalchemy import text
 
-with eng.connect() as conn:
-    # ---- 1. signal_events distribution by bar_timestamp recency ----
-    print("=" * 70)
-    print("1. signal_events distribution by bar_timestamp")
-    print("=" * 70)
-    rows = conn.execute(text("""
-        SELECT
-          COUNT(*) FILTER (WHERE bar_timestamp >= NOW() - INTERVAL '7 days')  AS last_7d,
-          COUNT(*) FILTER (WHERE bar_timestamp >= NOW() - INTERVAL '14 days') AS last_14d,
-          COUNT(*) FILTER (WHERE bar_timestamp >= NOW() - INTERVAL '30 days') AS last_30d,
-          COUNT(*) AS total,
-          MAX(bar_timestamp) AS max_bar_ts,
-          MIN(bar_timestamp) AS min_bar_ts
-        FROM signal_events
-    """)).first()
-    print(f"  Total events:               {rows.total:>10,}")
-    print(f"  bar_timestamp >= 7d ago:    {rows.last_7d:>10,}   <-- new filter")
-    print(f"  bar_timestamp >= 14d ago:   {rows.last_14d:>10,}")
-    print(f"  bar_timestamp >= 30d ago:   {rows.last_30d:>10,}")
-    print(f"  Max bar_timestamp: {rows.max_bar_ts}")
-    print(f"  Min bar_timestamp: {rows.min_bar_ts}")
+from trip_ema.config.loader import load_config
+from trip_ema.persistence.connection import create_engine_from_config
 
-    # ---- 2. notification_log activity ----
-    print()
-    print("=" * 70)
-    print("2. notification_log activity")
-    print("=" * 70)
-    rows = conn.execute(text("""
-        SELECT
-          COUNT(*) AS total_rows,
-          MAX(last_sent_at) AS last_sent_at,
-          COUNT(DISTINCT subscriber_id) AS n_subscribers,
-          COUNT(DISTINCT event_id) AS n_events
-        FROM notification_log
-    """)).first()
-    print(f"  Total rows: {rows.total_rows}")
-    print(f"  Last sent at: {rows.last_sent_at}")
-    print(f"  Subscribers ever notified: {rows.n_subscribers}")
-    print(f"  Events ever notified about: {rows.n_events}")
+SUB = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 
-    # ---- 3. subscriber 1 config ----
-    print()
-    print("=" * 70)
-    print("3. Subscriber 1 config")
-    print("=" * 70)
-    sub = conn.execute(text("""
-        SELECT subscriber_id, email, transport, active, schedule_cron, last_dispatched_at
-        FROM subscribers
-        WHERE subscriber_id = 1
-    """)).first()
-    if sub is None:
-        print("  No subscriber with id=1!")
-    else:
-        for k in ("subscriber_id", "email", "transport", "active",
-                 "schedule_cron", "last_dispatched_at"):
-            try:
-                print(f"  {k}: {getattr(sub, k)}")
-            except AttributeError:
-                pass  # column may not exist
 
-    # ---- 4. simulate find_pending_for_subscriber for sub 1 ----
-    print()
-    print("=" * 70)
-    print("4. Pending events for subscriber 1 RIGHT NOW")
-    print("=" * 70)
-    rows = conn.execute(text("""
-        SELECT s.symbol, t.exchange, e.bar_timestamp, e.computed_at,
-               e.signal_type, e.event_id
-        FROM signal_events e
-        JOIN tickers t ON t.ticker_id = e.ticker_id
-        JOIN tickers s ON s.ticker_id = e.ticker_id
-        WHERE e.computed_at >= NOW() - INTERVAL '24 hours'
-          AND e.bar_timestamp >= NOW() - INTERVAL '7 days'
-          AND NOT EXISTS (
-              SELECT 1 FROM notification_log nl
-              WHERE nl.event_id = e.event_id
-                AND nl.subscriber_id = 1
-                AND nl.notification_count >= 3
-          )
-        ORDER BY e.bar_timestamp DESC, e.computed_at DESC
-        LIMIT 30
-    """)).all()
-    print(f"  {len(rows)} event(s) pass both filters and aren't capped:")
-    for r in rows[:20]:
-        print(f"    [{r.event_id:>7}] {r.exchange}:{r.symbol:<12} "
-              f"bar={r.bar_timestamp.date()}  computed={r.computed_at.date()}  "
-              f"type={r.signal_type}")
-    if len(rows) > 20:
-        print(f"    ... and {len(rows)-20} more")
+def main() -> None:
+    engine = create_engine_from_config(load_config("config.yaml"))
+    with engine.connect() as conn:
+        print("=" * 72)
+        print("1. current_signals — what the notifier would send RIGHT NOW")
+        print("=" * 72)
+        r = conn.execute(text("""
+            SELECT COUNT(*) AS n,
+                   MIN(bar_timestamp) AS min_bar,
+                   MAX(bar_timestamp) AS max_bar,
+                   MAX(computed_at)   AS last_computed
+              FROM current_signals
+        """)).first()
+        print(f"  rows in current_signals : {r.n:>8,}")
+        print(f"  week anchor range       : {r.min_bar} .. {r.max_bar}")
+        print(f"  last computed_at        : {r.last_computed}")
+        if r.n == 0:
+            print("  -> nothing to send. The cycle emits current_signals only")
+            print("     on a regime FLIP; a quiet day legitimately has zero.")
 
-    # ---- 5. recent emitted signal types ----
-    print()
-    print("=" * 70)
-    print("5. Recent signal_events by signal_type (last 7 days bar_timestamp)")
-    print("=" * 70)
-    rows = conn.execute(text("""
-        SELECT signal_type, COUNT(*) AS n
-        FROM signal_events
-        WHERE bar_timestamp >= NOW() - INTERVAL '7 days'
-        GROUP BY signal_type
-        ORDER BY n DESC
-    """)).all()
-    for r in rows:
-        print(f"  {r.signal_type:<20} {r.n:>6}")
+        print()
+        print("=" * 72)
+        print("2. current_signals by type")
+        print("=" * 72)
+        for row in conn.execute(text("""
+            SELECT signal_type, COUNT(*) AS n
+              FROM current_signals
+             GROUP BY signal_type
+             ORDER BY n DESC
+        """)):
+            print(f"  {row.signal_type:<18} {row.n:>6}")
 
-    # ---- 6. subscriptions for sub 1 ----
-    print()
-    print("=" * 70)
-    print("6. Subscriber 1 subscriptions")
-    print("=" * 70)
-    rows = conn.execute(text("""
-        SELECT subscription_id, ticker_id, signal_filter
-        FROM subscriptions
-        WHERE subscriber_id = 1
-    """)).all()
-    print(f"  {len(rows)} subscription(s):")
-    for r in rows[:10]:
-        print(f"    sub_id={r.subscription_id} ticker_id={r.ticker_id} "
-              f"filter={r.signal_filter}")
+        print()
+        print("=" * 72)
+        print("3. historical_signals — recent activity (by signal_date)")
+        print("=" * 72)
+        # signal_date, NOT bar_timestamp: the latter is the week anchor.
+        h = conn.execute(text("""
+            SELECT
+              COUNT(*) FILTER (
+                  WHERE signal_date >= CURRENT_DATE - 7)  AS last_7d,
+              COUNT(*) FILTER (
+                  WHERE signal_date >= CURRENT_DATE - 30) AS last_30d,
+              COUNT(*)          AS total,
+              MAX(signal_date)  AS latest_signal_date
+              FROM historical_signals
+        """)).first()
+        print(f"  signal_date >= 7d ago   : {h.last_7d:>8,}")
+        print(f"  signal_date >= 30d ago  : {h.last_30d:>8,}")
+        print(f"  total                   : {h.total:>8,}")
+        print(f"  latest signal_date      : {h.latest_signal_date}")
+
+        print()
+        print("=" * 72)
+        print(f"4. Subscriber {SUB}")
+        print("=" * 72)
+        s = conn.execute(text("""
+            SELECT subscriber_id, email, is_active, last_notified_at
+              FROM subscribers WHERE subscriber_id = :s
+        """), {"s": SUB}).first()
+        if s is None:
+            print(f"  !! no subscriber with subscriber_id = {SUB}")
+            return
+        print(f"  email            : {s.email}")
+        print(f"  is_active        : {s.is_active}"
+              f"{'   <-- INACTIVE: no email will be sent' if not s.is_active else ''}")
+        print(f"  last_notified_at : {s.last_notified_at}")
+
+        print()
+        print("=" * 72)
+        print(f"5. What subscriber {SUB} has already been sent (V1 dedup key)")
+        print("=" * 72)
+        # The V1 key is (signal_ticker_id, signal_timeframe,
+        # signal_bar_timestamp). event_id is legacy and NULL on every V1 row --
+        # joining on it (as the old diagnostic did) matches nothing, ever.
+        sent = conn.execute(text("""
+            SELECT COUNT(*) AS n, MAX(last_sent_at) AS last_sent
+              FROM notification_log
+             WHERE subscriber_id = :s
+        """), {"s": SUB}).first()
+        print(f"  notification_log rows : {sent.n:>8,}")
+        print(f"  last_sent_at          : {sent.last_sent}")
+
+        print()
+        print("=" * 72)
+        print(f"6. current_signals NOT yet logged for subscriber {SUB}")
+        print("=" * 72)
+        pending = conn.execute(text("""
+            SELECT t.symbol, t.exchange, cs.signal_type,
+                   cs.bar_timestamp, cs.computed_at
+              FROM current_signals cs
+              JOIN tickers t ON t.ticker_id = cs.ticker_id
+             WHERE NOT EXISTS (
+                       SELECT 1 FROM notification_log nl
+                        WHERE nl.subscriber_id        = :s
+                          AND nl.signal_ticker_id     = cs.ticker_id
+                          AND nl.signal_timeframe     = cs.timeframe
+                          AND nl.signal_bar_timestamp = cs.bar_timestamp
+                   )
+             ORDER BY cs.computed_at DESC
+             LIMIT 30
+        """), {"s": SUB}).all()
+        print(f"  {len(pending)} signal(s) not yet in notification_log:")
+        for p in pending[:20]:
+            print(f"    {p.exchange}:{p.symbol:<14} {p.signal_type:<16}"
+                  f"  week={p.bar_timestamp.date()}"
+                  f"  computed={p.computed_at.date()}")
+        if len(pending) > 20:
+            print(f"    ... and {len(pending) - 20} more")
+
+
+if __name__ == "__main__":
+    main()

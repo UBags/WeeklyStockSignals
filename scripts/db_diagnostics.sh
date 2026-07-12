@@ -22,7 +22,7 @@ set -euo pipefail
 
 CONFIG_FILE="${1:-config.yaml}"
 # trip_gui_user has SELECT on all tables (per Phase 12 role grants), so it's
-# the right identity for diagnostics. trip_etl_user can't read signal_events.
+# the right identity for diagnostics. trip_etl_user can't read historical_signals.
 DB_USER="${DB_USER:-trip_gui_user}"
 DB_NAME="${DB_NAME:-trip_ema}"
 
@@ -200,7 +200,7 @@ done
 # ============================================================================
 # (c) Signals generated in the last 2 days
 # ============================================================================
-hdr "(c) Signals generated — last 2 days (live signal_events log)"
+hdr "(c) Signals generated — last 2 days (historical_signals)"
 
 runsql "
 SELECT
@@ -211,12 +211,12 @@ SELECT
     (se.bar_timestamp     AT TIME ZONE '$TZ_DISPLAY') AS bar_local,
     (se.computed_at       AT TIME ZONE '$TZ_DISPLAY') AS computed_local,
     se.price_at_signal
-FROM signal_events se
+FROM historical_signals se
 JOIN tickers t ON t.ticker_id = se.ticker_id
 WHERE t.exchange IN ($EX_SQL_LIST)
-  AND se.computed_at >= NOW() - INTERVAL '2 days'
+  AND se.signal_date >= CURRENT_DATE - 2
 ORDER BY
-    (se.computed_at AT TIME ZONE '$TZ_DISPLAY')::date DESC,
+    se.signal_date DESC,
     se.signal_type ASC,
     t.symbol ASC;
 "
@@ -228,10 +228,10 @@ SELECT
     t.exchange,
     se.signal_type,
     COUNT(*) AS n
-FROM signal_events se
+FROM historical_signals se
 JOIN tickers t ON t.ticker_id = se.ticker_id
 WHERE t.exchange IN ($EX_SQL_LIST)
-  AND se.computed_at >= NOW() - INTERVAL '2 days'
+  AND se.signal_date >= CURRENT_DATE - 2
 GROUP BY t.exchange, se.signal_type
 ORDER BY t.exchange, se.signal_type;
 "
