@@ -121,6 +121,9 @@ def send_signal_report(
         which_exchanges=which_exchanges,
         which_industries=which_industries,
         which_stocks=which_stocks,
+        # CHAIN-CLOCK-FIX: today_ist is already computed above for the
+        # entitlement gate — reuse it rather than reaching for a second clock.
+        as_of_date=today_ist,
     )
     if not rows:
         return None
@@ -152,6 +155,7 @@ def _fetch_filtered_current_signals(
     which_exchanges: str | Sequence[str],
     which_industries: str | Sequence[str],
     which_stocks: str | Sequence[int],
+    as_of_date: date,
 ) -> list[EnrichedSignalRow]:
     """current_signals JOIN tickers LEFT JOIN instrument_industry, with
     the recipient's scope + signal-type filters applied. Mirrors
@@ -209,6 +213,20 @@ def _fetch_filtered_current_signals(
         ticker_ids = [int(r.ticker_id) for r in raw_rows]
         rank_scores = fetch_rank_scores(conn, ticker_ids)
 
+        # CHAIN-CLOCK-FIX: this fetch never happened, so intraday_chain
+        # defaulted to [] on every row and the renderer — which suppresses an
+        # empty chain by design — silently shipped every per-subscriber email
+        # WITHOUT the within-day sequence. Indistinguishable from "no chain".
+        #
+        # Must run INSIDE this `with` block: the comprehension below sits
+        # outside it, by which point `conn` is closed.
+        from ..persistence.intraday_signal_log_repo import (
+            IntradaySignalLogRepository,
+        )
+        _chains = IntradaySignalLogRepository(conn).chains_for_date(
+            signal_date=as_of_date, ticker_ids=ticker_ids,
+        )
+
     enriched = [
         EnrichedSignalRow(
             ticker_id=int(r.ticker_id),
@@ -222,6 +240,7 @@ def _fetch_filtered_current_signals(
             bar_timestamp=r.bar_timestamp,
             computed_at=r.computed_at,
             rank_score=rank_scores.get(int(r.ticker_id), 0.0),
+            intraday_chain=_chains.get(int(r.ticker_id), []),
         )
         for r in raw_rows
     ]

@@ -141,7 +141,12 @@ def compose_email(
     Returns:
         EmailBody | None.
     """
-    rows = _fetch_enriched_signals(conn)
+    # CHAIN-CLOCK-FIX: pass the cycle's instant down. The chain lookup must
+    # use the same day the transitions were LOGGED under
+    # (log_intraday_transitions writes signal_date from the cycle's as_of), not
+    # the wall clock at render time — otherwise an EoD cycle that straddles
+    # midnight silently loses every chain.
+    rows = _fetch_enriched_signals(conn, now=now)
     if not rows:
         return None
 
@@ -154,6 +159,8 @@ def compose_email(
 
 def _fetch_enriched_signals(
     conn: Connection,
+    *,
+    now: datetime,
 ) -> list[EnrichedSignalRow]:
     """SELECT current_signals JOIN tickers + instrument_industry,
     then attach rank_scores via fetch_rank_scores. Returns rows
@@ -190,7 +197,15 @@ def _fetch_enriched_signals(
     from ..persistence.intraday_signal_log_repo import (
         IntradaySignalLogRepository,
     )
-    _today = datetime.now(_IST).date()
+    # CHAIN-CLOCK-FIX: the day comes from the CYCLE's instant, never from
+    # datetime.now(). log_intraday_transitions stamps signal_date from the
+    # cycle's as_of; using the wall clock here meant two different clocks
+    # decided the same day. An EoD cycle running at 23:5x writes
+    # signal_date = D, and if the email rendered minutes later — past midnight
+    # — the wall clock said D+1 and EVERY chain silently disappeared. It also
+    # made the feature untestable: tests pass an explicit `now=`, which was
+    # being ignored here.
+    _today = now.astimezone(_IST).date()
     chains = IntradaySignalLogRepository(conn).chains_for_date(
         signal_date=_today, ticker_ids=ticker_ids,
     )
