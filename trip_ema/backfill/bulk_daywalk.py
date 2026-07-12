@@ -253,7 +253,30 @@ def backfill_daywalk_bulk(
         ]
 
     days_walked = len(walked)
-    today_walked = today in walked
+
+    # EFFECTIVE-TODAY: `walked` holds only TRADING days, so `today in walked` is
+    # False on every Saturday, Sunday and exchange holiday — and
+    # process_signals_for_day (the SOLE writer of current_signals) would then
+    # never run, leaving current_signals EMPTY and the notify stage skipped. A
+    # cold-start backfill on a Sunday produced a full historical_signals table,
+    # zero current_signals, and no email — and reported success.
+    #
+    # Two questions were being conflated:
+    #   (a) did this backfill reach the PRESENT?  <- the one that matters; a
+    #       historical backfill (date_to = 2020-01-01) must NOT touch
+    #       current_signals or fire an email
+    #   (b) is the calendar `today` itself a trading day?  <- what was asked
+    #
+    # On a weekend the backfill HAS reached the present: Friday is the latest
+    # trading day and IS the current weekly bar (Sunday sits in the Mon-Sun week
+    # Friday closed). So resolve `today` to the last trading day at or before it,
+    # and gate on whether the range actually reaches the present.
+    #
+    # On a trading day effective_today == today and nothing changes.
+    reached_present = date_to >= today
+    _at_or_before = [d for d in walked if d <= today]   # `walked` is ORDER BY date
+    effective_today = _at_or_before[-1] if _at_or_before else None
+    today_walked = reached_present and effective_today is not None
 
     cur_up = cur_del = 0
     if today_walked:
@@ -261,13 +284,18 @@ def backfill_daywalk_bulk(
         # current_signals (upsert flips, delete non-flips). It re-deletes and
         # re-inserts today's historical rows too — idempotent, same values.
         from ..orchestrator.process_day import process_signals_for_day
+        # EFFECTIVE-TODAY: drive off the last trading day at or before `today`
+        # (== `today` itself on a trading day). day == today keeps
+        # process_signals_for_day's own semantics identical — upsert this day's
+        # flips, delete the non-flips — it simply runs on the correct day now.
+        assert effective_today is not None   # guaranteed by today_walked
         pd = process_signals_for_day(
             db_engine,
             scoped_tickers=scoped_tickers,
-            day=today,
-            today=today,
+            day=effective_today,
+            today=effective_today,
             mode="backfill",
-            as_of=_as_of(today),
+            as_of=_as_of(effective_today),
             timeframe=timeframe,
         )
         cur_up, cur_del = pd.current_upserted, pd.current_deleted
