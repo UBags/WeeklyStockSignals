@@ -51,6 +51,7 @@ from typing import Literal
 from sqlalchemy.engine import Engine
 
 from ..cache.current_signals_cache import CurrentSignalsCache
+from .intraday_chain import log_intraday_transitions
 from .process_day import process_signals_for_day
 from .industry_stages import (
     _stage_industry_enrichment,
@@ -341,6 +342,20 @@ def recompute_market(
         try:
             _emit_progress(progress_cb, "signals", "running")
             _ist_day = as_of.astimezone(ZoneInfo("Asia/Kolkata")).date()
+            # INTRADAY-CHAIN: record the within-day transition sequence before
+            # the net-daily write below. The weekly-chart regime can turn more
+            # than once a day as the forming bar moves; current_signals holds
+            # only the latest (PK ticker_id) and historical_signals only the
+            # net one (UNIQUE on signal_date), so without this the chain
+            # (e.g. BUY - EXIT_FROM_BUY - BUY) is lost. Suppresses a repeat of
+            # the position already logged, so a 15-min tick cadence does not
+            # re-log the same BUY.
+            log_intraday_transitions(
+                db_engine,
+                scoped_tickers=None,
+                day=_ist_day,
+                as_of=as_of,
+            )
             _pd = process_signals_for_day(
                 db_engine,
                 scoped_tickers=None,

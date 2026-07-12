@@ -27,14 +27,20 @@ Pipeline:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from ..persistence.subscribers_repo import SubscriberRecord
 from .benchmark_rerank import fetch_rank_scores
+
+# INTRADAY-CHAIN: the chain is keyed on the trading day in exchange-local
+# time. current_signals.bar_timestamp is the week anchor, so it cannot
+# supply the day.
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +57,10 @@ class EnrichedSignalRow:
     bar_timestamp: datetime
     computed_at: datetime
     rank_score: float
+    # INTRADAY-CHAIN: ordered signal_types this ticker fired TODAY, e.g.
+    # ["BUY", "EXIT_FROM_BUY", "BUY"]. Defaulted: other constructors of this
+    # row (tests, the per-subscriber report) do not supply it.
+    intraday_chain: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +182,19 @@ def _fetch_enriched_signals(
     ticker_ids = [int(r.ticker_id) for r in raw_rows]
     rank_scores = fetch_rank_scores(conn, ticker_ids)
 
+    # INTRADAY-CHAIN: the within-day sequence for each emailed ticker.
+    # current_signals holds only the ticker's LATEST signal; the chain shows
+    # how it got there (e.g. BUY - EXIT_FROM_BUY - BUY). Keyed on today in the
+    # session's own timezone: the bar_timestamp on current_signals is the week
+    # anchor, so it cannot supply the day.
+    from ..persistence.intraday_signal_log_repo import (
+        IntradaySignalLogRepository,
+    )
+    _today = datetime.now(_IST).date()
+    chains = IntradaySignalLogRepository(conn).chains_for_date(
+        signal_date=_today, ticker_ids=ticker_ids,
+    )
+
     enriched = [
         EnrichedSignalRow(
             ticker_id=int(r.ticker_id),
@@ -185,6 +208,8 @@ def _fetch_enriched_signals(
             bar_timestamp=r.bar_timestamp,
             computed_at=r.computed_at,
             rank_score=rank_scores.get(int(r.ticker_id), 0.0),
+            # INTRADAY-CHAIN: the ordered signals this ticker fired today.
+            intraday_chain=chains.get(int(r.ticker_id), []),
         )
         for r in raw_rows
     ]
@@ -276,6 +301,30 @@ def _render_industry_section(
     return "\n".join(out)
 
 
+def _render_chain_html(r: EnrichedSignalRow) -> str:
+    """INTRADAY-CHAIN: " (BUY - EXIT_FROM_BUY - BUY)".
+
+    Empty when the ticker fired only once today (chain length <= 1) — the row's
+    own signal_type already says it, so repeating it adds nothing.
+    """
+    chain = getattr(r, "intraday_chain", None) or []
+    if len(chain) <= 1:
+        return ""
+    seq = " - ".join(chain)
+    return (
+        f' <span style="color: {_COLOR_MUTED};">'
+        f'({_html_escape(seq)})</span>'
+    )
+
+
+def _render_chain_text(r: EnrichedSignalRow) -> str:
+    """INTRADAY-CHAIN, plain-text form."""
+    chain = getattr(r, "intraday_chain", None) or []
+    if len(chain) <= 1:
+        return ""
+    return " (" + " - ".join(chain) + ")"
+
+
 def _render_row_html(r: EnrichedSignalRow) -> str:
     color = (
         _COLOR_BUY if r.signal_type == "BUY"
@@ -290,7 +339,8 @@ def _render_row_html(r: EnrichedSignalRow) -> str:
         f'<td style="padding: 4px 8px;">'
         f'{_html_escape(r.symbol)} '
         f'<span style="color: {_COLOR_MUTED};">'
-        f'({_html_escape(r.exchange)})</span></td>'
+        f'({_html_escape(r.exchange)})</span>'
+        f'{_render_chain_html(r)}</td>'
         f'<td style="padding: 4px 8px; text-align: right;">'
         f'{r.price_at_signal:.2f}</td>'
         f'<td style="padding: 4px 8px; text-align: right;">'
@@ -333,7 +383,8 @@ def _render_plain_text(
         for r in ind_rows:
             label = _TYPE_LABELS.get(r.signal_type, r.signal_type)
             lines.append(
-                f"  [{label:>11}] {r.symbol} ({r.exchange})  "
+                f"  [{label:>11}] {r.symbol} ({r.exchange})"
+                f"{_render_chain_text(r)}  "
                 f"price={r.price_at_signal:.2f}  "
                 f"rank={r.rank_score:.2f}"
             )
