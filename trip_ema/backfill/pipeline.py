@@ -47,6 +47,8 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from .bulk_daywalk import backfill_daywalk_bulk
+
 from ..domain import Timeframe
 from ..etl.runner import fetch_bars_for_tickers, run_backfill
 from ..fundamentals.merged_state_enrichment import (  # MERGED-STATE-ENRICHMENT
@@ -54,10 +56,7 @@ from ..fundamentals.merged_state_enrichment import (  # MERGED-STATE-ENRICHMENT
 )
 from ..fundamentals.v1_runners import (
     populate_industry_index_value_for_all,
-    populate_stock_indicator_enrichment_for_ticker,
-    populate_stock_indicator_state_for_ticker,
 )
-from ..orchestrator.process_day import process_signals_for_day
 from ..orchestrator.industry_stages import (
     _stage_industry_enrichment,
     _stage_industry_state,
@@ -905,72 +904,6 @@ def _stage_delete_historical(
             from_date=from_dt,
             to_date=to_dt,
         )
-
-
-from .bulk_daywalk import backfill_daywalk_bulk  # BULK-DAYWALK
-
-
-def _walk_trading_days(
-    db_engine, *, scoped_tickers: list[int],
-    date_from: date, date_to: date,
-) -> list[date]:
-    """Trading days in [date_from, date_to] for the scoped tickers = the
-    distinct stock_indicator_state dates in range (populated by the state
-    stage earlier in this pipeline). Only days with state can produce
-    signals, so this is both correct and the minimal set to walk."""
-    with db_engine.connect() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT DISTINCT date
-                  FROM stock_indicator_state
-                 WHERE date BETWEEN :f AND :t
-                   AND timeframe = :tf
-                   AND ticker_id = ANY(:ids)
-                 ORDER BY date
-            """),
-            {"f": date_from, "t": date_to, "tf": "1W", "ids": scoped_tickers},
-        ).all()
-    return [r[0] for r in rows]
-
-
-def _stage_backfill_daywalk(
-    db_engine, *, scoped_tickers: list[int],
-    date_from: date, date_to: date, today: date,
-    progress_cb: Callable[[str, str], None] | None = None,
-) -> tuple[int, int, int, int, bool]:
-    """Stages 8+9 unified: walk each trading day in range and run
-    process_signals_for_day in backfill mode. Per-day historical
-    (delete day + insert); current only on the day that == today.
-
-    Returns (days_walked, historical_inserted, current_upserted,
-    current_deleted, today_walked). today_walked is True iff today's
-    trading day was in the walked range (drives the notify gate)."""
-    days = _walk_trading_days(
-        db_engine, scoped_tickers=scoped_tickers,
-        date_from=date_from, date_to=date_to,
-    )
-    hist_ins = cur_up = cur_del = 0
-    total = len(days)
-    every = max(1, total // 100)
-    for i, d in enumerate(days, 1):
-        as_of_dt = datetime.combine(d, time(16, 30), tzinfo=_IST)
-        pd = process_signals_for_day(
-            db_engine,
-            scoped_tickers=scoped_tickers,
-            day=d,
-            today=today,
-            mode="backfill",
-            as_of=as_of_dt,
-        )
-        hist_ins += pd.historical_written
-        cur_up += pd.current_upserted
-        cur_del += pd.current_deleted
-        if i % every == 0 or i == total:
-            _emit_progress(
-                progress_cb, "stage_8_walk_days",
-                f"{i}/{total} days walked",
-            )
-    return len(days), hist_ins, cur_up, cur_del, (today in days)
 
 
 # ============================================================
