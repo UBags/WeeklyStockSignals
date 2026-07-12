@@ -101,14 +101,23 @@ class IndustryIndicatorEnrichmentRepository:
         industry_name: str,
         timeframe: str,
         bar_timestamp: datetime,
+        as_of_date: date | None = None,
     ) -> IndustryIndicatorEnrichment | None:
-        """Most recent row at or before `bar_timestamp`."""
+        """Most recent row at or before `bar_timestamp`.
+
+        DAILY-GRAIN-BOUND: pass `as_of_date` when you mean "as of day D".
+        bar_timestamp is the IST-Monday WEEK anchor, shared by every daily row
+        of the week, so `bar_timestamp <= :bt` ALONE admits the rest of that
+        week and `ORDER BY date DESC` then returns the week's LAST row -- a day
+        in the FUTURE relative to :bt. A week anchor cannot bound a day.
+        """
         row = self._conn.execute(
             text(_SELECT_SQL + " WHERE industry_name = :ind "
                  "AND timeframe = :tf AND bar_timestamp <= :bt "
+                 "AND (:aod IS NULL OR date <= :aod) "
                  "ORDER BY bar_timestamp DESC, date DESC LIMIT 1"),
             {"ind": industry_name, "tf": timeframe,
-             "bt": bar_timestamp},
+             "bt": bar_timestamp, "aod": as_of_date},
         ).fetchone()
         return _row_to_enrichment(row) if row else None
 

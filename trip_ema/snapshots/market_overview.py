@@ -217,8 +217,26 @@ class MarketOverviewSnapshotter:
                        AND is_active = TRUE
                        AND delisted_at IS NULL
                 ),
+                -- DAILY-GRAIN-FANOUT-FIX: stock_indicator_state is DAILY
+                -- grain (migration 0034) -- ~5 rows per week, ALL carrying the
+                -- same IST-Monday bar_timestamp. Joining on the anchor alone
+                -- returned one row PER TRADING DAY ELAPSED THIS WEEK per
+                -- ticker, and the LEFT JOIN into per_ticker below fanned every
+                -- ticker out by that factor, so COUNT(*) FILTER(...) counted
+                -- each ticker N times: Monday N=1 (correct), Friday N=5 (every
+                -- count 5x too high), resetting each Monday.
+                --
+                -- DISTINCT ON (ticker_id) + ORDER BY date DESC takes exactly
+                -- ONE row per ticker: the latest daily state at or before the
+                -- as-of date. `date <= today_d` also removes the lookahead that
+                -- snapshot_date mode had (the anchor join pulled the whole
+                -- week, including days AFTER the snapshot).
+                --
+                -- The bar_timestamp = monday_ts join is KEPT so scoping is
+                -- unchanged: a ticker with no state this week still contributes
+                -- nothing (LEFT JOIN -> NULL -> not counted).
                 state AS (
-                    SELECT
+                    SELECT DISTINCT ON (sis.ticker_id)
                         sis.ticker_id,
                         sis.display_regime,
                         GREATEST(sis.med_ema, sis.long_ema,
@@ -230,6 +248,8 @@ class MarketOverviewSnapshotter:
                       JOIN week_anchor wa
                         ON sis.bar_timestamp = wa.monday_ts
                      WHERE sis.timeframe = '1W'
+                       AND sis.date <= wa.today_d
+                     ORDER BY sis.ticker_id, sis.date DESC
                 ),
                 close_today AS (
                     SELECT

@@ -10,9 +10,16 @@ drift (Issue 2 from the bug-triage memo).
 This module replaces that with a straight JOIN of the persisted tables:
 
   - `ohlcv_bars` (daily) → aggregated to weekly via `daily_to_weekly`.
-  - `indicator_state` → EMAs, ATR, bands, and `display_regime` per
-    weekly bar.
-  - `signal_events` → BUY / SELL / EXIT_* markers per weekly bar.
+  - `stock_indicator_state` → EMAs, ATR, bands, and `display_regime`.
+    DAILY grain (migration 0034): ~5 rows per week, all sharing the week's
+    IST-Monday `bar_timestamp`. The chart wants ONE row per weekly bar — the
+    week's LAST daily row, i.e. the converged end-of-week state.
+  - `current_signals` + `historical_signals` → BUY / SELL / EXIT_* markers.
+    historical_signals is DAILY grain too: a ticker can fire several signals in
+    one week, all sharing one bar_timestamp. Filter and order on `signal_date`.
+
+`indicator_state` and `signal_events` (named in an earlier version of this
+docstring) were dropped in migrations 0032 and 0030 respectively.
 
 The chart now displays exactly what the persisted regime and signal
 producers wrote. Two consumers, one source of truth.
@@ -279,9 +286,33 @@ def _load_indicator_rows_by_date(
     end: date,
     tz: ZoneInfo,
 ) -> dict[date, _IndicatorRow]:
-    """Fetch stock_indicator_state rows for the window, indexed by IST date."""
+    """The CONVERGED indicator state for each weekly bar, keyed by the bar's
+    IST-Monday date.
+
+    WEEK-GRAIN-FIX: stock_indicator_state is DAILY grain (migration 0034) —
+    ~5 rows per week, every one carrying the same IST-Monday `bar_timestamp`.
+    This function must return ONE row per weekly bar, and it must be the week's
+    LAST daily row: that is the converged end-of-week state, which is what the
+    weekly bar on the chart represents.
+
+    The previous version selected every daily row and built the dict keyed on
+    bar_timestamp, so the ~5 rows of a week collapsed to one on a last-writer-
+    wins basis — with NO ORDER BY, meaning the surviving row (and therefore the
+    EMAs, bands and regime fill drawn for that week) was whatever Postgres
+    happened to return last. Two identical requests could render different
+    charts, and a completed week could be drawn with a mid-week FORMING state.
+
+    DISTINCT ON (bar_timestamp) + ORDER BY bar_timestamp, date DESC picks the
+    latest daily row per week, deterministically. For the current, still-forming
+    week that is the most recent day — exactly what the partial weekly bar shows.
+
+    The window is bounded on `date` (the daily grain) rather than on
+    bar_timestamp::date (the week anchor), so a window that starts or ends
+    mid-week is not silently widened to whole weeks.
+    """
     sql = text("""
-        SELECT bar_timestamp,
+        SELECT DISTINCT ON (bar_timestamp)
+               bar_timestamp, date,
                med_ema, long_ema, longest_ema, atr,
                upper_inner_band, lower_inner_band,
                upper_mid_band,   lower_mid_band,
@@ -290,15 +321,19 @@ def _load_indicator_rows_by_date(
           FROM stock_indicator_state
          WHERE ticker_id = :tid
            AND timeframe = :tf
-           AND bar_timestamp::date BETWEEN :start AND :end
+           AND date BETWEEN :start AND :end
+      ORDER BY bar_timestamp, date DESC
     """)
     rows = conn.execute(sql, {
         "tid": ticker_id, "tf": timeframe.value,
         "start": start, "end": end,
     }).fetchall()
     return {
+        # Key = the weekly bar's IST-Monday (matches wb.timestamp in the
+        # caller). trade_date = the actual trading day the state converged on,
+        # which is the week's last session, NOT the Monday.
         r.bar_timestamp.astimezone(tz).date(): _IndicatorRow(
-            trade_date=r.bar_timestamp.astimezone(tz).date(),
+            trade_date=r.date,
             med_ema=r.med_ema,
             long_ema=r.long_ema,
             longest_ema=r.longest_ema,
@@ -375,14 +410,27 @@ def _load_signal_events_for_window(
         seen_keys.add((cur.bar_timestamp, cur.computed_at))
 
     # ---- 2. historical_signals ----
+    # WEEK-GRAIN-FIX: filter and order on signal_date (the DAILY grain, and the
+    # column carrying the UNIQUE constraint), NOT bar_timestamp — which is the
+    # IST-Monday week anchor shared by every day of the week.
+    #
+    #   * filtering on bar_timestamp::date matched by WEEK: a window starting
+    #     mid-week dropped every signal in that week (its Monday precedes
+    #     :start), and a window ending mid-week pulled in signals from later in
+    #     that same week.
+    #   * ordering on bar_timestamp alone was total only while signals could
+    #     fire on one day per week. Now a ticker can fire several in one week
+    #     (BUY Mon -> EXIT_FROM_BUY Wed -> BUY Thu), all sharing one anchor, so
+    #     the sequence came back in arbitrary order — and the chart's marker
+    #     layer walks the list left-to-right for placement.
     hist = conn.execute(text("""
         SELECT signal_id AS event_id, bar_timestamp, computed_at,
                signal_type, price_at_signal
           FROM historical_signals
          WHERE ticker_id = :tid
            AND timeframe = :tf
-           AND bar_timestamp::date BETWEEN :start AND :end
-      ORDER BY bar_timestamp ASC
+           AND signal_date BETWEEN :start AND :end
+      ORDER BY signal_date ASC
     """), {
         "tid": ticker_id, "tf": timeframe.value,
         "start": start, "end": end,
@@ -399,6 +447,10 @@ def _load_signal_events_for_window(
             price_at_signal=r.price_at_signal,
         ))
 
-    # Final order: bar_timestamp ASC across the merged set.
-    rows.sort(key=lambda x: x.bar_timestamp)
+    # Final order across the merged set. WEEK-GRAIN-FIX: bar_timestamp alone is
+    # NOT a total order any more — several signals in one week share it — and
+    # Python's sort is stable, so it would preserve whatever arbitrary order the
+    # rows arrived in. computed_at is the signal day at 16:30 IST, so it breaks
+    # the tie in true chronological order.
+    rows.sort(key=lambda x: (x.bar_timestamp, x.computed_at))
     return rows

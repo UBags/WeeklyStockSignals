@@ -165,10 +165,18 @@ class StockIndicatorStateRepository:
         ticker_id: int,
         timeframe: str,
         bar_timestamp: datetime,
+        as_of_date: date | None = None,
     ) -> StockIndicatorState | None:
         """Most recent row at or before `bar_timestamp`. Used by
         live-engine warm-start where we want the latest state we have
-        for this ticker as of a given clock instant."""
+        for this ticker as of a given clock instant.
+
+        DAILY-GRAIN-BOUND: pass `as_of_date` when you mean "as of day D".
+        bar_timestamp is the IST-Monday WEEK anchor, shared by every daily row
+        of the week, so `bar_timestamp <= :bt` ALONE admits the rest of that
+        week and `ORDER BY date DESC` then returns the week's LAST row -- a day
+        in the FUTURE relative to :bt. A week anchor cannot bound a day.
+        """
         row = self._conn.execute(
             text("""
                 SELECT ticker_id, timeframe, bar_timestamp,
@@ -180,10 +188,12 @@ class StockIndicatorStateRepository:
                 FROM stock_indicator_state
                 WHERE ticker_id = :tid AND timeframe = :tf
                   AND bar_timestamp <= :bt
+                  AND (:aod IS NULL OR date <= :aod)
                 ORDER BY date DESC
                 LIMIT 1
             """),
-            {"tid": ticker_id, "tf": timeframe, "bt": bar_timestamp},
+            {"tid": ticker_id, "tf": timeframe, "bt": bar_timestamp,
+             "aod": as_of_date},
         ).fetchone()
         return _row_to_state(row) if row else None
 

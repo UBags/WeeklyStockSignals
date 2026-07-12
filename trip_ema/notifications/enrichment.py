@@ -5,8 +5,8 @@ than the plain-text 'one event per line' format: per-ticker market cap,
 sector classification, the sector's current display regime, day-over-day
 sector direction, and the ticker's last 5 signal events. None of this
 data lives on `SignalEvent` itself — it's spread across
-instrument_industry, daily_market_cap, indicator_state (industry rows),
-industry_index_value, and signal_events. This module bundles the lookups
+instrument_industry, daily_market_cap, industry_indicator_state,
+industry_index_value, and historical_signals. This module bundles the lookups
 into a single function the email transport invokes per send.
 
 Design:
@@ -24,10 +24,12 @@ Design:
     DB-agnostic for tests.
 
 Sector zone / sector direction:
-  - 'Zone' is the latest indicator_state.display_regime for the
-    industry the ticker belongs to. -1 = BEARISH / red, 0 = NEUTRAL /
-    grey, +1 = BULLISH / green. Uses indicator_state's industry rows
-    (industry_name IS NOT NULL).
+  - 'Zone' is the latest industry_indicator_state.display_regime
+    for the industry the ticker belongs to. -1 = BEARISH / red,
+    0 = NEUTRAL / grey, +1 = BULLISH / green. That table is DAILY
+    grain, so 'latest' means latest `date` -- NOT latest
+    bar_timestamp, which is the week anchor and ties across every
+    day of the week.
   - 'Direction' is the sign of the day-over-day change in
     industry_index_value. ▲ when today's value > yesterday's, ▼ when
     lower, ● when equal or only one day of data is available.
@@ -232,23 +234,31 @@ def _fetch_ticker_basics(conn, refs: list[TickerRef]) -> list[dict]:
 
 
 def _fetch_sector_zones(conn, industries: list[str]) -> dict[str, int]:
-    """Latest display_regime per industry from indicator_state's
-    industry rows. Returns {industry_name: regime_int} where regime is
-    -1 / 0 / +1.
+    """Latest display_regime per industry, from industry_indicator_state.
+    Returns {industry_name: regime_int} where regime is -1 / 0 / +1.
 
-    DISTINCT ON is the right tool here: one row per industry, picking
-    the most recent trade_date.
+    DAILY-GRAIN-ORDER: industry_indicator_state is DAILY grain (migration
+    0035) and bar_timestamp is the IST-Monday WEEK anchor, shared by every
+    daily row of the week. Ordering by bar_timestamp DESC therefore TIES
+    across all ~5 days of the most recent week, and DISTINCT ON returns an
+    ARBITRARY one of them — a mid-week regime picked by whatever order
+    Postgres happened to produce. This feeds the sector zone shown in the
+    email, so it could differ between two sends with identical data.
+
+    Order by `date` DESC — the daily grain — to get the genuinely latest
+    row. (The old docstring claimed it picked "the most recent trade_date"
+    while ordering by bar_timestamp; it did not.)
     """
     if not industries:
         return {}
-    # === STEP 15-C1: rewired indicator_state -> industry_indicator_state ===
     sql = text("""
         SELECT DISTINCT ON (industry_name)
             industry_name,
             display_regime
         FROM industry_indicator_state
         WHERE industry_name = ANY(:industries)
-        ORDER BY industry_name, bar_timestamp DESC
+          AND timeframe = '1W'
+        ORDER BY industry_name, date DESC
     """)
     rows = conn.execute(sql, {"industries": industries}).all()
     return {r.industry_name: int(r.display_regime) for r in rows}
