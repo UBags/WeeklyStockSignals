@@ -18,20 +18,17 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta, UTC
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Engine, text
 
 # PHASE-3E: SignalCache + get_cache imports removed (both were dead —
 # no route handler in this module actually consumed them).
-from ....api import TickerNotPrimedError
 from ....domain import TickerRef, Timeframe
 from ..dependencies import get_db_engine
 from .signal_history import build_signal_history_payload
 from ..schemas import (
     HistoricalBarPayload,
     SignalHistoryPayload,
-    TerseResponsePayload,
-    VerboseResponsePayload,
 )
 from ....persistence import TickersRepository
 

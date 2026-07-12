@@ -50,7 +50,6 @@ from .exchanges import UnsupportedExchangeError
 from .runner import (
     recompute_tiers,
     refresh_listings,
-    run_backfill,
     run_eod,
     run_intraday,
     unpark_all,
@@ -345,7 +344,7 @@ def _print_backfill_plan(
     if date_to:
         print(f"  date_to:       {date_to.isoformat()}")
     else:
-        print(f"  date_to:       (defaults to today)")
+        print("  date_to:       (defaults to today)")
     if stocks is None:
         print(f"  stocks:        ALL ({n_tickers} active)")
     else:
@@ -447,7 +446,7 @@ def cmd_snapshot(args, config: Config) -> int:
     Idempotent — UPSERT semantics, multiple invocations for the
     same (date, exchange) yield the latest counts.
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime
     from zoneinfo import ZoneInfo
 
     from ..snapshots.market_overview import MarketOverviewSnapshotter
@@ -633,7 +632,7 @@ def cmd_cycle(args, config: Config) -> int:
     from ..persistence.compute_runs_repo import ComputeRunsRepository
     from ..scheduler.market_hours import MarketHoursService
     from .runner import _run_fetch_pass
-    from .types import RunKind, Tier
+    from .types import RunKind
 
     # PHASE-2-SIGTERM: install SIGTERM handler so dispatcher-
     # triggered force-termination cleans up the compute_runs row.

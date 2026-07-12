@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable
+from collections.abc import Callable
 
 from .compose_email import EmailBody
 from ..persistence.subscribers_repo import SubscriberRecord

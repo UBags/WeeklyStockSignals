@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cache
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -98,7 +98,7 @@ class ExchangeCalendar:
 # MarketSession
 # ------------------------------------------------------------------ #
 
-@lru_cache(maxsize=None)
+@cache
 def _holidays_for(country: str, year: int) -> frozenset:
     """PERF-NAN-COUNT (same batch): process-wide holiday cache.
 

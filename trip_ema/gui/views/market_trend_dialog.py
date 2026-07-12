@@ -16,7 +16,6 @@ Behavior on empty data:
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
 from enum import Enum
 
 import pyqtgraph as pg

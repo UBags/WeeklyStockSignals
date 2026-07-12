@@ -23,7 +23,6 @@ that have cache snapshots).
 
 from __future__ import annotations
 
-from datetime import datetime, UTC
 
 from fastapi import APIRouter, Depends, HTTPException, status
 

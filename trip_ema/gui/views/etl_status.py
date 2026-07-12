@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import (
@@ -40,15 +40,15 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
-    QButtonGroup, QCompleter, QDateEdit, QFrame, QGroupBox,
+    QButtonGroup, QCompleter, QDateEdit, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QRadioButton, QSizePolicy, QTableView,
+    QPushButton, QRadioButton, QTableView,
     QVBoxLayout, QWidget,
 )
 
 from ..db import GuiDbSession
 from ..http_client import TripEmaHttpClient
-from ..workers import RefreshScheduler, submit
+from ..workers import RefreshScheduler
 from .market_trend_dialog import MarketTrendDialog, TrendKind
 from .widgets.backfill_destructive_modal import (
     BackfillDestructiveModal, estimate_runtime_minutes,
@@ -1434,7 +1434,7 @@ class EtlStatusView(QWidget):
                 n_active = SubscribersRepository(
                     conn,
                 ).count_active()
-        except Exception as e:
+        except Exception:
             logger.exception(
                 "Could not count active subscribers; "
                 "defaulting to 0 in modal"

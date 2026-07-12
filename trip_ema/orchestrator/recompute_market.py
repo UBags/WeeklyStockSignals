@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, UTC
+from datetime import datetime, timedelta, UTC
 from zoneinfo import ZoneInfo
 from collections.abc import Callable
 from typing import Literal
@@ -62,9 +62,7 @@ from ..fundamentals.v1_runners import (
     populate_stock_indicator_enrichment_for_exchange,
     populate_stock_indicator_state_for_exchange,
 )
-from ..persistence import transaction
 from ..persistence.current_signals_repo import CurrentSignalsRepository
-from .derive_signals import derive_signals_for_all_active_stocks
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +236,7 @@ def recompute_market(
     n_weeks_to_upsert: int = 2,
     cache: CurrentSignalsCache | None = None,
     exchange: str = "NSE",
-    progress_cb: "Callable[[str, str], None] | None" = None,
+    progress_cb: Callable[[str, str], None] | None = None,
 ) -> RecomputeMarketResult:
     """Run one pass through the V1 cycle compute pipeline.
 

@@ -28,7 +28,7 @@ Lock semantics:
 from __future__ import annotations
 
 import threading
-from typing import Sequence
+from collections.abc import Sequence
 
 from ..domain.signal_event import SignalEvent
 

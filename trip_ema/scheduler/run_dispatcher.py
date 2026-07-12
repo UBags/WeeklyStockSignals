@@ -34,13 +34,12 @@ Thread lifecycle:
 from __future__ import annotations
 
 import logging
-import os
 import signal
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass
-from typing import Callable
+from collections.abc import Callable
 
 from sqlalchemy.engine import Engine
 

@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection

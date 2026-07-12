@@ -101,7 +101,7 @@ def notify_subscribers(
     brevo_from_name: str = "WeeklyStockSignals",
     cycle_id: str,
     now: datetime,
-    progress_cb: "Callable[[str, str], None] | None" = None,
+    progress_cb: Callable[[str, str], None] | None = None,
 ) -> NotifyResult:
     """V1 distribute stage. See module docstring for the flow.
 

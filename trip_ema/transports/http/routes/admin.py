@@ -31,7 +31,6 @@ from sqlalchemy import Engine
 from ....cache.current_signals_cache import CurrentSignalsCache
 from ....config import Config
 from ....domain import TickerRef, Timeframe
-from ....notifications.circuit_breaker import CircuitBreakingTransport
 from ....orchestrator import recompute_market
 from ..dependencies import (
     get_v1_cache,
@@ -40,8 +39,6 @@ from ..dependencies import (
     require_admin_token,
 )
 from ..schemas import (
-    CircuitBreakerConfigPayload,
-    CircuitBreakerEntry,
     CircuitBreakersPayload,
     ComputeRunSummaryPayload,
     RepriumeResultPayload,

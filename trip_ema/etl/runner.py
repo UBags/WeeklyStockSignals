@@ -465,7 +465,7 @@ def fetch_bars_for_tickers(
     ticker_ids: list[int],
     start_date: date,
     end_date: date | None = None,
-    source: "YFinanceSource | None" = None,
+    source: YFinanceSource | None = None,
 ) -> int:
     """Per-ticker yfinance daily-bar fetch for a date range.
 
@@ -638,7 +638,7 @@ def _run_fetch_pass(
     start_date: date | None = None,
     days_lookback: int = 7,
     intraday: bool = False,
-    progress_cb: "Callable[[str, str], None] | None" = None,
+    progress_cb: Callable[[str, str], None] | None = None,
 ) -> int:
     """Shared spine for backfill / eod / intraday. Differences:
 
