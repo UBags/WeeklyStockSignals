@@ -138,10 +138,20 @@ echo " TRUNCATING ${#DERIVED[@]} derived tables"
 echo "==================================================================="
 # One statement: TRUNCATE ... CASCADE in a single transaction, so FK order
 # doesn't matter and it's all-or-nothing.
+#
+# NOTE: deliberately NOT `RESTART IDENTITY`. That requires OWNERSHIP of every
+# backing sequence, and the tables are owned by trip_ema_app while we truncate as
+# trip_etl_user (which has TRUNCATE but not ownership) — it fails with
+#     ERROR: must be owner of sequence historical_signals_signal_id_seq
+# Nothing here depends on ids restarting at 1: parity checks and every uniqueness
+# constraint key on natural columns like (ticker_id, timeframe, signal_date), not
+# on the surrogate id. So letting signal_id continue from where it left off is
+# harmless. If you ever DO want the sequences reset, run this as the owner role:
+#     ROLE=trip_ema_app bash reset_db_for_coldstart.sh --apply
 LIST=$(IFS=, ; echo "${DERIVED[*]}")
 psql -U "$ROLE" -d "$DB" -v ON_ERROR_STOP=1 -c "
 BEGIN;
-TRUNCATE TABLE ${LIST} RESTART IDENTITY CASCADE;
+TRUNCATE TABLE ${LIST} CASCADE;
 COMMIT;
 "
 
