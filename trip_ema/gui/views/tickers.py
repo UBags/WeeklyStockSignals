@@ -83,9 +83,7 @@ from ..queries import (
 from ..benchmark_rerank_client import fetch_rank_scores
 from fuzzywuzzy import fuzz   # Step 12b
 from ..signals_helpers import (
-    industry_rank_alpha_sort_key,
     signal_group_industry_rank_sort_key,  # Step 12c — Tickers tab sort
-    signal_industry_mcap_sort_key,
 )
 from ..workers import RefreshScheduler, submit
 from ..determine_background_color import DetermineBackgroundColor

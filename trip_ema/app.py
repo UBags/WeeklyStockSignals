@@ -28,12 +28,8 @@ import argparse
 import logging
 import signal
 import sys
-import threading
-import time
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import NoReturn, TYPE_CHECKING
+from typing import NoReturn
 
 # PHASE-3B: PulseState TYPE_CHECKING import removed (module deleted).
 
@@ -52,13 +48,11 @@ from sqlalchemy import text as _sa_text
 # PHASE-3E: SignalCache import removed (class deleted).
 from .cache.current_signals_cache import CurrentSignalsCache
 from .config import load_config
-from .notifications import EmailTransport, NullTransport, WebhookTransport
+from .notifications import EmailTransport, NullTransport
 from .notifications.base import NotificationTransport
-from .orchestrator import notify_subscribers, recompute_market
 from .persistence import (
     create_engine_from_config,
 )
-from .persistence.backfill_runs_repo import BackfillRunsRepository
 from .persistence.current_signals_repo import CurrentSignalsRepository
 # === STEP 14B-E6-import: ComputeScheduler + SubscriberDistributor imports stripped ===
 # PHASE-3B: OrchestratorPool + OrchestratorSettings + build_pool_from_configs
@@ -148,8 +142,16 @@ def _build_app_state(config_path: Path) -> AppState:
     )
 
     # === STEP 14B-E6-cs_build: ComputeScheduler construction removed ===
-    # The orchestrator pool (Phase 14) owns all compute cadence in V1.
-    market_hours = MarketHoursService(config.market_hours)
+    # The orchestrator pool (Phase 14) owns all compute cadence in V1, so the
+    # resulting object is unused here.
+    #
+    # The CALL is deliberately kept: MarketHoursService.__init__ is not
+    # side-effect free — it walks the config calling _parse_hhmm() (raises on a
+    # malformed "HH:MM") and ZoneInfo() (raises on an unknown timezone). This
+    # line is therefore a STARTUP FAIL-FAST on the market_hours config. Deleting
+    # it, which is what a careless F841 fix does, would let a typo'd open/close
+    # time or tz name boot cleanly and blow up later somewhere unrelated.
+    MarketHoursService(config.market_hours)  # noqa: F841 — validates config
 
     # === STEP 14B-E6-dist_build: SubscriberDistributor construction removed ===
     # V1 uses notify_subscribers (invoked by the orchestrator pool as
