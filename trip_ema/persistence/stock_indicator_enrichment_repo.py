@@ -17,7 +17,7 @@ FK: each enrichment row requires its matching state row to exist
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection

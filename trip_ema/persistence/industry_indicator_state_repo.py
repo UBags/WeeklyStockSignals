@@ -7,7 +7,7 @@ DB CHECK constraints in migration 0020.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
