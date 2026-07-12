@@ -72,6 +72,11 @@ from ..fundamentals.runners import (
 from ..fundamentals.signal_enrichment_runner import backfill_signal_enrichment
 from ..fundamentals.sector_metrics_runner import backfill_sector_metrics
 from ..fundamentals.industry_regime_runner import backfill_industry_regime_matrix
+# BENCHMARK-STATS-STAGE: rank_score in the email comes from these tables.
+from ..fundamentals.benchmark_stats_runners import (
+    run_benchmark_stats_for_all_industries,
+    run_benchmark_stats_for_all_tickers,
+)
 from ..fundamentals.signal_ensemble_runner import backfill_signal_ensemble_features
 from ..fundamentals.signal_labels_runner import backfill_signal_labels
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
@@ -118,6 +123,18 @@ class BackfillResult:
     iiv_industries_done: int = 0
     industry_state_done: int = 0
     industry_enrichment_done: int = 0
+    # BENCHMARK-STATS-STAGE (6d). `skipped` is EXPECTED, not an error: a ticker
+    # whose industry has no industry_index_value rows (sub-threshold industry)
+    # gets no INDUSTRY stats, and NIFTYBEES is skipped for the NIFTY leg
+    # (self-vs-self). Kept separate from `failed` so a big skip count doesn't
+    # read as a big failure count.
+    benchmark_tickers_done: int = 0
+    benchmark_tickers_skipped: int = 0
+    benchmark_industries_done: int = 0
+    benchmark_industries_skipped: int = 0
+    benchmark_failed: list[tuple[str, str]] = field(
+        default_factory=list,
+    )
     historical_signals_deleted: int = 0
     historical_signals_inserted: int = 0
     current_signals_upserted: int = 0
@@ -509,6 +526,47 @@ def backfill(
         _emit_progress(
             progress_cb, "stage_6c_regime_matrix",
             "done" if _rm is not None else "skipped (resume)",
+        )
+
+        # ---- Stage 6d: benchmark stats (BENCHMARK-STATS-STAGE) ----
+        # Populates stock_benchmark_stats + industry_benchmark_stats. These were
+        # previously reachable ONLY via a separate manual CLI command, so both
+        # tables sat empty — which meant fetch_rank_scores returned nothing,
+        # every emailed signal scored rank_score = 0.0, and the email's
+        # `ORDER BY rank_score DESC, ticker_id ASC` silently degraded to
+        # ticker_id order. Nothing surfaced the omission.
+        #
+        # Must run AFTER industry_index_values (3d) — the INDUSTRY benchmark leg
+        # reads industry_index_value — and BEFORE notify, which is the point:
+        # notify -> compose_email -> fetch_rank_scores.
+        #
+        # Nothing on the signal path depends on it: signal_enrichment reads
+        # industry_index_value directly, not these tables. So this stage cannot
+        # perturb signal correctness.
+        _emit_progress(
+            progress_cb, "stage_6d_benchmark_stats", "starting",
+        )
+        _bm = run_phase(
+            db_engine, exchange, "benchmark_stats",
+            lambda: _stage_benchmark_stats(
+                db_engine, exchange=exchange, progress_cb=progress_cb,
+            ),
+            backfill_run_id=run_id, force=_force,
+        )
+        if _bm is not None:
+            # NOTE: the pipeline has NO mutable `result` object during the
+            # stages — it accumulates into result_kwargs and constructs
+            # BackfillResult at the very end. Writing `result.x = ...` here
+            # would compile cleanly and then NameError at runtime, hours into a
+            # backfill.
+            (result_kwargs["benchmark_tickers_done"],
+             result_kwargs["benchmark_tickers_skipped"],
+             result_kwargs["benchmark_industries_done"],
+             result_kwargs["benchmark_industries_skipped"],
+             result_kwargs["benchmark_failed"]) = _bm
+        _emit_progress(
+            progress_cb, "stage_6d_benchmark_stats",
+            "done" if _bm is not None else "skipped (resume)",
         )
 
         # ---- Stage 7: DELETE historical_signals in range ----
@@ -904,6 +962,59 @@ def _stage_delete_historical(
             from_date=from_dt,
             to_date=to_dt,
         )
+
+
+def _stage_benchmark_stats(
+    db_engine,
+    *,
+    exchange: str,
+    progress_cb: Callable[[str, str], None] | None = None,
+) -> tuple[int, int, int, int, list[tuple[str, str]]]:
+    """BENCHMARK-STATS-STAGE: stock + industry benchmark stats.
+
+    Writes stock_benchmark_stats (each ticker vs its INDUSTRY index and vs
+    NIFTY) and industry_benchmark_stats (each industry vs NIFTY), across the
+    SHORT / MEDIUM / LONG windows. Idempotent on
+    (ticker|industry, benchmark, window, as_of_date).
+
+    These feed `rank_score`, which orders the notification email. Before this
+    stage existed they were populated only by a manual CLI command, so on a
+    fresh backfill both tables were empty and every signal ranked 0.0.
+
+    Returns (tickers_done, tickers_skipped, industries_done, industries_skipped,
+    failed). SKIPPED IS NORMAL — a ticker in a sub-threshold industry (no
+    industry_index_value rows) has no INDUSTRY benchmark, and NIFTYBEES has no
+    NIFTY benchmark (self-vs-self). Both runners isolate per-item errors, so one
+    bad ticker cannot take the stage down.
+    """
+    _emit_progress(progress_cb, "stage_6d_benchmark_stats", "tickers")
+    t = run_benchmark_stats_for_all_tickers(db_engine, exchange=exchange)
+
+    _emit_progress(progress_cb, "stage_6d_benchmark_stats", "industries")
+    i = run_benchmark_stats_for_all_industries(db_engine)
+
+    failed: list[tuple[str, str]] = []
+    for name, err in t.get("failed", []):
+        failed.append((f"ticker:{name}", str(err)))
+    for name, err in i.get("failed", []):
+        failed.append((f"industry:{name}", str(err)))
+
+    n_t_ok = len(t.get("succeeded", []))
+    n_t_skip = len(t.get("skipped", []))
+    n_i_ok = len(i.get("succeeded", []))
+    n_i_skip = len(i.get("skipped", []))
+
+    logger.info(
+        "stage_6d benchmark_stats: tickers %d ok / %d skipped, "
+        "industries %d ok / %d skipped, %d failed",
+        n_t_ok, n_t_skip, n_i_ok, n_i_skip, len(failed),
+    )
+    if failed:
+        logger.warning(
+            "stage_6d benchmark_stats: %d item(s) FAILED (first 5: %s)",
+            len(failed), failed[:5],
+        )
+    return n_t_ok, n_t_skip, n_i_ok, n_i_skip, failed
 
 
 # ============================================================
