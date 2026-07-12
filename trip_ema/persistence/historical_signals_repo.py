@@ -171,10 +171,16 @@ class HistoricalSignalsRepository:
             ticker_id: required.
             kinds: optional filter (subset of SIGNAL_TYPES).
                 None means no filter.
-            from_date: optional lower bound on bar_timestamp::date
-                (inclusive).
-            to_date: optional upper bound on bar_timestamp::date
-                (inclusive).
+            from_date: optional lower bound on signal_date (inclusive).
+            to_date: optional upper bound on signal_date (inclusive).
+
+        SIGNAL-DATE-BOUND: these bound `signal_date` (the daily grain, and the
+        column carrying the UNIQUE constraint), NOT bar_timestamp.
+        bar_timestamp is the IST-Monday week anchor shared by every day of the
+        week, so filtering on it matches by WEEK: a Thursday signal would match
+        a filter on that week's Monday and miss one on the Thursday itself.
+        Harmless while every signal landed on the week's last day; wrong now
+        that signals are per-day.
             limit: optional row cap.
         """
         conditions = ["ticker_id = :tid"]
@@ -195,10 +201,11 @@ class HistoricalSignalsRepository:
                 params[f"k{i}"] = k
 
         if from_date is not None:
-            conditions.append("bar_timestamp::date >= :fd")
+            # SIGNAL-DATE-BOUND: daily grain, not the week anchor.
+            conditions.append("signal_date >= :fd")
             params["fd"] = from_date
         if to_date is not None:
-            conditions.append("bar_timestamp::date <= :td")
+            conditions.append("signal_date <= :td")
             params["td"] = to_date
 
         sql_parts = [
