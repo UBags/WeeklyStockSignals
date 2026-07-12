@@ -620,7 +620,7 @@ class IndustryIndicators:
 
     Populates the "Overall Indicators" card on the Tickers tab. All
     fields nullable so the renderer can show "—" for tickers whose
-    industry has no indicator_state coverage yet.
+    industry has no industry_indicator_state coverage yet.
 
     regime: latest display_regime for the industry (-1 / 0 / +1).
     trend:  sign of (med_ema_latest - med_ema_two_bars_back). Same
@@ -644,7 +644,10 @@ def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
     """Return regime + trend + Phase 6-3 windowed benchmark stats.
 
     Three SQL roundtrips (all cheap; <15ms total):
-      1. indicator_state — latest 3 weekly rows for regime + trend.
+      1. industry_indicator_state — latest 3 WEEKLY rows for
+         regime + trend. The table is DAILY grain, so each week is
+         collapsed to its converged (last) daily row first; taking
+         3 raw rows would give a 3-DAY trend, not a 3-week one.
       2. stock_benchmark_stats — latest row per window
          (SHORT/MEDIUM/LONG), INDUSTRY benchmark.
       3. industry_benchmark_stats — latest row per window for the
@@ -654,15 +657,35 @@ def industry_indicators_for_ticker(conn, ticker_id: int) -> IndustryIndicators:
     same formula as notifications/benchmark_rerank:
         0.5 × stock_RS + 0.3 × industry_RS + 0.2 × R²
     """
+    # DROPPED-TABLE-FIX: `indicator_state` was dropped in migration 0032 and
+    # its `trade_date` column with it — this query raised
+    # "relation indicator_state does not exist" every time the Tickers tab
+    # asked for industry indicators. The replacement is
+    # industry_indicator_state, which is DAILY grain (migration 0035): ~5 rows
+    # per week, all sharing the week's IST-Monday bar_timestamp.
+    #
+    # The caller wants the latest THREE WEEKS (it takes
+    # med_ema[0] - med_ema[2] as a 3-week trend). A plain
+    # `ORDER BY date DESC LIMIT 3` would return three DAYS and silently turn
+    # that into a 3-DAY trend. So collapse each week to its LAST daily row
+    # (the converged end-of-week state) first, then take the latest 3 weeks.
     state_rows = conn.execute(text("""
-        SELECT s.med_ema, s.display_regime, s.trade_date, ii.industry
-        FROM instrument_industry ii
-        JOIN indicator_state s
-          ON s.industry_name = ii.industry
-        WHERE ii.ticker_id = :tid
-          AND s.industry_name IS NOT NULL
-        ORDER BY s.trade_date DESC
-        LIMIT 3
+        WITH weekly AS (
+            SELECT DISTINCT ON (s.industry_name, s.bar_timestamp)
+                   s.industry_name, s.bar_timestamp, s.date,
+                   s.med_ema, s.display_regime
+              FROM industry_indicator_state s
+             WHERE s.timeframe = '1W'
+             ORDER BY s.industry_name, s.bar_timestamp, s.date DESC
+        )
+        SELECT w.med_ema, w.display_regime,
+               w.date AS trade_date, ii.industry
+          FROM instrument_industry ii
+          JOIN weekly w
+            ON w.industry_name = ii.industry
+         WHERE ii.ticker_id = :tid
+         ORDER BY w.bar_timestamp DESC
+         LIMIT 3
     """), {"tid": ticker_id}).all()
 
     if not state_rows:

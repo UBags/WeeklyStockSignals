@@ -64,9 +64,10 @@ def get_industry_history(
     Volume is reported as 0 (industries don't have volume).
 
     Indicator overlays (EMAs / bands / regime) come from
-    `indicator_state` rows for this industry, sampled at the last
-    trading day of each week. Signal events list is empty —
-    `signal_events` is ticker-only by design.
+    `industry_indicator_state` rows for this industry. That table is DAILY
+    grain, so each week is collapsed to its LAST daily row — the converged
+    end-of-week state — before being joined onto the weekly bar. Signal
+    events list is empty: signals are ticker-only by design.
 
     Returns 404 if the industry is unknown. Returns an empty bars
     list (with notes) if the industry has no values in the requested
@@ -80,7 +81,33 @@ def get_industry_history(
         # so the GUI degrades gracefully instead of showing "fetch
         # failed").
         since = datetime.now(UTC) - timedelta(days=365 * years)
+        # DROPPED-TABLE-FIX: `indicator_state` was dropped in migration 0032
+        # (and its `trade_date` column with it), so this raised
+        # "relation indicator_state does not exist" every time the Industry
+        # panel opened. Replacement is industry_indicator_state, which is DAILY
+        # grain (migration 0035): ~5 rows per week, all sharing the week's
+        # IST-Monday bar_timestamp.
+        #
+        # This is a WEEKLY chart, so it needs exactly ONE indicator row per
+        # week — the week's LAST daily row (the converged end-of-week state).
+        # Joining the daily-grain table directly would fan every daily index
+        # value out across all ~5 state rows of its week.
+        #
+        # bar_timestamp is `timestamp` (no tz) in this table, so ::date is a
+        # plain cast with no session-timezone trap.
         rows = conn.execute(text("""
+            WITH weekly_state AS (
+                SELECT DISTINCT ON (industry_name, bar_timestamp)
+                       industry_name, bar_timestamp,
+                       med_ema, long_ema, longest_ema, atr,
+                       upper_inner_band, lower_inner_band,
+                       upper_mid_band,   lower_mid_band,
+                       upper_outer_band, lower_outer_band,
+                       display_regime
+                  FROM industry_indicator_state
+                 WHERE timeframe = '1W'
+                 ORDER BY industry_name, bar_timestamp, date DESC
+            )
             SELECT
                 v.trade_date,
                 v.value,
@@ -91,9 +118,10 @@ def get_industry_history(
                 s.upper_outer_band, s.lower_outer_band,
                 s.display_regime
             FROM industry_index_value v
-            LEFT JOIN indicator_state s
+            LEFT JOIN weekly_state s
                    ON s.industry_name = v.industry_name
-                  AND s.trade_date = DATE_TRUNC('week', v.trade_date)::date
+                  AND s.bar_timestamp::date
+                      = DATE_TRUNC('week', v.trade_date)::date
             WHERE v.industry_name = :n
               AND v.trade_date >= :since
             ORDER BY v.trade_date ASC
