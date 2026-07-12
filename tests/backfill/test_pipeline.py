@@ -188,11 +188,11 @@ def stub_populators(monkeypatch):
     with no-ops so tests focus on orchestration logic. State data
     is pre-seeded; recompute would just overwrite with the same
     values."""
-    def _noop_stock_state(*args, **kwargs):
-        return 0
-
-    def _noop_stock_enrichment(*args, **kwargs):
-        return 0
+    def _noop_stock_state_and_enrichment(*args, **kwargs):
+        # Stages 2 and 3 are ONE engine pass now (the merged runner writes both
+        # stock_indicator_state and stock_indicator_enrichment), so a single
+        # no-op covers both: stage 3 recomputes nothing.
+        return (0, 0)
 
     def _noop_industry_iiv(*args, **kwargs):
         return {"succeeded": [], "failed": []}
@@ -205,13 +205,8 @@ def stub_populators(monkeypatch):
 
     monkeypatch.setattr(
         "trip_ema.backfill.pipeline."
-        "populate_stock_indicator_state_for_ticker",
-        _noop_stock_state,
-    )
-    monkeypatch.setattr(
-        "trip_ema.backfill.pipeline."
-        "populate_stock_indicator_enrichment_for_ticker",
-        _noop_stock_enrichment,
+        "populate_stock_state_and_enrichment_for_ticker",
+        _noop_stock_state_and_enrichment,
     )
     monkeypatch.setattr(
         "trip_ema.backfill.pipeline."
@@ -276,16 +271,14 @@ class TestMarkerLifecycle:
             "populate_industry_index_value_for_all",
             _boom,
         )
-        # Earlier stages no-op so we reach stage 3d cleanly
+        # Earlier stages no-op so we reach stage 3d cleanly. Stages 2 and 3
+        # are ONE engine pass now (the merged runner writes both
+        # stock_indicator_state and stock_indicator_enrichment), so one no-op
+        # covers both.
         monkeypatch.setattr(
             "trip_ema.backfill.pipeline."
-            "populate_stock_indicator_state_for_ticker",
-            lambda *a, **k: 0,
-        )
-        monkeypatch.setattr(
-            "trip_ema.backfill.pipeline."
-            "populate_stock_indicator_enrichment_for_ticker",
-            lambda *a, **k: 0,
+            "populate_stock_state_and_enrichment_for_ticker",
+            lambda *a, **k: (0, 0),
         )
 
         result = backfill(
