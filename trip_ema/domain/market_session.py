@@ -129,6 +129,8 @@ class MarketSession:
     open_time: time
     close_time: time
     calendar: ExchangeCalendar = field(compare=False)
+    # date -> early close (LOCAL). Empty for exchanges with no early closes.
+    half_days: dict = field(default_factory=dict, compare=False, repr=False)
     # Memo for week_total_hours (see below). compare/repr excluded so it plays
     # no part in equality or hashing.
     _wth_cache: dict = field(
@@ -141,21 +143,49 @@ class MarketSession:
 
     @property
     def session_hours(self) -> float:
-        """Length of one regular session in hours."""
-        open_dt = datetime.combine(date(2000, 1, 1), self.open_time)
-        close_dt = datetime.combine(date(2000, 1, 1), self.close_time)
+        """Length of one REGULAR session in hours."""
+        return self._hours(self.open_time, self.close_time)
+
+    @staticmethod
+    def _hours(o: time, c: time) -> float:
+        open_dt = datetime.combine(date(2000, 1, 1), o)
+        close_dt = datetime.combine(date(2000, 1, 1), c)
         return (close_dt - open_dt).total_seconds() / 3600.0
+
+    def session_hours_on(self, d: date) -> float:
+        """Length of the session ON `d` — a half-day is shorter.
+
+        The proration denominator used to be `session_hours * n_trading_days`,
+        which claims a full session on a day the exchange closed early. For a NYSE
+        13:00 close that is 6.5 hours claimed against 3.5 actually traded, and
+        imputed_weekly_volume is overstated for the whole week.
+        """
+        early = self.half_days.get(d)
+        if early is None:
+            return self.session_hours
+        return self._hours(self.open_time, early)
+
+    def close_time_on(self, d: date) -> time:
+        """The close ON `d`. Half-days close early."""
+        return self.half_days.get(d, self.close_time)
 
     def is_trading_day(self, d: date) -> bool:
         return self.calendar.is_trading_day(d)
 
     def _session_hours_elapsed(self, now_local: datetime) -> float:
-        """Trading hours elapsed within `now_local`'s own session."""
+        """Trading hours elapsed within `now_local`'s own session.
+
+        Uses the close for THAT day — on a half-day the session is already over
+        at 13:00, and treating it as open until 16:00 understates elapsed hours
+        (inflating the projection) for the rest of the afternoon.
+        """
+        d = now_local.date()
+        close = self.close_time_on(d)
         tod = now_local.timetz().replace(tzinfo=None)
         if tod <= self.open_time:
             return 0.0
-        if tod >= self.close_time:
-            return self.session_hours
+        if tod >= close:
+            return self.session_hours_on(d)
         open_dt = datetime.combine(
             now_local.date(), self.open_time, tzinfo=now_local.tzinfo,
         )
@@ -172,9 +202,13 @@ class MarketSession:
         hit = self._wth_cache.get(monday_local)
         if hit is not None:
             return hit
-        v = self.session_hours * sum(
-            1 for i in range(5)
-            if self.is_trading_day(monday_local + timedelta(days=i))
+        # SUM per-day lengths, do not multiply one constant by a day count: a
+        # half-day is a shorter session, and claiming a full one inflates the
+        # proration denominator for the entire week.
+        v = sum(
+            self.session_hours_on(d)
+            for d in (monday_local + timedelta(days=i) for i in range(5))
+            if self.is_trading_day(d)
         )
         self._wth_cache[monday_local] = v
         return v
@@ -193,17 +227,18 @@ class MarketSession:
         mid-session (live intraday, via `now_local`).
         """
         days_before = (as_of - monday_local).days
-        full = sum(
-            1 for i in range(days_before)
-            if self.is_trading_day(monday_local + timedelta(days=i))
+        # Per-day again: a completed half-day contributes its SHORT session.
+        hours = sum(
+            self.session_hours_on(d)
+            for d in (monday_local + timedelta(days=i) for i in range(days_before))
+            if self.is_trading_day(d)
         )
-        hours = self.session_hours * full
         if not self.is_trading_day(as_of):
             return hours
         if now_local.date() == as_of:
             hours += self._session_hours_elapsed(now_local)
         else:
-            hours += self.session_hours
+            hours += self.session_hours_on(as_of)
         return hours
 
     def imputed_weekly_volume(
@@ -233,6 +268,10 @@ class _ExchangeSpec:
     close_time: time
     holidays_country: str | None
     trading_weekdays: frozenset[int] = frozenset({1, 2, 3, 4, 5})
+    # date -> early close, LOCAL time. NYSE closes at 13:00 on ~9 days a year
+    # (day after Thanksgiving, Christmas Eve, July 3rd). Proration that assumes a
+    # full 6.5h session on those days overstates imputed weekly volume.
+    half_days: tuple[tuple[date, time], ...] = ()
 
 
 _EXCHANGE_SPECS: dict[str, _ExchangeSpec] = {
@@ -244,29 +283,63 @@ _EXCHANGE_SPECS: dict[str, _ExchangeSpec] = {
 }
 
 
+class UnknownExchangeError(ValueError):
+    """No session spec for this exchange. There is no safe default."""
+
+
+def seed_specs_from_config(config) -> None:
+    """Make config.yaml the single source of truth for what a market is.
+
+    _EXCHANGE_SPECS duplicated config.market_hours: two places declaring every
+    exchange's timezone and session window, kept in step by nothing. Called once
+    at startup, this replaces the hardcoded defaults with what the operator
+    actually configured.
+
+    The hardcoded specs remain only as the pre-config default (for tests and for
+    tooling that never loads a Config); the drift test pins the two together.
+    """
+    for mh in config.market_hours:
+        _EXCHANGE_SPECS[mh.exchange.upper()] = _ExchangeSpec(
+            tz=mh.tz,
+            open_time=_hhmm(mh.open),
+            close_time=_hhmm(mh.close),
+            holidays_country=mh.holidays_country,
+            trading_weekdays=frozenset(mh.weekdays),
+            half_days=tuple(
+                (date.fromisoformat(h.date), _hhmm(h.close))
+                for h in (mh.half_days or [])
+            ),
+        )
+
+
+def _hhmm(s: str) -> time:
+    h, m = s.split(":")
+    return time(int(h), int(m))
+
+
 def market_session_for(
     exchange: str,
-    fallback_tz: str = "UTC",
     *,
     override_path: Path | None = None,
 ) -> MarketSession:
     """Resolve the MarketSession for `exchange`.
 
-    Known exchanges use their spec (authoritative tz + session window +
-    holiday country). Unknown exchanges fall back to `fallback_tz`
-    (typically the ticker's stored tz) with a generic 09:00-16:00
-    weekday session and no holiday calendar.
+    RAISES on an unknown exchange. There used to be a `fallback_tz` here — fed,
+    in practice, by tickers.tz, which was 'UTC' for all 2,685 NSE tickers — and an
+    unknown exchange silently got a generic 09:00-16:00 UTC session with nothing
+    but a log warning.
+
+    That is not a safe default; it is a wrong one. If you do not know when the
+    market opens you cannot prorate its volume, and every downstream number is
+    quietly wrong. A warning in a log is not a gate.
     """
     spec = _EXCHANGE_SPECS.get(exchange.upper())
     if spec is None:
-        logger.warning(
-            "market_session_for: unknown exchange %r; using generic "
-            "09:00-16:00 session in tz=%s", exchange, fallback_tz,
-        )
-        cal = ExchangeCalendar(None, frozenset({1, 2, 3, 4, 5}))
-        return MarketSession(
-            exchange=exchange, tz=fallback_tz,
-            open_time=time(9, 0), close_time=time(16, 0), calendar=cal,
+        raise UnknownExchangeError(
+            f"market_session_for: no session spec for exchange {exchange!r}. "
+            f"Known: {sorted(_EXCHANGE_SPECS)}. Add it to config.yaml's "
+            f"market_hours — guessing a session window silently mis-prorates "
+            f"volume for every ticker on the exchange."
         )
     cal = ExchangeCalendar(
         spec.holidays_country, spec.trading_weekdays, override_path,
@@ -275,6 +348,7 @@ def market_session_for(
         exchange=exchange, tz=spec.tz,
         open_time=spec.open_time, close_time=spec.close_time,
         calendar=cal,
+        half_days=dict(spec.half_days),
     )
 
 

@@ -40,6 +40,18 @@ def load_config(path: str | Path) -> Config:
         # Pydantic raises ValidationError; wrap so callers can catch a single type.
         raise ConfigError(f"Config validation failed for {p}: {e}") from e
 
+    # config.yaml is the single source of truth for what a market is.
+    # Seeding HERE, rather than asking every entry point to remember a
+    # startup call, is the point: a missed entry point would silently
+    # run on the hardcoded _EXCHANGE_SPECS instead of the operator's
+    # config — which is exactly the duplication this removes, brought
+    # back as a call-site obligation.
+    #
+    # market_session imports nothing from trip_ema, so there is no cycle.
+    from ..domain.market_session import seed_specs_from_config
+
+    seed_specs_from_config(config)
+
     # Sanity-check: the env var named for the DB password must be set.
     # We don't store the password on the Config object — we resolve it at
     # connect time. But fail fast at startup if it's missing.

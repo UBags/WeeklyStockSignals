@@ -278,6 +278,16 @@ class TickScheduleEntry(BaseModel):
         return self
 
 
+class HalfDayConfig(BaseModel):
+    """An early close. NYSE trades 09:30-13:00 on ~9 days a year.
+
+    Proration that assumes a full session on these days overstates imputed weekly
+    volume — which feeds the daily-grain compute, the indicators, and the signals.
+    """
+    date:  str    # YYYY-MM-DD
+    close: str    # "HH:MM" in the exchange's local tz
+
+
 class MarketHoursConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -288,6 +298,12 @@ class MarketHoursConfig(BaseModel):
     weekdays: list[int] = Field(
         description="ISO weekdays open: 1=Monday..7=Sunday",
     )
+
+    # Early closes. NYSE trades 09:30-13:00 on ~9 days a year. Empty for
+    # NSE by standing decision: half-day price/volume data IS used, but the
+    # week's volume proration is deliberately not fine-tuned for it —
+    # declaring them would move historical signals and need a rebuild.
+    half_days: list[HalfDayConfig] = []
 
     # ---- Legacy tick-scheduling fields (all optional with sane defaults) ---- #
     # When the MarketOrchestrator owns a tick loop for this exchange, these

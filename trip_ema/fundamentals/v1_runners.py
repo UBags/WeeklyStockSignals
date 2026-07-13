@@ -172,7 +172,7 @@ def populate_stock_indicator_state_for_ticker(
             f"bars (need at least {min_bars})"
         )
 
-    session = market_session_for(ticker.ref.exchange, tz)
+    session = market_session_for(ticker.ref.exchange)
     now = datetime.now(UTC)
 
     target_days = None
@@ -409,7 +409,7 @@ def populate_stock_indicator_enrichment_for_ticker(
             f"bars (need at least {min_bars})"
         )
 
-    session = market_session_for(ticker.ref.exchange, tz)
+    session = market_session_for(ticker.ref.exchange)
     now = datetime.now(UTC)
 
     target_days = None

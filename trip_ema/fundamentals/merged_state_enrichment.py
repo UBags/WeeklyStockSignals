@@ -102,7 +102,7 @@ def populate_stock_state_and_enrichment_for_ticker(
             f"(need at least {min_bars})"
         )
 
-    session = market_session_for(ticker.ref.exchange, tz)
+    session = market_session_for(ticker.ref.exchange)
     now = datetime.now(UTC)
 
     target_days = None
