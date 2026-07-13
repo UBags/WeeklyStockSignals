@@ -42,6 +42,13 @@ CLASSIFICATION_SOURCES = (
 SHARES_SOURCES = (
     "YFINANCE", "YFINANCE_IMPLIED",
     "NSE_XBRL", "MANUAL_OVERRIDE",
+    # Record-of-attempt: we asked yfinance and it has nothing. Written with
+    # shares_outstanding = NULL. NOT the same as never having asked, and the
+    # distinction is what lets the fidelity audit tell "missing" from "does not
+    # exist" — and therefore what lets it ever report READY.
+    # market_cap_compute already skips NULL shares (skipped_no_shares), so an
+    # UNAVAILABLE row cannot leak into a computed market cap.
+    "UNAVAILABLE",
 )
 
 # Allowed values for `quarterly_financials.source`. Added in
@@ -52,6 +59,8 @@ SHARES_SOURCES = (
 FINANCIAL_SOURCES = (
     "YFINANCE", "YFINANCE_COMPUTED",
     "NSE_XBRL", "MANUAL_OVERRIDE",
+    # See SHARES_SOURCES.UNAVAILABLE — same record-of-attempt semantics.
+    "UNAVAILABLE",
 )
 
 # Allowed values for `fundamentals_run.phase`.
