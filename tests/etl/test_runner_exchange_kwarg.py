@@ -7,9 +7,9 @@ back to `config.etl.exchange`. These tests cover the per-exchange
 isolation guarantee — each market's fetch pass only sees its own
 tickers.
 
-These don't require a real Postgres — they exercise `_select_tickers`
-against an in-memory SQLite database. The SQL uses standard named
-parameters and ANSI WHERE clauses, so it ports cleanly.
+These run against the Alembic-migrated Postgres provided by the shared
+`db_engine` fixture (re-exported by tests/etl/conftest.py), NOT against a
+hand-written schema. See the `engine` fixture below for why that matters.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 from trip_ema.etl.runner import _select_tickers
 
@@ -34,40 +34,51 @@ def _make_config(default_exchange: str = "NSE") -> MagicMock:
 
 
 @pytest.fixture
-def engine():
-    """Bare SQLite engine seeded with a `tickers` table containing
-    three exchanges' worth of data. Tier values are integers (1, 2, 3)
-    per the real Tier(int, Enum) in trip_ema.etl.types."""
-    eng = create_engine("sqlite://")
-    with eng.begin() as conn:
-        conn.execute(text("""
-            CREATE TABLE tickers (
-                ticker_id INTEGER PRIMARY KEY,
-                symbol TEXT NOT NULL,
-                exchange TEXT NOT NULL,
-                tier INTEGER NOT NULL,
-                is_active INTEGER NOT NULL DEFAULT 1,
-                delisted_at TEXT
-            )
-        """))
-        rows = [
-            # NSE tickers, all tiers
-            (1, "RELIANCE", "NSE", 1, 1, None),
-            (2, "INFY",     "NSE", 1, 1, None),
-            (3, "TCS",      "NSE", 2, 1, None),
-            (4, "OLDCO",    "NSE", 1, 0, None),         # inactive
-            (5, "DEADCO",   "NSE", 1, 1, "2026-01-01"), # delisted
-            # BSE tickers
-            (6, "BSEONLY",  "BSE", 1, 1, None),
-            (7, "BSEMID",   "BSE", 2, 1, None),
-            # NYSE tickers (future-proofing)
-            (8, "AAPL",     "NYSE", 1, 1, None),
-        ]
+def engine(db_engine):
+    """The REAL, Alembic-migrated `tickers` table, seeded with three exchanges.
+
+    This fixture used to build its own `tickers` table in in-memory SQLite:
+
+        CREATE TABLE tickers (ticker_id INTEGER PRIMARY KEY, symbol TEXT, ...)
+
+    That was a second copy of the schema, maintained by hand, and it drifted —
+    it never had listing_date, isin, instrument_type, full_name, lot_size or
+    face_value. The moment `_select_tickers` started selecting `listing_date`,
+    eight tests here failed with "no such column", not because the runner was
+    wrong but because the fixture's private copy of the truth had fallen behind
+    the truth.
+
+    Patching the missing column into that CREATE TABLE would have been the
+    thirty-second fix and would have rebuilt the same trap for the next person.
+    So the copy is gone. `db_engine` (re-exported by tests/etl/conftest.py) is a
+    function-scoped, fresh-per-test Postgres migrated with `alembic upgrade
+    head`, which means the schema here IS the schema, and this class of failure
+    cannot drift back in — a column added by a future migration is simply there.
+
+    Tier values are integers (1, 2, 3) per the real Tier(int, Enum) in
+    trip_ema.etl.types. `listing_date` is left NULL: these tests are about
+    exchange isolation and the active/delisted filters, and _select_tickers is
+    required to work whether or not a listing date is known.
+    """
+    rows = [
+        # NSE tickers, all tiers
+        (1, "RELIANCE", "NSE", 1, True, None),
+        (2, "INFY",     "NSE", 1, True, None),
+        (3, "TCS",      "NSE", 2, True, None),
+        (4, "OLDCO",    "NSE", 1, False, None),                       # inactive
+        (5, "DEADCO",   "NSE", 1, True, "2026-01-01T00:00:00+00:00"), # delisted
+        # BSE tickers
+        (6, "BSEONLY",  "BSE", 1, True, None),
+        (7, "BSEMID",   "BSE", 2, True, None),
+        # NYSE tickers (future-proofing)
+        (8, "AAPL",     "NYSE", 1, True, None),
+    ]
+    with db_engine.begin() as conn:
         conn.execute(
             text("""
                 INSERT INTO tickers
                   (ticker_id, symbol, exchange, tier, is_active, delisted_at)
-                VALUES (:id, :sym, :ex, :tier, :act, :del)
+                VALUES (:id, :sym, :ex, :tier, :act, CAST(:del AS timestamptz))
             """),
             [
                 {"id": r[0], "sym": r[1], "ex": r[2], "tier": r[3],
@@ -75,7 +86,7 @@ def engine():
                 for r in rows
             ],
         )
-    return eng
+    return db_engine
 
 
 # ---------------------------------------------------------------------------

@@ -103,6 +103,7 @@ class YFinanceSource:
         retry_backoff_base: float = 2.0,
         request_delay_seconds: float = 0.0,
         repair: bool = True,
+        throttle_backoff_seconds: float = 30.0,
     ):
         # NB: exchange is validated by the runner before YFinanceSource
         # is constructed. We trust it here. A misformatted exchange
@@ -117,6 +118,8 @@ class YFinanceSource:
         # volumes. The solo-retry recovery pass sets repair=False to
         # rescue those.
         self._repair = repair
+        # Yahoo's rate-limit is NOT an exception — see _is_throttled.
+        self._throttle_backoff = throttle_backoff_seconds
 
     @property
     def exchange(self) -> str:
@@ -184,12 +187,40 @@ class YFinanceSource:
         for i in range(0, len(items), n):
             yield items[i : i + n]
 
+    @staticmethod
+    def _is_throttled(
+        outcomes: dict[str, FetchOutcome], symbols: list[str],
+    ) -> bool:
+        """True when the batch looks rate-limited rather than genuinely empty.
+
+        Yahoo does not raise when it throttles. It returns the frame with every
+        requested symbol's column present and all-NaN, which _normalize_df_to_outcomes
+        faithfully turns into FetchOutcome(bars=(), error_message=None) — a
+        "success" with nothing in it.
+
+        The discriminator is unanimity. One NSE equity returning zero bars over a
+        multi-year window is plausible (delisted, never traded). ALL of them doing
+        so simultaneously is not a mass delisting; it is a rate-limit. We require
+        >= 2 symbols so a solo-retry fetch (batch of 1) can never be mistaken for
+        a throttle — for a single ticker, zero bars is genuinely ambiguous and is
+        handled downstream by the runner's empty/short buckets.
+        """
+        if len(symbols) < 2:
+            return False
+        return all(
+            (o := outcomes.get(s)) is not None
+            and o.succeeded
+            and not o.bars
+            for s in symbols
+        )
+
     def _fetch_batch_daily(
         self,
         symbols: list[str],
         start: date,
         end: date,
     ) -> dict[str, FetchOutcome]:
+        import random
         import yfinance as yf  # lazy: only required when an ETL run fires
 
         yf_symbols = [self._yf(s) for s in symbols]
@@ -208,7 +239,31 @@ class YFinanceSource:
                     progress=False,
                     group_by="ticker",
                 )
-                return self._normalize_df_to_outcomes(df, symbols)
+                outcomes = self._normalize_df_to_outcomes(df, symbols)
+
+                # The throttle check lives HERE, after normalisation, because the
+                # rate-limit is invisible at the exception level — it is a shape
+                # in the returned data, not an error. Retrying immediately would
+                # just take another swing at a closed door, so this uses its own
+                # long backoff rather than the 2s/4s exception one.
+                if self._is_throttled(outcomes, symbols) and attempt < self._max_retries:
+                    delay = self._throttle_backoff * (2 ** (attempt - 1))
+                    delay *= 0.5 + random.random()  # jitter: don't sync the workers
+                    logger.warning(
+                        "yfinance THROTTLED (all %d symbols returned zero bars); "
+                        "backing off %.1fs before attempt %d/%d",
+                        len(symbols), delay, attempt + 1, self._max_retries,
+                        extra={
+                            "attempt": attempt,
+                            "batch_size": len(symbols),
+                            "exchange": self._exchange,
+                            "backoff_seconds": delay,
+                        },
+                    )
+                    time.sleep(delay)
+                    continue
+
+                return outcomes
             except Exception as e:
                 last_error = e
                 logger.warning(

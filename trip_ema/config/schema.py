@@ -772,6 +772,30 @@ class EtlConfig(BaseModel):
     """ThreadPoolExecutor worker count for parallel batches. Higher =
     faster + more rate-limit risk; lower = slower + safer."""
 
+    yfinance_throttle_backoff_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
+    """Base backoff when Yahoo is detected to be rate-limiting us.
+
+    Yahoo does NOT raise on a throttle — it returns an all-NaN frame and yfinance
+    logs "possibly delisted; no price data found". So the ordinary
+    `retry_backoff_base ** attempt` path (2s, 4s) never fires, and even if it did
+    it is far too short for a rate-limit. This is the separate, longer backoff for
+    the throttle signal: base, base*2, base*4, jittered.
+    """
+
+    max_coverage_gap_days: int = Field(default=30, ge=1, le=3650)
+    """How far AFTER the expected first bar the earliest returned bar may fall
+    before the fetch is judged truncated.
+
+    expected_first_bar = max(requested_start, tickers.listing_date). A fetch that
+    returns its first bar materially later than that did not return what was asked
+    for — Yahoo truncated it. Genuine new listings satisfy the check by
+    construction, because listing_date says when they listed.
+
+    30 days absorbs suspensions and provider gaps at the start of a window while
+    still catching the failure we actually saw: DABUR, listed 1999, backfilled
+    from 2006, returning its first bar in July 2026.
+    """
+
     yfinance_request_delay_seconds: float = Field(default=0.5, ge=0.0)
     """Jitter sleep between batches. Helps avoid Yahoo's rate-limit."""
 
@@ -800,6 +824,37 @@ class EtlConfig(BaseModel):
     would need its own listings parser."""
 
 
+class ComputeConfig(BaseModel):
+    """Execution-strategy knobs for the heavy compute stages.
+
+    Sourced under `compute:` in config.yaml. Every field has a default, so the
+    section is optional — omitting it yields the tuned defaults below.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    stock_state_processes: int = Field(default=3, ge=1, le=8)
+    """Child processes for backfill stage_2 (merged stock state + enrichment).
+
+    That stage is dominated by `compute_daily_grain_via_engine`, a pure-Python
+    scalar loop that holds the GIL, so a thread pool serialises it: 8 threads
+    were measured producing 1.15 cores of work while Postgres sat idle (1 active
+    backend, 9 idle) and the box was 52% idle. Processes multiply it.
+
+    3 is tuned for a 6-physical-core box: at roughly 1.15 cores of Python plus
+    1.4 cores of Postgres per process, 3 lands near the core count and Postgres
+    becomes the next constraint. Higher values queue rather than parallelise.
+
+    **1 means run in-process on threads** — the pre-process-pool path. This is a
+    real mode, not a degenerate one:
+      * it is the ONLY mode under which monkeypatching the populator works,
+        because spawned children re-import the pipeline module clean and never
+        see the parent's patches. Orchestration tests that stub the populator
+        must set this to 1.
+      * it is the production escape hatch if the pool ever misbehaves.
+    """
+
+
 # ---------- Root ---------- #
 
 
@@ -810,6 +865,7 @@ class Config(BaseModel):
     ema: EMAConfig
     atr: ATRConfig
     market_hours: list[MarketHoursConfig]
+    compute: ComputeConfig = ComputeConfig()
     scheduling: SchedulingConfig = SchedulingConfig()
     cache: CacheConfig = CacheConfig()
     http: HttpConfig = HttpConfig()

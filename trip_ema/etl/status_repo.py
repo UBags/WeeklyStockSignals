@@ -294,6 +294,47 @@ class EtlStatusRepository:
             {"tid": ticker_id, "lbd": last_bar_date, "ts": ts},
         )
 
+    def record_coverage_gap(
+        self,
+        ticker_id: int,
+        reason: str,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Record that a fetch returned bars, but not the ones we asked for.
+
+        This is deliberately NEITHER record_success NOR record_failure:
+
+          * not a success — the whole point is that we refuse to stamp
+            "success" on a ticker whose history came back truncated. That stamp
+            is what let DABUR sit in the DB with five bars and a clean bill of
+            health;
+          * not a failure — `consecutive_failures` is left untouched, because
+            park_failure_threshold would otherwise park a live large cap after
+            three throttled runs. A truncated fetch is our problem, not the
+            ticker's.
+
+        So: stamp the attempt, leave a breadcrumb in `last_error`, and change
+        nothing else. `last_successful_bar_date` in particular is NOT advanced —
+        it still reflects the last time we genuinely had complete data.
+        """
+        ts = now or datetime.now(UTC)
+        self._conn.execute(
+            text("""
+                INSERT INTO etl_ticker_status
+                    (ticker_id, last_successful_bar_date, last_attempt_at,
+                     consecutive_failures, parked, parked_at, parked_reason,
+                     last_error, updated_at)
+                VALUES
+                    (:tid, NULL, :ts, 0, FALSE, NULL, NULL, :reason, :ts)
+                ON CONFLICT (ticker_id) DO UPDATE SET
+                    last_attempt_at = EXCLUDED.last_attempt_at,
+                    last_error      = EXCLUDED.last_error,
+                    updated_at      = EXCLUDED.updated_at
+            """),
+            {"tid": ticker_id, "ts": ts, "reason": reason},
+        )
+
     def record_failure(
         self,
         ticker_id: int,

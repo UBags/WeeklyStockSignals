@@ -304,6 +304,10 @@ class _TickerInfo:
     ticker_id: int
     symbol: str
     tier: Tier
+    listing_date: date | None = None
+    """From NSE's `dateoflisting`. The ONLY thing that distinguishes a ticker
+    that is short because it is NEW from one that is short because Yahoo
+    truncated us. See _coverage_shortfall_days."""
 
 
 def _select_tickers(
@@ -322,7 +326,7 @@ def _select_tickers(
     """
     with db_engine.connect() as conn:
         query = """
-            SELECT ticker_id, symbol, tier
+            SELECT ticker_id, symbol, tier, listing_date
             FROM tickers
             WHERE is_active = TRUE AND delisted_at IS NULL
               AND exchange = :ex
@@ -334,7 +338,10 @@ def _select_tickers(
         query += " ORDER BY tier ASC, symbol ASC"
         rows = conn.execute(text(query), params)
         return [
-            _TickerInfo(ticker_id=r.ticker_id, symbol=r.symbol, tier=Tier(r.tier))
+            _TickerInfo(
+                ticker_id=r.ticker_id, symbol=r.symbol, tier=Tier(r.tier),
+                listing_date=r.listing_date,
+            )
             for r in rows
         ]
 
@@ -505,7 +512,7 @@ def fetch_bars_for_tickers(
     with db_engine.connect() as conn:
         rows = conn.execute(
             text("""
-                SELECT ticker_id, exchange, symbol, tier
+                SELECT ticker_id, exchange, symbol, tier, listing_date
                   FROM tickers
                  WHERE ticker_id = ANY(:ids)
                    AND is_active = TRUE
@@ -534,7 +541,7 @@ def fetch_bars_for_tickers(
     tickers = [
         _TickerInfo(
             ticker_id=r.ticker_id, symbol=r.symbol,
-            tier=Tier(r.tier),
+            tier=Tier(r.tier), listing_date=r.listing_date,
         )
         for r in rows
     ]
@@ -865,13 +872,26 @@ def _solo_retry_once(
     # IntCastingNaNError repair-casualties. survivors is fixed before
     # this pass; no re-add, so no loop.
     rec_b = 0
+    still_empty: list = []
     if survivors:
-        rec_b, _still = _solo_pass(survivors, repair=False)
+        rec_b, still_empty = _solo_pass(survivors, repair=False)
     logger.info(
         "solo-retry: %d recovered (repair=True), %d recovered "
         "(repair=False) of %d flaked",
         rec_a, rec_b, len(snapshot),
     )
+    if still_empty:
+        # Survived both solo passes. Either genuinely dataless (delisted,
+        # rights entitlement, never-traded) or Yahoo was throttling for the
+        # whole window. Named, not silent.
+        logger.warning(
+            "solo-retry: %d ticker(s) STILL returned no data after Layer 2 "
+            "and Layer 3: %s",
+            len(still_empty),
+            ", ".join(
+                sorted(f"{t.symbol}(id={t.ticker_id})" for t in still_empty)
+            ),
+        )
 
 
 def _execute_batches(
@@ -902,6 +922,8 @@ def _execute_batches(
     total_failed = 0
     total_bars_written = 0
     all_failed_tickers: list = []
+    all_empty_tickers: list = []
+    all_short_tickers: list = []
 
     with ThreadPoolExecutor(max_workers=config.etl.yfinance_concurrency) as ex:
         futures = [
@@ -924,6 +946,8 @@ def _execute_batches(
             total_failed += bs.failed
             total_bars_written += bs.bars_written
             all_failed_tickers.extend(bs.failed_tickers)
+            all_empty_tickers.extend(bs.empty_tickers)
+            all_short_tickers.extend(bs.short_tickers)
             # Update the run counters incrementally so the GUI sees progress.
             with db_engine.begin() as conn:
                 EtlStatusRepository(conn).increment_counters(
@@ -934,13 +958,34 @@ def _execute_batches(
 
     M.etl_bars_written_total.inc(total_bars_written)
 
+    # The retry set is failures PLUS zero-bar "successes" PLUS truncated ones.
+    # All three go to the bounded solo passes; only failures count toward the
+    # run outcome.
+    retry_tickers = all_failed_tickers + all_empty_tickers + all_short_tickers
+    if all_empty_tickers:
+        logger.warning(
+            "fetch: %d ticker(s) returned zero bars without erroring "
+            "(throttle or delisting) — routing to solo-retry",
+            len(all_empty_tickers),
+        )
+    if all_short_tickers:
+        logger.warning(
+            "fetch: %d ticker(s) returned TRUNCATED history (first bar far "
+            "later than max(requested_start, listing_date)) — routing to "
+            "solo-retry: %s",
+            len(all_short_tickers),
+            ", ".join(sorted(t.symbol for t in all_short_tickers)[:25]),
+        )
+
     if total_attempted == 0:
-        return RunOutcome.FAILED, all_failed_tickers
+        return RunOutcome.FAILED, retry_tickers
     if total_succeeded == 0:
-        return RunOutcome.FAILED, all_failed_tickers
+        # Every ticker errored or came back empty. Previously an all-empty
+        # pass reported SUCCESS; it now fails loudly.
+        return RunOutcome.FAILED, retry_tickers
     if total_failed > 0:
-        return RunOutcome.PARTIAL, all_failed_tickers
-    return RunOutcome.SUCCESS, all_failed_tickers
+        return RunOutcome.PARTIAL, retry_tickers
+    return RunOutcome.SUCCESS, retry_tickers
 
 
 @dataclass(frozen=True, slots=True)
@@ -952,6 +997,45 @@ class _BatchStats:
     # Identities of tickers that failed this batch — used by the
     # single bounded solo-retry in _run_fetch_pass.
     failed_tickers: tuple = ()
+    # Tickers whose fetch did not error but returned ZERO bars. yfinance
+    # emits an all-NaN column (no exception) when it throttles us, so these
+    # look like successes and are not. Not counted as failures — that would
+    # false-park a live-but-halted ticker — but they ARE retry candidates
+    # and join failed_tickers in the set handed to _solo_retry_once.
+    empty_tickers: tuple = ()
+    # Tickers whose fetch returned SOME bars, but starting far later than
+    # max(requested_start, listing_date) — i.e. Yahoo truncated us. The bars we
+    # got are still written; what is withheld is the verdict "success". Same
+    # retry path as empty_tickers.
+    short_tickers: tuple = ()
+
+
+def _coverage_shortfall_days(
+    ticker: _TickerInfo, bars, requested_start: date,
+) -> int:
+    """How many days LATE the earliest returned bar is. 0 means complete.
+
+    expected_first_bar = max(requested_start, listing_date)
+
+    We asked Yahoo for `requested_start` onward. The earliest bar that could
+    legitimately exist is the later of that and the day the stock actually listed.
+    A first bar materially after that means Yahoo did not return what we asked
+    for.
+
+    listing_date is what makes this safe. Without it, any short history looks like
+    a failure, and we would false-flag every genuine new listing — ELCID took its
+    NSE listing on 2026-04-20 and its .NS history correctly starts there, despite
+    the company being decades old. With it, the test is exact: ELCID's expected
+    first bar IS 2026-04-20, so it passes.
+
+    Returns 0 (never negative, never a false alarm) when listing_date is NULL,
+    since we then have no ground truth to judge against.
+    """
+    if not bars or ticker.listing_date is None:
+        return 0
+    expected_first = max(requested_start, ticker.listing_date)
+    actual_first = min(b.trading_date for b in bars)
+    return max(0, (actual_first - expected_first).days)
 
 
 def _process_one_batch(
@@ -995,6 +1079,8 @@ def _process_one_batch(
     failed = 0
     bars_written = 0
     failed_tickers_local: list = []
+    empty_tickers_local: list = []
+    short_tickers_local: list = []
 
     for ticker in batch:
         outcome = results_by_symbol.get(ticker.symbol)
@@ -1008,6 +1094,25 @@ def _process_one_batch(
             failed_tickers_local.append(ticker)
             M.etl_tickers_fetched_total.labels(
                 tier=str(ticker.tier.value), outcome="failed",
+            ).inc()
+            continue
+
+        if not outcome.bars:
+            # Fetch did not error but returned nothing. yfinance returns the
+            # symbol's column all-NaN — without raising — both when it is
+            # throttling us and when a ticker is genuinely delisted. We cannot
+            # tell the two apart here, so we do neither of the wrong things:
+            #   * no _handle_ticker_failure — consecutive_failures untouched,
+            #     so a live-but-halted ticker is never false-parked;
+            #   * no record_success — writing "success" on a ticker that
+            #     returned zero bars is the lie that hid this whole class.
+            # It becomes a retry candidate instead: _solo_retry_once re-fetches
+            # it solo (Layer 2), and if it is STILL empty, again with
+            # repair=False (Layer 3). Genuinely-dataless tickers survive both
+            # and are named in the Layer 3 WARNING.
+            empty_tickers_local.append(ticker)
+            M.etl_tickers_fetched_total.labels(
+                tier=str(ticker.tier.value), outcome="empty",
             ).inc()
             continue
 
@@ -1048,13 +1153,39 @@ def _process_one_batch(
                 max(b.trading_date for b in outcome.bars)
                 if outcome.bars else None
             )
-            status_repo.record_success(ticker.ticker_id, last_bar_date)
+
+            # Did we get what we ASKED for, or merely something?
+            #
+            # Everything above this line judges the fetch by whether it errored.
+            # Nothing judged it by whether it was COMPLETE — which is how a stock
+            # listed in 1999, backfilled from 2006, came back with five bars from
+            # last week and was recorded as a clean success. The bars are real, so
+            # we keep them; what we withhold is the verdict.
+            shortfall = 0 if intraday else _coverage_shortfall_days(
+                ticker, outcome.bars, start,
+            )
+            if shortfall > config.etl.max_coverage_gap_days:
+                short_tickers_local.append(ticker)
+                # NOT record_success — that call is the lie.
+                # NOT record_failure either: consecutive_failures must stay put,
+                # or a truncated fetch would park a perfectly live large cap.
+                # We leave a breadcrumb and re-fetch it solo instead.
+                status_repo.record_coverage_gap(
+                    ticker.ticker_id,
+                    f"truncated: first bar {shortfall}d after expected "
+                    f"(listing_date={ticker.listing_date}, requested={start})",
+                )
+                M.etl_tickers_fetched_total.labels(
+                    tier=str(ticker.tier.value), outcome="short",
+                ).inc()
+            else:
+                status_repo.record_success(ticker.ticker_id, last_bar_date)
+                M.etl_tickers_fetched_total.labels(
+                    tier=str(ticker.tier.value), outcome="success",
+                ).inc()
 
         bars_written += len(plan.writes)
         succeeded += 1
-        M.etl_tickers_fetched_total.labels(
-            tier=str(ticker.tier.value), outcome="success",
-        ).inc()
 
     return _BatchStats(
         attempted=attempted,
@@ -1062,6 +1193,8 @@ def _process_one_batch(
         failed=failed,
         bars_written=bars_written,
         failed_tickers=tuple(failed_tickers_local),
+        empty_tickers=tuple(empty_tickers_local),
+        short_tickers=tuple(short_tickers_local),
     )
 
 
