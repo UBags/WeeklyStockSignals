@@ -63,7 +63,11 @@ from ..orchestrator.industry_stages import (
 )
 from ..persistence import transaction
 from .phase_ledger import run_phase, reset_phases
-from ..fundamentals.parallel import fan_out
+from ..fundamentals.parallel import (
+    engine_spec_from_config,
+    fan_out,
+    fan_out_processes,
+)
 from ..fundamentals.market_cap_compute import populate_market_cap_range
 from ..fundamentals.runners import (
     build_all_industry_index_chains,
@@ -293,7 +297,7 @@ def backfill(
         _r = run_phase(
             db_engine, exchange, "stock_state",
             lambda: _stage_stock_state_full(
-                db_engine, scoped_tickers, progress_cb,
+                db_engine, config, scoped_tickers, progress_cb,
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -812,25 +816,65 @@ def _stage_fetch_bars(
 _MERGED_RESULT: dict[str, tuple[int, list[tuple[int, str]]]] = {}
 
 
+def _stock_state_worker(db_engine, ticker_id: int) -> None:
+    """One ticker's merged state+enrichment pass.
+
+    MODULE-LEVEL on purpose: fan_out_processes ships this to child processes,
+    and ProcessPoolExecutor pickles callables by qualified name. The closure
+    this replaced captured db_engine, which is not picklable — and must not be,
+    since a child inheriting the parent's connections is exactly the bug that
+    the spawn context exists to prevent. The child passes its OWN engine in.
+    """
+    populate_stock_state_and_enrichment_for_ticker(
+        db_engine, ticker_id, str(Timeframe.WEEKLY),
+        mode="full",
+    )
+
+
 def _stage_stock_state_full(
-    db_engine, scoped_tickers: list[int],
+    db_engine, config, scoped_tickers: list[int],
     progress_cb: Callable[[str, str], None] | None = None,
 ) -> tuple[int, list[tuple[int, str]]]:
     """Stages 2+3: one engine pass writing state AND enrichment.
 
-    Returns (done_count, [(failed_ticker_id, error_str)]).
-    Per-ticker error isolation — a failure on ticker X doesn't abort the rest.
+    Two execution modes, selected by `config.compute.stock_state_processes`:
+
+      >1  (default 3): a PROCESS pool. The merged pass is dominated by
+          compute_daily_grain_via_engine — a pure-Python scalar loop holding the
+          GIL — so threads serialised it: 8 workers measured 1.15 cores with
+          Postgres idle. Processes multiply it. See fan_out_processes.
+
+       1: in-process, on threads. Byte-for-byte the pre-process-pool path. This
+          is the ONLY mode in which monkeypatching
+          `populate_stock_state_and_enrichment_for_ticker` has any effect —
+          spawned children re-import this module clean and never see the
+          parent's patches — so orchestration tests that stub the populator must
+          select it. It is also the production escape hatch.
+
+    Both modes return (done_count, [(failed_ticker_id, error_str)]) and both
+    give per-ticker error isolation, so the phase ledger, _MERGED_RESULT and
+    stage 3's no-op cannot tell them apart.
     """
-    def _one(tid):
-        populate_stock_state_and_enrichment_for_ticker(
-            db_engine, tid, str(Timeframe.WEEKLY),
-            mode="full",
+    processes = config.compute.stock_state_processes
+
+    if processes > 1:
+        outcome = fan_out_processes(
+            scoped_tickers, _stock_state_worker,
+            engine_spec=engine_spec_from_config(config),
+            label="stage_2_stock_state",
+            processes=processes,
+            progress_cb=progress_cb,
+        )
+    else:
+        # In-process. db_engine is closed over rather than shipped, which is
+        # precisely why this path cannot be parallelised across processes and
+        # precisely why monkeypatching works here.
+        outcome = fan_out(
+            scoped_tickers,
+            lambda tid: _stock_state_worker(db_engine, tid),
+            label="stage_2_stock_state", progress_cb=progress_cb,
         )
 
-    outcome = fan_out(
-        scoped_tickers, _one,
-        label="stage_2_stock_state", progress_cb=progress_cb,
-    )
     _MERGED_RESULT["stock"] = (outcome.done, outcome.failed)
     return outcome.done, outcome.failed
 

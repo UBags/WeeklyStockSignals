@@ -74,6 +74,23 @@ class _MockConfig:
         yfinance_batch_size = 50
         yfinance_concurrency = 4
 
+    class compute:
+        stock_state_processes = 1
+        """Stage 2 MUST run in-process here.
+
+        These tests monkeypatch
+        `trip_ema.backfill.pipeline.populate_stock_state_and_enrichment_for_ticker`
+        to a no-op (see the `stub_populators` fixture). With the default of 3,
+        stage 2 fans out to spawned child processes which re-import the pipeline
+        module CLEAN — the monkeypatch lives in this process's memory and does
+        not cross the boundary, so children would call the REAL populator
+        against the fixture DB. The stub would be silently defeated and these
+        tests would pass while testing something else entirely.
+
+        1 keeps stage 2 in this process, where the patch applies. These are
+        orchestration tests; the populator has its own test files.
+        """
+
 
 def _seed_ticker(
     db_engine, *, ticker_id: int, symbol: str,
