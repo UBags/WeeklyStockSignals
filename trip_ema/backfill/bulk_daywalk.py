@@ -40,7 +40,7 @@ import bisect
 import logging
 import threading
 from datetime import date, datetime, time
-from zoneinfo import ZoneInfo
+from ..fundamentals.market_session import market_tz, post_session_time
 
 from sqlalchemy import Engine, text
 
@@ -52,14 +52,18 @@ from ..persistence.historical_signals_repo import HistoricalSignalsRepository
 
 logger = logging.getLogger(__name__)
 
-_IST = ZoneInfo("Asia/Kolkata")
 
 
-def _as_of(d: date) -> datetime:
+def _as_of(d: date, exchange: str) -> datetime:
     """The per-day walk's observation instant: D 16:30 IST. Must match
     _stage_backfill_daywalk exactly — it lands in computed_at, which the
     bounded stage-7 delete filters on."""
-    return datetime.combine(d, time(16, 30), tzinfo=_IST)
+    # An instant unambiguously AFTER the session, in the market's own zone.
+    # The old hardcoded 16:30 was NSE's close (15:30) + 1h — correct for India and
+    # 06:00 in New York, three hours before the opening bell.
+    return datetime.combine(
+        d, post_session_time(exchange), tzinfo=market_tz(exchange),
+    )
 
 
 def _load_state_series(conn, ticker_id: int, timeframe: str, date_to: date):
@@ -82,7 +86,7 @@ def _load_state_series(conn, ticker_id: int, timeframe: str, date_to: date):
     return rows
 
 
-def _load_closes(conn, ticker_id: int, date_to: date):
+def _load_closes(conn, ticker_id: int, date_to: date, exchange: str):
     """Daily bars ascending. Capped at date_to's close so a signal can never be
     priced off a future bar."""
     rows = conn.execute(
@@ -93,7 +97,7 @@ def _load_closes(conn, ticker_id: int, date_to: date):
                AND bar_timestamp <= :ob
              ORDER BY bar_timestamp ASC
         """),
-        {"tid": ticker_id, "ob": _as_of(date_to)},
+        {"tid": ticker_id, "ob": _as_of(date_to, exchange)},
     ).all()
     return [r[0] for r in rows], [float(r[1]) for r in rows]
 
@@ -117,13 +121,14 @@ def derive_signals_for_ticker_bulk(
     timeframe: str,
     date_from: date,
     date_to: date,
+    exchange: str,
 ) -> list[SignalEvent]:
     """Every signal for one ticker over [date_from, date_to], in two queries."""
     states = _load_state_series(conn, ticker_id, timeframe, date_to)
     if len(states) < 2:
         return None or []
 
-    ts_list, close_list = _load_closes(conn, ticker_id, date_to)
+    ts_list, close_list = _load_closes(conn, ticker_id, date_to, exchange)
     if not ts_list:
         return []
 
@@ -140,7 +145,7 @@ def derive_signals_for_ticker_bulk(
         if prev_row.display_regime == cur_row.display_regime:
             continue
 
-        as_of_dt = _as_of(d)
+        as_of_dt = _as_of(d, exchange)
         price = _price_on_or_before(ts_list, close_list, as_of_dt)
         if price is None or price <= 0:
             # Same guard as derive_signal_for_ticker_this_cycle: no valid price
@@ -174,6 +179,7 @@ def compute_all_signals(
     scoped_tickers: list[int],
     date_from: date,
     date_to: date,
+    exchange: str,
     timeframe: str = "1W",
     progress_cb=None,
 ) -> list[SignalEvent]:
@@ -188,6 +194,7 @@ def compute_all_signals(
                 evs = derive_signals_for_ticker_bulk(
                     conn, tid, timeframe=timeframe,
                     date_from=date_from, date_to=date_to,
+                    exchange=exchange,
                 )
         except Exception:
             logger.exception("bulk daywalk: derive error ticker_id=%d", tid)
@@ -207,6 +214,7 @@ def backfill_daywalk_bulk(
     date_from: date,
     date_to: date,
     today: date,
+    exchange: str,
     timeframe: str = "1W",
     progress_cb=None,
 ) -> tuple[int, int, int, int, bool]:
@@ -223,6 +231,7 @@ def backfill_daywalk_bulk(
     events = compute_all_signals(
         db_engine, scoped_tickers=scoped_tickers,
         date_from=date_from, date_to=date_to,
+        exchange=exchange,
         timeframe=timeframe, progress_cb=progress_cb,
     )
 
@@ -295,7 +304,7 @@ def backfill_daywalk_bulk(
             day=effective_today,
             today=effective_today,
             mode="backfill",
-            as_of=_as_of(effective_today),
+            as_of=_as_of(effective_today, exchange),
             timeframe=timeframe,
         )
         cur_up, cur_del = pd.current_upserted, pd.current_deleted

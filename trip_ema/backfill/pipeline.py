@@ -70,6 +70,7 @@ from ..fundamentals.parallel import (
 )
 from ..fundamentals.market_cap_compute import populate_market_cap_range
 from ..fundamentals.data_fidelity import audit_exchange
+from ..fundamentals.market_session import market_tz
 from ..fundamentals.runners import (
     run_financials_refresh,
     run_industry_refresh,
@@ -94,7 +95,6 @@ from ..persistence.historical_signals_repo import (
 
 logger = logging.getLogger(__name__)
 
-_IST = ZoneInfo("Asia/Kolkata")
 
 
 # ============================================================
@@ -843,7 +843,10 @@ def backfill(
         _emit_progress(
             progress_cb, "stage_8_walk_days", "starting",
         )
-        _today = datetime.now(_IST).date()
+        # The market's today, not the machine's. On a NUC set to Asia/Kolkata
+        # running NSE these are the same date, which is precisely why a hardcoded
+        # IST survived here unnoticed.
+        _today = datetime.now(market_tz(exchange)).date()
         _r = run_phase(
             db_engine, exchange, "daywalk",
             # BULK-DAYWALK: the per-day walk ran process_signals_for_day once
@@ -861,6 +864,7 @@ def backfill(
                 date_from=date_from,
                 date_to=date_to,
                 today=_today,
+                exchange=exchange,
                 progress_cb=progress_cb,
             ),
             backfill_run_id=run_id, force=_force,

@@ -278,6 +278,77 @@ def market_session_for(
     )
 
 
+def market_tz(exchange: str) -> ZoneInfo:
+    """The exchange's timezone. THE single authority — nothing else may decide.
+
+    Three modules on the signal path used to carry their own
+    `_IST = ZoneInfo("Asia/Kolkata")`, which silently assumed every market is in
+    India. On a NUC set to Asia/Kolkata running NSE, that assumption is invisibly
+    true — which is exactly why it survived this long.
+    """
+    return market_session_for(exchange).zone
+
+
+def post_session_time(exchange: str) -> time:
+    """One hour after the close, in the exchange's LOCAL time.
+
+    The daywalk needs an instant that is unambiguously after the session, to pick
+    "the last bar at or before as_of". It used a hardcoded 16:30, which is not
+    arbitrary — NSE closes at 15:30 — but which is 06:00 in New York, three hours
+    BEFORE the opening bell.
+
+    close + 1h gives 16:30 for NSE (bit-identical to the constant it replaces) and
+    17:00 for NYSE. DST is handled by ZoneInfo at the point of attachment; there is
+    no offset arithmetic here or anywhere.
+    """
+    close = market_session_for(exchange).close_time
+    h = (close.hour + 1) % 24
+    return time(h, close.minute)
+
+
+def exchange_of_engine(db_engine) -> str:
+    """Which exchange does this DATABASE belong to?
+
+    Under one-database-per-exchange the database IS the exchange, so code holding
+    only a db_engine can recover it without threading `exchange` through every
+    signature — _build_industry_weekly_bars has none in scope, and giving it one
+    would ripple through both industry runners and their callers.
+
+    Asserts EXACTLY ONE exchange: the same invariant Commit L enforces when it
+    refuses a backfill whose industry layer belongs to someone else. If this ever
+    fires, two exchanges share a database and every industry index in it is
+    suspect.
+
+    Cached on the URL — called from per-ticker hot paths.
+    """
+    from sqlalchemy import text as _text
+
+    url = str(db_engine.url)
+    hit = _EXCHANGE_OF_DB.get(url)
+    if hit is not None:
+        return hit
+
+    with db_engine.connect() as conn:
+        rows = conn.execute(_text(
+            "SELECT DISTINCT exchange FROM tickers WHERE exchange IS NOT NULL"
+        ))
+        found = sorted(r[0] for r in rows)
+
+    if len(found) != 1:
+        raise ValueError(
+            f"exchange_of_engine: expected EXACTLY ONE exchange in this "
+            f"database, found {found or 'none'}. Under one-database-per-exchange "
+            f"a database belongs to a single exchange; more than one means the "
+            f"industry layer (whose PK is (industry_name, trade_date), with no "
+            f"exchange column) is shared, and every index in it is suspect."
+        )
+    _EXCHANGE_OF_DB[url] = found[0]
+    return found[0]
+
+
+_EXCHANGE_OF_DB: dict[str, str] = {}
+
+
 def _coerce_date(v) -> date:
     if isinstance(v, date):
         return v
