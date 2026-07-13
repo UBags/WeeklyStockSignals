@@ -41,27 +41,26 @@ class TestBackwardCompat:
     """When roles is None, every role falls back to the top-level
     user/password — preserves existing deployments."""
 
-    def test_no_roles_means_top_level_user_for_all(self, monkeypatch):
-        monkeypatch.setenv("T_PWD", "secret")
+    def test_no_roles_means_top_level_user_for_all(self):
+        env = {"T_PWD": "secret"}
         db = DatabaseConfig(
             host="h.example", database="trip_ema",
             user="trip_app", password_env="T_PWD",
         )
         config = _make_config(db)
-        top = build_db_url(config)
+        top = build_db_url(config, env=env)
         assert "trip_app:secret@" in top
         # All three roles return the same URL
         for role in ("etl", "engine", "gui"):
-            url = build_db_url_for_role(config, role)
+            url = build_db_url_for_role(config, role, env=env)
             assert url == top, f"role={role} should fall back when unset"
 
 
 class TestRoleOverride:
     """When a role is configured, it uses its own user + password env."""
 
-    def test_etl_role_uses_etl_credentials(self, monkeypatch):
-        monkeypatch.setenv("T_PWD", "topsecret")
-        monkeypatch.setenv("ETL_PWD", "etlsecret")
+    def test_etl_role_uses_etl_credentials(self):
+        env = {"T_PWD": "topsecret", "ETL_PWD": "etlsecret"}
         db = DatabaseConfig(
             host="h.example", database="trip_ema",
             user="trip_app", password_env="T_PWD",
@@ -72,16 +71,13 @@ class TestRoleOverride:
             ),
         )
         config = _make_config(db)
-        etl_url = build_db_url_for_role(config, "etl")
+        etl_url = build_db_url_for_role(config, "etl", env=env)
         assert "trip_etl_user:etlsecret@h.example:5432/trip_ema" in etl_url
 
-    def test_unconfigured_role_falls_back_even_when_other_roles_set(
-        self, monkeypatch,
-    ):
+    def test_unconfigured_role_falls_back_even_when_other_roles_set(self):
         """Only etl is configured; engine and gui must still fall
         back to the top-level credentials."""
-        monkeypatch.setenv("T_PWD", "topsecret")
-        monkeypatch.setenv("ETL_PWD", "etlsecret")
+        env = {"T_PWD": "topsecret", "ETL_PWD": "etlsecret"}
         db = DatabaseConfig(
             host="h.example", database="trip_ema",
             user="trip_app", password_env="T_PWD",
@@ -92,18 +88,17 @@ class TestRoleOverride:
             ),
         )
         config = _make_config(db)
-        engine_url = build_db_url_for_role(config, "engine")
+        engine_url = build_db_url_for_role(config, "engine", env=env)
         assert "trip_app:topsecret@" in engine_url
-        gui_url = build_db_url_for_role(config, "gui")
+        gui_url = build_db_url_for_role(config, "gui", env=env)
         assert "trip_app:topsecret@" in gui_url
 
-    def test_missing_password_env_raises(self, monkeypatch):
+    def test_missing_password_env_raises(self):
         """If the role's password_env is missing from environment,
         we want a clear error — not a silent fallback or a connection
         attempt with empty password."""
-        monkeypatch.setenv("T_PWD", "topsecret")
-        # Note: ETL_PWD intentionally NOT set
-        monkeypatch.delenv("ETL_PWD", raising=False)
+        # ETL_PWD intentionally absent from the env mapping.
+        env = {"T_PWD": "topsecret"}
         db = DatabaseConfig(
             host="h.example", database="trip_ema",
             user="trip_app", password_env="T_PWD",
@@ -115,4 +110,4 @@ class TestRoleOverride:
         )
         config = _make_config(db)
         with pytest.raises(RuntimeError, match="ETL_PWD"):
-            build_db_url_for_role(config, "etl")
+            build_db_url_for_role(config, "etl", env=env)

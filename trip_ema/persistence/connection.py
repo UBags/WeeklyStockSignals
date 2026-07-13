@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from typing import Any, Literal
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import Connection
@@ -51,18 +51,22 @@ def _utc_session_connect_args(url: str) -> dict:
     return {"connect_args": {"options": "-c timezone=UTC"}}
 
 
-def build_db_url(config: Config) -> str:
+def build_db_url(
+    config: Config, *, env: Mapping[str, str] | None = None,
+) -> str:
     """Build the SQLAlchemy URL with the password resolved from env.
 
     Uses the top-level user/password. For role-specific URLs, see
-    `build_db_url_for_role`.
+    `build_db_url_for_role`. `env` defaults to os.environ.
     """
-    pwd = resolve_db_password(config)
+    pwd = resolve_db_password(config, env=env)
     db = config.database
     return f"postgresql+psycopg2://{db.user}:{pwd}@{db.host}:{db.port}/{db.database}"
 
 
-def build_db_url_for_role(config: Config, role: Role) -> str:
+def build_db_url_for_role(
+    config: Config, role: Role, *, env: Mapping[str, str] | None = None,
+) -> str:
     """Build the SQLAlchemy URL for a specific role.
 
     Falls back to the top-level user/password when the role isn't
@@ -70,14 +74,15 @@ def build_db_url_for_role(config: Config, role: Role) -> str:
     adds a roles: section to config.yaml, the corresponding role
     starts using its own credentials without further code change.
     """
+    environ = os.environ if env is None else env
     db = config.database
     if db.roles is None:
-        return build_db_url(config)
+        return build_db_url(config, env=env)
     role_creds = getattr(db.roles, role, None)
     if role_creds is None:
-        return build_db_url(config)
+        return build_db_url(config, env=env)
     try:
-        pwd = os.environ[role_creds.password_env]
+        pwd = environ[role_creds.password_env]
     except KeyError:
         raise RuntimeError(
             f"DB role {role!r} password env var "

@@ -3,28 +3,51 @@
 Secrets (DB password) are never stored in the file. The file names an
 *environment variable* that holds the secret. At load time we read both
 the file and resolve the env var; an unset env var is a hard failure.
+
+The environment is an ARGUMENT, not an ambient global. Every function here
+takes `env: Mapping[str, str] | None`, defaulting to `os.environ` — which is
+the production path and stays the production path. What it buys is that
+config loading is a pure function of (yaml, env): tests pass a dict instead
+of mutating the process environment, so they can't leak into each other and
+can't fight each other under `pytest -n auto`.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import yaml
 
 from .schema import Config
 
+Env = Mapping[str, str]
+"""A read-only environment. `os.environ` satisfies this; so does a plain dict."""
+
+
+def _env(env: Env | None) -> Env:
+    """The one place the ambient environment is reached for."""
+    return os.environ if env is None else env
+
 
 class ConfigError(Exception):
     """Raised when config is missing, malformed, or references unset env vars."""
 
 
-def load_config(path: str | Path) -> Config:
+def load_config(path: str | Path, *, env: Env | None = None) -> Config:
     """Read YAML from `path`, validate, and return a Config instance.
+
+    Args:
+        path: the YAML file.
+        env: the environment to resolve secret env-var NAMES against.
+            Defaults to `os.environ`. Pass a dict to load a config against a
+            controlled environment (tests, and any future multi-tenant caller).
 
     Raises ConfigError on any failure — caller should let it propagate up
     to the process entry point.
     """
+    environ = _env(env)
     p = Path(path)
     if not p.exists():
         raise ConfigError(f"Config file not found: {p}")
@@ -56,7 +79,7 @@ def load_config(path: str | Path) -> Config:
     # We don't store the password on the Config object — we resolve it at
     # connect time. But fail fast at startup if it's missing.
     pwd_env = config.database.password_env
-    if pwd_env not in os.environ:
+    if pwd_env not in environ:
         raise ConfigError(
             f"Database password env var '{pwd_env}' is not set"
         )
@@ -68,7 +91,7 @@ def load_config(path: str | Path) -> Config:
     # NotifierWorker process after startup looked healthy.
     if config.redis is not None and config.redis.password_env:
         redis_pwd_env = config.redis.password_env
-        if redis_pwd_env not in os.environ:
+        if redis_pwd_env not in environ:
             raise ConfigError(
                 f"Redis password env var '{redis_pwd_env}' is not set"
             )
@@ -90,17 +113,22 @@ def load_config(path: str | Path) -> Config:
     return config
 
 
-def resolve_db_password(config: Config) -> str:
+def resolve_db_password(config: Config, *, env: Env | None = None) -> str:
     """Resolve the DB password from the env var named in the config.
 
     Call this at connection time. Will KeyError if the var has been unset
     since load_config ran — that's a defensive check, normally load_config
     catches the missing-env-var case at startup.
+
+    `env` defaults to os.environ; pass a dict to resolve against a controlled
+    environment.
     """
-    return os.environ[config.database.password_env]
+    return _env(env)[config.database.password_env]
 
 
-def resolve_redis_password(config: Config) -> str | None:
+def resolve_redis_password(
+    config: Config, *, env: Env | None = None,
+) -> str | None:
     """Resolve the Redis password (if configured) from its env var.
 
     Returns None if no Redis config exists or if Redis config has no
@@ -110,4 +138,4 @@ def resolve_redis_password(config: Config) -> str | None:
     """
     if config.redis is None or not config.redis.password_env:
         return None
-    return os.environ[config.redis.password_env]
+    return _env(env)[config.redis.password_env]

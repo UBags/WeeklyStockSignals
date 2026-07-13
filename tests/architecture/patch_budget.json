@@ -11,18 +11,13 @@
       "mock_patch": 2,
       "setattr": 0
     },
-    "config/test_db_roles.py": {
-      "env": 7,
-      "mock_patch": 0,
-      "setattr": 0
-    },
     "config/test_exchange_overrides.py": {
       "env": 1,
       "mock_patch": 0,
       "setattr": 0
     },
     "config/test_loader.py": {
-      "env": 19,
+      "env": 1,
       "mock_patch": 0,
       "setattr": 0
     },
