@@ -43,6 +43,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..config.loader import load_config
+from ..fundamentals.market_session import market_tz
 from ..observability.logging_config import configure_logging
 from ..persistence.connection import create_engine_from_config
 from .corporate_actions_repo import CorporateActionsRepository
@@ -486,7 +487,10 @@ def cmd_snapshot(args, config: Config) -> int:
         # Operator-facing output
         when = (
             snap_date.isoformat() if snap_date is not None
-            else f"today IST ({datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat()})"
+            else (
+                f"today in {args.exchange} "
+                f"({datetime.now(market_tz(args.exchange)).date().isoformat()})"
+            )
         )
         print(f"market_overview snapshot — {args.exchange} — {when}")
         print(

@@ -16,6 +16,7 @@ from datetime import date, datetime
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
+from ..fundamentals.market_session import market_tz
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +144,9 @@ def list_tickers(
 # Step 12a: V1 read path — queries.py reads current_signals + historical_signals.
 
 
-def _ist_week_anchors(conn: Connection) -> tuple[datetime, datetime]:
+def _week_anchors(
+    conn: Connection, exchange: str,
+) -> tuple[datetime, datetime]:
     """Return (current_monday_ts, previous_monday_ts) as timestamptz
     values matching the bar_timestamp shape used in
     current_signals / historical_signals for weekly bars
@@ -173,15 +176,20 @@ def _ist_week_anchors(conn: Connection) -> tuple[datetime, datetime]:
             -- session TZ. Previously ::timestamptz cast against a
             -- ::date returned Monday 00:00 in the SESSION TZ, which
             -- silently returned empty when session TZ was Asia/Kolkata.
+            -- :tz is the EXCHANGE's zone, not India's. It decides which
+            -- DAY "now" falls on, and therefore which week. The OUTER
+            -- AT TIME ZONE 'UTC' below is unchanged and must stay: see the
+            -- note above — a ::timestamptz cast on a ::date returns Monday
+            -- 00:00 in the SESSION tz, which silently returned EMPTY.
             (date_trunc('week',
-                        (NOW() AT TIME ZONE 'Asia/Kolkata'))::date::timestamp
+                        (NOW() AT TIME ZONE :tz))::date::timestamp
                 AT TIME ZONE 'UTC')              AS current_monday_ts,
             ((date_trunc('week',
-                         (NOW() AT TIME ZONE 'Asia/Kolkata'))::date
+                         (NOW() AT TIME ZONE :tz))::date
               - INTERVAL '7 days'
              )::timestamp
                 AT TIME ZONE 'UTC')              AS previous_monday_ts
-    """)).first()
+    """), {"tz": market_tz(exchange).key}).first()
     return row.current_monday_ts, row.previous_monday_ts
 
 
@@ -304,7 +312,7 @@ def _signal_color_inputs_by_ticker(
     is omitted -- the coloring rule returns None for it regardless of
     regime, so there is nothing to color.
 
-    Window (Monday 00:00 UTC anchors, see `_ist_week_anchors`):
+    Window (Monday 00:00 UTC anchors, see `_week_anchors`):
       current_signal  : current_signals@current_ts, else
                         historical_signals@current_ts (post-rotation).
       previous_signal : historical_signals@previous_ts.
@@ -315,7 +323,7 @@ def _signal_color_inputs_by_ticker(
     exchange=None means all exchanges (legacy contract of
     ticker_universe_with_recent_signals).
     """
-    current_ts, previous_ts = _ist_week_anchors(conn)
+    current_ts, previous_ts = _week_anchors(conn, exchange)
     if exchange is None:
         ex_clause = ""
         ex_params: dict = {}
