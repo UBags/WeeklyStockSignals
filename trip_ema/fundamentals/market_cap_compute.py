@@ -138,14 +138,23 @@ def compute_market_cap_for_date(
             skipped_no_close=0, skipped_no_shares=0,
         )
 
-    # Load all closes for this date in one query. Using
-    # bar_timestamp >= :start AND < :end so we don't tie ourselves
-    # to a specific timezone — any 1d bar with a timestamp falling
-    # within the trade_date counts. (Indian 1d bars are timestamped
-    # at market close 15:30 IST; we just need to be permissive.)
-    from datetime import datetime as _dt
-    day_start = _dt.combine(trade_date, _dt.min.time())
-    day_end = _dt.combine(trade_date, _dt.max.time())
+    # L7-NO-NAIVE-BINDS. The comment that stood here said this window did not
+    # "tie ourselves to a specific timezone". It tied us to the worst one: the
+    # SESSION's. Both bounds were NAIVE, and Postgres coerces a naive datetime to
+    # timestamptz using the session TZ — which this application now pins to UTC.
+    #
+    # The anchor of trading date D is local midnight: D-1 18:30Z for NSE. The naive
+    # window [D 00:00, D 23:59:59.999999] read as UTC does not contain it. What it
+    # DOES contain is D 18:30Z — the anchor of D+1. So this query returned the NEXT
+    # DAY's close, and every daily market cap was computed with lookahead.
+    #
+    # (The old comment was also simply wrong on the facts: daily bars were never
+    # "timestamped at market close 15:30 IST". They were at 00:00Z. Being
+    # "permissive" about a timestamp you have not actually looked at is how a
+    # window ends up a day wide in the wrong direction.)
+    #
+    # Half-open, market-local, and named. Same primitive the writer uses.
+    day_start, day_end = range_bounds(trade_date, trade_date, exchange)
     # Whitelist the column names — they go into SQL text, so never
     # interpolate arbitrary strings.
     _ALLOWED_PRICE_COLS = {"adj_close", "close", "open", "high", "low"}
@@ -166,7 +175,7 @@ def compute_market_cap_for_date(
                 FROM ohlcv_bars b
                 WHERE b.timeframe = '1D'
                   AND b.bar_timestamp >= :start
-                  AND b.bar_timestamp <= :end
+                  AND b.bar_timestamp <  :end
                 """
             ),
             {"start": day_start, "end": day_end},

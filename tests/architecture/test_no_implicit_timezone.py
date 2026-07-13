@@ -126,6 +126,31 @@ def _utc_midnight_anchors(sources=None) -> list[str]:
     return hits
 
 
+# domain/market_session.py legitimately builds naive datetimes: combine(
+# date(2000, 1, 1), open_time) exists only to subtract two times and get a session
+# LENGTH. A duration has no timezone. Nothing else in the package has that excuse.
+_NAIVE_COMBINE_ALLOWED = {"market_session.py"}
+
+
+def _naive_combines(sources=None) -> list[str]:
+    """Every `datetime.combine(...)` that passes no tzinfo."""
+    hits: list[str] = []
+    for path in (sources if sources is not None else _all_sources()):
+        if path.name in _NAIVE_COMBINE_ALLOWED:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            fname = (node.func.attr if isinstance(node.func, ast.Attribute)
+                     else getattr(node.func, "id", ""))
+            if fname != "combine":
+                continue
+            if any(kw.arg == "tzinfo" for kw in node.keywords):
+                continue
+            hits.append(f"{path.name}:{node.lineno}: datetime.combine() with no tzinfo")
+    return hits
+
+
 class TestNoImplicitTimezone:
 
     def test_no_unqualified_timestamptz_to_date_cast(self):
@@ -160,6 +185,25 @@ class TestNoImplicitTimezone:
             "A bare .date() reads whatever zone the datetime happens to carry — "
             "the session's, from psycopg, or UTC, from datetime.now(UTC). Neither "
             "is the market's. Use trading_date_of(ts, exchange)." + NL + NL.join(hits)
+        )
+
+    def test_no_naive_datetime_combine(self):
+        """Rule 5: combine() with NO tzinfo at all.
+
+        The sneakiest of the five, because it does not name a WRONG zone — it names
+        no zone, and lets whoever is downstream pick. Bound against a timestamptz,
+        Postgres picks the SESSION's, and market_cap_compute's day window was
+        thereby a full day off in the wrong direction: it selected the NEXT trading
+        day's close and computed market cap with lookahead.
+
+        The four original rules all missed it. This is the one that would not have.
+        """
+        hits = _naive_combines()
+        assert not hits, (
+            "A naive datetime names no instant. Bound against a timestamptz it is "
+            "coerced using the SESSION timezone — a clock nobody chose. Use "
+            "bar_anchor / week_anchor / day_bounds / range_bounds." + NL
+            + NL.join(hits)
         )
 
     def test_no_utc_midnight_as_a_trading_date(self):
@@ -209,6 +253,23 @@ class TestTheGuardCanActuallyFail:
         f = tmp_path / "bad.py"
         f.write_text(src)
         assert _utc_midnight_anchors([f]), "the guard fails OPEN on this shape"
+
+    def test_rejects_the_naive_day_window(self, tmp_path):
+        """The exact two lines that produced the market-cap lookahead.
+
+        Built with NL.join and no escape sequences: three separate rounds of this
+        workstream were lost to a backslash-n surviving one layer of quoting too
+        many, and the last one shipped a guard that could not parse. A constant is
+        not clever, and it cannot be mis-escaped.
+        """
+        f = tmp_path / "bad.py"
+        f.write_text(NL.join([
+            "import datetime",
+            "day_start = _dt.combine(trade_date, _dt.min.time())",
+            "day_end = _dt.combine(trade_date, _dt.max.time())",
+            "",
+        ]))
+        assert len(_naive_combines([f])) == 2
 
     def test_accepts_a_market_local_anchor(self, tmp_path):
         f = tmp_path / "good.py"
