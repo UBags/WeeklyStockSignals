@@ -33,6 +33,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from trip_ema.config.schema import ComputeConfig, EtlConfig
 from trip_ema.backfill.pipeline import backfill, BackfillResult
 
 
@@ -65,31 +66,35 @@ _IST = ZoneInfo("Asia/Kolkata")
 # ============================================================
 
 class _MockConfig:
-    """Minimal Config substitute for the pipeline.
+    """Config substitute for the pipeline, built from the REAL pydantic models.
 
-    Stage 1 (yfinance) is the only stage that needs config; we
-    always pass refetch_bars=False in these tests so config can
-    be a stand-in."""
-    class etl:
-        yfinance_batch_size = 50
-        yfinance_concurrency = 4
+    Both sections used to be hand-rolled classes. That is a private copy of the
+    schema, and it drifts: `class etl:` declared two of EtlConfig's fifteen
+    fields, and the sibling stub in tests/etl/test_fetch_bars_for_tickers.py
+    broke the moment the runner read a third. Using the real models means every
+    field is present, validated, carrying its production default — and a field
+    added by a future commit is simply there.
 
-    class compute:
-        stock_state_processes = 1
-        """Stage 2 MUST run in-process here.
+    stock_state_processes=1 is NOT a workaround; it is a real constraint, and the
+    reason must not be lost:
 
         These tests monkeypatch
         `trip_ema.backfill.pipeline.populate_stock_state_and_enrichment_for_ticker`
-        to a no-op (see the `stub_populators` fixture). With the default of 3,
-        stage 2 fans out to spawned child processes which re-import the pipeline
-        module CLEAN — the monkeypatch lives in this process's memory and does
-        not cross the boundary, so children would call the REAL populator
-        against the fixture DB. The stub would be silently defeated and these
-        tests would pass while testing something else entirely.
+        to a no-op (see the `stub_populators` fixture). At the default of 3, stage
+        2 fans out to SPAWNED CHILD PROCESSES, which re-import the pipeline module
+        CLEAN. The monkeypatch lives in this process's memory and does not cross
+        the boundary, so the children would call the REAL populator against the
+        fixture DB. The stub would be silently defeated and these tests would pass
+        while testing something else entirely.
 
         1 keeps stage 2 in this process, where the patch applies. These are
         orchestration tests; the populator has its own test files.
-        """
+
+    The outer shell stays: the full Config requires database/ema/atr/market_hours,
+    which these tests do not need. The shell was never the problem.
+    """
+    etl = EtlConfig()
+    compute = ComputeConfig(stock_state_processes=1)
 
 
 def _seed_ticker(

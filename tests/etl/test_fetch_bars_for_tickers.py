@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from sqlalchemy import text
 
+from trip_ema.config.schema import EtlConfig
 from trip_ema.etl.runner import fetch_bars_for_tickers
 from trip_ema.persistence import transaction
 
@@ -36,9 +37,29 @@ def _seed_ticker(
 
 
 class _MockConfig:
-    class etl:
-        yfinance_batch_size = 50
-        yfinance_concurrency = 4
+    """Config stand-in whose `etl` section is the REAL, validated EtlConfig.
+
+    It used to hand-roll one:
+
+        class etl:
+            yfinance_batch_size = 50
+            yfinance_concurrency = 4
+
+    — two of EtlConfig's fifteen fields. The moment fetch_bars_for_tickers started
+    reading yfinance_request_delay_seconds (which it had been ignoring, silently
+    running at 0.0 against a configured 30.0), these tests died with
+    "type object 'etl' has no attribute ...". Not bad luck: a hand-maintained copy
+    of a schema is a drift generator, and it had thirteen more fields to trip over.
+
+    EtlConfig's fields are all defaulted, so EtlConfig() constructs bare. Every
+    field is now present, pydantic-validated, carrying the production default —
+    and a field added by a future commit is simply there. This cannot drift again.
+
+    The outer shell stays: the full Config requires database/ema/atr/market_hours,
+    which these tests genuinely do not need. The shell was never the problem; the
+    hand-rolled schema was.
+    """
+    etl = EtlConfig()
 
 
 class TestFetchBarsForTickers:
