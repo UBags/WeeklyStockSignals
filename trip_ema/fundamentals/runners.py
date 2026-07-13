@@ -104,6 +104,7 @@ def run_industry_refresh(
     *,
     resume_run_id: int | None = None,
     force: bool = False,
+    only_missing: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn: Callable[[str, str], IndustryInfo] = fetch_industry,
 ) -> int:
@@ -150,7 +151,10 @@ def run_industry_refresh(
             run_id, cursor_index, len(ticker_list),
         )
     else:
-        ticker_list = _load_active_tickers_for_exchange(db_engine, exchange)
+        ticker_list = _load_active_tickers_for_exchange(
+            db_engine, exchange,
+            missing_from="instrument_industry" if only_missing else None,
+        )
         if not ticker_list:
             logger.warning(
                 "No active tickers for exchange %s — skipping refresh",
@@ -411,8 +415,20 @@ def _try_fetch_etf_long_name(symbol: str, exchange: str):
         return None
 
 
+# Tables a reference runner can be asked to fill the gaps in. Whitelisted rather
+# than interpolated freely: the table name goes into SQL, and "it's only ever
+# called with a constant" is not a property worth betting the query on.
+_MISSING_FROM_TABLES = {
+    "instrument_industry",
+    "instrument_shares",
+    "quarterly_financials",
+}
+
+
 def _load_active_tickers_for_exchange(
-    db_engine: Engine, exchange: str,
+    db_engine: Engine, exchange: str, *,
+    missing_from: str | None = None,
+    eq_only: bool = False,
 ) -> list[dict]:
     """Return [{id, symbol, instrument_type}, ...] for active tickers
     on `exchange`.
@@ -423,14 +439,45 @@ def _load_active_tickers_for_exchange(
     instrument_type is included so the main loop can branch between
     yfinance fetch (for EQ) and direct ETF classification (for ETF)
     without an extra DB query per ticker.
+
+    `missing_from`: when set to a table name, return ONLY the tickers that have
+    no row in that table — the ones whose data is actually absent.
+
+    This is the difference between closing a gap and re-fetching the world. At
+    DEFAULT_REQUEST_DELAY_S = 2.0s, sweeping all 2,673 NSE tickers costs ~89
+    minutes per runner; fetching the 438 that actually lack shares costs ~15.
+    The `force` flag does not help with this — it bypasses an 80-day
+    skip-if-the-RUN-was-recent guard, which is a run-level check. There has
+    never been a per-TICKER gap filter, which is why 17% of the universe has sat
+    without shares (and therefore without market cap, and therefore invisible to
+    industry constituent selection) for as long as it has.
     """
+    # ETFs are not equities. yfinance never reports sharesOutstanding for one
+    # (it raises SharesFetchPermanent), they have no quarterly financials, and
+    # run_market_cap_backfill already filters them out. Sweeping the 328 NSE ETFs
+    # for shares is ~13 minutes of guaranteed, repeated failure.
+    where_eq = " AND t.instrument_type = 'EQ'" if eq_only else ""
+
+    where_missing = ""
+    if missing_from is not None:
+        if missing_from not in _MISSING_FROM_TABLES:
+            raise ValueError(
+                f"_load_active_tickers_for_exchange: missing_from="
+                f"{missing_from!r} is not one of {sorted(_MISSING_FROM_TABLES)}"
+            )
+        where_missing = f"""
+              AND NOT EXISTS (
+                  SELECT 1 FROM {missing_from} x
+                   WHERE x.ticker_id = t.ticker_id
+              )"""
+
     with db_engine.connect() as conn:
-        rows = conn.execute(text("""
-            SELECT ticker_id, symbol, instrument_type
-            FROM tickers
-            WHERE exchange = :ex AND is_active = TRUE
-              AND delisted_at IS NULL
-            ORDER BY symbol
+        rows = conn.execute(text(f"""
+            SELECT t.ticker_id, t.symbol, t.instrument_type
+            FROM tickers t
+            WHERE t.exchange = :ex AND t.is_active = TRUE
+              AND t.delisted_at IS NULL{where_eq}{where_missing}
+            ORDER BY t.symbol
         """), {"ex": exchange})
         return [
             {
@@ -546,6 +593,7 @@ def run_shares_refresh(
     *,
     resume_run_id: int | None = None,
     force: bool = False,
+    only_missing: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn=None,
 ) -> int:
@@ -604,7 +652,13 @@ def run_shares_refresh(
             run_id, cursor_index, len(ticker_list),
         )
     else:
-        ticker_list = _load_active_tickers_for_exchange(db_engine, exchange)
+        ticker_list = _load_active_tickers_for_exchange(
+            db_engine, exchange,
+            missing_from="instrument_shares" if only_missing else None,
+            # An ETF can never have sharesOutstanding — fetching one is a
+            # guaranteed SharesFetchPermanent. 438 gaps -> 107 real ones.
+            eq_only=only_missing,
+        )
         if not ticker_list:
             logger.warning(
                 "No active tickers for exchange %s — skipping shares refresh",
@@ -988,6 +1042,7 @@ def run_financials_refresh(
     *,
     resume_run_id: int | None = None,
     force: bool = False,
+    only_missing: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn=None,
     max_quarters: int = 4,
@@ -1040,7 +1095,12 @@ def run_financials_refresh(
             run_id, cursor_index, len(ticker_list),
         )
     else:
-        ticker_list = _load_active_tickers_for_exchange(db_engine, exchange)
+        ticker_list = _load_active_tickers_for_exchange(
+            db_engine, exchange,
+            missing_from="quarterly_financials" if only_missing else None,
+            # ETFs have no quarterly financials either.
+            eq_only=only_missing,
+        )
         if not ticker_list:
             logger.warning(
                 "No active tickers for exchange %s — skipping financials refresh",
