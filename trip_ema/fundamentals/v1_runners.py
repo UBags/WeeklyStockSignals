@@ -38,7 +38,7 @@ from ..domain.industry_indicator_state import IndustryIndicatorState
 from ..domain.stock_indicator_enrichment import StockIndicatorEnrichment
 from ..domain.stock_indicator_state import StockIndicatorState
 from ..indicators.aggregation import daily_to_weekly
-from .market_session import exchange_of_engine, market_tz
+from ..domain.market_session import exchange_of_engine, market_tz
 from ..persistence.fundamentals_repo import (
     FundamentalsRunRepository,
     IndustryIndexRepository,
@@ -136,7 +136,7 @@ def populate_stock_indicator_state_for_ticker(
     from sqlalchemy import text as _text
     from ..persistence.bars_repo import BarsRepository
     from .daily_grain import compute_daily_grain_states
-    from .market_session import market_session_for
+    from ..domain.market_session import market_session_for
 
     try:
         Timeframe(timeframe)
@@ -360,7 +360,7 @@ def populate_stock_indicator_enrichment_for_ticker(
     """
     from ..persistence.bars_repo import BarsRepository
     from .daily_grain import compute_daily_grain_enrichment
-    from .market_session import market_session_for
+    from ..domain.market_session import market_session_for
 
     try:
         Timeframe(timeframe)

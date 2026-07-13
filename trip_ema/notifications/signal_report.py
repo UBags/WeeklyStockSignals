@@ -41,7 +41,7 @@ from ..persistence.subscribers_repo import SubscriberRecord
 from .benchmark_rerank import fetch_rank_scores
 from .compose_email import EnrichedSignalRow, build_email_body
 from .send_email import SendResult, send_email
-from ..fundamentals.market_session import exchange_of_engine, market_tz
+from ..domain.market_session import exchange_of_engine, market_tz
 
 
 # Sentinel for "no restriction on this dimension".

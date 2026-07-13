@@ -88,7 +88,11 @@ from ..signals_helpers import (
 from ..workers import RefreshScheduler, submit
 from ..determine_background_color import DetermineBackgroundColor
 from ..queries import SignalColorInputs
-from ...fundamentals.market_session import exchange_of_engine, market_tz
+from ...domain.market_session import exchange_of_engine, market_tz
+from ...domain.market_session import (
+    display_now,
+    exchange_of_engine_or_none,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -748,7 +752,7 @@ class TickersView(QWidget):
             f"T3: {summary['tier_3']}  Parked: {summary['parked']}"
         )
         self._last_refreshed_label.setText(
-            f"Refreshed at {datetime.now().strftime('%H:%M:%S')}"
+            f"Refreshed at {display_now(self._db._engine).strftime('%H:%M:%S')}"
         )
         # Restore the previously-selected ticker if it's still present.
         if self._selected_ticker_id is not None:
@@ -1054,7 +1058,7 @@ class TickersView(QWidget):
             ])
         export_rows_to_csv(
             self,
-            default_filename=timestamped_filename("tickers"),
+            default_filename=timestamped_filename("tickers", exchange=exchange_of_engine_or_none(self._db._engine)),
             columns=[
                 "ticker_id", "exchange", "symbol", "instrument_type",
                 "full_name", "isin", "tier", "is_active", "delisted_at",

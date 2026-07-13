@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 from trip_ema.config.loader import load_config
-from trip_ema.fundamentals.market_session import _EXCHANGE_SPECS
+from trip_ema.domain.market_session import _EXCHANGE_SPECS
 
 CONFIG = Path(__file__).resolve().parents[1] / "config.yaml"
 

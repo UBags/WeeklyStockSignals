@@ -26,6 +26,10 @@ from ..persistence.fundamentals_repo import (
     InstrumentSharesRepository,
 )
 from .runners import run_industry_refresh
+from ..domain.market_session import (
+    exchange_of_engine,
+    market_today,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -452,7 +456,10 @@ def cmd_compute_market_cap(args, config: Config) -> int:
         if args.backfill_from is not None:
             # Backfill mode.
             from_date = _date.fromisoformat(args.backfill_from)
-            to_date = _date.fromisoformat(args.backfill_to) if args.backfill_to else _date.today()
+            to_date = (
+        _date.fromisoformat(args.backfill_to) if args.backfill_to
+        else market_today(args.exchange)
+    )
             run_id = run_market_cap_backfill(
                 db_engine, args.exchange,
                 from_date=from_date,
@@ -476,7 +483,10 @@ def cmd_compute_market_cap(args, config: Config) -> int:
             return 2
 
         # Single-day mode.
-        trade_date = _date.fromisoformat(args.date) if args.date else _date.today()
+        trade_date = (
+        _date.fromisoformat(args.date) if args.date
+        else market_today(args.exchange)
+    )
         result = compute_market_cap_for_date(
             db_engine, args.exchange, trade_date,
         )
@@ -595,7 +605,16 @@ def cmd_compute_index_values(args, config: Config) -> int:
         return 2
 
     cli_from = _date.fromisoformat(args.from_) if args.from_ else None
-    cli_to = _date.fromisoformat(args.to) if args.to else _date.today()
+    # Left as None until db_engine EXISTS, three lines below. Resolving it above
+    # the engine was an UnboundLocalError — a name used before its assignment,
+    # which neither py_compile nor an import test can see; only running the line
+    # does. Hoisting the engine instead would have changed its lifetime (it is
+    # disposed in a finally).
+    #
+    # compute-index-values takes --industry / --all-active and has no --exchange,
+    # so the exchange comes from the database — which under
+    # one-database-per-exchange is the same question.
+    cli_to = _date.fromisoformat(args.to) if args.to else None
 
     db_engine = create_engine_from_config(config)
     try:
@@ -621,6 +640,20 @@ def cmd_compute_index_values(args, config: Config) -> int:
                         file=sys.stderr,
                     )
                     return 1
+
+        # Resolve the default `--to` HERE, not when the engine opens.
+        #
+        # Both early returns above (unknown industry -> 2, no active indices -> 1)
+        # complete without ever needing a date, and cli_to is first used inside the
+        # loop below. Resolving it eagerly meant asking the database what exchange
+        # it is in order to compute a default for work we had already decided not
+        # to do — and on a database with no tickers that raises.
+        #
+        # compute-index-values has no --exchange (it takes --industry /
+        # --all-active), so the exchange comes from the database, which under
+        # one-database-per-exchange is the same question.
+        if cli_to is None:
+            cli_to = market_today(exchange_of_engine(db_engine))
 
         total_indices = len(indices)
         # Counters across the loop. Resume is per-call (single

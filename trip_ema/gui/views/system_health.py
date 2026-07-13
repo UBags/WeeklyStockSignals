@@ -33,6 +33,11 @@ from PySide6.QtWidgets import (
 from ..db import GuiDbSession
 from ..http_client import TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
+from ...domain.market_session import exchange_of_engine, market_now
+from ...domain.market_session import (
+    display_now,
+    exchange_of_engine_or_none,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +221,7 @@ class SystemHealthView(QWidget):
         cards = payload.get("cards", [])
         self._render_cards(cards)
         self._last_refreshed_label.setText(
-            f"Refreshed at {datetime.now().strftime('%H:%M:%S')}"
+            f"Refreshed at {display_now(self._db._engine):%H:%M:%S}"
         )
 
     def _on_snapshot_failed(self, message: str) -> None:

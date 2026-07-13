@@ -19,7 +19,7 @@ from collections.abc import Iterator
 
 from ..domain import OHLCVBar
 from ..indicators.aggregation import _monday_of, daily_to_weekly
-from .market_session import MarketSession
+from ..domain.market_session import MarketSession
 
 
 @dataclass(frozen=True, slots=True)

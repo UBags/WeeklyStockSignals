@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 from ..domain import OHLCVBar
 from .indicator_primitives import INDICATOR_DEFAULTS
-from .market_session import market_session_for
+from ..domain.market_session import market_session_for
 from .state_carry_engine import compute_daily_grain_via_engine
 
 # Artificial index: every weekly bar weighs the same in the VW-EMA.

@@ -36,7 +36,7 @@ from sqlalchemy.engine import Connection
 
 from ..persistence.subscribers_repo import SubscriberRecord
 from .benchmark_rerank import fetch_rank_scores
-from ..fundamentals.market_session import exchange_of_conn, market_tz
+from ..domain.market_session import exchange_of_conn, market_tz
 
 # INTRADAY-CHAIN: the chain is keyed on the trading day in exchange-local
 # time. current_signals.bar_timestamp is the week anchor, so it cannot

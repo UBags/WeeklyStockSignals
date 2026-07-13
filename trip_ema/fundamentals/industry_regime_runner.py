@@ -18,7 +18,7 @@ from ..persistence.industry_regime_repo import (
     IndustryRegimeCorrRepository,
     InfluentialEnsembleRepository,
 )
-from .market_session import market_session_for
+from ..domain.market_session import market_session_for
 from .ensemble import compute_ensembles
 from .regime_matrix import compute_regime_matrix
 

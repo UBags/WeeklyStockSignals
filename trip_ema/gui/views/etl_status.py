@@ -69,7 +69,7 @@ from .widgets.cycle_stdout_parser import (
     parse_cycle_failure_summary, parse_stage_line,
 )
 from .widgets.ticker_chip import TickerChipArea
-from ...fundamentals.market_session import exchange_of_engine, market_tz
+from ...domain.market_session import exchange_of_engine, market_tz
 
 logger = logging.getLogger(__name__)
 

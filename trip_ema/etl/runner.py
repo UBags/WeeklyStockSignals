@@ -70,6 +70,7 @@ from .types import (
     Tier,
 )
 from .yfinance_source import YFinanceSource
+from ..domain.market_session import exchange_of_engine, market_today
 
 logger = logging.getLogger(__name__)
 
@@ -557,7 +558,10 @@ def fetch_bars_for_tickers(
     ]
 
     if end_date is None:
-        end_date = date.today()
+        # `exchange` was resolved from the SCOPED tickers above and
+        # validated. exchange_of_engine() asks what exchange the DATABASE
+        # is, which is a different question and the wrong one here.
+        end_date = market_today(exchange)
 
     cid = new_correlation_id()
     with correlation_id(cid):
@@ -765,7 +769,7 @@ def _run_fetch_pass(
             },
         )
 
-        end_date = date.today()
+        end_date = market_today(exchange)
         effective_start = start_date or (end_date - _timedelta_days(days_lookback))
 
         outcome, _failed_tickers = _execute_batches(
@@ -1136,7 +1140,7 @@ def _process_one_batch(
         plan = reconcile(
             new_bars_for_engine,
             existing.get(ticker.ticker_id, []),
-            today=date.today(),
+            today=market_today(exchange_of_engine(db_engine)),
             rolling_window_days=config.etl.reconcile_window_days,
         )
 
@@ -1273,7 +1277,7 @@ def _handle_ticker_failure(
                 reason=f"{config.etl.park_failure_threshold} consecutive failures",
                 last_error=error_message,
             ),
-            today=date.today(),
+            today=market_today(exchange_of_engine(db_engine)),
             base_dir=Path(config.etl.parked_dir),
         )
 

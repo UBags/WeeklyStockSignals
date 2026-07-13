@@ -41,7 +41,7 @@ from datetime import date
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
-from ..fundamentals.market_session import market_tz
+from ..domain.market_session import market_tz
 
 
 logger = logging.getLogger(__name__)

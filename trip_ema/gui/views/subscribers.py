@@ -57,6 +57,11 @@ from ..csv_export import export_rows_to_csv, timestamped_filename
 from ..db import GuiDbSession
 from ..http_client import TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
+from ...domain.market_session import exchange_of_engine, market_now
+from ...domain.market_session import (
+    display_now,
+    exchange_of_engine_or_none,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -419,7 +424,7 @@ class SubscribersView(QWidget):
             f"{len(subs)} subscribers ({active_count} active)"
         )
         self._last_refreshed_label.setText(
-            f"Refreshed at {datetime.now().strftime('%H:%M:%S')}"
+            f"Refreshed at {display_now(self._db._engine):%H:%M:%S}"
         )
         # Re-select the row currently being edited so the user doesn't
         # lose their place across a refresh.
@@ -867,7 +872,7 @@ class SubscribersView(QWidget):
             ])
         export_rows_to_csv(
             self,
-            default_filename=timestamped_filename("subscribers"),
+            default_filename=timestamped_filename("subscribers", exchange=exchange_of_engine_or_none(self._db._engine)),
             columns=[
                 "subscriber_id", "transport", "address",
                 "notify_cadence_minutes", "is_active",

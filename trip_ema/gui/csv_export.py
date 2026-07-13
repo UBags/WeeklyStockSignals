@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import csv
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from collections.abc import Callable, Iterable
 
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
+from ..domain.market_session import market_now
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,13 @@ def export_rows_to_csv(
     return path
 
 
-def timestamped_filename(prefix: str, *, ext: str = "csv") -> str:
+def timestamped_filename(
+    prefix: str, *, ext: str = "csv", exchange: str | None = None,
+) -> str:
     """Build a default filename like 'tickers_20260517_140312.csv'."""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # An export of NYSE signals stamped in Indian time is a lie about
+    # when it was taken. With no exchange (un-provisioned database) fall
+    # back to UTC — explicit, never the machine's local clock.
+    stamp = market_now(exchange) if exchange else datetime.now(UTC)
+    ts = stamp.strftime("%Y%m%d_%H%M%S")
     return f"{prefix}_{ts}.{ext}"

@@ -26,7 +26,7 @@ from ..indicators.aggregation import _monday_of, daily_to_weekly
 from ..persistence import transaction
 from ..persistence.bars_repo import BarsRepository
 from ..persistence.sector_metrics_repo import SectorStockLeadlagRepository
-from .market_session import market_session_for
+from ..domain.market_session import market_session_for
 from .parallel import fan_out
 from .sector_cross_section import compute_rs_rank_by_week
 from .sector_leadlag import compute_sector_leadlag

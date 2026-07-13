@@ -57,7 +57,7 @@ from .backtest_dialog import BacktestDialog
 from .industry_panel import IndustryPanel
 from .signal_generation_panel import SignalGenerationPanel
 from ..determine_background_color import DetermineBackgroundColor
-from ...fundamentals.market_session import exchange_of_engine, market_tz
+from ...domain.market_session import exchange_of_engine, market_tz
 
 logger = logging.getLogger(__name__)
 

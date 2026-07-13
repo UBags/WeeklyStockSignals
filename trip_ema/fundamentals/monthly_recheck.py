@@ -53,6 +53,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from .data_fidelity import FidelityReport, audit_exchange
+from ..domain.market_session import market_today
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ def run_monthly_recheck(
     # startup for every subcommand.
     from .runners import run_financials_refresh, run_shares_refresh
 
-    today = today or date.today()
+    today = today or market_today(exchange)
 
     if if_due:
         if not is_first_saturday(today):

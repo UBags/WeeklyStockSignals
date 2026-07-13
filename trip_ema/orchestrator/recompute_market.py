@@ -63,7 +63,7 @@ from ..fundamentals.v1_runners import (
     populate_stock_indicator_state_for_exchange,
 )
 from ..persistence.current_signals_repo import CurrentSignalsRepository
-from ..fundamentals.market_session import market_tz
+from ..domain.market_session import market_tz
 
 logger = logging.getLogger(__name__)
 

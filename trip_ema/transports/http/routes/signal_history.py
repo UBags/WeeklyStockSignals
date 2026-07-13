@@ -63,7 +63,7 @@ from ....transports.http.schemas import (
     HistoricalSignalEventPayload,
     SignalHistoryPayload,
 )
-from ....fundamentals.market_session import market_tz
+from ....domain.market_session import market_tz
 
 
 # ============================================================

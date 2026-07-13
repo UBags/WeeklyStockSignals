@@ -40,7 +40,7 @@ import bisect
 import logging
 import threading
 from datetime import date, datetime, time
-from ..fundamentals.market_session import market_tz, post_session_time
+from ..domain.market_session import market_tz, post_session_time
 
 from sqlalchemy import Engine, text
 

@@ -16,7 +16,7 @@ from datetime import date, datetime
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
-from ..fundamentals.market_session import market_tz
+from ..domain.market_session import market_tz
 
 
 @dataclass(frozen=True, slots=True)

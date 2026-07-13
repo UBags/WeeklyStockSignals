@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout,
     QLabel, QVBoxLayout, QWidget,
 )
+from ....domain.market_session import market_today
 
 
 # Default to 10 years ago — matches the typical operator intent for
@@ -67,7 +68,9 @@ class BackfillSharesDialog(QDialog):
         form.setSpacing(6)
 
         # Start date — default 10 years back.
-        default = date.today() - timedelta(days=365 * _DEFAULT_YEARS_BACK)
+        default = market_today(self._exchange) - timedelta(
+            days=365 * _DEFAULT_YEARS_BACK,
+        )
         self._date_edit = QDateEdit()
         self._date_edit.setCalendarPopup(True)
         self._date_edit.setDisplayFormat("yyyy-MM-dd")

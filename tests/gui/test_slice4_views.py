@@ -582,7 +582,7 @@ class TestNotificationLogView:
 class TestCsvExport:
 
     def test_timestamped_filename_format(self):
-        name = timestamped_filename("foo")
+        name = timestamped_filename("foo", exchange="NSE")
         assert name.startswith("foo_")
         assert name.endswith(".csv")
         # YYYYMMDD_HHMMSS

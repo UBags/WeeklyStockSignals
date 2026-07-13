@@ -70,7 +70,7 @@ from ..fundamentals.parallel import (
 )
 from ..fundamentals.market_cap_compute import populate_market_cap_range
 from ..fundamentals.data_fidelity import audit_exchange
-from ..fundamentals.market_session import market_tz
+from ..domain.market_session import market_today, market_tz
 from ..fundamentals.runners import (
     run_financials_refresh,
     run_industry_refresh,
@@ -276,7 +276,7 @@ def backfill(
             etc).
     """
     if date_to is None:
-        date_to = date.today()
+        date_to = market_today(exchange)
     if date_from > date_to:
         raise ValueError(
             f"date_from ({date_from}) must be <= date_to ({date_to})"

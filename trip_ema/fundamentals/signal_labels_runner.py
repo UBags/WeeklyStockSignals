@@ -23,7 +23,7 @@ from ..persistence.signal_labels_repo import SignalLabelsRepository
 from ..persistence.stock_indicator_state_repo import (
     StockIndicatorStateRepository,
 )
-from .market_session import market_session_for
+from ..domain.market_session import market_session_for
 from .parallel import fan_out
 from .runners import _load_active_tickers_for_exchange
 from .signal_labels import compute_label

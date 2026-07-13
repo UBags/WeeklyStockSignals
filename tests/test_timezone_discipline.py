@@ -54,7 +54,7 @@ from pathlib import Path
 PKG = Path(__file__).resolve().parents[1] / "trip_ema"
 
 # The one module allowed to name a market's timezone: it IS the registry.
-TZ_AUTHORITY = {"market_session.py"}
+TZ_AUTHORITY = {"market_session.py"}   # now trip_ema/domain/
 
 # ---------------------------------------------------------------- baseline
 #
@@ -77,22 +77,12 @@ TZ_AUTHORITY = {"market_session.py"}
 #   archive/*         dead code, on no path.
 #
 _BASELINE: dict[str, int] = {
-    "trip_ema/archive/index_value_backfill.py": 1,
-    "trip_ema/backfill/pipeline.py": 1,
-    "trip_ema/etl/runner.py": 4,
-    "trip_ema/etl/yfinance_source.py": 1,
-    "trip_ema/fundamentals/cli.py": 3,
-    "trip_ema/fundamentals/market_cap_fetch.py": 1,
-    "trip_ema/fundamentals/monthly_recheck.py": 1,
-    "trip_ema/gui/csv_export.py": 1,
-    "trip_ema/gui/views/notifications.py": 1,
+    # The ONLY survivor, and deliberately so: a config-file BACKUP
+    # filename is stamped with the OPERATOR'S machine time, not a
+    # market clock. Not every clock read is a market clock, and forcing
+    # an exchange timezone onto a local backup file would be its own
+    # kind of wrong.
     "trip_ema/gui/views/settings.py": 1,
-    "trip_ema/gui/views/subscribers.py": 1,
-    "trip_ema/gui/views/system_health.py": 1,
-    "trip_ema/gui/views/tickers.py": 1,
-    "trip_ema/gui/views/widgets/backfill_dialog.py": 2,
-    "trip_ema/gui/views/widgets/backfill_shares_dialog.py": 1,
-    "trip_ema/transports/http/routes/fundamentals.py": 2,
 }
 
 

@@ -840,14 +840,39 @@ from trip_ema.persistence.fundamentals_repo import (
     IndustryIndexRepository,
     IndustryIndexValueRepository,
 )
+from sqlalchemy import text
 
 
 # ---------- helpers ---------- #
 
 
+def _seed_exchange_ticker(db_engine, exchange="NSE"):
+    """Give this database an exchange.
+
+    An industry index is CONSTRUCTED from ticker constituents —
+    select_top_n_constituents picks tickers by market cap and the index is
+    computed from their prices. A database with an industry_index row and no
+    tickers is not a minimal fixture, it is a state nothing in the pipeline can
+    produce.
+
+    It went unnoticed only because nothing on the industry path used to read
+    `tickers`. The compute path now does, to resolve the exchange's timezone, and
+    it asserts exactly one — the invariant behind one-database-per-exchange.
+
+    Idempotent.
+    """
+    with transaction(db_engine) as conn:
+        conn.execute(text("""
+            INSERT INTO tickers (ticker_id, exchange, symbol, instrument)
+            VALUES (900001, :ex, 'FIXTURE_ANCHOR', 'EQ')
+            ON CONFLICT (ticker_id) DO NOTHING
+        """), {"ex": exchange})
+
+
 def _create_index(db_engine, industry="IT - Services",
                   sector="Technology",
                   base_date=date(2025, 10, 1)):
+    _seed_exchange_ticker(db_engine)
     with transaction(db_engine) as conn:
         IndustryIndexRepository(conn).upsert(
             industry, sector_name=sector, base_date=base_date,

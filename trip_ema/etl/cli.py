@@ -43,7 +43,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..config.loader import load_config
-from ..fundamentals.market_session import market_tz
+from ..domain.market_session import market_tz
 from ..observability.logging_config import configure_logging
 from ..persistence.connection import create_engine_from_config
 from .corporate_actions_repo import CorporateActionsRepository

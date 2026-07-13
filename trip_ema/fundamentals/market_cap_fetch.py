@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from ..etl.exchanges import yfinance_symbol
+from ..domain.market_session import market_today
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def fetch_historical_mcap_for_ticker(
     # Decide what period= to ask yfinance for. The probe showed
     # period='1y' returns ~250 rows for NSE tickers; we map our
     # requested range to a period string yfinance understands.
-    today = date.today()
+    today = market_today(exchange)
     days_back = (today - from_date).days
     if days_back <= 35:
         period = "1mo"

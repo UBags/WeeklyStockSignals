@@ -32,6 +32,11 @@ from ..csv_export import export_rows_to_csv, timestamped_filename
 from ..db import GuiDbSession
 from ..http_client import TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
+from ...domain.market_session import exchange_of_engine, market_now
+from ...domain.market_session import (
+    display_now,
+    exchange_of_engine_or_none,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -298,7 +303,7 @@ class NotificationLogView(QWidget):
             f"Showing {len(entries)} notifications{suffix}"
         )
         self._last_refreshed_label.setText(
-            f"Refreshed at {datetime.now().strftime('%H:%M:%S')}"
+            f"Refreshed at {display_now(self._db._engine):%H:%M:%S}"
         )
 
     def _on_log_failed(self, message: str) -> None:
@@ -327,7 +332,7 @@ class NotificationLogView(QWidget):
             ])
         export_rows_to_csv(
             self,
-            default_filename=timestamped_filename("notifications"),
+            default_filename=timestamped_filename("notifications", exchange=exchange_of_engine_or_none(self._db._engine)),
             columns=[
                 "last_sent_at", "subscriber_id", "subscriber_address",
                 "subscriber_transport", "ticker", "signal",

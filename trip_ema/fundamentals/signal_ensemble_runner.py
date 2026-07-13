@@ -18,7 +18,7 @@ from ..persistence.signal_ensemble_repo import (
     SignalEnsembleFeaturesRepository,
 )
 from .ensemble_features import compute_ensemble_features
-from .market_session import market_session_for
+from ..domain.market_session import market_session_for
 
 logger = logging.getLogger(__name__)
 

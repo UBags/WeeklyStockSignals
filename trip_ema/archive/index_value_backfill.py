@@ -27,6 +27,7 @@ from ..fundamentals.runners import (
 )
 from ..persistence import transaction
 from ..persistence.fundamentals_repo import FundamentalsRunRepository
+from ..domain.market_session import exchange_of_engine, market_today
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,9 @@ def run_index_value_backfill(
                 industry_name,
             )
         if latest is not None:
-            age = (date.today() - latest.trade_date).days
+            age = (
+        market_today(exchange_of_engine(db_engine)) - latest.trade_date
+    ).days
             if age < 80:
                 logger.info(
                     "Skipping index value backfill for %s: latest "

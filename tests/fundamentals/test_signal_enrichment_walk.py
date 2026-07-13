@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta, timezone
 
 from trip_ema.domain import OHLCVBar
-from trip_ema.fundamentals.market_session import market_session_for
+from trip_ema.domain.market_session import market_session_for
 from trip_ema.fundamentals.signal_enrichment_walk import (
     compute_ticker_signal_enrichments,
 )

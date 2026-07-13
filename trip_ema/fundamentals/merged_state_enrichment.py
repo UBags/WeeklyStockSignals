@@ -52,7 +52,7 @@ from ..persistence.stock_indicator_state_repo import (
 )
 from ..persistence.tickers_repo import TickersRepository
 from .indicator_primitives import INDICATOR_DEFAULTS
-from .market_session import market_session_for
+from ..domain.market_session import market_session_for
 from .state_carry_engine import compute_daily_grain_via_engine
 from .v1_runners import PHASE_V1_STOCK_ENRICHMENT, PHASE_V1_STOCK_STATE
 

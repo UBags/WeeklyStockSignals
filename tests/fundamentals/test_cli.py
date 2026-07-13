@@ -1055,7 +1055,7 @@ class TestCmdComputeIndexValues:
 
     def test_all_active_iterates_indices(
         self, db_engine, fake_config, patched_engine_factory,
-        monkeypatch, capsys,
+        monkeypatch, capsys, reliance_ticker,
     ):
         """--all-active calls the runner once per active index."""
         self._setup_one_index(db_engine, "Index A")
@@ -1110,7 +1110,7 @@ class TestCmdComputeIndexValues:
 
     def test_partial_status_returns_1(
         self, db_engine, fake_config, patched_engine_factory,
-        monkeypatch, capsys,
+        monkeypatch, capsys, reliance_ticker,
     ):
         self._setup_one_index(db_engine, "IT - Services")
         def fake_backfill(engine, industry_name, **kw):

@@ -766,7 +766,7 @@ def compute_market_cap_endpoint(
             detail="backfill_from is required",
         )
     if backfill_to is None:
-        backfill_to = _date.today()
+        backfill_to = market_today(exchange)
     if backfill_from > backfill_to:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -806,6 +806,7 @@ from ....persistence.fundamentals_repo import (
     IndustryIndexRepository,
     IndustryIndexValueRepository,
 )
+from ....domain.market_session import exchange_of_engine, market_today
 
 
 # ---------- payload models ---------- #
@@ -941,7 +942,9 @@ def _run_index_value_backfill_safe(
                 idx = ir.get(industry_name)
                 indices = [idx] if idx else []
 
-        effective_to = to_date_param or date.today()
+        effective_to = to_date_param or market_today(
+        exchange_of_engine(db_engine)
+    )
         for idx in indices:
             effective_from = (
                 max(from_date_param, idx.base_date)

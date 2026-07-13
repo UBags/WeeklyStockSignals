@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from trip_ema.domain import OHLCVBar
-from trip_ema.fundamentals.market_session import (
+from trip_ema.domain.market_session import (
     MarketSession,
     market_session_for,
 )

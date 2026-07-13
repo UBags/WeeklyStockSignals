@@ -37,7 +37,7 @@ from datetime import date, datetime
 from ..domain import OHLCVBar
 from ..indicators.vw_ema import VolumeWeightedTripleEMA
 from ..regime import BarInputs, Regime, compute_regime
-from .market_session import MarketSession
+from ..domain.market_session import MarketSession
 from .pattern_rules import bars_and_pct_since_turn, pattern_label
 from .weekly_walk import weekly_forming_walk
 

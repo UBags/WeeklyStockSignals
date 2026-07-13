@@ -18,7 +18,7 @@ from datetime import date, datetime
 
 from ..domain import OHLCVBar
 from .indicator_primitives import INDICATOR_DEFAULTS
-from .market_session import MarketSession
+from ..domain.market_session import MarketSession
 from .state_carry_engine import compute_daily_grain_via_engine
 
 

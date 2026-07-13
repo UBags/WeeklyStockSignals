@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from functools import cache
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -304,6 +304,56 @@ def post_session_time(exchange: str) -> time:
     close = market_session_for(exchange).close_time
     h = (close.hour + 1) % 24
     return time(h, close.minute)
+
+
+def market_today(exchange: str) -> date:
+    """The date it is RIGHT NOW on `exchange` — not on this machine.
+
+    date.today() takes no arguments. There is no timezone parameter and no way to
+    make it correct; that is precisely why it is the dangerous one. This is the
+    only correct spelling, given a name.
+
+    At 22:30 UTC a NUC in Bangalore says the date is the 14th. For a NYSE ticker
+    it is still the 13th.
+    """
+    return datetime.now(market_tz(exchange)).date()
+
+
+def market_now(exchange: str) -> datetime:
+    """The instant it is right now, in `exchange`'s local clock.
+
+    For display and for filenames: an export of NYSE signals stamped in Indian
+    time is a lie about when it was taken.
+    """
+    return datetime.now(market_tz(exchange))
+
+
+def exchange_of_engine_or_none(db_engine) -> str | None:
+    """The database's exchange, or None if it does not have exactly one.
+
+    For DISPLAY only. An un-provisioned database — a fresh install, before the
+    first backfill — has no tickers and therefore no exchange. That is a real
+    state, and the GUI has to render in it.
+    """
+    try:
+        return exchange_of_engine(db_engine)
+    except Exception:
+        return None
+
+
+def display_now(db_engine) -> datetime:
+    """"Now", in the exchange's clock, for a GUI label.
+
+    Falls back to UTC when the database has no exchange yet. UTC is explicit and
+    deterministic; the machine's local clock is neither, and is the bug this whole
+    workstream exists to remove.
+
+    A DISPLAY fallback, never a compute one. Nothing on the signal path may guess
+    an exchange — but a label that tells an operator the time may say UTC rather
+    than crash the panel it lives in.
+    """
+    ex = exchange_of_engine_or_none(db_engine)
+    return market_now(ex) if ex else datetime.now(UTC)
 
 
 def exchange_of_conn(conn) -> str:

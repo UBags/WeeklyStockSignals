@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from collections.abc import Iterable
 
 from .exchanges import (
@@ -147,7 +147,10 @@ class YFinanceSource:
         symbol, regardless of success — a failed symbol gets a
         FetchOutcome with empty bars and error_message set.
         """
-        end_date = end or date.today()
+        # The RUNNER always passes an explicit, exchange-aware `end`. This
+        # fallback exists only for ad-hoc/direct use and is never on the signal
+        # path. UTC, not date.today(): deterministic rather than machine-local.
+        end_date = end or datetime.now(UTC).date()
         results: dict[str, FetchOutcome] = {}
         symbols_list = list(symbols)
         for batch in self._batched(symbols_list, self._batch_size):

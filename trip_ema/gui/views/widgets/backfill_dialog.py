@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout,
     QLabel, QSpinBox, QVBoxLayout, QWidget,
 )
+from ....domain.market_session import market_today
 
 
 # Default start date: 30 days back from today. Operators typically
@@ -63,7 +64,9 @@ class BackfillDialog(QDialog):
         self.setModal(True)
 
         if default_start is None:
-            default_start = date.today() - timedelta(days=_DEFAULT_START_LOOKBACK_DAYS)
+            default_start = market_today(exchange) - timedelta(
+            days=_DEFAULT_START_LOOKBACK_DAYS,
+        )
 
         self._build_ui(default_start)
 
@@ -95,7 +98,7 @@ class BackfillDialog(QDialog):
             _EARLIEST_START.day,
         ))
         # Max date: today. Backfilling from a future date is nonsense.
-        today = date.today()
+        today = market_today(self._exchange)
         self._date_edit.setMaximumDate(QDate(today.year, today.month, today.day))
         self._date_edit.setDate(QDate(
             default_start.year,
