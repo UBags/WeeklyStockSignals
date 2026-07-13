@@ -109,6 +109,7 @@ def run_industry_refresh(
     resume_run_id: int | None = None,
     force: bool = False,
     only_missing: bool = False,
+    recheck_unavailable: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn: Callable[[str, str], IndustryInfo] = fetch_industry,
 ) -> int:
@@ -158,6 +159,18 @@ def run_industry_refresh(
         ticker_list = _load_active_tickers_for_exchange(
             db_engine, exchange,
             missing_from="instrument_industry" if only_missing else None,
+            # L1-CLASSIFICATION-SURVIVES: the third dataset finally uses the
+            # table that was built for it. Tickers yfinance has already told us
+            # it cannot classify drop out of the gap-only sweep, exactly as they
+            # do for shares and financials — which is what backfill()'s stage-0b
+            # comment has been claiming all along.
+            #
+            # recheck_unavailable inverts this. That is the monthly job's whole
+            # purpose: a provider's "no data" is a fact about last month, not a
+            # permanent property of the company.
+            skip_unavailable=(
+                "industry" if (only_missing and not recheck_unavailable) else None
+            ),
         )
         if not ticker_list:
             # See run_shares_refresh: under only_missing an empty list is the
@@ -327,6 +340,9 @@ def _classify_equity(
                 industry=info.industry,
                 classification_source="YFINANCE",
             )
+            # A ticker that WAS dark and now classifies. Release it, in the same
+            # transaction as the write so the two cannot disagree.
+            FundamentalsFetchStatusRepository(conn).clear(tid, "industry")
         return "succeeded"
     except IndustryFetchRateLimited as e:
         logger.warning(
@@ -345,14 +361,44 @@ def _classify_equity(
                     industry=info.industry,
                     classification_source="YFINANCE",
                 )
+                FundamentalsFetchStatusRepository(conn).clear(tid, "industry")
             return "succeeded"
+        except IndustryFetchPermanent as e2:
+            # The retry is not a lesser path. A ticker that was throttled first
+            # and is definitively absent second is STILL definitively absent —
+            # and this handler is the only one that will ever see it. Catching it
+            # under `except Exception` below would discard the verdict for the
+            # exact cohort the cool-off exists to serve.
+            logger.info(
+                "industry unavailable upstream for %s (after cool-off): %s",
+                symbol, e2,
+            )
+            with transaction(db_engine) as conn:
+                FundamentalsFetchStatusRepository(conn).mark_unavailable(
+                    tid, "industry", str(e2),
+                )
+            return "failed"
         except Exception as e2:
             logger.error(
                 "Failed retry after rate-limit cool-off for %s: %s",
                 symbol, e2,
             )
             return "failed"
-    except (IndustryFetchTransient, IndustryFetchPermanent) as e:
+    except IndustryFetchPermanent as e:
+        # The provider was asked and has nothing to classify this with. Record
+        # it: the gap-only sweep then stops re-asking, and the fidelity audit can
+        # tell data we are MISSING from data that DOES NOT EXIST. Not a row in
+        # instrument_industry — that table holds facts about the company, and a
+        # sentinel there would be a lie in the wrong place.
+        logger.info("industry unavailable upstream for %s: %s", symbol, e)
+        with transaction(db_engine) as conn:
+            FundamentalsFetchStatusRepository(conn).mark_unavailable(
+                tid, "industry", str(e),
+            )
+        return "failed"
+    except IndustryFetchTransient as e:
+        # A hiccup, not an absence. Retried naturally on the next run; recording
+        # it would only accumulate noise.
         logger.warning("Failed to fetch %s: %s", symbol, e)
         return "failed"
     except Exception as e:
@@ -802,7 +848,22 @@ def run_shares_refresh(
                             shares_outstanding=info.shares_outstanding,
                             shares_source=info.source,
                         )
+                        # Same release as the first-attempt path. Its absence here
+                        # was a stale verdict generator for the throttle cohort.
+                        FundamentalsFetchStatusRepository(conn).clear(
+                            tid, "shares",
+                        )
                     succeeded += 1
+                except SharesFetchPermanent as e2:
+                    logger.info(
+                        "shares unavailable upstream for %s (after cool-off): %s",
+                        symbol, e2,
+                    )
+                    with transaction(db_engine) as conn:
+                        FundamentalsFetchStatusRepository(conn).mark_unavailable(
+                            tid, "shares", str(e2),
+                        )
+                    failed += 1
                 except Exception as e2:
                     logger.error(
                         "Failed retry after rate-limit cool-off for %s: %s",
@@ -1259,6 +1320,14 @@ def run_financials_refresh(
                             currency=q.currency,
                             source="YFINANCE",
                         )
+                    # THE MISSING RELEASE. mark_unavailable("financials") has been
+                    # written since K2b and nothing anywhere has ever cleared it —
+                    # not the sweep, not the monthly re-check (which only un-skips;
+                    # the release IS this line). A financials verdict could not be
+                    # revoked by any code path in the system.
+                    FundamentalsFetchStatusRepository(conn).clear(
+                        tid, "financials",
+                    )
                 succeeded += 1
             except FinancialsFetchRateLimited as e:
                 logger.warning(
@@ -1281,7 +1350,21 @@ def run_financials_refresh(
                                 currency=q.currency,
                                 source="YFINANCE",
                             )
+                        FundamentalsFetchStatusRepository(conn).clear(
+                            tid, "financials",
+                        )
                     succeeded += 1
+                except FinancialsFetchPermanent as e2:
+                    logger.info(
+                        "financials unavailable upstream for %s "
+                        "(after cool-off): %s",
+                        symbol, e2,
+                    )
+                    with transaction(db_engine) as conn:
+                        FundamentalsFetchStatusRepository(conn).mark_unavailable(
+                            tid, "financials", str(e2),
+                        )
+                    failed += 1
                 except Exception as e2:
                     logger.error(
                         "Failed retry after rate-limit cool-off for %s: %s",
