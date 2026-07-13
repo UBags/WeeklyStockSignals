@@ -15,6 +15,7 @@ import pytest
 from trip_ema.domain import OHLCVBar
 from trip_ema.domain.market_session import (
     MarketSession,
+    UnknownExchangeError,
     market_session_for,
 )
 from trip_ema.fundamentals.daily_grain import (
@@ -132,10 +133,31 @@ class TestMultiMarket:
             assert mn == pytest.approx(exp)
             assert my == pytest.approx(exp)
 
-    def test_unknown_exchange_falls_back(self):
-        s = market_session_for("XYZ", fallback_tz="Asia/Tokyo")
-        assert s.tz == "Asia/Tokyo"
-        assert s.session_hours == pytest.approx(7.0)  # 09:00-16:00
+    def test_unknown_exchange_raises(self):
+        """An unknown exchange must RAISE, not invent a session.
+
+        This test used to assert the opposite — that market_session_for("XYZ")
+        quietly returned a 09:00-16:00 session in whatever tz the caller passed,
+        and that 7.0 hours was the right answer for a market nobody had heard of.
+
+        In production the caller passed tickers.tz, which read 'UTC' for all 2,685
+        NSE equities. So the "fallback" this test blessed was a 09:00-16:00 UTC
+        session applied to Indian stocks.
+
+        A session window you invented is not a safe default, it is a wrong one, and
+        every number downstream of it — volume proration, the week anchor, the
+        daily-grain compute — is quietly wrong. config.yaml's market_hours is the
+        single source of truth; an exchange that is not in it is an error, not an
+        opportunity to guess.
+        """
+        with pytest.raises(UnknownExchangeError, match="no session spec"):
+            market_session_for("XYZ")
+
+    def test_known_exchanges_still_resolve(self):
+        """...and the ones we DO know must still be exactly right."""
+        assert market_session_for("NSE").session_hours == pytest.approx(6.25)
+        assert market_session_for("NYSE").session_hours == pytest.approx(6.5)
+        assert market_session_for("LSE").session_hours == pytest.approx(8.5)  # 09:00-16:00
 
 
 def _gen_daily(n_weeks: int, start_monday: date) -> list[OHLCVBar]:

@@ -68,6 +68,7 @@ from .industry_fetch import (
     IndustryInfo,
     fetch_industry,
 )
+from ..domain.market_session import market_tz
 
 # from .backfill_shares_fetch import (
 #     HistoricalSharesFetchPermanent,
@@ -2165,11 +2166,23 @@ def _fetch_bars_at_timeframe(conn, ticker_id, timeframe):
             ticker_id, Timeframe(timeframe), limit=10000,
         )
     if timeframe == "1W" and "1D" in available:
-        tz_row = conn.execute(_text(
-            "SELECT COALESCE(tz, 'UTC') AS tz "
-            "FROM tickers WHERE ticker_id = :tid"
+        # The EXCHANGE's week, not UTC's. This used to read tickers.tz,
+        # which was 'UTC' for every ticker — so weekly bars built from daily
+        # ones were grouped on UTC week boundaries while the rest of the
+        # pipeline used the exchange's. Monday 00:00 IST is Sunday 18:30 UTC:
+        # the first bar of the week landed in the previous one.
+        #
+        # No default. A ticker with no exchange is not a thing.
+        ex_row = conn.execute(_text(
+            "SELECT exchange FROM tickers WHERE ticker_id = :tid"
         ), {"tid": ticker_id}).first()
-        tz = tz_row.tz if tz_row else "UTC"
+        if ex_row is None:
+            raise ValueError(
+                f"_fetch_bars_at_timeframe: no ticker with ticker_id="
+                f"{ticker_id}; cannot resolve the exchange whose weeks these "
+                f"bars belong to."
+            )
+        tz = market_tz(ex_row.exchange).key
         daily_bars = BarsRepository(conn).fetch_history(
             ticker_id, Timeframe.DAILY, limit=10000,
         )

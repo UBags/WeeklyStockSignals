@@ -44,7 +44,6 @@ class TickerRecord:
     ref: TickerRef
     is_active: bool
     full_name: str | None
-    tz: str = "UTC"
 
 
 def _row_to_record(row: Any) -> TickerRecord:
@@ -57,7 +56,6 @@ def _row_to_record(row: Any) -> TickerRecord:
         ),
         is_active=row.is_active,
         full_name=row.full_name,
-        tz=getattr(row, "tz", "UTC"),
     )
 
 
@@ -111,15 +109,15 @@ class TickersRepository:
         full_name: str | None = None,
         is_active: bool = True,
         created_at: datetime,
-        tz: str = "UTC",
     ) -> int:
         """Insert a new ticker. Returns the assigned ticker_id.
 
         Caller passes `created_at` explicitly (rather than letting the DB
         default kick in) to keep timestamps deterministic in tests.
 
-        Phase 8 B4: `tz` is a required schema column but defaults to
-        'UTC' to preserve backward compat with existing test fixtures.
+        The ticker's timezone is NOT stored: it is a property of the
+        EXCHANGE, and market_tz(exchange) is the single authority. A `tz`
+        column said 'UTC' for 2,685 Indian equities.
         """
         stmt = (
             insert(tickers)
@@ -130,7 +128,6 @@ class TickersRepository:
                 full_name=full_name,
                 is_active=is_active,
                 created_at=created_at,
-                tz=tz,
             )
             .returning(tickers.c.ticker_id)
         )

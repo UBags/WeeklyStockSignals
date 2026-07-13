@@ -44,7 +44,6 @@ tickers = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     # Phase 8 B4 — exchange-local timezone for week-anchor computation
     # and source-resolution timeframe for the ETL.
-    Column("tz", String(32), nullable=False, server_default="UTC"),
     UniqueConstraint("exchange", "symbol", "instrument", name="tickers_uq"),
 )
 

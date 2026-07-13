@@ -89,11 +89,6 @@ def populate_stock_state_and_enrichment_for_ticker(
         daily_bars = BarsRepository(conn).fetch_history(
             ticker_id, Timeframe.DAILY, limit=100000,
         )
-        tz_row = conn.execute(text(
-            "SELECT COALESCE(tz, 'UTC') AS tz "
-            "FROM tickers WHERE ticker_id = :tid"
-        ), {"tid": ticker_id}).first()
-    tz = tz_row.tz if tz_row else "UTC"
 
     if len(daily_bars) < min_bars:
         raise ValueError(
