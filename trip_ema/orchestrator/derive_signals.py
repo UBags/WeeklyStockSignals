@@ -47,6 +47,10 @@ from ..persistence.stock_indicator_state_repo import (
 )
 from ..persistence.tickers_repo import TickersRepository
 from ..domain import DetermineSignal
+from ..domain.market_session import (
+    exchange_of_conn,
+    trading_date_of,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,11 +142,17 @@ def derive_signal_for_ticker_this_cycle(
     # the week anchor shared by every daily row of the week, so `to_dt=as_of`
     # would also admit the rest of D's week and hand back the week's last two
     # rows instead of (D, D-1) -- lookahead, and every intra-week signal lost.
-    # as_of is IST-aware (datetime.combine(d, time(16,30), tzinfo=IST)), so
-    # .date() is exactly day d. as_of is None in live mode -> unbounded.
+    # L5: as_of.date() was SAFE — but only by the caller's grace. The daywalk
+    # happens to build as_of with tzinfo=market_tz(exchange), so .date() gave the
+    # market's day. Hand this an as_of in UTC (which recompute_market's default
+    # very nearly does) and .date() silently answers with the UTC day instead.
+    # The comment that stood here even hardcoded IST. trading_date_of() makes it
+    # safe by construction rather than by the habits of two call sites.
+    # as_of is None in live mode -> unbounded.
     states = repo.get_history_for_ticker(
         ticker_id, str(timeframe),
-        to_date=as_of.date() if as_of is not None else None,
+        to_date=(trading_date_of(as_of, exchange_of_conn(conn))
+                 if as_of is not None else None),
         limit=2,
     )
     if len(states) < 2:

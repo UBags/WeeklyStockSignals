@@ -63,7 +63,11 @@ from ..fundamentals.v1_runners import (
     populate_stock_indicator_state_for_exchange,
 )
 from ..persistence.current_signals_repo import CurrentSignalsRepository
-from ..domain.market_session import market_tz
+from ..domain.market_session import (
+    exchange_of_engine,
+    market_tz,
+    trading_date_of,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -172,10 +176,18 @@ def _stage_iiv_incremental(
     `as_of - n_weeks_to_upsert weeks` through `as_of`. Required
     before industry state recomputes because the state populator
     reads from IIV."""
-    to_date = as_of.date()
-    from_date = (
-        as_of - timedelta(weeks=n_weeks_to_upsert)
-    ).date()
+    # L5: recompute_market() defaults `as_of = datetime.now(UTC)`, so .date() was
+    # the UTC date, not the market's. It is correct today only because all four
+    # NSE ticks land inside the same UTC day (16:30 IST = 11:00 UTC). A tick past
+    # 18:30 UTC, or any market west of Greenwich, and this window slides a day —
+    # and it recomputes industry index values, so the whole industry layer slides
+    # with it. This same file converts explicitly one function away; this line was
+    # simply missed.
+    _ex = exchange_of_engine(db_engine)
+    to_date = trading_date_of(as_of, _ex)
+    from_date = trading_date_of(
+        as_of - timedelta(weeks=n_weeks_to_upsert), _ex,
+    )
     report = populate_industry_index_value_for_all(
         db_engine,
         from_date=from_date,
