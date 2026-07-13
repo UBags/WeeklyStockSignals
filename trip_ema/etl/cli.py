@@ -535,6 +535,84 @@ def cmd_recompute_tiers(args, config: Config) -> int:
     return 0
 
 
+def cmd_refresh_reference(args, config: Config) -> int:
+    """Populate the reference layer: industry, shares, quarterly financials.
+
+    With --only-missing (the default), each runner fetches ONLY the tickers that
+    have no row in the corresponding table. That is what makes this affordable:
+    at 2s/ticker a full sweep is ~89 minutes per dataset, while closing the
+    actual gap is minutes.
+
+    Without it, every active ticker is re-fetched.
+    """
+    from ..fundamentals.runners import (
+        run_financials_refresh,
+        run_industry_refresh,
+        run_shares_refresh,
+    )
+
+    wanted = [d.strip() for d in args.datasets.split(",") if d.strip()]
+    runners = {
+        "industry": run_industry_refresh,
+        "shares": run_shares_refresh,
+        "financials": run_financials_refresh,
+    }
+    unknown = [d for d in wanted if d not in runners]
+    if unknown:
+        print(f"error: unknown dataset(s) {unknown}; "
+              f"choose from {sorted(runners)}")
+        return 2
+
+    db_engine = create_engine_from_config(config)
+    try:
+        for name in wanted:
+            print(f"[{name}] starting "
+                  f"({'gaps only' if args.only_missing else 'FULL sweep'})")
+            run_id = runners[name](
+                db_engine, args.exchange,
+                # only_missing implies force: the 80-day skip-if-recent guard is
+                # there to stop a needless full re-sweep, and a gap-only pass is
+                # precisely the thing that guard should not block.
+                force=args.force or args.only_missing,
+                only_missing=args.only_missing,
+            )
+            print(f"[{name}] done (fundamentals_run_id={run_id})")
+    finally:
+        db_engine.dispose()
+
+    print("\nRe-run the audit to confirm:")
+    print(f"  python -m trip_ema.etl.cli audit --exchange {args.exchange}")
+    return 0
+
+
+def cmd_audit(args, config: Config) -> int:
+    """Read-only fidelity audit. Writes nothing.
+
+    Exit codes are meaningful so this can gate a cold start or a CI job:
+        0  every dataset OK
+        1  gaps (MISSING / PARTIAL) — data is incomplete
+        2  BLOCKED — a structural defect makes the data unsafe regardless
+    """
+    from ..fundamentals.data_fidelity import audit_exchange
+
+    db_engine = create_engine_from_config(config)
+    try:
+        report = audit_exchange(
+            db_engine, args.exchange,
+            gap_days=config.etl.max_coverage_gap_days,
+        )
+    finally:
+        db_engine.dispose()
+
+    print(report.render())
+
+    if report.blockers:
+        return 2
+    if report.gaps:
+        return 1
+    return 0
+
+
 def cmd_status(args, config: Config) -> int:
     db_engine = create_engine_from_config(config)
     try:
@@ -1018,6 +1096,32 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_exchange_arg(rt)
 
+    aud = sub.add_parser(
+        "audit",
+        help="Read-only fidelity audit: what is populated, and is it trustworthy",
+    )
+    _add_exchange_arg(aud)
+
+    rr = sub.add_parser(
+        "refresh-reference",
+        help="Fetch industry / shares / financials for tickers that lack them",
+    )
+    _add_exchange_arg(rr)
+    rr.add_argument(
+        "--datasets", default="industry,shares,financials",
+        help="comma-separated: industry, shares, financials",
+    )
+    rr.add_argument(
+        "--only-missing", dest="only_missing",
+        action=argparse.BooleanOptionalAction, default=True,
+        help="fetch only tickers with no row (default). "
+             "--no-only-missing re-fetches every active ticker.",
+    )
+    rr.add_argument(
+        "--force", action="store_true",
+        help="bypass the 80-day skip-if-recent run guard",
+    )
+
     status = sub.add_parser(
         "status", help="Recent runs + parked count",
     )
@@ -1120,6 +1224,8 @@ def main(argv: list[str] | None = None) -> int:
         "incremental-eod":      cmd_incremental_eod,
         "incremental-intraday": cmd_incremental_intraday,
         "recompute-tiers":      cmd_recompute_tiers,
+        "audit":                cmd_audit,
+        "refresh-reference":    cmd_refresh_reference,
         "status":               cmd_status,
         "unpark":               cmd_unpark,
         "approve-action":       cmd_approve_action,
