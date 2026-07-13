@@ -69,6 +69,7 @@ from ..fundamentals.parallel import (
     fan_out_processes,
 )
 from ..fundamentals.market_cap_compute import populate_market_cap_range
+from ..fundamentals.data_fidelity import audit_exchange
 from ..fundamentals.runners import (
     run_financials_refresh,
     run_industry_refresh,
@@ -120,6 +121,12 @@ class BackfillResult:
     refetch_bars: bool
     bars_fetch_run_id: int | None     # etl_runs.run_id, or None if skipped
     stock_state_tickers_done: int
+    # The post-flight verdict. `fidelity_ready` is False when the pipeline
+    # finished but the data it built is still incomplete — which is NOT the same
+    # as a stage failing, and used to be invisible. The CLI exits non-zero on it.
+    fidelity_ready: bool | None = None
+    fidelity_gaps: list[str] = field(default_factory=list)
+    fidelity_report: str = ""
     stock_state_failed: list[tuple[int, str]] = field(
         default_factory=list,
     )
@@ -154,6 +161,13 @@ class BackfillResult:
 # ============================================================
 # Entry point
 # ============================================================
+
+class BlockedByFidelityError(RuntimeError):
+    """A structural defect makes this backfill unsafe to run.
+
+    Raised BEFORE any work, not after. See _stage_audit_preflight.
+    """
+
 
 class ForeignIndustryLayerError(RuntimeError):
     """The industry layer already belongs to a different exchange.
@@ -282,6 +296,44 @@ def backfill(
     # belongs to someone else, stop here rather than discovering it in the
     # signals a week later.
     _assert_industry_layer_belongs_to(db_engine, exchange)
+
+    # ---- Stage 0a: fidelity pre-flight ----
+    # Ask, BEFORE spending six hours, whether this run can possibly produce
+    # correct data.
+    #
+    # BLOCKED is a structural defect that no amount of correct data fixes — today
+    # that is industry_index_value's PK (industry_name, trade_date), which has no
+    # exchange column. Discovering that AFTER the run is discovering it too late:
+    # the corruption is already written.
+    #
+    # Gaps are NOT fatal here. They are the REASON the backfill is running. But
+    # they are logged, because a run starting from 198 truncated tickers should
+    # say so — and because the post-flight verdict is meaningless without a
+    # before.
+    _emit_progress(progress_cb, "stage_0a_audit_preflight", "starting")
+    _pre = audit_exchange(
+        db_engine, exchange, gap_days=config.etl.max_coverage_gap_days,
+    )
+    for _line in _pre.render().splitlines():
+        logger.info("preflight| %s", _line)
+
+    if _pre.blockers:
+        _names = ", ".join(d.dataset for d in _pre.blockers)
+        raise BlockedByFidelityError(
+            f"REFUSING to backfill {exchange}: {len(_pre.blockers)} structural "
+            f"blocker(s) — {_names}. These are defects no amount of correct data "
+            f"repairs, so running the pipeline would write corrupt data rather "
+            f"than fix it. Run `audit --exchange {exchange}` for the detail."
+        )
+
+    logger.info(
+        "preflight: %d gap(s) to fill, 0 blockers — proceeding",
+        len(_pre.gaps),
+    )
+    _emit_progress(
+        progress_cb, "stage_0a_audit_preflight",
+        f"completed: {len(_pre.gaps)} gap(s) to fill",
+    )
 
     # ---- Stage 0: listings ----
     # This MUST run before _resolve_tickers, which raises "no active tickers
@@ -922,6 +974,40 @@ def backfill(
             )
 
         # Stage 10 (cache) is service-side. No CLI action.
+        # ---- Stage 9: fidelity post-flight ----
+        # "backfill complete" has always meant "no stage raised", which is not
+        # the same as "the data is correct" — DABUR sat in ohlcv_bars with 5 bars
+        # from last week, recorded as a clean ETL success, while the industry
+        # indices were rebuilt without their largest constituents.
+        #
+        # This is the stage that closes that gap. It does NOT raise: the data is
+        # written and the stages did their work, so refusing to return a result
+        # would only hide the verdict. It reports, and the CLI's exit code carries
+        # it, so a cron-driven run cannot silently succeed on a half-built
+        # database.
+        _emit_progress(progress_cb, "stage_9_audit_postflight", "starting")
+        _post = audit_exchange(
+            db_engine, exchange, gap_days=config.etl.max_coverage_gap_days,
+        )
+        result_kwargs["fidelity_ready"] = _post.ready
+        result_kwargs["fidelity_gaps"] = [d.dataset for d in _post.gaps]
+        result_kwargs["fidelity_report"] = _post.render()
+        for _line in _post.render().splitlines():
+            logger.info("postflight| %s", _line)
+        if _post.ready:
+            logger.info("postflight: READY — every link in the chain is OK")
+        else:
+            logger.warning(
+                "postflight: NOT READY — %d gap(s) remain after a full "
+                "backfill: %s",
+                len(_post.gaps), ", ".join(d.dataset for d in _post.gaps),
+            )
+        _emit_progress(
+            progress_cb, "stage_9_audit_postflight",
+            "completed: READY" if _post.ready
+            else f"completed: {len(_post.gaps)} gap(s) REMAIN",
+        )
+
         _emit_progress(progress_cb, "stage_10_cache", "skipped (service-side)")
 
     except Exception as e:

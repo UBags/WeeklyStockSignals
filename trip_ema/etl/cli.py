@@ -399,8 +399,16 @@ def _report_backfill_result(result) -> int:
             f"  run_id:      {result.run_id} "
             f"(marker finished; live cycle resumes)"
         )
+    elif result.fidelity_ready is False:
+        # The pipeline finished; the DATA did not. A distinction that did not
+        # exist before the post-flight audit, and the one that matters.
+        print("backfill complete — BUT THE DATA IS NOT READY")
+        print(f"  run_id:      {result.run_id}")
+        print(f"  gaps:        {', '.join(result.fidelity_gaps)}")
+        print()
+        print(result.fidelity_report)
     else:
-        print("backfill complete")
+        print("backfill complete — data fidelity: READY")
         print(f"  run_id:      {result.run_id}")
     print(f"  range:       {result.date_from} .. {result.date_to}")
     print(
@@ -434,7 +442,13 @@ def _report_backfill_result(result) -> int:
         f"  current:     upserted={result.current_signals_upserted}, "
         f"deleted={result.current_signals_deleted}"
     )
-    return 0 if result.failed_stage is None else 1
+    if result.failed_stage is not None:
+        return 1
+    # The pipeline finished, but the DATA may still be incomplete —
+    # a distinction that did not exist before the post-flight audit.
+    # Exit non-zero so a scheduled run cannot silently 'succeed' on a
+    # half-built database.
+    return 0 if result.fidelity_ready is not False else 1
 
 
 def cmd_snapshot(args, config: Config) -> int:
