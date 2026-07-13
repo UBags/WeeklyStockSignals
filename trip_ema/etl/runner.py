@@ -537,7 +537,17 @@ def fetch_bars_for_tickers(
     exchange = exchanges.pop()
     validate_exchange(exchange, config)
 
-    src = source or YFinanceSource(exchange=exchange)
+    # This path used to be `YFinanceSource(exchange=exchange)` — no batch_size,
+    # no request_delay. It therefore ran at the constructor defaults (delay 0.0)
+    # and hammered Yahoo with no spacing at all, which is a remarkable property
+    # for the code path whose entire job is to re-fetch tickers that a throttle
+    # already cost us. It now reads the same config as every other fetch.
+    src = source or YFinanceSource(
+        exchange=exchange,
+        batch_size=config.etl.yfinance_batch_size,
+        request_delay_seconds=config.etl.yfinance_request_delay_seconds,
+        throttle_backoff_seconds=config.etl.yfinance_throttle_backoff_seconds,
+    )
     tickers = [
         _TickerInfo(
             ticker_id=r.ticker_id, symbol=r.symbol,
@@ -667,6 +677,7 @@ def _run_fetch_pass(
         exchange=exchange,
         batch_size=config.etl.yfinance_batch_size,
         request_delay_seconds=config.etl.yfinance_request_delay_seconds,
+        throttle_backoff_seconds=config.etl.yfinance_throttle_backoff_seconds,
     )
 
     # Sanity: if the caller supplied a source, ensure it matches the
@@ -841,6 +852,11 @@ def _solo_retry_once(
             request_delay_seconds=(
                 config.etl.yfinance_request_delay_seconds
             ),
+            # batch_size=1 means _is_throttled can never fire here (it requires
+            # >= 2 symbols, because for a lone ticker zero bars really might mean
+            # delisted). Passed regardless: every source is built from config, so
+            # this site cannot go stale if that predicate ever changes.
+            throttle_backoff_seconds=config.etl.yfinance_throttle_backoff_seconds,
             repair=repair,
         )
         bound = len(pass_snapshot)
