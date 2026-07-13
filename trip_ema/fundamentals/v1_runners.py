@@ -27,7 +27,6 @@ import logging
 import threading
 from datetime import date, datetime, time, timedelta, UTC
 from typing import Literal
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.engine import Engine
 
@@ -39,6 +38,7 @@ from ..domain.industry_indicator_state import IndustryIndicatorState
 from ..domain.stock_indicator_enrichment import StockIndicatorEnrichment
 from ..domain.stock_indicator_state import StockIndicatorState
 from ..indicators.aggregation import daily_to_weekly
+from .market_session import exchange_of_engine, market_tz
 from ..persistence.fundamentals_repo import (
     FundamentalsRunRepository,
     IndustryIndexRepository,
@@ -101,7 +101,6 @@ PHASE_V1_INDUSTRY_INDICATOR_ENRICHMENT = (
 
 # IST is used for the industry weekly-bar Monday anchor — see Phase 1B
 # unification (commit 607a2a5). Computed once at module load.
-_IST = ZoneInfo("Asia/Kolkata")
 
 
 def populate_stock_indicator_state_for_ticker(
@@ -942,13 +941,31 @@ def populate_industry_index_value_for_all(
 
 def _build_industry_weekly_bars(
     history: list,
+    exchange: str,
 ) -> list[OHLCVBar]:
-    """Convert industry_index_value rows to IST-Monday-anchored
-    weekly bars.
+    """Convert industry_index_value rows to Monday-anchored weekly bars,
+    in the EXCHANGE'S OWN timezone.
+
+    Takes the exchange rather than a timezone deliberately. Two things here
+    depend on the zone and they are a PAIR:
+
+      * the ATTACH   — trade_date -> timestamptz on each pseudo-daily bar;
+      * the GROUPING — daily_to_weekly's `tz`, which decides which week a bar
+        falls in.
+
+    They used to be two hardcoded copies of "Asia/Kolkata", consistent with each
+    other, which is the only reason NSE's industry indices are right. Change one
+    and not the other and every week boundary shifts — silently, on the input to
+    every industry indicator, which feeds every signal's enrichment vector.
+
+    Deriving both from one `exchange` makes them impossible to desynchronise:
+    there is nothing left to keep in sync.
 
     Args:
         history: List of IndustryIndexValue records (oldest-first).
             Each has `.trade_date` and `.value`.
+        exchange: The exchange this industry index belongs to. Supplies the
+            timezone for BOTH the attach and the week grouping.
 
     Returns:
         Weekly OHLCVBar list. Open = first day's value in the week,
@@ -959,13 +976,14 @@ def _build_industry_weekly_bars(
     """
     if not history:
         return []
+    zone = market_tz(exchange)
     # Build pseudo-daily bars: H=L=O=C=value (no intra-day OHLC on
     # IIV). The daily_to_weekly aggregator will compute meaningful
     # weekly H/L as max/min across the days in each week.
     pseudo_daily_bars = [
         OHLCVBar(
             timestamp=datetime.combine(
-                h.trade_date, time.min, tzinfo=_IST,
+                h.trade_date, time.min, tzinfo=zone,
             ),
             open=float(h.value),
             high=float(h.value),
@@ -978,7 +996,8 @@ def _build_industry_weekly_bars(
     return daily_to_weekly(
         pseudo_daily_bars,
         include_partial_last_week=True,
-        tz="Asia/Kolkata",
+        # SAME zone as the attach above. Not a second literal.
+        tz=zone.key,
     )
 
 
@@ -1046,7 +1065,9 @@ def populate_industry_indicator_state_for_industry(
     history = list(reversed(history))
 
     # Aggregate to weekly bars.
-    weekly_bars = _build_industry_weekly_bars(history)
+    weekly_bars = _build_industry_weekly_bars(
+        history, exchange_of_engine(db_engine),
+    )
     if len(weekly_bars) < min_bars:
         raise ValueError(
             f"populate_industry_indicator_state_for_industry: "
@@ -1306,7 +1327,9 @@ def populate_industry_indicator_enrichment_for_industry(
     history = list(reversed(history))  # oldest-first for the walk
 
     # Aggregate to weekly bars (reuse Step 7 helper).
-    weekly_bars = _build_industry_weekly_bars(history)
+    weekly_bars = _build_industry_weekly_bars(
+        history, exchange_of_engine(db_engine),
+    )
     if len(weekly_bars) < min_bars:
         raise ValueError(
             f"populate_industry_indicator_enrichment_for_industry: "

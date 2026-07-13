@@ -92,6 +92,28 @@ def _seed_daily_bars(
 # Industry-side helpers
 # ============================================================
 
+def _seed_exchange_ticker(conn, exchange: str = "NSE") -> None:
+    """Give this database an exchange.
+
+    An industry index is CONSTRUCTED from ticker constituents — select_top_n_
+    constituents picks tickers by market cap and the index is computed from their
+    prices. A database with an industry_index row and no tickers is not a minimal
+    fixture, it is an impossible state: nothing in the pipeline can produce it.
+
+    It went unnoticed only because nothing used to look at `tickers` from the
+    industry path. exchange_of_engine now does, to resolve the timezone for the
+    week anchor, and asserts exactly one exchange — the invariant behind
+    one-database-per-exchange.
+
+    Idempotent: several helpers may call it within one test.
+    """
+    conn.execute(text("""
+        INSERT INTO tickers (ticker_id, exchange, symbol, instrument)
+        VALUES (900001, :ex, 'FIXTURE_ANCHOR', 'EQ')
+        ON CONFLICT (ticker_id) DO NOTHING
+    """), {"ex": exchange})
+
+
 def _seed_industry(conn, *, name: str) -> None:
     """Insert one industry_index row directly (not via the repo upsert
     which has methodology/schedule validation we don't want to mock
@@ -100,6 +122,7 @@ def _seed_industry(conn, *, name: str) -> None:
 
     status='ACTIVE' is required — the bulk wrappers iterate
     `IndustryIndexRepository.list_active()` which filters on that."""
+    _seed_exchange_ticker(conn)
     conn.execute(text("""
         INSERT INTO industry_index (
             industry_name, sector_name, methodology,

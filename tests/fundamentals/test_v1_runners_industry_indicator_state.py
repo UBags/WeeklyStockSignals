@@ -29,11 +29,34 @@ from trip_ema.persistence.fundamentals_repo import (
 # Helpers
 # ============================================================
 
+def _seed_exchange_ticker(conn, exchange: str = "NSE") -> None:
+    """Give this database an exchange.
+
+    An industry index is CONSTRUCTED from ticker constituents — select_top_n_
+    constituents picks tickers by market cap and the index is computed from their
+    prices. A database with an industry_index row and no tickers is not a minimal
+    fixture, it is an impossible state: nothing in the pipeline can produce it.
+
+    It went unnoticed only because nothing used to look at `tickers` from the
+    industry path. exchange_of_engine now does, to resolve the timezone for the
+    week anchor, and asserts exactly one exchange — the invariant behind
+    one-database-per-exchange.
+
+    Idempotent: several helpers may call it within one test.
+    """
+    conn.execute(text("""
+        INSERT INTO tickers (ticker_id, exchange, symbol, instrument)
+        VALUES (900001, :ex, 'FIXTURE_ANCHOR', 'EQ')
+        ON CONFLICT (ticker_id) DO NOTHING
+    """), {"ex": exchange})
+
+
 def _seed_industry(
     conn, industry_name: str,
     *, status: str = "ACTIVE",
     base_date: date = date(2024, 1, 1),
 ) -> str:
+    _seed_exchange_ticker(conn)
     conn.execute(text("""
         INSERT INTO industry_index (
             industry_name, sector_name, methodology,
