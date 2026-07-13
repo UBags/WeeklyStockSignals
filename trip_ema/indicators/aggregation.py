@@ -18,6 +18,7 @@ from collections.abc import Iterable
 from zoneinfo import ZoneInfo
 
 from ..domain import OHLCVBar, Timeframe
+from ..domain.market_session import monday_instant_of
 
 
 def _monday_of(d: datetime, tz: str = "UTC") -> datetime:
@@ -29,16 +30,14 @@ def _monday_of(d: datetime, tz: str = "UTC") -> datetime:
     return value is always converted to UTC for storage consistency.
 
     The input `d` must be tz-aware. If it isn't, raises ValueError.
+
+    L1-ANCHOR-RULE: the arithmetic now lives in domain.market_session, which is
+    already the declared authority on exchange time. This is the tz-STRING
+    spelling of the same fact (aggregation is handed a zone name, not an
+    exchange); market_session.week_anchor is the exchange spelling. One
+    implementation, two front doors — not two implementations.
     """
-    if d.tzinfo is None:
-        raise ValueError(
-            "_monday_of requires a tz-aware datetime; got naive"
-        )
-    zone = ZoneInfo(tz)
-    d_local = d.astimezone(zone)
-    monday_date_local = d_local.date() - timedelta(days=d_local.weekday())
-    monday_local = datetime.combine(monday_date_local, time.min, tzinfo=zone)
-    return monday_local.astimezone(UTC)
+    return monday_instant_of(d, ZoneInfo(tz))
 
 
 def bucket_end(

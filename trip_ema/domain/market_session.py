@@ -402,6 +402,122 @@ def market_now(exchange: str) -> datetime:
     return datetime.now(market_tz(exchange))
 
 
+# --------------------------------------------------------------------------- #
+# L1-ANCHOR-RULE: the instant <-> local-calendar boundary.
+#
+# A timestamptz is an INSTANT. A trading date and a week anchor are LOCAL
+# CALENDAR FACTS. Crossing between them without naming a zone is not a shortcut,
+# it is an assumption — and on this machine (server TZ Asia/Kolkata, market NSE,
+# UTC to the west) every such assumption happens to come out right, which is
+# precisely why they survived. They stop being right at NYSE.
+#
+# THE RULE: a bar's timestamp is the local-midnight instant of the first calendar
+# day of the period it covers, in the exchange's own zone.
+#
+#     daily bar  -> local midnight of its trading date
+#     weekly bar -> local midnight of its local Monday
+#
+# Both are invertible by construction: trading_date_of(bar_anchor(d, ex), ex) == d
+# for every exchange and every date, DST included. Midnight-UTC is invertible only
+# for zones east of UTC, which is a property of India, not a property of the code.
+# --------------------------------------------------------------------------- #
+
+
+def market_tz_name(exchange: str) -> str:
+    """The exchange's IANA zone name, for SQL binds (`AT TIME ZONE :tz`).
+
+    SQL cannot take a ZoneInfo. It takes the name — and the name must come from
+    the same authority the Python side uses, or the two drift.
+    """
+    return market_tz(exchange).key
+
+
+def monday_of(d: date) -> date:
+    """The Monday of the local week containing local date `d`.
+
+    Pure calendar arithmetic on a date that is ALREADY local — no zone involved,
+    because a date has no zone. Three modules carried their own copy of this line;
+    this is the one.
+    """
+    return d - timedelta(days=d.weekday())
+
+
+def local_midnight_in_zone(d: date, zone: ZoneInfo) -> datetime:
+    """The instant at which local date `d` begins in `zone`, as UTC.
+
+    ZoneInfo attaches the correct offset for that date, so DST is handled at the
+    point of attachment and there is no offset arithmetic anywhere.
+    """
+    return datetime.combine(d, time.min, tzinfo=zone).astimezone(UTC)
+
+
+def monday_instant_of(ts: datetime, zone: ZoneInfo) -> datetime:
+    """The local-Monday-midnight instant of the week containing instant `ts`.
+
+    The week anchor. `ts` MUST be aware: a naive datetime has no instant, so
+    there is no correct answer, and guessing one is how this class of bug is born.
+    """
+    if ts.tzinfo is None:
+        raise ValueError(
+            "monday_instant_of requires a tz-aware datetime; got naive. A naive "
+            "datetime names no instant — supply the zone at the point of origin."
+        )
+    local = ts.astimezone(zone)
+    return local_midnight_in_zone(monday_of(local.date()), zone)
+
+
+def bar_anchor(trading_date: date, exchange: str) -> datetime:
+    """THE timestamp of a daily bar: local midnight of its trading date.
+
+    The only sanctioned way to turn a trading date into a bar_timestamp.
+    """
+    return local_midnight_in_zone(trading_date, market_tz(exchange))
+
+
+def week_anchor(d: date, exchange: str) -> datetime:
+    """THE timestamp of a weekly bar: local midnight of the local Monday of `d`."""
+    zone = market_tz(exchange)
+    return local_midnight_in_zone(monday_of(d), zone)
+
+
+def trading_date_of(ts: datetime, exchange: str) -> date:
+    """The local calendar date of instant `ts` on `exchange`.
+
+    The inverse of bar_anchor, and the ONLY sanctioned way to get a date out of a
+    timestamp that came from the database. A bare `ts.date()` on a value psycopg
+    handed back is a silent read of the SESSION timezone — a clock nobody in this
+    codebase chose and nobody tests.
+    """
+    if ts.tzinfo is None:
+        raise ValueError(
+            f"trading_date_of got a naive datetime ({ts!r}). Naive datetimes do "
+            f"not name an instant; there is no correct trading date for one."
+        )
+    return ts.astimezone(market_tz(exchange)).date()
+
+
+def day_bounds(d: date, exchange: str) -> tuple[datetime, datetime]:
+    """Half-open [start, end) covering local date `d` on `exchange`.
+
+    Half-open, not inclusive-with-23:59:59.999999: the closed form has to invent
+    a last representable instant, and "the largest microsecond before midnight" is
+    a fact about the storage type, not about the day. `>= start AND < end` is the
+    only form that cannot lose a row to rounding or gain one from the next day.
+    """
+    start = local_midnight_in_zone(d, market_tz(exchange))
+    end = local_midnight_in_zone(d + timedelta(days=1), market_tz(exchange))
+    return start, end
+
+
+def range_bounds(
+    date_from: date, date_to: date, exchange: str,
+) -> tuple[datetime, datetime]:
+    """Half-open [start, end) covering local dates [date_from, date_to] inclusive."""
+    start, _ = day_bounds(date_from, exchange)
+    _, end = day_bounds(date_to, exchange)
+    return start, end
+
+
 def exchange_of_engine_or_none(db_engine) -> str | None:
     """The database's exchange, or None if it does not have exactly one.
 

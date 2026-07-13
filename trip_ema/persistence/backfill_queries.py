@@ -35,6 +35,12 @@ from datetime import UTC, date, datetime, time, timedelta
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from ..domain.market_session import (
+    market_tz_name,
+    monday_of,
+    week_anchor,
+)
+
 
 def active_symbols(
     conn: Connection, *, exchange: str,
@@ -66,28 +72,36 @@ def min_bar_date(
     default per the Step 13c design)."""
     row = conn.execute(
         text("""
-            SELECT MIN(b.bar_timestamp)::date AS min_date
+            SELECT MIN(b.bar_timestamp AT TIME ZONE :tz)::date AS min_date
               FROM ohlcv_bars b
               JOIN tickers t ON b.ticker_id = t.ticker_id
              WHERE t.exchange = :ex
                AND b.timeframe = '1D'
         """),
-        {"ex": exchange},
+        {"ex": exchange, "tz": market_tz_name(exchange)},
     ).first()
     return row.min_date if row and row.min_date else None
 
 
 def _monday_of(d: date) -> date:
-    """IST Monday of `d`. Mirrors backfill_pipeline._monday_of."""
-    return d - timedelta(days=d.weekday())
+    """Monday of the local week containing `d`.
+
+    L1-ANCHOR-RULE: delegates to the one implementation. It used to say "IST
+    Monday" and "mirrors backfill_pipeline._monday_of" — both a hardcoded market
+    and a promise no compiler checks.
+    """
+    return _domain_monday_of(d)
 
 
-def _from_dt(date_from: date) -> datetime:
-    """Mirrors backfill_pipeline._stage_delete_historical's from_dt
-    construction: IST Monday of date_from, anchored to UTC."""
-    return datetime.combine(
-        _monday_of(date_from), time(0, 0), tzinfo=UTC,
-    )
+def _from_dt(date_from: date, exchange: str) -> datetime:
+    """The instant the delete window opens: local midnight of the local Monday.
+
+    It used to hardcode "IST Monday ... anchored to UTC" — a market and a clock,
+    neither of which the caller chose. It also claimed to mirror
+    _stage_delete_historical; both now call week_anchor(), so the mirror is a
+    shared implementation rather than a promise.
+    """
+    return week_anchor(date_from, exchange)
 
 
 def historical_signals_delete_count_for_range(
@@ -104,7 +118,7 @@ def historical_signals_delete_count_for_range(
     - ticker_ids=None: scope is ALL active tickers on `exchange`
     - ticker_ids=[...]: scope is the explicit ticker_ids set
     """
-    from_dt = _from_dt(date_from)
+    from_dt = _from_dt(date_from, exchange)
     if ticker_ids is None:
         row = conn.execute(
             text("""

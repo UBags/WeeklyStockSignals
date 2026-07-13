@@ -50,6 +50,11 @@ from sqlalchemy.engine import Engine
 from .bulk_daywalk import backfill_daywalk_bulk
 
 from ..domain import Timeframe
+from ..domain.market_session import (
+    day_bounds,
+    monday_of,
+    week_anchor,
+)
 from ..etl.runner import fetch_bars_for_tickers, refresh_listings, run_backfill
 from ..fundamentals.merged_state_enrichment import (  # MERGED-STATE-ENRICHMENT
     populate_stock_state_and_enrichment_for_ticker,
@@ -829,6 +834,7 @@ def backfill(
                 scoped_tickers=scoped_tickers,
                 from_monday=from_monday,
                 to_date=date_to,
+                exchange=exchange,
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -1267,20 +1273,23 @@ def _stage_delete_historical(
     scoped_tickers: list[int],
     from_monday: date,
     to_date: date,
+    exchange: str,
 ) -> int:
     """Stage 7: DELETE historical_signals for scoped tickers with
-    computed_at in [from_monday, end-of-day(to_date)].
+    computed_at in [local-midnight(from_monday), local-midnight(to_date + 1)).
 
     DELETE-UPPER-BOUND: bounding the upper edge to the walk's date_to is
     required — the daywalk only regenerates [date_from, date_to], so an
     unbounded delete would leave a hole of missing signals in
-    (date_to, today] on any bounded (to_date < today) run."""
-    from_dt = datetime.combine(
-        from_monday, time(0, 0), tzinfo=UTC,
-    )
-    to_dt = datetime.combine(
-        to_date, time(23, 59, 59, 999999), tzinfo=UTC,
-    )
+    (date_to, today] on any bounded (to_date < today) run.
+
+    L2-ZONE-IS-NAMED: both edges were UTC, and the upper one was the closed
+    `23:59:59.999999` form. computed_at is stamped at post-session LOCAL time, so
+    for any market far enough WEST the last day's signals land after midnight UTC,
+    fall outside the closed UTC window, survive the delete — and the rebuild then
+    inserts alongside them. Half-open, market-local bounds cannot do that."""
+    from_dt = week_anchor(from_monday, exchange)
+    _, to_dt = day_bounds(to_date, exchange)
     with transaction(db_engine) as conn:
         return HistoricalSignalsRepository(
             conn,
@@ -1392,9 +1401,14 @@ def _resolve_tickers(
 
 
 def _monday_of(d: date) -> date:
-    """Monday of the week containing `d`. Matches the IST-Monday
-    anchor used throughout the V1 weekly bars."""
-    return d - timedelta(days=d.weekday())
+    """Monday of the local week containing `d`.
+
+    L1-ANCHOR-RULE: delegates. This file, backfill_queries.py and
+    indicators/aggregation.py each carried their own copy, two of them documented
+    as "mirrors the other one" — which is a comment, not a mechanism. The
+    duplicates are gone; the fact has one home.
+    """
+    return _domain_monday_of(d)
 
 
 def _emit_progress(
