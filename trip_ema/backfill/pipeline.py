@@ -152,6 +152,71 @@ class BackfillResult:
 # Entry point
 # ============================================================
 
+class ForeignIndustryLayerError(RuntimeError):
+    """The industry layer already belongs to a different exchange.
+
+    Raised INSTEAD of silently corrupting it. See
+    _assert_industry_layer_belongs_to.
+    """
+
+
+def _assert_industry_layer_belongs_to(db_engine: Engine, exchange: str) -> None:
+    """Refuse to rebuild industry indices that belong to another exchange.
+
+    Not one of the nine tables in the industry layer has an exchange column:
+
+        industry_index                PK (industry_name)
+        industry_index_value          PK (industry_name, trade_date)
+        industry_indicator_state      PK (industry_name, timeframe, date)
+        industry_index_constituent, industry_index_period,
+        industry_indicator_enrichment, industry_benchmark_stats,
+        industry_regime_breadth, sector_stock_leadlag
+
+    So NSE's "Software - Infrastructure" and NYSE's "Software - Infrastructure"
+    are THE SAME ROW. Running `backfill --exchange NYSE` against a database
+    holding NSE's indices does not fail — it UPSERTS over them, and every NSE
+    signal computed afterwards derives from an index built out of NYSE
+    constituents. Silently. With a green run.
+
+    That is the worst failure shape this codebase can produce, so it is refused.
+
+    The exchange is derived through the constituents, since the tables themselves
+    cannot say:
+
+        industry_index_constituent.ticker_id -> tickers.exchange
+
+    An empty industry layer belongs to nobody, and a fresh database can be
+    pointed at any exchange.
+
+    There is deliberately NO override. Until the schema can represent two
+    exchanges, the operation this would enable is always wrong, and a --force
+    flag would just be a footgun with a safety catch. When the exchange-key
+    migration lands, this guard is REPLACED, not bypassed.
+    """
+    with db_engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT t.exchange
+                  FROM industry_index_constituent c
+                  JOIN tickers t ON t.ticker_id = c.ticker_id
+            """)
+        )
+        present = {r[0] for r in rows}
+
+    foreign = present - {exchange}
+    if foreign:
+        raise ForeignIndustryLayerError(
+            f"REFUSING to backfill exchange {exchange!r}: the industry layer "
+            f"already holds indices built from {sorted(foreign)} constituents, "
+            f"and NONE of the nine industry tables has an exchange column "
+            f"(industry_index_value's PK is (industry_name, trade_date)). "
+            f"Rebuilding would UPSERT over {sorted(foreign)}'s industry indices "
+            f"and every signal derived from them would be silently wrong. "
+            f"Use a separate database per exchange until the industry layer is "
+            f"keyed by exchange."
+        )
+
+
 def backfill(
     db_engine: Engine,
     config,
@@ -208,6 +273,12 @@ def backfill(
     )
 
     # ---- Resolve ticker scope upfront so all stages share it ----
+    # BEFORE anything is written, and before a run row is even opened: the
+    # industry layer is shared across exchanges by omission, not by design. If it
+    # belongs to someone else, stop here rather than discovering it in the
+    # signals a week later.
+    _assert_industry_layer_belongs_to(db_engine, exchange)
+
     scoped_tickers = _resolve_tickers(db_engine, exchange, stocks)
     if not scoped_tickers:
         raise ValueError(
