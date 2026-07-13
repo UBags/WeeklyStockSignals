@@ -151,6 +151,32 @@ def _naive_combines(sources=None) -> list[str]:
     return hits
 
 
+def _machine_clocks(sources=None) -> list[str]:
+    """`datetime.now()` with no tz, and `.astimezone()` with no argument.
+
+    Rules 6 and 7. Both resolve to the clock of whatever machine happens to be
+    running the process — which on this NUC is Asia/Kolkata, which is why they were
+    invisible, which is the whole story of this workstream in two AST nodes.
+    """
+    hits: list[str] = []
+    for path in (sources if sources is not None else _all_sources()):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if not isinstance(f, ast.Attribute):
+                continue
+            if f.attr == "now" and not node.args and not node.keywords:
+                base = f.value.id if isinstance(f.value, ast.Name) else ""
+                if base in ("datetime", "dt", "_dt"):
+                    hits.append(f"{path.name}:{node.lineno}: datetime.now() — no tz")
+            if f.attr == "astimezone" and not node.args:
+                hits.append(
+                    f"{path.name}:{node.lineno}: .astimezone() — the machine's zone"
+                )
+    return hits
+
+
 class TestNoImplicitTimezone:
 
     def test_no_unqualified_timestamptz_to_date_cast(self):
@@ -203,6 +229,22 @@ class TestNoImplicitTimezone:
             "A naive datetime names no instant. Bound against a timestamptz it is "
             "coerced using the SESSION timezone — a clock nobody chose. Use "
             "bar_anchor / week_anchor / day_bounds / range_bounds." + NL
+            + NL.join(hits)
+        )
+
+    def test_no_machine_clock(self):
+        """Rules 6 and 7: datetime.now() with no tz, .astimezone() with no arg.
+
+        Neither can corrupt data — both were in GUI display paths — and both are
+        the same mistake in the same costume: reading the clock of whatever box the
+        process happens to be on. That box is in Bangalore, which is why a NYSE
+        file's mtime rendered in IST and nobody blinked.
+        """
+        hits = _machine_clocks()
+        assert not hits, (
+            "The machine's clock is not the market's clock and is not UTC. Say "
+            "which you mean: datetime.now(UTC), market_now(exchange), "
+            "display_now(db_engine), or .astimezone(market_tz(exchange))." + NL
             + NL.join(hits)
         )
 
@@ -270,6 +312,28 @@ class TestTheGuardCanActuallyFail:
             "",
         ]))
         assert len(_naive_combines([f])) == 2
+
+    def test_rejects_the_machine_clocks(self, tmp_path):
+        """The exact two lines that were in the GUI."""
+        f = tmp_path / "bad.py"
+        f.write_text(NL.join([
+            "import datetime",
+            'ts = datetime.now().strftime("%Y%m%d_%H%M%S")',
+            'label = dt.astimezone().strftime("%Y-%m-%d %H:%M")',
+            "",
+        ]))
+        assert len(_machine_clocks([f])) == 2
+
+    def test_accepts_a_named_clock(self, tmp_path):
+        f = tmp_path / "good.py"
+        f.write_text(NL.join([
+            "import datetime",
+            "a = datetime.now(UTC)",
+            "b = datetime.now(market_tz(exchange))",
+            "c = dt.astimezone(market_tz(exchange))",
+            "",
+        ]))
+        assert not _machine_clocks([f])
 
     def test_accepts_a_market_local_anchor(self, tmp_path):
         f = tmp_path / "good.py"

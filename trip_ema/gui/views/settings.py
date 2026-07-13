@@ -28,7 +28,10 @@ from __future__ import annotations
 
 import logging
 import shutil
-from datetime import datetime
+from datetime import (
+    UTC,
+    datetime,
+)
 from pathlib import Path
 
 from PySide6.QtCore import QSettings
@@ -363,7 +366,11 @@ class SettingsView(QWidget):
                 "The current config path is not set or does not exist.",
             )
             return
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # L8-NO-MACHINE-CLOCK: was datetime.now() — naive, and the machine's clock.
+        # A config file belongs to no exchange, so there is no market_now() to reach
+        # for; UTC is the honest answer, it sorts correctly, and the Z says so out
+        # loud instead of leaving the reader to guess whose midnight this was.
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%SZ")
         suggested = str(
             Path.cwd() / f"{self._config_path.stem}_{ts}.yaml"
         )

@@ -16,7 +16,10 @@ Compact layout (all controls on one row, metadata on a second):
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import (
+    UTC,
+    datetime,
+)
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
@@ -27,6 +30,10 @@ from PySide6.QtWidgets import (
 from ..http_client import TripEmaHttpClient
 from ..workers import submit
 from .widgets.exchange_picker import ExchangePicker
+from ...domain.market_session import (
+    UnknownExchangeError,
+    market_tz,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,21 +55,41 @@ def _format_size(n_bytes: int | None) -> str:
     return f"{n_bytes / (1024 ** 3):.2f} GB"
 
 
-def _format_mtime(mtime_iso: str | None) -> str:
+def _format_mtime(mtime_iso: str | None, exchange: str | None = None) -> str:
+    """When this exchange's signals file was last written, in THAT exchange's clock.
+
+    L8-NO-MACHINE-CLOCK: this used to be `.astimezone()` — no argument — which
+    converts to the machine's zone. The panel is laid out per exchange ("Last
+    generation per exchange"), so on a NUC in Bangalore a NYSE file written at
+    17:05 ET rendered as 02:35 the next morning. Not wrong, exactly; just the answer
+    to a question nobody asked.
+
+    `exchange=None` falls back to UTC, labelled as such. That is the same call
+    display_now() makes when it has no exchange to ask: UTC is explicit and
+    deterministic, and the machine's local clock is neither.
+    """
     if not mtime_iso:
         return "\u2014"
     try:
         dt = datetime.fromisoformat(mtime_iso.replace("Z", "+00:00"))
-        return dt.astimezone().strftime("%Y-%m-%d %H:%M")
     except (TypeError, ValueError):
         return mtime_iso[:16]
 
+    if exchange is None:
+        return dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    try:
+        return dt.astimezone(market_tz(exchange)).strftime("%Y-%m-%d %H:%M")
+    except UnknownExchangeError:
+        # A DISPLAY fallback, never a compute one: a label may say UTC rather than
+        # crash the panel it lives in.
+        return dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
-def _format_metadata_line(payload: dict) -> str:
+
+def _format_metadata_line(payload: dict, exchange: str | None = None) -> str:
     if not payload.get("exists"):
         return "no file yet"
     size = _format_size(payload.get("size_bytes"))
-    mtime = _format_mtime(payload.get("mtime"))
+    mtime = _format_mtime(payload.get("mtime"), exchange)
     counts = payload.get("counts") or {}
     total = counts.get("signals_total")
     total_str = f"{total:,} signals" if total is not None else "(no counts)"
@@ -325,7 +352,7 @@ class SignalGenerationPanel(QGroupBox):
         label = self._metadata_labels.get(exchange)
         if label is None:
             return
-        label.setText(_format_metadata_line(payload))
+        label.setText(_format_metadata_line(payload, exchange))
         if payload.get("exists"):
             label.setStyleSheet("color: #1a1a1a;")
         else:
