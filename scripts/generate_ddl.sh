@@ -1,0 +1,1 @@
+sudo -u postgres pg_dump -d trip_ema --schema-only --schema=public > DDL.txt
