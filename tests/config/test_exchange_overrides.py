@@ -63,9 +63,9 @@ market_hours:
     tz: Asia/Kolkata
     weekdays: [1, 2, 3, 4, 5]
   - exchange: NYSE
-    open: "09:15"
-    close: "15:30"
-    tz: Asia/Kolkata
+    open: "09:30"
+    close: "16:00"
+    tz: America/New_York
     weekdays: [1, 2, 3, 4, 5]
 """
 

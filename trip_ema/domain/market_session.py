@@ -282,6 +282,30 @@ _EXCHANGE_SPECS: dict[str, _ExchangeSpec] = {
     "LSE": _ExchangeSpec("Europe/London", time(8, 0), time(16, 30), "GB"),
 }
 
+# L6-SPECS-ARE-ISOLATED: the specs as they are BEFORE any config touches them.
+#
+# _EXCHANGE_SPECS is a module-global mutable dict and seed_specs_from_config()
+# rewrites it in place — which is right for a process that loads one config at
+# startup, and catastrophic for a process that loads several. A test suite loads
+# dozens. One fixture declaring `exchange: NYSE, tz: Asia/Kolkata` (which one did)
+# silently moved New York to India for every test that ran after it in the same
+# worker, and nothing noticed until something finally asked market_tz("NYSE").
+#
+# Snapshotting the defaults costs one dict copy and gives the state a way back.
+_DEFAULT_EXCHANGE_SPECS: dict[str, _ExchangeSpec] = dict(_EXCHANGE_SPECS)
+
+
+def reset_specs_to_defaults() -> None:
+    """Restore the exchange registry to its pre-config state.
+
+    For tests. Production seeds once, at startup, from the operator's config and
+    never looks back — that is the intended lifecycle. A test process, though,
+    loads many configs, and each one is entitled to be wrong about markets it does
+    not care about. This is the undo that makes that safe.
+    """
+    _EXCHANGE_SPECS.clear()
+    _EXCHANGE_SPECS.update(_DEFAULT_EXCHANGE_SPECS)
+
 
 class UnknownExchangeError(ValueError):
     """No session spec for this exchange. There is no safe default."""
