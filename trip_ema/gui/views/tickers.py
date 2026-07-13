@@ -88,6 +88,7 @@ from ..signals_helpers import (
 from ..workers import RefreshScheduler, submit
 from ..determine_background_color import DetermineBackgroundColor
 from ..queries import SignalColorInputs
+from ...fundamentals.market_session import exchange_of_engine, market_tz
 
 logger = logging.getLogger(__name__)
 
@@ -825,7 +826,9 @@ class TickersView(QWidget):
         #   "at DD-MM-YY HH:MM" = computed_at (when the runner/scheduler
         #                       emitted the row, IST). Useful to see
         #                       generation time during a live tick.
-        ist = ZoneInfo("Asia/Kolkata")
+        # The exchange's clock, not India's. Under one-database-per-exchange the
+        # GUI's database IS the exchange.
+        ist = market_tz(exchange_of_engine(self._db._engine))
         lines = []
         for e in events:
             bar_ts = getattr(e, "bar_timestamp", None)

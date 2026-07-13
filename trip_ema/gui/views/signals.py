@@ -57,6 +57,7 @@ from .backtest_dialog import BacktestDialog
 from .industry_panel import IndustryPanel
 from .signal_generation_panel import SignalGenerationPanel
 from ..determine_background_color import DetermineBackgroundColor
+from ...fundamentals.market_session import exchange_of_engine, market_tz
 
 logger = logging.getLogger(__name__)
 
@@ -605,8 +606,7 @@ class SignalsView(QWidget):
         #            the operator sees local-clock times.
         # Hoisted out of the per-row loop so the closure doesn't
         # capture a rebound loop variable (ruff B023).
-        from zoneinfo import ZoneInfo as _ZI
-        ist = _ZI("Asia/Kolkata")
+        ist = market_tz(exchange_of_engine(self._db._engine))
 
         def _to_ist(ts):
             if not ts:

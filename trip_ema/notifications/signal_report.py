@@ -41,8 +41,8 @@ from ..persistence.subscribers_repo import SubscriberRecord
 from .benchmark_rerank import fetch_rank_scores
 from .compose_email import EnrichedSignalRow, build_email_body
 from .send_email import SendResult, send_email
+from ..fundamentals.market_session import exchange_of_engine, market_tz
 
-_IST = ZoneInfo("Asia/Kolkata")
 
 # Sentinel for "no restriction on this dimension".
 ALL = "ALL"
@@ -100,10 +100,13 @@ def send_signal_report(
     SendResult.
     """
     now = now or datetime.now(UTC)
-    today_ist = now.astimezone(_IST).date()
+    # The MARKET's today. This gates the paid-subscription window below
+    # (from_date <= today <= to_date) — on the wrong clock a subscriber is
+    # entitled on the wrong day.
+    today_market = now.astimezone(market_tz(exchange_of_engine(db_engine))).date()
 
     # --- Entitlement gate: today within the paid subscription window ---
-    if not (from_date <= today_ist <= to_date):
+    if not (from_date <= today_market <= to_date):
         return None
 
     # --- EOD gate ---
@@ -121,9 +124,9 @@ def send_signal_report(
         which_exchanges=which_exchanges,
         which_industries=which_industries,
         which_stocks=which_stocks,
-        # CHAIN-CLOCK-FIX: today_ist is already computed above for the
+        # CHAIN-CLOCK-FIX: today_market is already computed above for the
         # entitlement gate — reuse it rather than reaching for a second clock.
-        as_of_date=today_ist,
+        as_of_date=today_market,
     )
     if not rows:
         return None

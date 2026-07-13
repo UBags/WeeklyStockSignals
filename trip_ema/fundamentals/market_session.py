@@ -306,6 +306,31 @@ def post_session_time(exchange: str) -> time:
     return time(h, close.minute)
 
 
+def exchange_of_conn(conn) -> str:
+    """Which exchange does this DATABASE belong to? (Connection variant.)
+
+    Same invariant as exchange_of_engine — exactly one exchange per database —
+    for callers that hold a Connection rather than an Engine (the email composer
+    runs inside the caller's transaction).
+
+    Not cached: a Connection is short-lived and the query is a single indexed
+    read. exchange_of_engine caches on the URL, which is the hot path.
+    """
+    from sqlalchemy import text as _text
+
+    rows = conn.execute(_text(
+        "SELECT DISTINCT exchange FROM tickers WHERE exchange IS NOT NULL"
+    ))
+    found = sorted(r[0] for r in rows)
+    if len(found) != 1:
+        raise ValueError(
+            f"exchange_of_conn: expected EXACTLY ONE exchange in this database, "
+            f"found {found or 'none'}. Under one-database-per-exchange a database "
+            f"belongs to a single exchange."
+        )
+    return found[0]
+
+
 def exchange_of_engine(db_engine) -> str:
     """Which exchange does this DATABASE belong to?
 

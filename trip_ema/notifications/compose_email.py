@@ -36,11 +36,11 @@ from sqlalchemy.engine import Connection
 
 from ..persistence.subscribers_repo import SubscriberRecord
 from .benchmark_rerank import fetch_rank_scores
+from ..fundamentals.market_session import exchange_of_conn, market_tz
 
 # INTRADAY-CHAIN: the chain is keyed on the trading day in exchange-local
 # time. current_signals.bar_timestamp is the week anchor, so it cannot
 # supply the day.
-_IST = ZoneInfo("Asia/Kolkata")
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +205,12 @@ def _fetch_enriched_signals(
     # — the wall clock said D+1 and EVERY chain silently disappeared. It also
     # made the feature untestable: tests pass an explicit `now=`, which was
     # being ignored here.
-    _today = now.astimezone(_IST).date()
+    # THE SAME CLOCK that wrote signal_date. recompute_market stamps it with
+    # market_tz(exchange); resolving the day here with a different zone is
+    # precisely the two-clocks bug the comment above describes — and for any
+    # exchange outside India the two WOULD disagree, and every chain would
+    # silently disappear.
+    _today = now.astimezone(market_tz(exchange_of_conn(conn))).date()
     chains = IntradaySignalLogRepository(conn).chains_for_date(
         signal_date=_today, ticker_ids=ticker_ids,
     )

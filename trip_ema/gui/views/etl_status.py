@@ -69,10 +69,10 @@ from .widgets.cycle_stdout_parser import (
     parse_cycle_failure_summary, parse_stage_line,
 )
 from .widgets.ticker_chip import TickerChipArea
+from ...fundamentals.market_session import exchange_of_engine, market_tz
 
 logger = logging.getLogger(__name__)
 
-IST = ZoneInfo("Asia/Kolkata")
 
 
 # ============================================================
@@ -111,12 +111,18 @@ KIND_LABELS = {
 CANCEL_GRACE_MS = 5000
 
 
-def _format_started_at(started_at: datetime) -> str:
-    started_ist = started_at.astimezone(IST)
-    today_ist = datetime.now(IST).date()
-    if started_ist.date() == today_ist:
-        return started_ist.strftime("%H:%M:%S")
-    return started_ist.strftime("%Y-%m-%d %H:%M")
+def _format_started_at(started_at: datetime, exchange: str) -> str:
+    """Render a run's start time in the EXCHANGE's local clock.
+
+    An operator watching NYSE wants New York time, not Indian time. The GUI is
+    the surface decisions get made on.
+    """
+    zone = market_tz(exchange)
+    started_local = started_at.astimezone(zone)
+    today_local = datetime.now(zone).date()
+    if started_local.date() == today_local:
+        return started_local.strftime("%H:%M:%S")
+    return started_local.strftime("%Y-%m-%d %H:%M")
 
 
 def _format_duration(seconds: float | None) -> str:
@@ -889,7 +895,9 @@ class EtlStatusView(QWidget):
 
         for row in rows:
             activity = KIND_LABELS.get(row.kind, row.kind)
-            started = _format_started_at(row.started_at)
+            started = _format_started_at(
+                row.started_at, exchange_of_engine(self._db._engine),
+            )
             duration = _format_duration(row.duration_seconds)
             attempted = (
                 str(row.tickers_attempted)

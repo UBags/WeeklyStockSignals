@@ -85,17 +85,13 @@ _BASELINE: dict[str, int] = {
     "trip_ema/fundamentals/market_cap_fetch.py": 1,
     "trip_ema/fundamentals/monthly_recheck.py": 1,
     "trip_ema/gui/csv_export.py": 1,
-    "trip_ema/gui/views/etl_status.py": 1,
     "trip_ema/gui/views/notifications.py": 1,
     "trip_ema/gui/views/settings.py": 1,
-    "trip_ema/gui/views/signals.py": 1,
     "trip_ema/gui/views/subscribers.py": 1,
     "trip_ema/gui/views/system_health.py": 1,
-    "trip_ema/gui/views/tickers.py": 2,
+    "trip_ema/gui/views/tickers.py": 1,
     "trip_ema/gui/views/widgets/backfill_dialog.py": 2,
     "trip_ema/gui/views/widgets/backfill_shares_dialog.py": 1,
-    "trip_ema/notifications/compose_email.py": 1,
-    "trip_ema/notifications/signal_report.py": 1,
     "trip_ema/transports/http/routes/fundamentals.py": 2,
 }
 
