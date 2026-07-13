@@ -156,50 +156,20 @@
       "mock_patch": 0,
       "setattr": 1
     },
-    "transports/http/test_admin_v1pipeline.py": {
-      "env": 1,
-      "mock_patch": 0,
-      "setattr": 0
-    },
-    "transports/http/test_admin_v1pipeline_enrichment.py": {
-      "env": 1,
-      "mock_patch": 0,
-      "setattr": 0
-    },
-    "transports/http/test_admin_v1pipeline_industry_index_value.py": {
-      "env": 1,
-      "mock_patch": 0,
-      "setattr": 0
-    },
-    "transports/http/test_admin_v1pipeline_industry_indicator_enrichment.py": {
-      "env": 1,
-      "mock_patch": 0,
-      "setattr": 0
-    },
-    "transports/http/test_admin_v1pipeline_industry_indicator_state.py": {
-      "env": 1,
-      "mock_patch": 0,
-      "setattr": 0
-    },
     "transports/http/test_fundamentals_routes.py": {
-      "env": 1,
+      "env": 0,
       "mock_patch": 0,
       "setattr": 7
     },
     "transports_pure/test_admin_etl.py": {
-      "env": 1,
+      "env": 0,
       "mock_patch": 0,
       "setattr": 7
     },
     "transports_pure/test_admin_exchange_state.py": {
-      "env": 1,
+      "env": 0,
       "mock_patch": 0,
       "setattr": 5
-    },
-    "transports_pure/test_admin_exchanges.py": {
-      "env": 1,
-      "mock_patch": 0,
-      "setattr": 0
     }
   }
 }

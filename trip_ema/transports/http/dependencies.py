@@ -12,6 +12,7 @@ visible at the route signature level.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Annotated, Any
 
@@ -189,24 +190,46 @@ def get_redis_queue():
 # ---------- Admin auth ---------- #
 
 
+def _admin_token_env(config: Config) -> str:
+    """The name of the env var holding the admin token."""
+    return getattr(config.http, "admin_token_env", None) or "TRIP_EMA_ADMIN_TOKEN"
+
+
+def get_admin_token(
+    config: Config = Depends(get_config),
+) -> str | None:
+    """The expected admin bearer token, or None when admin auth is unconfigured.
+
+    This is the ONE place the admin secret is read out of the environment. It
+    is a dependency rather than an inline `os.environ.get` inside the gate for
+    the usual reason: a dependency can be overridden. Tests wire a token with
+    `app.dependency_overrides[get_admin_token]` instead of mutating os.environ
+    — which leaked across tests (there were un-restored `os.environ.pop` calls
+    in the route suites) and is hostile to `pytest -n auto`.
+
+    Returns None => admin endpoints are disabled and return 503. That contract
+    is unchanged.
+    """
+    return os.environ.get(_admin_token_env(config))
+
+
 def require_admin_token(
     authorization: Annotated[str | None, Header()] = None,
     config: Config = Depends(get_config),
+    expected: str | None = Depends(get_admin_token),
 ) -> None:
     """Bearer-token gate for admin endpoints.
 
-    Token is read from the env var named by `http.admin_token_env`. If the
-    env var is unset, admin endpoints are completely disabled (any request
-    returns 503). If the env var is set, the header must match exactly.
+    The expected token comes from `get_admin_token`. If it is None, admin
+    endpoints are completely disabled (any request returns 503). Otherwise the
+    header must match exactly.
     """
-    import os
-
-    token_env = getattr(config.http, "admin_token_env", None) or "TRIP_EMA_ADMIN_TOKEN"
-    expected = os.environ.get(token_env)
     if not expected:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Admin endpoints disabled: {token_env} not set",
+            detail=(
+                f"Admin endpoints disabled: {_admin_token_env(config)} not set"
+            ),
         )
 
     if not authorization or not authorization.startswith("Bearer "):

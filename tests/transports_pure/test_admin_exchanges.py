@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from trip_ema.transports.http import create_app
 from trip_ema.transports.http.dependencies import (
+    get_admin_token,
     # === STEP 14B-FIXUP4-import: scheduler/distributor getters stripped ===
     get_config, get_db_engine,
     get_etl_executor, get_redis_queue, )
@@ -22,15 +23,16 @@ from trip_ema.transports.http.dependencies import (
 # ---------- shared fixtures ---------- #
 
 
-@pytest.fixture
-def admin_token(monkeypatch):
-    monkeypatch.setenv("TRIP_EMA_ADMIN_TOKEN", "test-token-xyz")
-    return "test-token-xyz"
+ADMIN_TOKEN = "test-token-xyz"
+"""The token the app is configured with, via the get_admin_token override in
+_make_client. No env var is touched: the gate reads its secret through a
+dependency now, so tests wire it the same way they wire every other
+collaborator."""
 
 
 @pytest.fixture
-def auth_headers(admin_token):
-    return {"Authorization": f"Bearer {admin_token}"}
+def auth_headers():
+    return {"Authorization": f"Bearer {ADMIN_TOKEN}"}
 
 
 def _make_config(market_hours_exchanges=("NSE",)):
@@ -42,8 +44,9 @@ def _make_config(market_hours_exchanges=("NSE",)):
     return cfg
 
 
-def _make_client(*, config=None):
+def _make_client(*, config=None, admin_token=ADMIN_TOKEN):
     app = create_app()
+    app.dependency_overrides[get_admin_token] = lambda: admin_token
     app.dependency_overrides[get_config] = lambda: (config or _make_config())
     app.dependency_overrides[get_db_engine] = lambda: MagicMock()
     app.dependency_overrides[get_etl_executor] = lambda: MagicMock()
@@ -101,9 +104,7 @@ class TestAdminExchangesList:
         assert body["exchanges"] == ["BSE", "NSE", "NYSE"]
 
     def test_requires_auth(self):
-        import os
-        os.environ.pop("TRIP_EMA_ADMIN_TOKEN", None)
-        client = _make_client()
+        client = _make_client(admin_token=None)
         resp = client.get("/v1/admin/exchanges")
         # Either 401 (auth header missing) or 503 (admin disabled) —
         # mirrors the pattern in the sibling route tests.

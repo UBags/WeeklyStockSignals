@@ -38,6 +38,7 @@ from trip_ema.config.schema import (
 from trip_ema.transports.http import create_app
 # PHASE-3E: get_cache dependency dropped (SignalCache class deleted).
 from trip_ema.transports.http.dependencies import (
+    get_admin_token,
     get_config,
     get_db_engine,
     get_redis_queue,
@@ -49,6 +50,11 @@ from tests.persistence.conftest import (  # noqa: F401
     postgresql,
     postgresql_proc,
 )
+
+
+ADMIN_TOKEN = "test-token"
+"""Token the http_app fixture configures the app with, via the get_admin_token
+dependency override. Tests using http_app send `Bearer test-token`."""
 
 
 def _build_test_config(admin_token_env: str = "TRIP_EMA_ADMIN_TOKEN") -> Config:
@@ -95,6 +101,7 @@ def http_app() -> Iterator[HttpFixture]:
 
     app = create_app()
     app.dependency_overrides[get_config] = lambda: config
+    app.dependency_overrides[get_admin_token] = lambda: ADMIN_TOKEN
     app.dependency_overrides[get_redis_queue] = lambda: None
     # db_engine is NOT overridden by default; tests that need it set
     # their own overrides.

@@ -11,21 +11,23 @@ from fastapi.testclient import TestClient
 
 from trip_ema.transports.http import create_app
 from trip_ema.transports.http.dependencies import (
+    get_admin_token,
     # === STEP 14B-FIXUP5-import: scheduler/distributor getters stripped ===
     get_v1_cache, get_config, get_db_engine,
     get_etl_executor, get_redis_queue,
 )
 
 
-@pytest.fixture
-def admin_token(monkeypatch):
-    monkeypatch.setenv("TRIP_EMA_ADMIN_TOKEN", "test-token-xyz")
-    return "test-token-xyz"
+ADMIN_TOKEN = "test-token-xyz"
+"""The token the app is configured with, via the get_admin_token override in
+_make_client. No env var is touched: the gate reads its secret through a
+dependency now, so tests wire it the same way they wire every other
+collaborator."""
 
 
 @pytest.fixture
-def auth_headers(admin_token):
-    return {"Authorization": f"Bearer {admin_token}"}
+def auth_headers():
+    return {"Authorization": f"Bearer {ADMIN_TOKEN}"}
 
 
 class FakeExecutor:
@@ -47,8 +49,9 @@ def _make_config():
     return cfg
 
 
-def _make_client(*, config=None, db_engine=None, executor=None):
+def _make_client(*, config=None, db_engine=None, executor=None, admin_token=ADMIN_TOKEN):
     app = create_app()
+    app.dependency_overrides[get_admin_token] = lambda: admin_token
     app.dependency_overrides[get_config] = (
         lambda: (config or _make_config())
     )
@@ -193,7 +196,7 @@ class TestIndustryIndexValueAuth:
         )
         assert resp.status_code == 503
 
-    def test_auth_required(self, admin_token):
+    def test_auth_required(self):
         client = _make_client(executor=FakeExecutor())
         resp = client.post(
             "/v1/admin/v1pipeline/industry-index-value"

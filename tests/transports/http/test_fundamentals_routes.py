@@ -4,8 +4,9 @@ Pattern matches the existing admin_etl route tests:
   - http_app fixture from conftest provides a TestClient.
   - db_engine fixture provides a real Postgres with Alembic head.
   - We override get_db_engine to point at our test engine.
-  - We set TRIP_EMA_ADMIN_TOKEN in os.environ for the require_admin_token
-    gate. tests/transports/http/conftest.py already sets the default.
+  - The admin gate reads its token through the get_admin_token dependency,
+    which conftest's http_app fixture overrides with conftest.ADMIN_TOKEN.
+    No environment variable is involved.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from trip_ema.persistence.fundamentals_repo import (
     InstrumentIndustryRepository,
 )
 from trip_ema.persistence.tickers_repo import TickersRepository
+from .conftest import ADMIN_TOKEN
 from trip_ema.transports.http.dependencies import (
     get_db_engine,
     get_etl_executor,
@@ -33,12 +35,7 @@ from trip_ema.transports.http.dependencies import (
 # ---------- fixtures ---------- #
 
 
-AUTH_HEADERS = {"Authorization": "Bearer test-token"}
-
-
-@pytest.fixture(autouse=True)
-def _admin_token_env(monkeypatch):
-    monkeypatch.setenv("TRIP_EMA_ADMIN_TOKEN", "test-token")
+AUTH_HEADERS = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
 
 
 @pytest.fixture
