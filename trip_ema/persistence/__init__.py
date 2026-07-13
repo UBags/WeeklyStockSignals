@@ -12,6 +12,10 @@ public API — `app.py` uses Alembic exclusively via the bridge.
 """
 
 from .bars_repo import BarsRepository
+from .fetch_status_repo import (
+    FetchStatus,
+    FundamentalsFetchStatusRepository,
+)
 from .connection import (
     build_db_url,
     create_engine_from_config,
@@ -27,6 +31,8 @@ from .tickers_repo import TickerRecord, TickersRepository
 
 __all__ = [
     "BarsRepository",
+    "FetchStatus",
+    "FundamentalsFetchStatusRepository",
     # === STEP 15-B7-all: SignalsRepository removed ===
     "SubscriberRecord",
     "SubscribersRepository",
