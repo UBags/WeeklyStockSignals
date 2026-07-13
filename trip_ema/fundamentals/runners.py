@@ -51,6 +51,9 @@ from sqlalchemy import Engine, text
 
 from .parallel import fan_out
 from ..persistence import transaction
+from ..persistence.fetch_status_repo import (
+    FundamentalsFetchStatusRepository,
+)
 from ..persistence.fundamentals_repo import (
     FundamentalsRunRepository,
     IndustryOverrideRepository,
@@ -424,11 +427,16 @@ _MISSING_FROM_TABLES = {
     "quarterly_financials",
 }
 
+# Datasets fundamentals_fetch_status can hold a verdict for. Whitelisted for the
+# same reason as the table names above: it reaches SQL.
+_FETCH_STATUS_DATASETS = {"shares", "financials", "industry"}
+
 
 def _load_active_tickers_for_exchange(
     db_engine: Engine, exchange: str, *,
     missing_from: str | None = None,
     eq_only: bool = False,
+    skip_unavailable: str | None = None,
 ) -> list[dict]:
     """Return [{id, symbol, instrument_type}, ...] for active tickers
     on `exchange`.
@@ -458,6 +466,26 @@ def _load_active_tickers_for_exchange(
     # for shares is ~13 minutes of guaranteed, repeated failure.
     where_eq = " AND t.instrument_type = 'EQ'" if eq_only else ""
 
+    # Tickers the provider has already told us it has nothing for
+    # (SharesFetchPermanent: "there's nothing to retry"). Without this the
+    # gap-only sweep re-asks the same dead question every single run — 107 EQ
+    # tickers, ~2.3s each, failing identically, forever.
+    where_dark = ""
+    if skip_unavailable is not None:
+        if skip_unavailable not in _FETCH_STATUS_DATASETS:
+            raise ValueError(
+                f"_load_active_tickers_for_exchange: skip_unavailable="
+                f"{skip_unavailable!r} is not one of "
+                f"{sorted(_FETCH_STATUS_DATASETS)}"
+            )
+        where_dark = """
+              AND NOT EXISTS (
+                  SELECT 1 FROM fundamentals_fetch_status f
+                   WHERE f.ticker_id = t.ticker_id
+                     AND f.dataset = :dark_ds
+                     AND f.status = 'UNAVAILABLE'
+              )"""
+
     where_missing = ""
     if missing_from is not None:
         if missing_from not in _MISSING_FROM_TABLES:
@@ -471,14 +499,18 @@ def _load_active_tickers_for_exchange(
                    WHERE x.ticker_id = t.ticker_id
               )"""
 
+    params: dict = {"ex": exchange}
+    if skip_unavailable is not None:
+        params["dark_ds"] = skip_unavailable
+
     with db_engine.connect() as conn:
         rows = conn.execute(text(f"""
             SELECT t.ticker_id, t.symbol, t.instrument_type
             FROM tickers t
             WHERE t.exchange = :ex AND t.is_active = TRUE
-              AND t.delisted_at IS NULL{where_eq}{where_missing}
+              AND t.delisted_at IS NULL{where_eq}{where_missing}{where_dark}
             ORDER BY t.symbol
-        """), {"ex": exchange})
+        """), params)
         return [
             {
                 "id": int(r[0]),
@@ -658,6 +690,10 @@ def run_shares_refresh(
             # An ETF can never have sharesOutstanding — fetching one is a
             # guaranteed SharesFetchPermanent. 438 gaps -> 107 real ones.
             eq_only=only_missing,
+            # ...and of those 107, the ones yfinance has already told us it has
+            # nothing for drop out too. First sweep discovers them; every sweep
+            # after that skips them.
+            skip_unavailable="shares" if only_missing else None,
         )
         if not ticker_list:
             logger.warning(
@@ -710,6 +746,11 @@ def run_shares_refresh(
                         shares_outstanding=info.shares_outstanding,
                         shares_source=info.source,
                     )
+                    # This ticker WAS dark and now has data — a microcap that
+                    # picked up yfinance coverage. Release it, in the same
+                    # transaction as the snapshot so the two cannot disagree.
+                    # Without this the verdict outlives its truth.
+                    FundamentalsFetchStatusRepository(conn).clear(tid, "shares")
                 succeeded += 1
             except SharesFetchRateLimited as e:
                 logger.warning(
@@ -737,7 +778,25 @@ def run_shares_refresh(
                         symbol, e2,
                     )
                     failed += 1
-            except (SharesFetchTransient, SharesFetchPermanent) as e:
+            except SharesFetchPermanent as e:
+                # The provider was asked and has nothing — "there's nothing to
+                # retry". Record it, so the gap-only sweep stops re-asking and
+                # so the fidelity audit can distinguish data we are MISSING from
+                # data that DOES NOT EXIST. Deliberately NOT a row in
+                # instrument_shares: that table holds facts about the company,
+                # and a today-dated sentinel there would shadow a ticker's real
+                # historical shares via get_latest's ORDER BY as_of_date DESC.
+                logger.info(
+                    "shares unavailable upstream for %s: %s", symbol, e,
+                )
+                with transaction(db_engine) as conn:
+                    FundamentalsFetchStatusRepository(conn).mark_unavailable(
+                        tid, "shares", str(e),
+                    )
+                failed += 1
+            except SharesFetchTransient as e:
+                # A hiccup, not an absence. Retried naturally on the next run;
+                # recording it would only accumulate noise.
                 logger.warning("Failed to fetch shares for %s: %s", symbol, e)
                 failed += 1
             except Exception as e:
@@ -1100,6 +1159,7 @@ def run_financials_refresh(
             missing_from="quarterly_financials" if only_missing else None,
             # ETFs have no quarterly financials either.
             eq_only=only_missing,
+            skip_unavailable="financials" if only_missing else None,
         )
         if not ticker_list:
             logger.warning(
@@ -1186,7 +1246,17 @@ def run_financials_refresh(
                         symbol, e2,
                     )
                     failed += 1
-            except (FinancialsFetchTransient, FinancialsFetchPermanent) as e:
+            except FinancialsFetchPermanent as e:
+                # See the shares handler: an absence, not a failure.
+                logger.info(
+                    "financials unavailable upstream for %s: %s", symbol, e,
+                )
+                with transaction(db_engine) as conn:
+                    FundamentalsFetchStatusRepository(conn).mark_unavailable(
+                        tid, "financials", str(e),
+                    )
+                failed += 1
+            except FinancialsFetchTransient as e:
                 logger.warning("Failed to fetch financials for %s: %s", symbol, e)
                 failed += 1
             except Exception as e:

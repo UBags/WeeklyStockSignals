@@ -73,12 +73,36 @@ class DatasetFidelity:
     covered: int | None = None       # entities with data
     universe: int | None = None      # entities that should have data
     detail: str = ""
+    unavailable: int = 0
+    """Entities the PROVIDER has nothing for — asked, and answered "no data".
+
+    The third bucket, and the one that makes this audit usable as a gate.
+    Without it, `covered < universe` is the only signal available and permanent
+    upstream absence is indistinguishable from a stage that never ran. ~107 NSE
+    microcaps have no sharesOutstanding on yfinance and never will; scoring them
+    as a gap leaves quarterly_financials PARTIAL forever, so READY is red forever,
+    and a gate that can never go green is not a gate — it cannot guard the wipe it
+    exists to guard.
+
+    Sourced from fundamentals_fetch_status, which records SharesFetchPermanent /
+    FinancialsFetchPermanent verdicts. It is a record of what we learned, not a
+    cache: the monthly job re-asks and clear() releases any ticker that gains
+    coverage.
+    """
 
     @property
     def coverage(self) -> float | None:
         if self.universe in (None, 0) or self.covered is None:
             return None
         return self.covered / self.universe
+
+    @property
+    def missing(self) -> int | None:
+        """Entities with no data AND no provider verdict — i.e. genuinely
+        unfetched. This is the number that should be zero."""
+        if self.universe is None or self.covered is None:
+            return None
+        return max(0, self.universe - self.covered - self.unavailable)
 
     def render(self) -> str:
         cov = self.coverage
@@ -87,9 +111,13 @@ class DatasetFidelity:
             f"{self.covered}/{self.universe}"
             if self.universe is not None else f"{self.rows}"
         )
+        detail = self.detail
+        if self.unavailable:
+            note = f"{self.unavailable} unavailable upstream"
+            detail = f"{note}; {detail}" if detail else note
         return (
             f"  {self.status:<8} {self.dataset:<24} {cov_s}  "
-            f"{counts:<14} {self.detail}"
+            f"{counts:<14} {detail}"
         )
 
 
@@ -138,12 +166,41 @@ class FidelityReport:
         return "\n".join(lines)
 
 
-def _status_for_coverage(covered: int, universe: int) -> str:
-    if universe == 0 or covered == 0:
+def _status_for_coverage(
+    covered: int, universe: int, unavailable: int = 0,
+) -> str:
+    """OK means "as good as it CAN be", not "every cell is full".
+
+    A dataset is OK when nothing is genuinely missing — every entity either has
+    data, or the provider has been asked and has none. Scoring permanent upstream
+    absence as a gap would leave quarterly_financials PARTIAL in perpetuity and
+    make READY unreachable, which would render the whole audit decorative.
+
+    The coverage thresholds still apply to what remains, so a stage that half-ran
+    is still caught.
+    """
+    if universe == 0:
         return "MISSING"
-    ratio = covered / universe
-    if ratio >= _COVERAGE_OK:
+    missing = max(0, universe - covered - unavailable)
+    if covered == 0:
+        return "MISSING"
+    if missing == 0:
         return "OK"
+
+    # There ARE genuinely unfetched entities, so this is not OK — regardless of
+    # how good the percentage looks.
+    #
+    # The old rule was `coverage >= 0.95 -> OK`, and it had to be: without a
+    # record of provider-side absence, "107 tickers with no data" and "107
+    # tickers the provider has nothing for" were the same observation, so a
+    # threshold was the only way to stop the audit screaming forever. It also
+    # meant 107 genuinely unfetched tickers sailed through the gate at 95.4%.
+    #
+    # Now that absence is recorded, the fudge is unnecessary and the criterion
+    # can be the honest one: every entity either HAS data or has been ASKED
+    # ABOUT. Anything else is work not yet done.
+    fetchable = max(1, universe - unavailable)
+    ratio = covered / fetchable
     return "PARTIAL" if ratio >= _COVERAGE_PARTIAL else "MISSING"
 
 
@@ -356,9 +413,28 @@ def _audit_ohlcv(
 # Reference data — the layer the backfill assumes and never builds
 # --------------------------------------------------------------------------
 
+def _unavailable_counts(conn, exchange: str) -> dict[str, int]:
+    """{dataset: n} from fundamentals_fetch_status — entities the provider has
+    told us it has nothing for. See DatasetFidelity.unavailable."""
+    rows = conn.execute(
+        text("""
+            SELECT f.dataset, count(*)
+              FROM fundamentals_fetch_status f
+              JOIN tickers t ON t.ticker_id = f.ticker_id
+             WHERE t.exchange = :ex
+               AND t.is_active AND t.delisted_at IS NULL
+               AND f.status = 'UNAVAILABLE'
+             GROUP BY f.dataset
+        """),
+        {"ex": exchange},
+    )
+    return {r[0]: int(r[1]) for r in rows}
+
+
 def _audit_per_ticker_table(
     conn, exchange: str, universe: int, *,
     dataset: str, table: str, detail: str = "", eq_only: bool = False,
+    unavailable: int = 0,
 ) -> DatasetFidelity:
     """Coverage of a table keyed by ticker_id, scoped to an exchange via tickers.
 
@@ -391,7 +467,7 @@ def _audit_per_ticker_table(
         """,
         ex=exchange,
     )
-    status = _status_for_coverage(covered, universe)
+    status = _status_for_coverage(covered, universe, unavailable)
     if status == "MISSING" and covered == 0:
         detail = detail or "no runner populates this for a universe"
     if eq_only:
@@ -399,6 +475,7 @@ def _audit_per_ticker_table(
     return DatasetFidelity(
         dataset=dataset, status=status, rows=rows,
         covered=covered, universe=universe, detail=detail,
+        unavailable=unavailable,
     )
 
 
@@ -506,18 +583,28 @@ def audit_exchange(
             dataset="instrument_industry", table="instrument_industry",
         ))
         # EQ-scoped, all three. See _audit_per_ticker_table.
+        dark = _unavailable_counts(conn, exchange)
         datasets.append(_audit_per_ticker_table(
             conn, exchange, eq_universe, eq_only=True,
             dataset="instrument_shares", table="instrument_shares",
+            unavailable=dark.get("shares", 0),
         ))
         datasets.append(_audit_per_ticker_table(
             conn, exchange, eq_universe, eq_only=True,
             dataset="quarterly_financials", table="quarterly_financials",
+            unavailable=dark.get("financials", 0),
         ))
         datasets.append(_audit_per_ticker_table(
             conn, exchange, eq_universe, eq_only=True,
             dataset="daily_market_cap", table="daily_market_cap",
             detail="derived from instrument_shares x ohlcv_bars",
+            # Market cap is DERIVED. A ticker whose shares the provider has
+            # nothing for can never have one — that absence is inherited, not a
+            # gap of ours. What remains after subtracting it is real: tickers
+            # that HAVE shares but no market cap, which means they have no BARS.
+            # That is the throttle cohort, and it should keep this PARTIAL until
+            # the OHLCV refetch — which is the truth.
+            unavailable=dark.get("shares", 0),
         ))
         datasets.extend(_audit_multi_exchange_safety(conn))
 
