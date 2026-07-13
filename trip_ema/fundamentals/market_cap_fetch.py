@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from ..etl.exchanges import yfinance_symbol
+from .ports import DEFAULT_SOURCE, FundamentalsSource, SourceCapabilityError
 from ..domain.market_session import market_today
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,8 @@ def fetch_historical_mcap_for_ticker(
     exchange: str,
     from_date: date,
     to_date: date,
+    *,
+    source: FundamentalsSource = DEFAULT_SOURCE,
 ) -> list[HistoricalMcapPoint]:
     """Fetch historical (close × shares) points for ONE ticker over
     the date range [from_date, to_date].
@@ -142,7 +145,7 @@ def fetch_historical_mcap_for_ticker(
         period = "max"
 
     try:
-        prices_df, shares_series = _fetch_yfinance_historical(
+        prices_df, shares_series = source.price_and_shares_history(
             yf_symbol, period=period,
         )
     except (
@@ -151,6 +154,11 @@ def fetch_historical_mcap_for_ticker(
         HistoricalMcapFetchPermanent,
     ):
         raise
+    except SourceCapabilityError as e:
+        # The source cannot serve this call on this yfinance version.
+        # Not transient: retrying will never fix it, and the message-
+        # substring classifier below would wrongly call it Transient.
+        raise HistoricalMcapFetchPermanent(str(e)) from e
     except Exception as e:
         raise _classify_yfinance_exception(yf_symbol, e) from e
 
@@ -248,32 +256,6 @@ def _classify_yfinance_exception(
     )):
         return HistoricalMcapFetchPermanent(f"{yf_symbol}: {e}")
     return HistoricalMcapFetchTransient(f"{yf_symbol}: {e}")
-
-
-def _fetch_yfinance_historical(yf_symbol: str, *, period: str):
-    """The actual yfinance calls. Returns (prices_df, shares_series).
-
-    Isolated for test patchability — tests replace this with a stub
-    that returns synthetic DataFrames/Series.
-    """
-    import yfinance as yf
-
-    ticker = yf.Ticker(yf_symbol)
-    prices_df = ticker.history(period=period, actions=False)
-    # get_shares_full() exists on yfinance >= 0.2.30-ish; the probe
-    # confirmed it's present in the operator's environment.
-    getter = getattr(ticker, "get_shares_full", None)
-    if getter is None:
-        # We could fall back to ticker.info.sharesOutstanding here
-        # but that's a scalar, not a series — would mean
-        # APPROX-style backfill for the entire range, which defeats
-        # the purpose of using this module. Surface as Permanent.
-        raise HistoricalMcapFetchPermanent(
-            f"{yf_symbol}: get_shares_full not available on this yfinance "
-            f"version. Install yfinance >= 0.2.30."
-        )
-    shares_series = getter()
-    return prices_df, shares_series
 
 
 # ---------- type-coercion helpers ---------- #

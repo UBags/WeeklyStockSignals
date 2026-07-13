@@ -1,15 +1,15 @@
 """Tests for the yfinance shares-outstanding fetcher.
 
-Same patching strategy as test_industry_fetch.py: we patch
-trip_ema.fundamentals.shares_fetch._fetch_yfinance_info, not yfinance
-itself. None of these tests require yfinance to be installed.
+The fetcher takes a FundamentalsSource (trip_ema/fundamentals/ports.py); these
+tests inject a FakeFundamentalsSource. Nothing is patched, and none of these
+tests require yfinance to be installed.
 """
 from __future__ import annotations
 
-from unittest.mock import patch
 
 import pytest
 
+from .fakes import FakeFundamentalsSource
 from trip_ema.fundamentals.shares_fetch import (
     SharesFetchError,
     SharesFetchPermanent,
@@ -31,11 +31,8 @@ def test_returns_direct_shares_outstanding():
         "sharesOutstanding": 6_768_140_000,
         "quoteType": "EQUITY",
     }
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_shares("RELIANCE", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_shares("RELIANCE", "NSE", source=source)
     assert result == SharesInfo(
         shares_outstanding=6_768_140_000,
         source="YFINANCE",
@@ -51,11 +48,8 @@ def test_falls_back_to_implied_when_direct_missing():
         "impliedSharesOutstanding": 425_000_000,
         # no sharesOutstanding key
     }
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_shares("MIDCAP", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_shares("MIDCAP", "NSE", source=source)
     assert result.shares_outstanding == 425_000_000
     assert result.source == "YFINANCE_IMPLIED"
 
@@ -70,11 +64,8 @@ def test_prefers_direct_when_both_present():
         "sharesOutstanding": 1_000_000_000,
         "impliedSharesOutstanding": 1_001_000_000,  # slightly different
     }
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_shares("X", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_shares("X", "NSE", source=source)
     assert result.shares_outstanding == 1_000_000_000
     assert result.source == "YFINANCE"
 
@@ -91,11 +82,8 @@ def test_zero_shares_treated_as_missing():
         "sharesOutstanding": 0,
         "impliedSharesOutstanding": 100_000,
     }
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_shares("X", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_shares("X", "NSE", source=source)
     # Direct=0 dismissed; falls back to implied.
     assert result.shares_outstanding == 100_000
     assert result.source == "YFINANCE_IMPLIED"
@@ -110,11 +98,8 @@ def test_negative_shares_treated_as_missing():
         "sharesOutstanding": -1,
         "impliedSharesOutstanding": 500,
     }
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_shares("X", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_shares("X", "NSE", source=source)
     assert result.shares_outstanding == 500
     assert result.source == "YFINANCE_IMPLIED"
 
@@ -127,11 +112,8 @@ def test_float_shares_converted_to_int():
         "shortName": "X",
         "sharesOutstanding": 1.234e9,
     }
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_shares("X", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_shares("X", "NSE", source=source)
     assert result.shares_outstanding == 1_234_000_000
     assert isinstance(result.shares_outstanding, int)
 
@@ -144,11 +126,8 @@ def test_string_shares_unparseable_treated_as_missing():
         "sharesOutstanding": "N/A",
         "impliedSharesOutstanding": 500,
     }
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_shares("X", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_shares("X", "NSE", source=source)
     assert result.shares_outstanding == 500
 
 
@@ -157,11 +136,9 @@ def test_string_shares_unparseable_treated_as_missing():
 
 def test_empty_info_dict_raises_permanent():
     """Delisted/nonexistent tickers come back with {}."""
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        return_value={},
-    ), pytest.raises(SharesFetchPermanent, match="empty info"):
-        fetch_shares("DELISTED", "NSE")
+    source = FakeFundamentalsSource(info={})
+    with pytest.raises(SharesFetchPermanent, match="empty info"):
+        fetch_shares("DELISTED", "NSE", source=source)
 
 
 def test_neither_field_populated_raises_permanent():
@@ -173,11 +150,9 @@ def test_neither_field_populated_raises_permanent():
         "quoteType": "EQUITY",
         # no sharesOutstanding, no impliedSharesOutstanding
     }
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ), pytest.raises(SharesFetchPermanent, match="neither"):
-        fetch_shares("X", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    with pytest.raises(SharesFetchPermanent, match="neither"):
+        fetch_shares("X", "NSE", source=source)
 
 
 def test_both_fields_zero_raises_permanent():
@@ -189,11 +164,9 @@ def test_both_fields_zero_raises_permanent():
         "sharesOutstanding": 0,
         "impliedSharesOutstanding": 0,
     }
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ), pytest.raises(SharesFetchPermanent):
-        fetch_shares("X", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    with pytest.raises(SharesFetchPermanent):
+        fetch_shares("X", "NSE", source=source)
 
 
 def test_rate_limit_classification():
@@ -202,33 +175,27 @@ def test_rate_limit_classification():
     def raise_rate_limit(_):
         raise Exception("Rate limit exceeded for this endpoint")
 
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        side_effect=raise_rate_limit,
-    ), pytest.raises(SharesFetchRateLimited):
-        fetch_shares("X", "NSE")
+    source = FakeFundamentalsSource(info=raise_rate_limit)
+    with pytest.raises(SharesFetchRateLimited):
+        fetch_shares("X", "NSE", source=source)
 
 
 def test_timeout_classified_as_transient():
     def raise_timeout(_):
         raise Exception("HTTPSConnectionPool: Read timed out.")
 
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        side_effect=raise_timeout,
-    ), pytest.raises(SharesFetchTransient):
-        fetch_shares("X", "NSE")
+    source = FakeFundamentalsSource(info=raise_timeout)
+    with pytest.raises(SharesFetchTransient):
+        fetch_shares("X", "NSE", source=source)
 
 
 def test_404_classified_as_permanent():
     def raise_404(_):
         raise Exception("HTTP 404: Symbol may be delisted")
 
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        side_effect=raise_404,
-    ), pytest.raises(SharesFetchPermanent):
-        fetch_shares("X", "NSE")
+    source = FakeFundamentalsSource(info=raise_404)
+    with pytest.raises(SharesFetchPermanent):
+        fetch_shares("X", "NSE", source=source)
 
 
 def test_unknown_error_classified_as_transient():
@@ -237,11 +204,9 @@ def test_unknown_error_classified_as_transient():
     def raise_weird(_):
         raise Exception("Some new error message yfinance just invented")
 
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        side_effect=raise_weird,
-    ), pytest.raises(SharesFetchTransient):
-        fetch_shares("X", "NSE")
+    source = FakeFundamentalsSource(info=raise_weird)
+    with pytest.raises(SharesFetchTransient):
+        fetch_shares("X", "NSE", source=source)
 
 
 # ---------- exception hierarchy ---------- #
@@ -267,11 +232,8 @@ def test_calls_yfinance_with_NSE_suffix():
         return {"symbol": yf_symbol, "shortName": "x",
                 "sharesOutstanding": 1}
 
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        side_effect=capture_arg,
-    ):
-        fetch_shares("RELIANCE", "NSE")
+    source = FakeFundamentalsSource(info=capture_arg)
+    fetch_shares("RELIANCE", "NSE", source=source)
     assert captured == ["RELIANCE.NS"]
 
 
@@ -283,11 +245,8 @@ def test_calls_yfinance_with_BSE_suffix():
         return {"symbol": yf_symbol, "shortName": "x",
                 "sharesOutstanding": 1}
 
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        side_effect=capture_arg,
-    ):
-        fetch_shares("RELIANCE", "BSE")
+    source = FakeFundamentalsSource(info=capture_arg)
+    fetch_shares("RELIANCE", "BSE", source=source)
     assert captured == ["RELIANCE.BO"]
 
 
@@ -299,9 +258,6 @@ def test_calls_yfinance_with_no_suffix_for_NYSE():
         return {"symbol": yf_symbol, "shortName": "x",
                 "sharesOutstanding": 1}
 
-    with patch(
-        "trip_ema.fundamentals.shares_fetch._fetch_yfinance_info",
-        side_effect=capture_arg,
-    ):
-        fetch_shares("IBM", "NYSE")
+    source = FakeFundamentalsSource(info=capture_arg)
+    fetch_shares("IBM", "NYSE", source=source)
     assert captured == ["IBM"]

@@ -56,21 +56,6 @@
       "mock_patch": 4,
       "setattr": 21
     },
-    "fundamentals/test_financials_fetch.py": {
-      "env": 0,
-      "mock_patch": 20,
-      "setattr": 0
-    },
-    "fundamentals/test_industry_fetch.py": {
-      "env": 0,
-      "mock_patch": 15,
-      "setattr": 0
-    },
-    "fundamentals/test_market_cap_fetch.py": {
-      "env": 0,
-      "mock_patch": 15,
-      "setattr": 0
-    },
     "fundamentals/test_runners.py": {
       "env": 0,
       "mock_patch": 4,
@@ -80,11 +65,6 @@
       "env": 0,
       "mock_patch": 16,
       "setattr": 1
-    },
-    "fundamentals/test_shares_fetch.py": {
-      "env": 0,
-      "mock_patch": 17,
-      "setattr": 0
     },
     "gui/test_etl_status_13d3_wiring.py": {
       "env": 0,

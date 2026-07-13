@@ -37,6 +37,7 @@ import logging
 from dataclasses import dataclass
 
 from ..etl.exchanges import yfinance_symbol
+from .ports import DEFAULT_SOURCE, FundamentalsSource
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,10 @@ class IndustryFetchPermanent(IndustryFetchError):
 # ---------- The fetch function ---------- #
 
 
-def fetch_industry(symbol: str, exchange: str) -> IndustryInfo:
+def fetch_industry(
+    symbol: str, exchange: str, *,
+    source: FundamentalsSource = DEFAULT_SOURCE,
+) -> IndustryInfo:
     """Fetch sector/industry for one ticker.
 
     Raises IndustryFetchRateLimited / IndustryFetchTransient /
@@ -97,7 +101,7 @@ def fetch_industry(symbol: str, exchange: str) -> IndustryInfo:
     """
     yf_symbol = yfinance_symbol(symbol, exchange)
     try:
-        info = _fetch_yfinance_info(yf_symbol)
+        info = source.ticker_info(yf_symbol)
     except (IndustryFetchRateLimited, IndustryFetchTransient,
             IndustryFetchPermanent):
         # Already classified by the inner function — re-raise as-is.
@@ -105,10 +109,9 @@ def fetch_industry(symbol: str, exchange: str) -> IndustryInfo:
     except Exception as e:
         # yfinance raises different exception types across versions.
         # We map by message-substring because yfinance's exception
-        # hierarchy isn't stable. Doing this here rather than inside
-        # _fetch_yfinance_info means tests can patch the inner
-        # function with a raw Exception and verify the classifier
-        # picks the right typed exception.
+        # hierarchy isn't stable. Doing this HERE rather than in the
+        # source keeps the source dumb: whether a failure is worth
+        # retrying is a domain decision, not a transport one.
         raise _classify_yfinance_exception(yf_symbol, e) from e
 
     # yfinance .info returns {} for delisted/nonexistent tickers in
@@ -131,8 +134,8 @@ def fetch_industry(symbol: str, exchange: str) -> IndustryInfo:
 
 def _classify_yfinance_exception(yf_symbol: str, e: Exception) -> IndustryFetchError:
     """Map a raw exception to one of our typed subtypes by message
-    substring. Public-ish: tests for fetch_industry exercise this
-    path by patching _fetch_yfinance_info to raise raw Exceptions."""
+    substring. Public-ish: tests for fetch_industry exercise this path by
+    giving the source an exception to raise."""
     msg = str(e).lower()
     if "rate" in msg and "limit" in msg:
         return IndustryFetchRateLimited(f"{yf_symbol}: {e}")
@@ -147,19 +150,6 @@ def _classify_yfinance_exception(yf_symbol: str, e: Exception) -> IndustryFetchE
     # tickers on novel yfinance errors. The runner won't retry
     # immediately, but the next quarterly refresh will pick it up.
     return IndustryFetchTransient(f"{yf_symbol}: {e}")
-
-
-def _fetch_yfinance_info(yf_symbol: str) -> dict:
-    """The actual yfinance call, isolated for test patchability.
-
-    Tests patch THIS function (with side_effect=Exception(...)) and
-    verify that fetch_industry's outer try/except classifies the
-    raw exception to the right typed subtype.
-    """
-    import yfinance as yf  # lazy: only required when an ETL run fires
-
-    ticker = yf.Ticker(yf_symbol)
-    return ticker.info or {}
 
 
 def _clean_string(v) -> str | None:

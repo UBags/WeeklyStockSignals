@@ -1,15 +1,15 @@
 """Tests for the yfinance industry fetcher.
 
-We patch trip_ema.fundamentals.industry_fetch._fetch_yfinance_info
-rather than yfinance itself — that's the isolation point. None of
-these tests require yfinance to be installed.
+The fetcher takes a FundamentalsSource (trip_ema/fundamentals/ports.py); these
+tests inject a FakeFundamentalsSource. Nothing is patched, and none of these
+tests require yfinance to be installed.
 """
 from __future__ import annotations
 
-from unittest.mock import patch
 
 import pytest
 
+from .fakes import FakeFundamentalsSource
 from trip_ema.fundamentals.industry_fetch import (
     IndustryFetchError,
     IndustryFetchPermanent,
@@ -32,11 +32,8 @@ def test_returns_sector_and_industry_for_valid_ticker():
         "industry": "Oil & Gas Refining & Marketing",
         "quoteType": "EQUITY",
     }
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_industry("RELIANCE", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_industry("RELIANCE", "NSE", source=source)
     assert result == IndustryInfo(
         sector="Energy",
         industry="Oil & Gas Refining & Marketing",
@@ -53,11 +50,8 @@ def test_yahoo_returns_only_sector_no_industry():
         "quoteType": "EQUITY",
         # no 'industry' key
     }
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_industry("FOO", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_industry("FOO", "NSE", source=source)
     assert result.sector == "Industrials"
     assert result.industry is None
 
@@ -71,11 +65,8 @@ def test_neither_sector_nor_industry_set():
         "shortName": "Bar Holdings",
         "quoteType": "EQUITY",
     }
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_industry("BAR", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_industry("BAR", "NSE", source=source)
     assert result == IndustryInfo(sector=None, industry=None, quote_type="EQUITY")
 
 
@@ -89,11 +80,8 @@ def test_strips_whitespace_in_fields():
         "sector": "  Technology  ",
         "industry": "\tSoftware\n",
     }
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_industry("X", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_industry("X", "NSE", source=source)
     assert result.sector == "Technology"
     assert result.industry == "Software"
 
@@ -105,11 +93,8 @@ def test_empty_string_becomes_none():
         "sector": "",
         "industry": "  ",
     }
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_industry("X", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_industry("X", "NSE", source=source)
     assert result.sector is None
     assert result.industry is None
 
@@ -123,11 +108,8 @@ def test_literal_string_none_becomes_none():
         "sector": "None",
         "industry": "NONE",
     }
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        return_value=mock_info,
-    ):
-        result = fetch_industry("X", "NSE")
+    source = FakeFundamentalsSource(info=mock_info)
+    result = fetch_industry("X", "NSE", source=source)
     assert result.sector is None
     assert result.industry is None
 
@@ -137,21 +119,17 @@ def test_literal_string_none_becomes_none():
 
 def test_empty_info_dict_raises_permanent():
     """Delisted or nonexistent tickers come back with {}."""
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        return_value={},
-    ), pytest.raises(IndustryFetchPermanent, match="empty info"):
-        fetch_industry("DELISTED", "NSE")
+    source = FakeFundamentalsSource(info={})
+    with pytest.raises(IndustryFetchPermanent, match="empty info"):
+        fetch_industry("DELISTED", "NSE", source=source)
 
 
 def test_info_dict_with_no_identifying_fields_raises_permanent():
     """yfinance has been seen to return junk dicts with no symbol
     or name. Treat as permanent failure."""
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        return_value={"random_field": "value"},
-    ), pytest.raises(IndustryFetchPermanent):
-        fetch_industry("WHATEVER", "NSE")
+    source = FakeFundamentalsSource(info={"random_field": "value"})
+    with pytest.raises(IndustryFetchPermanent):
+        fetch_industry("WHATEVER", "NSE", source=source)
 
 
 def test_rate_limit_classification():
@@ -160,33 +138,27 @@ def test_rate_limit_classification():
     def raise_rate_limit(_):
         raise Exception("Rate limit exceeded for this endpoint")
 
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        side_effect=raise_rate_limit,
-    ), pytest.raises(IndustryFetchRateLimited):
-        fetch_industry("X", "NSE")
+    source = FakeFundamentalsSource(info=raise_rate_limit)
+    with pytest.raises(IndustryFetchRateLimited):
+        fetch_industry("X", "NSE", source=source)
 
 
 def test_timeout_classified_as_transient():
     def raise_timeout(_):
         raise Exception("HTTPSConnectionPool: Read timed out.")
 
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        side_effect=raise_timeout,
-    ), pytest.raises(IndustryFetchTransient):
-        fetch_industry("X", "NSE")
+    source = FakeFundamentalsSource(info=raise_timeout)
+    with pytest.raises(IndustryFetchTransient):
+        fetch_industry("X", "NSE", source=source)
 
 
 def test_404_classified_as_permanent():
     def raise_404(_):
         raise Exception("HTTP 404: Symbol may be delisted")
 
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        side_effect=raise_404,
-    ), pytest.raises(IndustryFetchPermanent):
-        fetch_industry("X", "NSE")
+    source = FakeFundamentalsSource(info=raise_404)
+    with pytest.raises(IndustryFetchPermanent):
+        fetch_industry("X", "NSE", source=source)
 
 
 def test_unknown_error_classified_as_transient():
@@ -196,11 +168,9 @@ def test_unknown_error_classified_as_transient():
     def raise_weird(_):
         raise Exception("Some new error message yfinance just invented")
 
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        side_effect=raise_weird,
-    ), pytest.raises(IndustryFetchTransient):
-        fetch_industry("X", "NSE")
+    source = FakeFundamentalsSource(info=raise_weird)
+    with pytest.raises(IndustryFetchTransient):
+        fetch_industry("X", "NSE", source=source)
 
 
 # ---------- exception hierarchy contract ---------- #
@@ -227,11 +197,8 @@ def test_calls_yfinance_with_NSE_suffix():
         captured.append(yf_symbol)
         return {"symbol": yf_symbol, "shortName": "x"}
 
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        side_effect=capture_arg,
-    ):
-        fetch_industry("RELIANCE", "NSE")
+    source = FakeFundamentalsSource(info=capture_arg)
+    fetch_industry("RELIANCE", "NSE", source=source)
     assert captured == ["RELIANCE.NS"]
 
 
@@ -242,11 +209,8 @@ def test_calls_yfinance_with_BSE_suffix():
         captured.append(yf_symbol)
         return {"symbol": yf_symbol, "shortName": "x"}
 
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        side_effect=capture_arg,
-    ):
-        fetch_industry("RELIANCE", "BSE")
+    source = FakeFundamentalsSource(info=capture_arg)
+    fetch_industry("RELIANCE", "BSE", source=source)
     assert captured == ["RELIANCE.BO"]
 
 
@@ -257,9 +221,6 @@ def test_calls_yfinance_with_no_suffix_for_NYSE():
         captured.append(yf_symbol)
         return {"symbol": yf_symbol, "shortName": "x"}
 
-    with patch(
-        "trip_ema.fundamentals.industry_fetch._fetch_yfinance_info",
-        side_effect=capture_arg,
-    ):
-        fetch_industry("IBM", "NYSE")
+    source = FakeFundamentalsSource(info=capture_arg)
+    fetch_industry("IBM", "NYSE", source=source)
     assert captured == ["IBM"]

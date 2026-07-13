@@ -1,18 +1,21 @@
 """Tests for the yfinance historical mcap fetcher.
 
-Patches trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical
-to return (prices_df, shares_series) tuples. Uses real pandas
-DataFrames/Series because the fetcher does DataFrame-shaped
-operations.
+The fetcher takes a FundamentalsSource (trip_ema/fundamentals/ports.py); these
+tests inject a FakeFundamentalsSource. Nothing is patched, and none of these
+tests require yfinance to be installed.
+
+The source yields (prices_df, shares_series). Uses real pandas
+DataFrames/Series because the fetcher does DataFrame-shaped operations.
 """
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
+from .fakes import FakeFundamentalsSource
+from trip_ema.fundamentals.ports import SourceCapabilityError
 from trip_ema.fundamentals.market_cap_fetch import (
     HistoricalMcapFetchError,
     HistoricalMcapFetchPermanent,
@@ -66,15 +69,13 @@ class TestHistoricalMcapHappyPath:
         shares = _shares_series({
             "2025-05-01": 6_700_000_000,
         })
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            return_value=(prices, shares),
-        ):
-            points = fetch_historical_mcap_for_ticker(
-                "RELIANCE", "NSE",
-                from_date=date(2025, 1, 1),
-                to_date=date(2026, 1, 1),
-            )
+        source = FakeFundamentalsSource(history=(prices, shares))
+        points = fetch_historical_mcap_for_ticker(
+            "RELIANCE", "NSE",
+            from_date=date(2025, 1, 1),
+            to_date=date(2026, 1, 1),
+            source=source,
+        )
         assert len(points) == 3
         assert points[0] == HistoricalMcapPoint(
             trade_date=date(2025, 6, 1),
@@ -96,15 +97,13 @@ class TestHistoricalMcapHappyPath:
             "2025-05-01": 1_000_000,
             "2025-07-15": 2_000_000,
         })
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            return_value=(prices, shares),
-        ):
-            points = fetch_historical_mcap_for_ticker(
-                "X", "NSE",
-                from_date=date(2025, 1, 1),
-                to_date=date(2025, 12, 31),
-            )
+        source = FakeFundamentalsSource(history=(prices, shares))
+        points = fetch_historical_mcap_for_ticker(
+            "X", "NSE",
+            from_date=date(2025, 1, 1),
+            to_date=date(2025, 12, 31),
+            source=source,
+        )
         # June and early-July use 1M shares; Aug and Sep use 2M.
         by_date = {p.trade_date: p.shares_outstanding for p in points}
         assert by_date[date(2025, 6, 1)] == 1_000_000
@@ -121,15 +120,13 @@ class TestHistoricalMcapHappyPath:
             "2026-01-01": 100.0,
         })
         shares = _shares_series({"2024-01-01": 1_000})
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            return_value=(prices, shares),
-        ):
-            points = fetch_historical_mcap_for_ticker(
-                "X", "NSE",
-                from_date=date(2025, 1, 1),
-                to_date=date(2025, 12, 31),
-            )
+        source = FakeFundamentalsSource(history=(prices, shares))
+        points = fetch_historical_mcap_for_ticker(
+            "X", "NSE",
+            from_date=date(2025, 1, 1),
+            to_date=date(2025, 12, 31),
+            source=source,
+        )
         dates = [p.trade_date for p in points]
         assert dates == [date(2025, 6, 1)]
 
@@ -141,15 +138,13 @@ class TestHistoricalMcapHappyPath:
             "2025-06-01": 100.0,  # after first shares snapshot
         })
         shares = _shares_series({"2025-01-01": 1_000_000})
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            return_value=(prices, shares),
-        ):
-            points = fetch_historical_mcap_for_ticker(
-                "X", "NSE",
-                from_date=date(2023, 1, 1),
-                to_date=date(2026, 1, 1),
-            )
+        source = FakeFundamentalsSource(history=(prices, shares))
+        points = fetch_historical_mcap_for_ticker(
+            "X", "NSE",
+            from_date=date(2023, 1, 1),
+            to_date=date(2026, 1, 1),
+            source=source,
+        )
         dates = [p.trade_date for p in points]
         assert dates == [date(2025, 6, 1)]
 
@@ -163,15 +158,13 @@ class TestHistoricalMcapHappyPath:
             "2025-09-01": 200.0,
         })
         shares = _shares_series({"2025-01-01": 1_000})
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            return_value=(prices, shares),
-        ):
-            points = fetch_historical_mcap_for_ticker(
-                "X", "NSE",
-                from_date=date(2025, 1, 1),
-                to_date=date(2025, 12, 31),
-            )
+        source = FakeFundamentalsSource(history=(prices, shares))
+        points = fetch_historical_mcap_for_ticker(
+            "X", "NSE",
+            from_date=date(2025, 1, 1),
+            to_date=date(2025, 12, 31),
+            source=source,
+        )
         dates = [p.trade_date for p in points]
         assert dates == sorted(dates)
 
@@ -189,15 +182,13 @@ class TestCoercion:
             "2025-07-01": 100.0,
         })
         shares = _shares_series({"2025-01-01": 1_000})
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            return_value=(prices, shares),
-        ):
-            points = fetch_historical_mcap_for_ticker(
-                "X", "NSE",
-                from_date=date(2025, 1, 1),
-                to_date=date(2025, 12, 31),
-            )
+        source = FakeFundamentalsSource(history=(prices, shares))
+        points = fetch_historical_mcap_for_ticker(
+            "X", "NSE",
+            from_date=date(2025, 1, 1),
+            to_date=date(2025, 12, 31),
+            source=source,
+        )
         dates = [p.trade_date for p in points]
         assert dates == [date(2025, 7, 1)]
 
@@ -209,15 +200,13 @@ class TestCoercion:
             "2025-07-01": 100.0,
         })
         shares = _shares_series({"2025-01-01": 1_000})
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            return_value=(prices, shares),
-        ):
-            points = fetch_historical_mcap_for_ticker(
-                "X", "NSE",
-                from_date=date(2025, 1, 1),
-                to_date=date(2025, 12, 31),
-            )
+        source = FakeFundamentalsSource(history=(prices, shares))
+        points = fetch_historical_mcap_for_ticker(
+            "X", "NSE",
+            from_date=date(2025, 1, 1),
+            to_date=date(2025, 12, 31),
+            source=source,
+        )
         dates = [p.trade_date for p in points]
         assert dates == [date(2025, 7, 1)]
 
@@ -233,15 +222,13 @@ class TestCoercion:
                 pd.Timestamp("2025-06-01"),
             ]),
         )
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            return_value=(prices, shares),
-        ):
-            points = fetch_historical_mcap_for_ticker(
-                "X", "NSE",
-                from_date=date(2025, 1, 1),
-                to_date=date(2025, 12, 31),
-            )
+        source = FakeFundamentalsSource(history=(prices, shares))
+        points = fetch_historical_mcap_for_ticker(
+            "X", "NSE",
+            from_date=date(2025, 1, 1),
+            to_date=date(2025, 12, 31),
+            source=source,
+        )
         # Should use the 1M entry (the zero one is filtered out).
         assert len(points) == 1
         assert points[0].shares_outstanding == 1_000_000
@@ -255,27 +242,25 @@ class TestFailures:
     def test_empty_prices_df_raises_permanent(self):
         empty_prices = pd.DataFrame()
         shares = _shares_series({"2025-01-01": 1_000})
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            return_value=(empty_prices, shares),
-        ), pytest.raises(HistoricalMcapFetchPermanent, match="no price history"):
+        source = FakeFundamentalsSource(history=(empty_prices, shares))
+        with pytest.raises(HistoricalMcapFetchPermanent, match="no price history"):
             fetch_historical_mcap_for_ticker(
                 "X", "NSE",
                 from_date=date(2025, 1, 1),
                 to_date=date(2025, 12, 31),
+                source=source,
             )
 
     def test_empty_shares_series_raises_permanent(self):
         prices = _prices_df({"2025-06-01": 100.0})
         empty_shares = pd.Series([], dtype=float)
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            return_value=(prices, empty_shares),
-        ), pytest.raises(HistoricalMcapFetchPermanent, match="get_shares_full"):
+        source = FakeFundamentalsSource(history=(prices, empty_shares))
+        with pytest.raises(HistoricalMcapFetchPermanent, match="get_shares_full"):
             fetch_historical_mcap_for_ticker(
                 "X", "NSE",
                 from_date=date(2025, 1, 1),
                 to_date=date(2025, 12, 31),
+                source=source,
             )
 
     def test_no_overlap_raises_permanent(self):
@@ -283,53 +268,49 @@ class TestFailures:
         survives both the range filter and the asof-shares filter."""
         prices = _prices_df({"2023-01-01": 100.0})  # before range
         shares = _shares_series({"2025-01-01": 1_000})
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            return_value=(prices, shares),
-        ), pytest.raises(HistoricalMcapFetchPermanent, match="no trade dates"):
+        source = FakeFundamentalsSource(history=(prices, shares))
+        with pytest.raises(HistoricalMcapFetchPermanent, match="no trade dates"):
             fetch_historical_mcap_for_ticker(
                 "X", "NSE",
                 from_date=date(2025, 1, 1),
                 to_date=date(2025, 12, 31),
+                source=source,
             )
 
     def test_rate_limit_classified(self):
         def boom(yf_sym, *, period):
             raise Exception("Rate limit exceeded")
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            side_effect=boom,
-        ), pytest.raises(HistoricalMcapFetchRateLimited):
+        source = FakeFundamentalsSource(history=boom)
+        with pytest.raises(HistoricalMcapFetchRateLimited):
             fetch_historical_mcap_for_ticker(
                 "X", "NSE",
                 from_date=date(2025, 1, 1),
                 to_date=date(2025, 12, 31),
+                source=source,
             )
 
     def test_timeout_classified_as_transient(self):
         def boom(yf_sym, *, period):
             raise Exception("Read timed out")
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            side_effect=boom,
-        ), pytest.raises(HistoricalMcapFetchTransient):
+        source = FakeFundamentalsSource(history=boom)
+        with pytest.raises(HistoricalMcapFetchTransient):
             fetch_historical_mcap_for_ticker(
                 "X", "NSE",
                 from_date=date(2025, 1, 1),
                 to_date=date(2025, 12, 31),
+                source=source,
             )
 
     def test_404_classified_as_permanent(self):
         def boom(yf_sym, *, period):
             raise Exception("HTTP 404 Symbol may be delisted")
-        with patch(
-            "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-            side_effect=boom,
-        ), pytest.raises(HistoricalMcapFetchPermanent):
+        source = FakeFundamentalsSource(history=boom)
+        with pytest.raises(HistoricalMcapFetchPermanent):
             fetch_historical_mcap_for_ticker(
                 "X", "NSE",
                 from_date=date(2025, 1, 1),
                 to_date=date(2025, 12, 31),
+                source=source,
             )
 
 
@@ -354,13 +335,34 @@ def test_calls_yfinance_with_NSE_suffix():
         captured.append((yf_sym, period))
         return prices, shares
 
-    with patch(
-        "trip_ema.fundamentals.market_cap_fetch._fetch_yfinance_historical",
-        side_effect=capture,
-    ):
+    source = FakeFundamentalsSource(history=capture)
+    fetch_historical_mcap_for_ticker(
+        "RELIANCE", "NSE",
+        from_date=date(2025, 1, 1),
+        to_date=date(2025, 12, 31),
+        source=source,
+    )
+    assert captured[0][0] == "RELIANCE.NS"
+
+
+# ---------- source capability ---------- #
+
+
+def test_source_capability_error_is_permanent_not_transient():
+    """A source that CANNOT serve the call — yfinance too old to have
+    get_shares_full — is unfixable by retrying. It must surface as Permanent.
+    The message-substring classifier would otherwise see an unrecognised error
+    and default it to Transient, which means re-attempting it on every run,
+    forever."""
+    source = FakeFundamentalsSource(
+        history=SourceCapabilityError(
+            "X.NS: get_shares_full not available on this yfinance version."
+        ),
+    )
+    with pytest.raises(HistoricalMcapFetchPermanent, match="get_shares_full"):
         fetch_historical_mcap_for_ticker(
-            "RELIANCE", "NSE",
+            "X", "NSE",
             from_date=date(2025, 1, 1),
             to_date=date(2025, 12, 31),
+            source=source,
         )
-    assert captured[0][0] == "RELIANCE.NS"

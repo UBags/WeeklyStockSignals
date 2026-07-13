@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from ..etl.exchanges import yfinance_symbol
+from .ports import DEFAULT_SOURCE, FundamentalsSource, SourceCapabilityError
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,8 @@ def fetch_historical_shares(
     symbol: str,
     exchange: str,
     start_date: date,
+    *,
+    source: FundamentalsSource = DEFAULT_SOURCE,
 ) -> list[HistoricalSharesSnapshot]:
     """Fetch historical shares-outstanding snapshots for ONE ticker
     from `start_date` to today.
@@ -104,13 +107,16 @@ def fetch_historical_shares(
     yf_symbol = yfinance_symbol(symbol, exchange)
 
     try:
-        shares_series = _fetch_yfinance_shares_full(yf_symbol, start_date)
+        shares_series = source.shares_full(yf_symbol, start_date)
     except (
         HistoricalSharesFetchRateLimited,
         HistoricalSharesFetchTransient,
         HistoricalSharesFetchPermanent,
     ):
         raise
+    except SourceCapabilityError as e:
+        # Unfixable by retrying — see the same guard in market_cap_fetch.
+        raise HistoricalSharesFetchPermanent(str(e)) from e
     except Exception as e:
         raise _classify_yfinance_exception(yf_symbol, e) from e
 
@@ -171,26 +177,6 @@ def _classify_yfinance_exception(
     # Unknown — treat as transient so we don't permanently park
     # tickers on novel yfinance errors.
     return HistoricalSharesFetchTransient(f"{yf_symbol}: {e}")
-
-
-def _fetch_yfinance_shares_full(yf_symbol: str, start_date: date):
-    """The actual yfinance call. Returns a pandas Series (or None).
-
-    Isolated for test patchability — tests replace this with a stub
-    returning a synthetic Series.
-    """
-    import yfinance as yf
-
-    ticker = yf.Ticker(yf_symbol)
-    getter = getattr(ticker, "get_shares_full", None)
-    if getter is None:
-        raise HistoricalSharesFetchPermanent(
-            f"{yf_symbol}: get_shares_full not available on this yfinance "
-            f"version. Install yfinance >= 0.2.30."
-        )
-    # get_shares_full() accepts start= and end= as ISO strings or
-    # date/datetime objects. We pass start; end defaults to now.
-    return getter(start=start_date.isoformat())
 
 
 def _to_date(ts) -> date | None:

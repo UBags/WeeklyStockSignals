@@ -40,6 +40,7 @@ import logging
 from dataclasses import dataclass
 
 from ..etl.exchanges import yfinance_symbol
+from .ports import DEFAULT_SOURCE, FundamentalsSource
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,10 @@ class SharesFetchPermanent(SharesFetchError):
 # ---------- The fetch function ---------- #
 
 
-def fetch_shares(symbol: str, exchange: str) -> SharesInfo:
+def fetch_shares(
+    symbol: str, exchange: str, *,
+    source: FundamentalsSource = DEFAULT_SOURCE,
+) -> SharesInfo:
     """Fetch shares-outstanding for one ticker.
 
     Returns a SharesInfo with `shares_outstanding > 0` and `source`
@@ -104,7 +108,7 @@ def fetch_shares(symbol: str, exchange: str) -> SharesInfo:
     """
     yf_symbol = yfinance_symbol(symbol, exchange)
     try:
-        info = _fetch_yfinance_info(yf_symbol)
+        info = source.ticker_info(yf_symbol)
     except (SharesFetchRateLimited, SharesFetchTransient,
             SharesFetchPermanent):
         # Already classified by the inner function — re-raise as-is.
@@ -159,18 +163,6 @@ def _classify_yfinance_exception(yf_symbol: str, e: Exception) -> SharesFetchErr
     # Unknown → treat as transient so we don't permanently park
     # tickers on novel yfinance errors.
     return SharesFetchTransient(f"{yf_symbol}: {e}")
-
-
-def _fetch_yfinance_info(yf_symbol: str) -> dict:
-    """The actual yfinance call, isolated for test patchability.
-
-    Tests patch THIS function (with side_effect=Exception(...)) and
-    verify that fetch_shares's outer try/except classifies correctly.
-    """
-    import yfinance as yf  # lazy: only required when an ETL run fires
-
-    ticker = yf.Ticker(yf_symbol)
-    return ticker.info or {}
 
 
 def _as_positive_int(v) -> int | None:

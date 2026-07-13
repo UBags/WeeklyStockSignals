@@ -1,19 +1,20 @@
 """Tests for the yfinance quarterly financials fetcher.
 
-We patch trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly
-to return a (DataFrame, currency) tuple. Uses real pandas DataFrames
-because the fetcher does DataFrame-shaped operations (df.loc, df.columns,
-df.index) and a hand-rolled mock would be more code than the real
-import.
+The fetcher takes a FundamentalsSource (trip_ema/fundamentals/ports.py); these
+tests inject a FakeFundamentalsSource. Nothing is patched, and none of these
+tests require yfinance to be installed.
+
+Uses real pandas DataFrames because the fetcher does DataFrame-shaped
+operations (df.loc, df.columns, df.index).
 """
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
+from .fakes import FakeFundamentalsSource
 from trip_ema.fundamentals.financials_fetch import (
     FinancialsFetchError,
     FinancialsFetchPermanent,
@@ -66,11 +67,8 @@ class TestHappyPath:
             },
             ["2025-12-31", "2025-09-30", "2025-06-30", "2025-03-31"],
         )
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ):
-            quarters = fetch_quarterly_financials("RELIANCE", "NSE")
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        quarters = fetch_quarterly_financials("RELIANCE", "NSE", source=source)
         assert len(quarters) == 4
         # Newest first per yfinance's column order.
         assert quarters[0].fiscal_quarter == date(2025, 12, 31)
@@ -84,13 +82,11 @@ class TestHappyPath:
             {"Total Revenue": [100, 110, 120, 130]},
             ["2025-12-31", "2025-09-30", "2025-06-30", "2025-03-31"],
         )
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ):
-            quarters = fetch_quarterly_financials(
-                "X", "NSE", max_quarters=2,
-            )
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        quarters = fetch_quarterly_financials(
+            "X", "NSE", max_quarters=2,
+            source=source,
+        )
         assert len(quarters) == 2
 
     def test_returns_revenue_only_when_ebitda_missing(self):
@@ -100,11 +96,8 @@ class TestHappyPath:
             {"Total Revenue": [500, 550]},
             ["2025-12-31", "2025-09-30"],
         )
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ):
-            quarters = fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        quarters = fetch_quarterly_financials("X", "NSE", source=source)
         assert len(quarters) == 2
         assert all(q.ebitda is None for q in quarters)
         assert quarters[0].revenue == 500
@@ -116,11 +109,8 @@ class TestHappyPath:
             {"EBITDA": [50, 55]},
             ["2025-12-31", "2025-09-30"],
         )
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ):
-            quarters = fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        quarters = fetch_quarterly_financials("X", "NSE", source=source)
         assert len(quarters) == 2
         assert all(q.revenue is None for q in quarters)
         assert quarters[0].ebitda == 50
@@ -138,11 +128,8 @@ class TestFieldNameVariation:
             {"Revenues": [100]},
             ["2025-12-31"],
         )
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ):
-            quarters = fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        quarters = fetch_quarterly_financials("X", "NSE", source=source)
         assert quarters[0].revenue == 100
 
     def test_revenue_under_Revenue_From_Operations(self):
@@ -151,11 +138,8 @@ class TestFieldNameVariation:
             {"Revenue From Operations": [100]},
             ["2025-12-31"],
         )
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ):
-            quarters = fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        quarters = fetch_quarterly_financials("X", "NSE", source=source)
         assert quarters[0].revenue == 100
 
     def test_ebitda_under_Normalized_EBITDA_alias(self):
@@ -163,11 +147,8 @@ class TestFieldNameVariation:
             {"Total Revenue": [100], "Normalized EBITDA": [15]},
             ["2025-12-31"],
         )
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ):
-            quarters = fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        quarters = fetch_quarterly_financials("X", "NSE", source=source)
         assert quarters[0].ebitda == 15
 
     def test_Total_Revenue_beats_Revenue_From_Operations(self):
@@ -180,11 +161,8 @@ class TestFieldNameVariation:
             },
             ["2025-12-31"],
         )
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ):
-            quarters = fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        quarters = fetch_quarterly_financials("X", "NSE", source=source)
         assert quarters[0].revenue == 100  # Total Revenue wins
 
 
@@ -198,11 +176,8 @@ class TestNaNHandling:
             {"Total Revenue": [100, float("nan")], "EBITDA": [15, 17]},
             ["2025-12-31", "2025-09-30"],
         )
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ):
-            quarters = fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        quarters = fetch_quarterly_financials("X", "NSE", source=source)
         # Both quarters retained because EBITDA is populated for both.
         assert len(quarters) == 2
         assert quarters[0].revenue == 100
@@ -219,11 +194,8 @@ class TestNaNHandling:
             },
             ["2025-12-31", "2025-09-30"],
         )
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ):
-            quarters = fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        quarters = fetch_quarterly_financials("X", "NSE", source=source)
         assert len(quarters) == 1
         assert quarters[0].fiscal_quarter == date(2025, 12, 31)
 
@@ -232,20 +204,14 @@ class TestCurrency:
 
     def test_yfinance_currency_used_when_provided(self):
         df = _make_df({"Total Revenue": [100]}, ["2025-12-31"])
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "USD"),
-        ):
-            quarters = fetch_quarterly_financials("X", "NYSE")
+        source = FakeFundamentalsSource(quarterly=(df, "USD"))
+        quarters = fetch_quarterly_financials("X", "NYSE", source=source)
         assert quarters[0].currency == "USD"
 
     def test_INR_default(self):
         df = _make_df({"Total Revenue": [100]}, ["2025-12-31"])
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ):
-            quarters = fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        quarters = fetch_quarterly_financials("X", "NSE", source=source)
         assert quarters[0].currency == "INR"
 
 
@@ -256,18 +222,14 @@ class TestFailures:
 
     def test_empty_dataframe_raises_permanent(self):
         empty = pd.DataFrame()
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(empty, "INR"),
-        ), pytest.raises(FinancialsFetchPermanent, match="no quarterly"):
-            fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(empty, "INR"))
+        with pytest.raises(FinancialsFetchPermanent, match="no quarterly"):
+            fetch_quarterly_financials("X", "NSE", source=source)
 
     def test_none_dataframe_raises_permanent(self):
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(None, "INR"),
-        ), pytest.raises(FinancialsFetchPermanent):
-            fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(None, "INR"))
+        with pytest.raises(FinancialsFetchPermanent):
+            fetch_quarterly_financials("X", "NSE", source=source)
 
     def test_all_quarters_empty_raises_permanent(self):
         """DataFrame exists but every quarter has NaN for both rev
@@ -279,38 +241,30 @@ class TestFailures:
             },
             ["2025-12-31", "2025-09-30"],
         )
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            return_value=(df, "INR"),
-        ), pytest.raises(FinancialsFetchPermanent, match="no quarters"):
-            fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=(df, "INR"))
+        with pytest.raises(FinancialsFetchPermanent, match="no quarters"):
+            fetch_quarterly_financials("X", "NSE", source=source)
 
     def test_rate_limit_classification(self):
         def boom(_):
             raise Exception("Rate limit exceeded")
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            side_effect=boom,
-        ), pytest.raises(FinancialsFetchRateLimited):
-            fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=boom)
+        with pytest.raises(FinancialsFetchRateLimited):
+            fetch_quarterly_financials("X", "NSE", source=source)
 
     def test_timeout_classified_as_transient(self):
         def boom(_):
             raise Exception("Read timed out")
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            side_effect=boom,
-        ), pytest.raises(FinancialsFetchTransient):
-            fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=boom)
+        with pytest.raises(FinancialsFetchTransient):
+            fetch_quarterly_financials("X", "NSE", source=source)
 
     def test_404_classified_as_permanent(self):
         def boom(_):
             raise Exception("HTTP 404 Symbol may be delisted")
-        with patch(
-            "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-            side_effect=boom,
-        ), pytest.raises(FinancialsFetchPermanent):
-            fetch_quarterly_financials("X", "NSE")
+        source = FakeFundamentalsSource(quarterly=boom)
+        with pytest.raises(FinancialsFetchPermanent):
+            fetch_quarterly_financials("X", "NSE", source=source)
 
 
 # ---------- exception hierarchy ---------- #
@@ -331,11 +285,8 @@ def test_calls_yfinance_with_NSE_suffix():
     def capture(yf_symbol):
         captured.append(yf_symbol)
         return df, "INR"
-    with patch(
-        "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-        side_effect=capture,
-    ):
-        fetch_quarterly_financials("RELIANCE", "NSE")
+    source = FakeFundamentalsSource(quarterly=capture)
+    fetch_quarterly_financials("RELIANCE", "NSE", source=source)
     assert captured == ["RELIANCE.NS"]
 
 
@@ -345,9 +296,6 @@ def test_calls_yfinance_with_BSE_suffix():
     def capture(yf_symbol):
         captured.append(yf_symbol)
         return df, "INR"
-    with patch(
-        "trip_ema.fundamentals.financials_fetch._fetch_yfinance_quarterly",
-        side_effect=capture,
-    ):
-        fetch_quarterly_financials("RELIANCE", "BSE")
+    source = FakeFundamentalsSource(quarterly=capture)
+    fetch_quarterly_financials("RELIANCE", "BSE", source=source)
     assert captured == ["RELIANCE.BO"]

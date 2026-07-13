@@ -50,6 +50,7 @@ from collections.abc import Callable
 from sqlalchemy import Engine, text
 
 from .parallel import fan_out
+from .ports import DEFAULT_SOURCE, FundamentalsSource
 from ..persistence import transaction
 from ..persistence.fetch_status_repo import (
     FundamentalsFetchStatusRepository,
@@ -455,19 +456,22 @@ def _classify_etf(
         return "failed"
 
 
-def _try_fetch_etf_long_name(symbol: str, exchange: str):
-    """Pull the longName field from yfinance for an ETF. Returns
-    None if anything goes wrong.
+def _try_fetch_etf_long_name(
+    symbol: str, exchange: str, *,
+    source: FundamentalsSource = DEFAULT_SOURCE,
+):
+    """Pull the longName field for an ETF. Returns None if anything
+    goes wrong.
 
-    Isolated function so tests can patch it without going through
-    the equity fetch_fn injection point. Lazy-imports the equity
-    fetcher's internal _fetch_yfinance_info to share its plumbing
-    and exception handling.
+    ETFs have no sector/industry, so they never go through the equity
+    fetch_fn injection point — but they still need one field out of the
+    same upstream. It reads that field off the same FundamentalsSource
+    rather than reaching into industry_fetch for a private function, which
+    is what it used to do.
     """
     try:
-        from .industry_fetch import _fetch_yfinance_info
         from ..etl.exchanges import yfinance_symbol
-        info = _fetch_yfinance_info(yfinance_symbol(symbol, exchange))
+        info = source.ticker_info(yfinance_symbol(symbol, exchange))
         ln = (info or {}).get("longName")
         if ln and str(ln).strip():
             return str(ln).strip()

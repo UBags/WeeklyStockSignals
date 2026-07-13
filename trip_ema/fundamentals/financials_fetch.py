@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from ..etl.exchanges import yfinance_symbol
+from .ports import DEFAULT_SOURCE, FundamentalsSource
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,7 @@ EBITDA_FIELD_CANDIDATES = (
 
 def fetch_quarterly_financials(
     symbol: str, exchange: str, *, max_quarters: int = 4,
+    source: FundamentalsSource = DEFAULT_SOURCE,
 ) -> list[QuarterlyFinancialInfo]:
     """Fetch up to `max_quarters` of quarterly revenue + EBITDA.
 
@@ -120,7 +122,7 @@ def fetch_quarterly_financials(
     """
     yf_symbol = yfinance_symbol(symbol, exchange)
     try:
-        df, currency = _fetch_yfinance_quarterly(yf_symbol)
+        df, currency = source.quarterly_financials(yf_symbol)
     except (FinancialsFetchRateLimited, FinancialsFetchTransient,
             FinancialsFetchPermanent):
         raise
@@ -178,36 +180,6 @@ def _classify_yfinance_exception(yf_symbol: str, e: Exception) -> FinancialsFetc
                               "not found", "404")):
         return FinancialsFetchPermanent(f"{yf_symbol}: {e}")
     return FinancialsFetchTransient(f"{yf_symbol}: {e}")
-
-
-def _fetch_yfinance_quarterly(yf_symbol: str):
-    """The actual yfinance call. Returns (DataFrame, currency).
-
-    Isolated for test patchability — tests patch THIS function with
-    a stub returning a fake DataFrame, so the test suite doesn't
-    need yfinance installed and doesn't depend on network.
-    """
-    import yfinance as yf  # lazy
-
-    ticker = yf.Ticker(yf_symbol)
-    # `quarterly_income_stmt` is the newer name; `quarterly_financials`
-    # is the alias in older yfinance. Prefer the new one but fall
-    # back if it's not present (defensive against version skew).
-    df = getattr(ticker, "quarterly_income_stmt", None)
-    if df is None or _is_empty(df):
-        df = getattr(ticker, "quarterly_financials", None)
-    # Currency: `info` has `financialCurrency`. We pull it once;
-    # default to INR for Indian exchanges which is the most common
-    # case for our universe.
-    currency = "INR"
-    try:
-        info = ticker.info or {}
-        if info.get("financialCurrency"):
-            currency = str(info["financialCurrency"])
-    except Exception:
-        # Currency fallback is acceptable; don't crash the fetch.
-        pass
-    return df, currency
 
 
 # ---------- helpers ---------- #
