@@ -63,6 +63,7 @@ from ....transports.http.schemas import (
     HistoricalSignalEventPayload,
     SignalHistoryPayload,
 )
+from ....fundamentals.market_session import market_tz
 
 
 # ============================================================
@@ -78,7 +79,7 @@ def build_signal_history_payload(
     timeframe: Timeframe,
     years_back: int = 3,
     now: datetime | None = None,
-    week_anchor_tz: str = "Asia/Kolkata",
+    week_anchor_tz: str | None = None,
 ) -> SignalHistoryPayload:
     """Assemble the chart-history payload for one (ticker, timeframe).
 
@@ -113,6 +114,11 @@ def build_signal_history_payload(
         indicator_state row.
       - Signal events are filtered to the same window.
     """
+    # A DEFAULT of 'Asia/Kolkata' is a silent-wrong-answer generator:
+    # every caller that omits it gets India. The ticker knows its own
+    # exchange, so ask it.
+    if week_anchor_tz is None:
+        week_anchor_tz = market_tz(ticker_ref.exchange).key
     if timeframe != Timeframe.WEEKLY:
         raise NotImplementedError(
             f"Only WEEKLY is supported in this step; got {timeframe}"

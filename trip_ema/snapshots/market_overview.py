@@ -41,6 +41,7 @@ from datetime import date
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
+from ..fundamentals.market_session import market_tz
 
 
 logger = logging.getLogger(__name__)
@@ -182,10 +183,14 @@ class MarketOverviewSnapshotter:
         # (which is PG's cast operator). The CAST() form avoids the
         # adjacency.
         if snapshot_date is None:
+            # The EXCHANGE's today, not India's. This becomes snapshot_date,
+            # which is half of the (snapshot_date, exchange) primary key.
+            # :tz is followed by ')' not ':', so the SQLAlchemy bind-regex
+            # `(?!:)` lookahead noted above does not bite.
             today_clause = (
-                "(NOW() AT TIME ZONE 'Asia/Kolkata')::date"
+                "(NOW() AT TIME ZONE :tz)::date"
             )
-            params: dict = {"ex": exchange}
+            params: dict = {"ex": exchange, "tz": market_tz(exchange).key}
         else:
             today_clause = "CAST(:snap_date AS date)"
             params = {"ex": exchange, "snap_date": snapshot_date}
@@ -341,9 +346,12 @@ class MarketOverviewSnapshotter:
         # Step 13a fixup: see _compute_counts for the rationale —
         # CAST() avoids the SQLAlchemy bind-regex `(?!:)` lookahead.
         if snapshot_date is None:
-            date_clause = "(NOW() AT TIME ZONE 'Asia/Kolkata')::date"
+            # See _compute_counts: the exchange's today, and :tz is followed by
+            # ')' so the bind-regex lookahead is satisfied.
+            date_clause = "(NOW() AT TIME ZONE :tz)::date"
             params: dict = {
                 "ex": exchange,
+                "tz": market_tz(exchange).key,
                 "b": counts.n_buys,
                 "s": counts.n_sells,
                 "eb": counts.n_exit_buys,

@@ -63,6 +63,7 @@ from ..fundamentals.v1_runners import (
     populate_stock_indicator_state_for_exchange,
 )
 from ..persistence.current_signals_repo import CurrentSignalsRepository
+from ..fundamentals.market_session import market_tz
 
 logger = logging.getLogger(__name__)
 
@@ -339,7 +340,12 @@ def recompute_market(
     if not stage_errors:
         try:
             _emit_progress(progress_cb, "signals", "running")
-            _ist_day = as_of.astimezone(ZoneInfo("Asia/Kolkata")).date()
+            # The MARKET'S day, not India's. This is signal_date — part of
+            # historical_signals' UNIQUE (ticker_id, timeframe, signal_date) —
+            # so getting it wrong writes signals against the wrong trading day,
+            # on the primary key. A NYSE signal at 15:55 ET is 01:25 IST the
+            # NEXT day; under the old constant it was recorded a day late.
+            _market_day = as_of.astimezone(market_tz(exchange)).date()
             # INTRADAY-CHAIN: record the within-day transition sequence before
             # the net-daily write below. The weekly-chart regime can turn more
             # than once a day as the forming bar moves; current_signals holds
@@ -351,14 +357,14 @@ def recompute_market(
             log_intraday_transitions(
                 db_engine,
                 scoped_tickers=None,
-                day=_ist_day,
+                day=_market_day,
                 as_of=as_of,
             )
             _pd = process_signals_for_day(
                 db_engine,
                 scoped_tickers=None,
-                day=_ist_day,
-                today=_ist_day,
+                day=_market_day,
+                today=_market_day,
                 mode=signal_mode,
                 as_of=as_of,
             )
