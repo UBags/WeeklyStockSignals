@@ -626,6 +626,7 @@ def run_shares_refresh(
     resume_run_id: int | None = None,
     force: bool = False,
     only_missing: bool = False,
+    recheck_unavailable: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn=None,
 ) -> int:
@@ -693,13 +694,31 @@ def run_shares_refresh(
             # ...and of those 107, the ones yfinance has already told us it has
             # nothing for drop out too. First sweep discovers them; every sweep
             # after that skips them.
-            skip_unavailable="shares" if only_missing else None,
+            #
+            # UNLESS this is the monthly re-check, which exists precisely to
+            # re-ask them. A provider's "no data" is a fact about the last time
+            # we asked, not a permanent property of the company — twelve tickers
+            # proved that the first time we recorded verdicts.
+            skip_unavailable=(
+                "shares" if (only_missing and not recheck_unavailable) else None
+            ),
         )
         if not ticker_list:
-            logger.warning(
-                "No active tickers for exchange %s — skipping shares refresh",
-                exchange,
-            )
+            # An empty list means two very different things now, and conflating
+            # them trains people to ignore warnings. Under only_missing an empty
+            # list is the SUCCESS case — every ticker either has data or has been
+            # asked about. Without it, an empty list means the universe query
+            # returned nothing, which is a real problem.
+            if only_missing:
+                logger.info(
+                    "No shares gaps for exchange %s — nothing to fetch",
+                    exchange,
+                )
+            else:
+                logger.warning(
+                    "No active tickers for exchange %s — skipping shares refresh",
+                    exchange,
+                )
             with transaction(db_engine) as conn:
                 run_id = FundamentalsRunRepository(conn).open(
                     phase="shares", exchange=exchange,
@@ -1102,6 +1121,7 @@ def run_financials_refresh(
     resume_run_id: int | None = None,
     force: bool = False,
     only_missing: bool = False,
+    recheck_unavailable: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn=None,
     max_quarters: int = 4,
@@ -1159,13 +1179,23 @@ def run_financials_refresh(
             missing_from="quarterly_financials" if only_missing else None,
             # ETFs have no quarterly financials either.
             eq_only=only_missing,
-            skip_unavailable="financials" if only_missing else None,
+            skip_unavailable=(
+                "financials"
+                if (only_missing and not recheck_unavailable) else None
+            ),
         )
         if not ticker_list:
-            logger.warning(
-                "No active tickers for exchange %s — skipping financials refresh",
-                exchange,
-            )
+            # See run_shares_refresh: under only_missing, empty == satisfied.
+            if only_missing:
+                logger.info(
+                    "No financials gaps for exchange %s — nothing to fetch",
+                    exchange,
+                )
+            else:
+                logger.warning(
+                    "No active tickers for exchange %s — skipping financials "
+                    "refresh", exchange,
+                )
             with transaction(db_engine) as conn:
                 run_id = FundamentalsRunRepository(conn).open(
                     phase="financials", exchange=exchange,

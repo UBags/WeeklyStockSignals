@@ -535,6 +535,32 @@ def cmd_recompute_tiers(args, config: Config) -> int:
     return 0
 
 
+def cmd_reference_recheck(args, config: Config) -> int:
+    """Monthly re-baseline: re-ask every ticker the provider called unavailable.
+
+    Safe to run daily from cron with --if-due; it no-ops unless today is the
+    first Saturday of the month and nothing has refreshed this month.
+    """
+    from ..fundamentals.monthly_recheck import run_monthly_recheck
+
+    db_engine = create_engine_from_config(config)
+    try:
+        report = run_monthly_recheck(
+            db_engine, config, args.exchange, if_due=args.if_due,
+        )
+    finally:
+        db_engine.dispose()
+
+    print(report.render())
+    if not report.ran:
+        return 0
+    if report.after is not None and report.after.blockers:
+        return 2
+    if report.after is not None and report.after.gaps:
+        return 1
+    return 0
+
+
 def cmd_refresh_reference(args, config: Config) -> int:
     """Populate the reference layer: industry, shares, quarterly financials.
 
@@ -1102,6 +1128,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_exchange_arg(aud)
 
+    rc = sub.add_parser(
+        "reference-recheck",
+        help="Monthly re-baseline: re-ask every ticker recorded as unavailable",
+    )
+    _add_exchange_arg(rc)
+    rc.add_argument(
+        "--if-due", dest="if_due", action="store_true",
+        help="no-op unless today is the first Saturday and nothing has "
+             "refreshed this month (run this DAILY from cron)",
+    )
+
     rr = sub.add_parser(
         "refresh-reference",
         help="Fetch industry / shares / financials for tickers that lack them",
@@ -1226,6 +1263,7 @@ def main(argv: list[str] | None = None) -> int:
         "recompute-tiers":      cmd_recompute_tiers,
         "audit":                cmd_audit,
         "refresh-reference":    cmd_refresh_reference,
+        "reference-recheck":    cmd_reference_recheck,
         "status":               cmd_status,
         "unpark":               cmd_unpark,
         "approve-action":       cmd_approve_action,
