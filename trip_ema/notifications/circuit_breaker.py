@@ -41,11 +41,11 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from dataclasses import dataclass
 from enum import StrEnum
 
 from ..domain import NotificationBatch
+from ..domain.clock import MonotonicClock, monotonic_clock
 from ..observability import metrics as M
 
 logger = logging.getLogger(__name__)
@@ -122,12 +122,6 @@ def _ensure_metrics():
     return _circuit_state_gauge, _circuit_transition_counter
 
 
-def _now() -> float:
-    """Monotonic clock — never goes backward across NTP adjustments,
-    unlike time.time(). Important for the reset-timeout comparison."""
-    return time.monotonic()
-
-
 class CircuitBreakingTransport:
     """Wraps a NotificationTransport with circuit-breaker semantics.
 
@@ -144,10 +138,19 @@ class CircuitBreakingTransport:
         wrapped: NotificationTransportProtocol,
         name: str,
         config: CircuitBreakerConfig | None = None,
+        clock: MonotonicClock = monotonic_clock,
     ):
+        """`clock` is a MonotonicClock — elapsed-time source for the
+        reset-timeout comparison. Defaults to `time.monotonic`. Injected so
+        tests drive the OPEN -> HALF_OPEN transition by hand instead of
+        sleeping (or patching a module global, which is what this replaced).
+        Not part of CircuitBreakerConfig: config is frozen, serialisable
+        tunables; the clock is a collaborator.
+        """
         self._wrapped = wrapped
         self._name = name
         self._config = config or CircuitBreakerConfig()
+        self._clock = clock
         self._state: CircuitState = CircuitState.CLOSED
         self._consecutive_failures = 0
         self._consecutive_half_open_successes = 0
@@ -245,7 +248,8 @@ class CircuitBreakingTransport:
         if self._state == CircuitState.OPEN:
             # Check if it's time to try a probe
             if self._opened_at is not None and (
-                _now() - self._opened_at >= self._config.reset_timeout_seconds
+                self._clock() - self._opened_at
+                >= self._config.reset_timeout_seconds
             ):
                 self._transition_locked(CircuitState.HALF_OPEN)
                 self._consecutive_half_open_successes = 0
@@ -277,12 +281,12 @@ class CircuitBreakingTransport:
             if self._state == CircuitState.HALF_OPEN:
                 # Probe failed — back to OPEN with fresh clock
                 self._transition_locked(CircuitState.OPEN)
-                self._opened_at = _now()
+                self._opened_at = self._clock()
                 self._consecutive_half_open_successes = 0
             elif self._state == CircuitState.CLOSED:
                 if self._consecutive_failures >= self._config.failure_threshold:
                     self._transition_locked(CircuitState.OPEN)
-                    self._opened_at = _now()
+                    self._opened_at = self._clock()
 
     def _transition_locked(self, new_state: CircuitState) -> None:
         """Record a state transition + emit a log line and bump the

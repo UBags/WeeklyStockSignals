@@ -13,9 +13,10 @@ Coverage:
   - Per-transport isolation: two breakers' states don't interfere
   - Metrics emit correctly on state transitions
 
-The breaker uses `time.monotonic()` internally. To exercise the
-reset-timeout transition we monkeypatch that function rather than
-sleeping in tests.
+The breaker takes a `clock` (a MonotonicClock: `() -> float`, defaulting to
+`time.monotonic`). To exercise the reset-timeout transition, tests inject a
+`ManualClock` and drive it by hand — no sleeping, no patching of module
+globals. See trip_ema/domain/clock.py.
 """
 
 from __future__ import annotations
@@ -62,6 +63,26 @@ class FakeTransport:
         if not self._return_values:
             return True
         return self._return_values.pop(0)
+
+
+class ManualClock:
+    """A MonotonicClock the test drives by hand.
+
+    Satisfies the `() -> float` protocol, so it goes straight into
+    CircuitBreakingTransport(clock=...) with no adapter.
+    """
+
+    def __init__(self, t: float = 0.0):
+        self.t = float(t)
+
+    def __call__(self) -> float:
+        return self.t
+
+    def set(self, t: float) -> None:
+        self.t = float(t)
+
+    def advance(self, seconds: float) -> None:
+        self.t += float(seconds)
 
 
 def _make_batch() -> NotificationBatch:
@@ -158,14 +179,12 @@ class TestClosedToOpenTransition:
 
 class TestOpenState:
 
-    def test_open_state_fast_fails_without_calling_wrapped(self, monkeypatch):
+    def test_open_state_fast_fails_without_calling_wrapped(self):
         """When OPEN, send() must NOT call the wrapped transport."""
-        # Freeze the clock to a known point BEFORE tripping the breaker
-        # so opened_at and the post-trip _now() comparison are both
-        # against controlled values, not against time.monotonic()
-        # (which depends on container uptime).
-        import trip_ema.notifications.circuit_breaker as cb_mod
-        monkeypatch.setattr(cb_mod, "_now", lambda: 100.0)
+        # Pin the clock BEFORE tripping the breaker so opened_at and the
+        # post-trip comparison are both against controlled values, not
+        # against container uptime.
+        clock = ManualClock(100.0)
 
         fake = FakeTransport()
         fake.queue(False, False, False)
@@ -174,6 +193,7 @@ class TestOpenState:
             config=CircuitBreakerConfig(
                 failure_threshold=3, reset_timeout_seconds=30.0,
             ),
+            clock=clock,
         )
         # Trip the breaker — opened_at gets set to 100.0
         for _ in range(3):
@@ -181,8 +201,8 @@ class TestOpenState:
         assert cb.state == CircuitState.OPEN
         call_count_before = len(fake.calls)
 
-        # Still at _now=100.0 (well within reset_timeout). Subsequent
-        # calls must return False without invoking the wrapped transport.
+        # Still at t=100.0 (well within reset_timeout). Subsequent calls
+        # must return False without invoking the wrapped transport.
         result = cb.send("a", _make_batch())
         assert result is False
         assert len(fake.calls) == call_count_before
@@ -190,7 +210,8 @@ class TestOpenState:
 
 class TestOpenToHalfOpenTransition:
 
-    def test_reset_timeout_moves_open_to_half_open_on_next_call(self, monkeypatch):
+    def test_reset_timeout_moves_open_to_half_open_on_next_call(self):
+        clock = ManualClock(0.0)
         fake = FakeTransport()
         fake.queue(False, False)  # Trip the breaker
         cb = CircuitBreakingTransport(
@@ -198,24 +219,23 @@ class TestOpenToHalfOpenTransition:
             config=CircuitBreakerConfig(
                 failure_threshold=2, reset_timeout_seconds=10.0,
             ),
+            clock=clock,
         )
 
-        import trip_ema.notifications.circuit_breaker as cb_mod
         # Time 0: send failure, send failure → OPEN
-        monkeypatch.setattr(cb_mod, "_now", lambda: 0.0)
         cb.send("a", _make_batch())
         cb.send("a", _make_batch())
         assert cb.state == CircuitState.OPEN
 
         # Time 5 (< 10s): still OPEN, fast-fail
-        monkeypatch.setattr(cb_mod, "_now", lambda: 5.0)
+        clock.set(5.0)
         cb.send("a", _make_batch())
         assert cb.state == CircuitState.OPEN
 
         # Time 11 (>= 10s): the next call transitions OPEN → HALF_OPEN
         # AND probes (so we need a return value queued for that probe)
         fake.queue(True)
-        monkeypatch.setattr(cb_mod, "_now", lambda: 11.0)
+        clock.set(11.0)
         result = cb.send("a", _make_batch())
         # Probe succeeded → state is now CLOSED, result is True
         assert result is True
@@ -224,34 +244,35 @@ class TestOpenToHalfOpenTransition:
 
 class TestHalfOpenProbe:
 
-    def _trip_to_open(self, cb, fake, monkeypatch, now=0.0):
-        import trip_ema.notifications.circuit_breaker as cb_mod
-        monkeypatch.setattr(cb_mod, "_now", lambda: now)
+    def _trip_to_open(self, cb, fake, clock, now=0.0):
+        clock.set(now)
         # Queue exactly the threshold-many failures — no extras
         fake.queue(*([False] * cb._config.failure_threshold))
         for _ in range(cb._config.failure_threshold):
             cb.send("a", _make_batch())
         assert cb.state == CircuitState.OPEN
 
-    def test_half_open_probe_failure_returns_to_open(self, monkeypatch):
+    def test_half_open_probe_failure_returns_to_open(self):
+        clock = ManualClock(0.0)
         fake = FakeTransport()
         cb = CircuitBreakingTransport(
             fake, name="t1",
             config=CircuitBreakerConfig(
                 failure_threshold=2, reset_timeout_seconds=10.0,
             ),
+            clock=clock,
         )
-        self._trip_to_open(cb, fake, monkeypatch)
+        self._trip_to_open(cb, fake, clock)
 
         # Move past reset timeout — next call probes
-        import trip_ema.notifications.circuit_breaker as cb_mod
-        monkeypatch.setattr(cb_mod, "_now", lambda: 20.0)
+        clock.set(20.0)
         fake.queue(False)  # probe fails
         result = cb.send("a", _make_batch())
         assert result is False
         assert cb.state == CircuitState.OPEN
 
-    def test_half_open_probe_success_returns_to_closed(self, monkeypatch):
+    def test_half_open_probe_success_returns_to_closed(self):
+        clock = ManualClock(0.0)
         fake = FakeTransport()
         cb = CircuitBreakingTransport(
             fake, name="t1",
@@ -259,18 +280,19 @@ class TestHalfOpenProbe:
                 failure_threshold=2, reset_timeout_seconds=10.0,
                 half_open_max_successes=1,
             ),
+            clock=clock,
         )
-        self._trip_to_open(cb, fake, monkeypatch)
-        import trip_ema.notifications.circuit_breaker as cb_mod
-        monkeypatch.setattr(cb_mod, "_now", lambda: 20.0)
+        self._trip_to_open(cb, fake, clock)
+        clock.set(20.0)
         fake.queue(True)  # probe succeeds
         result = cb.send("a", _make_batch())
         assert result is True
         assert cb.state == CircuitState.CLOSED
 
-    def test_half_open_requires_max_successes_to_close(self, monkeypatch):
+    def test_half_open_requires_max_successes_to_close(self):
         """With half_open_max_successes=3, three consecutive probes
         must succeed before returning to CLOSED."""
+        clock = ManualClock(0.0)
         fake = FakeTransport()
         cb = CircuitBreakingTransport(
             fake, name="t1",
@@ -278,12 +300,12 @@ class TestHalfOpenProbe:
                 failure_threshold=2, reset_timeout_seconds=10.0,
                 half_open_max_successes=3,
             ),
+            clock=clock,
         )
-        self._trip_to_open(cb, fake, monkeypatch)
+        self._trip_to_open(cb, fake, clock)
 
-        import trip_ema.notifications.circuit_breaker as cb_mod
         # Probe 1: success — still HALF_OPEN
-        monkeypatch.setattr(cb_mod, "_now", lambda: 20.0)
+        clock.set(20.0)
         fake.queue(True)
         assert cb.send("a", _make_batch()) is True
         assert cb.state == CircuitState.HALF_OPEN
