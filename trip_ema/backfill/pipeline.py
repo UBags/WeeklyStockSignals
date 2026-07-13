@@ -359,6 +359,43 @@ def backfill(
         )
     _force = not resume
 
+    # ---- Scoped runs do NOT participate in the phase ledger ----
+    #
+    # pipeline_phase_status's PK is (exchange, phase_name). It records that
+    # "fetch_bars is COMPLETE for NSE" — but NOT for which tickers. A backfill's
+    # work is scope-dependent: --stocks DABUR,MARICO,CONCOR fetches three, a full
+    # run fetches 2,673, and both would write the same row.
+    #
+    # With resume=True that means a scoped run skips every phase the last full run
+    # completed — observed: a 3-ticker diagnostic skipped the entire pipeline,
+    # walked 0 days and never contacted Yahoo. Wasteful, but visible.
+    #
+    # With --rebuild it is far worse: the scoped run clears the ledger, fetches
+    # THREE tickers, and marks fetch_bars COMPLETE. The next FULL backfill reads
+    # that row and skips fetching altogether — 2,670 tickers never fetched, green
+    # run, no error. A completion marker that does not know what it completed.
+    #
+    # So a scoped run neither reads nor writes the ledger: every phase always
+    # executes (no false skips) and none is ever recorded (no false completions).
+    # The ledger keeps meaning exactly what it says — "this phase finished for the
+    # WHOLE EXCHANGE" — because only full-exchange runs write to it.
+    #
+    # NB: assigning `run_phase` here makes it a LOCAL for the whole of backfill(),
+    # so all 17 call sites below are covered by this one binding. That is
+    # deliberate: editing 17 sites is 17 chances to miss one, and missing one
+    # means a scoped run still writes a false COMPLETE for that phase — which is
+    # the entire bug.
+    def _scoped_run_phase(_db, _ex, phase_name, fn, **_kwargs):
+        """Run the phase; tell the ledger nothing."""
+        logger.info(
+            "phase %s/%s: scoped run (%d ticker(s)) — executing, ledger bypassed",
+            _ex, phase_name, len(stocks or []),
+        )
+        return fn()
+
+    if stocks is not None:
+        run_phase = _scoped_run_phase
+
     # ---- The pipeline body — wrap in try/finally so finish() ALWAYS
     # gets called, freeing the live cycle's deferral check. ----
     result_kwargs: dict = {

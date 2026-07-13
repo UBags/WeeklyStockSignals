@@ -159,10 +159,21 @@ def run_industry_refresh(
             missing_from="instrument_industry" if only_missing else None,
         )
         if not ticker_list:
-            logger.warning(
-                "No active tickers for exchange %s — skipping refresh",
-                exchange,
-            )
+            # See run_shares_refresh: under only_missing an empty list is the
+            # SUCCESS case (every ticker already classified), not a broken
+            # universe. This one still lied after K3 because industry had no gaps
+            # at the time — it has stages now, and it was warning on every
+            # backfill.
+            if only_missing:
+                logger.info(
+                    "No industry gaps for exchange %s — nothing to fetch",
+                    exchange,
+                )
+            else:
+                logger.warning(
+                    "No active tickers for exchange %s — skipping refresh",
+                    exchange,
+                )
             with transaction(db_engine) as conn:
                 run_id = FundamentalsRunRepository(conn).open(
                     phase="industry", exchange=exchange,
