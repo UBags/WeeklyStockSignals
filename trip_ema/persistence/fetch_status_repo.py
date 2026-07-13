@@ -106,21 +106,11 @@ class FundamentalsFetchStatusRepository:
         rows = self._conn.execute(text(sql), params)
         return {int(r[0]) for r in rows}
 
-    def counts_by_dataset(self, exchange: str) -> dict[str, int]:
-        """{dataset: n_unavailable} for one exchange. The audit's third bucket."""
-        rows = self._conn.execute(
-            text("""
-                SELECT f.dataset, count(*)
-                  FROM fundamentals_fetch_status f
-                  JOIN tickers t ON t.ticker_id = f.ticker_id
-                 WHERE t.exchange = :ex
-                   AND t.is_active AND t.delisted_at IS NULL
-                   AND f.status = 'UNAVAILABLE'
-                 GROUP BY f.dataset
-            """),
-            {"ex": exchange},
-        )
-        return {r[0]: int(r[1]) for r in rows}
+    # L2-GATE-CANNOT-LIE: counts_by_dataset was deleted here. It had zero call
+    # sites and it was a second copy of data_fidelity._unavailable_counts' SQL —
+    # which now carries a NOT EXISTS that this one did not. Two copies of the
+    # truth, one of them wrong, waiting for someone to call the convenient one.
+    # The audit owns this query.
 
     def get(self, ticker_id: int, dataset: str) -> FetchStatus | None:
         self._check_dataset(dataset)

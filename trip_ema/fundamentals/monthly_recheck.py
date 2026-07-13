@@ -151,7 +151,11 @@ def run_monthly_recheck(
     # Imported here rather than at module scope: runners imports the fundamentals
     # fetchers, which pull yfinance, and this module is imported by the CLI at
     # startup for every subcommand.
-    from .runners import run_financials_refresh, run_shares_refresh
+    from .runners import (
+        run_financials_refresh,
+        run_industry_refresh,
+        run_shares_refresh,
+    )
 
     today = today or market_today(exchange)
 
@@ -175,7 +179,14 @@ def run_monthly_recheck(
     )
 
     # (runner name, function, the audit dataset that mirrors it)
+    #
+    # Industry belongs here for the same reason the other two do, and its absence
+    # was not a judgement call — the industry runner simply never learned to
+    # record or skip a verdict, so there was nothing to re-ask. Now there is.
+    # Ordering mirrors backfill(): industry precedes the index build, shares
+    # precedes market cap.
     _RUNNERS = (
+        ("industry", run_industry_refresh, "instrument_industry"),
         ("shares", run_shares_refresh, "instrument_shares"),
         ("financials", run_financials_refresh, "quarterly_financials"),
     )

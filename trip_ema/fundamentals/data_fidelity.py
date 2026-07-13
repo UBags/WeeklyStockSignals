@@ -413,22 +413,56 @@ def _audit_ohlcv(
 # Reference data — the layer the backfill assumes and never builds
 # --------------------------------------------------------------------------
 
+# L2-GATE-CANNOT-LIE: the table a verdict is ABOUT. Mapped, not interpolated
+# freely — the name reaches SQL, and "it's only ever called with a constant" is
+# not a property worth betting the query on.
+_DATASET_TABLE = {
+    "shares": "instrument_shares",
+    "financials": "quarterly_financials",
+    "industry": "instrument_industry",
+}
+
+
 def _unavailable_counts(conn, exchange: str) -> dict[str, int]:
-    """{dataset: n} from fundamentals_fetch_status — entities the provider has
-    told us it has nothing for. See DatasetFidelity.unavailable."""
-    rows = conn.execute(
-        text("""
-            SELECT f.dataset, count(*)
+    """{dataset: n} — entities the provider has told us it has nothing for AND
+    that still have no data.
+
+    The second half of that sentence is the entire point of this function.
+
+    `missing = universe - covered - unavailable`, and OK is `missing == 0`. A
+    ticker counted in BOTH `covered` and `unavailable` is therefore subtracted
+    twice, and one genuinely-missing ticker silently drops out of the gate. A
+    single stale verdict — one clear() that didn't fire, on one ticker — is
+    enough to turn `READY: yes` on over a real gap. backfill() runs this audit;
+    the gate guards the wipe.
+
+    So the NOT EXISTS below is not defence-in-depth layered on top of the
+    runners' clear() calls. It IS the invariant: a verdict only counts while the
+    data it is a verdict about is still absent. The clear() calls are hygiene —
+    they keep the table honest and the sweep cheap — but the gate no longer
+    depends on them being perfect, which is the only reason it can be trusted to
+    guard a wipe.
+    """
+    out: dict[str, int] = {}
+    for dataset, table in _DATASET_TABLE.items():
+        out[dataset] = _scalar(
+            conn,
+            f"""
+            SELECT count(*)
               FROM fundamentals_fetch_status f
               JOIN tickers t ON t.ticker_id = f.ticker_id
              WHERE t.exchange = :ex
                AND t.is_active AND t.delisted_at IS NULL
+               AND f.dataset = :ds
                AND f.status = 'UNAVAILABLE'
-             GROUP BY f.dataset
-        """),
-        {"ex": exchange},
-    )
-    return {r[0]: int(r[1]) for r in rows}
+               AND NOT EXISTS (
+                   SELECT 1 FROM {table} x
+                    WHERE x.ticker_id = f.ticker_id
+               )
+            """,
+            ex=exchange, ds=dataset,
+        )
+    return out
 
 
 def _audit_per_ticker_table(
@@ -578,12 +612,16 @@ def audit_exchange(
         datasets.append(
             _audit_ohlcv(conn, exchange, universe, gap_days, req_start)
         )
+        dark = _unavailable_counts(conn, exchange)
         datasets.append(_audit_per_ticker_table(
             conn, exchange, universe,
             dataset="instrument_industry", table="instrument_industry",
+            # The third bucket, finally wired. Without it, tickers yfinance
+            # cannot classify are scored as OUR gap and this dataset can never
+            # reach OK — and a gate that cannot go green is not a gate.
+            unavailable=dark.get("industry", 0),
         ))
-        # EQ-scoped, all three. See _audit_per_ticker_table.
-        dark = _unavailable_counts(conn, exchange)
+        # EQ-scoped, the rest. See _audit_per_ticker_table.
         datasets.append(_audit_per_ticker_table(
             conn, exchange, eq_universe, eq_only=True,
             dataset="instrument_shares", table="instrument_shares",
