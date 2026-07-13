@@ -133,7 +133,6 @@ def populate_stock_indicator_state_for_ticker(
     ticker doesn't exist or has fewer than `min_bars` daily bars.
     `force` / `n_weeks_to_upsert` retained for signature compatibility.
     """
-    from sqlalchemy import text as _text
     from ..persistence.bars_repo import BarsRepository
     from .daily_grain import compute_daily_grain_states
     from ..domain.market_session import market_session_for
@@ -386,7 +385,6 @@ def populate_stock_indicator_enrichment_for_ticker(
             f"Run the state populator first."
         )
 
-    from sqlalchemy import text as _text
     with db_engine.connect() as conn:
         daily_bars = BarsRepository(conn).fetch_history(
             ticker_id, Timeframe.DAILY, limit=100000,

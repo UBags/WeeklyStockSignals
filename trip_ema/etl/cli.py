@@ -462,7 +462,6 @@ def cmd_snapshot(args, config: Config) -> int:
     same (date, exchange) yield the latest counts.
     """
     from datetime import datetime
-    from zoneinfo import ZoneInfo
 
     from ..snapshots.market_overview import MarketOverviewSnapshotter
 

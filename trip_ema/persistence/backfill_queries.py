@@ -30,7 +30,7 @@ now the modal warns the operator that they're stale.
 """
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection

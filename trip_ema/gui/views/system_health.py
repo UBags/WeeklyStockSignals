@@ -22,7 +22,6 @@ so polling is cheap.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -33,10 +32,8 @@ from PySide6.QtWidgets import (
 from ..db import GuiDbSession
 from ..http_client import TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
-from ...domain.market_session import exchange_of_engine, market_now
 from ...domain.market_session import (
     display_now,
-    exchange_of_engine_or_none,
 )
 
 logger = logging.getLogger(__name__)

@@ -40,7 +40,6 @@ Refresh cadence: 30s. Same pattern as Tickers tab.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt,
@@ -57,7 +56,6 @@ from ..csv_export import export_rows_to_csv, timestamped_filename
 from ..db import GuiDbSession
 from ..http_client import TripEmaHttpClient
 from ..workers import RefreshScheduler, submit
-from ...domain.market_session import exchange_of_engine, market_now
 from ...domain.market_session import (
     display_now,
     exchange_of_engine_or_none,

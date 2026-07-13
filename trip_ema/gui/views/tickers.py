@@ -58,9 +58,7 @@ intent is "never scroll to find a fresh signal".
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, Signal,

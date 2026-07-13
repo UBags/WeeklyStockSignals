@@ -757,7 +757,6 @@ def compute_market_cap_endpoint(
     locally. The HTTP path is for the heavy backfill that benefits
     from the executor.
     """
-    from datetime import date as _date
     _require_executor(executor)
     _validate_exchange_or_400(exchange, config)
     if backfill_from is None:

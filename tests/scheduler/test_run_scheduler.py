@@ -370,7 +370,7 @@ class TestLifecycle:
 
         def bad_reader(p):
             error_count[0] += 1
-            raise IOError("simulated config load error")
+            raise OSError("simulated config load error")
 
         # Very short retry-sleep to make the test fast.
         sched = RunScheduler(

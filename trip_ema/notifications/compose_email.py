@@ -29,7 +29,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection

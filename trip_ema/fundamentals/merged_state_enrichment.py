@@ -35,7 +35,6 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from ..domain import Timeframe

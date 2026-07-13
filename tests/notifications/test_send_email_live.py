@@ -157,7 +157,7 @@ def test_send_test_email_to_uddipan():
     # Print result regardless so the user sees the message_id (or
     # the failure reason) when running with pytest -s.
     print()
-    print(f"  live Brevo result:")
+    print("  live Brevo result:")
     print(f"    subscriber_id  : {result.subscriber_id}")
     print(f"    address        : {result.address}")
     print(f"    success        : {result.success}")

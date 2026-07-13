@@ -32,7 +32,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date, datetime, UTC
 from enum import IntFlag
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine

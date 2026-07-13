@@ -33,7 +33,6 @@ from __future__ import annotations
 import logging
 import sys
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import (
     Qt, QDate, QProcess, QStringListModel, QTimer,

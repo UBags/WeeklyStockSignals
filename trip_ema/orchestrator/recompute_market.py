@@ -44,7 +44,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, UTC
-from zoneinfo import ZoneInfo
 from collections.abc import Callable
 from typing import Literal
 
