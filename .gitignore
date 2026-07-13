@@ -47,3 +47,4 @@ FAILS.txt
 trip_ema_ddl.sql
 var/etl/parked/
 scripts/stock_split_evaluate.py
+.env
