@@ -28,6 +28,29 @@ from ..config import Config, resolve_db_password
 Role = Literal["etl", "engine", "gui"]
 
 
+def _utc_session_connect_args(url: str) -> dict:
+    """L2-ZONE-IS-NAMED: every connection this application opens speaks UTC.
+
+    Not because UTC is the right clock for a trading date — it is not; the
+    market's clock is, and `AT TIME ZONE :tz` / `trading_date_of()` are how we say
+    so. This exists because an UNCHOSEN clock is the enemy.
+
+    Postgres evaluates `timestamptz::date` and `CURRENT_DATE` in the SESSION
+    timezone. Unpinned, that is whatever the server's postgresql.conf inherited
+    from the host OS — on this NUC, Asia/Kolkata. Which is why every implicit cast
+    in this codebase came out right, and why not one of them was correct: they
+    were reading a clock nobody chose, nobody documented and no test asserts.
+    Move the box to a UTC host, or point it at NYSE, and they change answer.
+
+    Pinned to UTC, nothing can be accidentally right. An implicit conversion is
+    now visibly wrong, in the tests, in the one place we can see it — which is the
+    only place a wrong date is cheap.
+    """
+    if not url.startswith("postgresql"):
+        return {}
+    return {"connect_args": {"options": "-c timezone=UTC"}}
+
+
 def build_db_url(config: Config) -> str:
     """Build the SQLAlchemy URL with the password resolved from env.
 
@@ -83,6 +106,7 @@ def create_engine_from_config(config: Config, **engine_kwargs: Any) -> Engine:
         "max_overflow": db.pool_max_overflow,
         "pool_timeout": db.pool_timeout_seconds,
         "pool_recycle": db.pool_recycle_seconds,
+        **_utc_session_connect_args(url),
     }
     # Caller overrides take priority — useful in tests where the kwargs
     # would otherwise conflict with NullPool / StaticPool fixtures.
@@ -108,6 +132,7 @@ def create_engine_for_role(
         "max_overflow": db.pool_max_overflow,
         "pool_timeout": db.pool_timeout_seconds,
         "pool_recycle": db.pool_recycle_seconds,
+        **_utc_session_connect_args(url),
     }
     pool_kwargs.update(engine_kwargs)
     return create_engine(url, **pool_kwargs)

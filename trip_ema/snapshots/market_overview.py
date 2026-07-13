@@ -193,7 +193,16 @@ class MarketOverviewSnapshotter:
             params: dict = {"ex": exchange, "tz": market_tz(exchange).key}
         else:
             today_clause = "CAST(:snap_date AS date)"
-            params = {"ex": exchange, "snap_date": snapshot_date}
+            # :tz is bound on BOTH branches, because the CTE's daily-close join
+            # (o.bar_timestamp AT TIME ZONE :tz)::date needs it regardless of
+            # where today's DATE came from. It used to be bound only on the live
+            # branch — so every backfill and every test, which pass an explicit
+            # snapshot_date, arrived with no value for it.
+            params = {
+                "ex": exchange,
+                "snap_date": snapshot_date,
+                "tz": market_tz(exchange).key,
+            }
 
         sql = text(f"""
             WITH
@@ -262,7 +271,7 @@ class MarketOverviewSnapshotter:
                       FROM ohlcv_bars o
                       JOIN active USING (ticker_id)
                       JOIN week_anchor wa
-                        ON o.bar_timestamp::date = wa.today_d
+                        ON (o.bar_timestamp AT TIME ZONE :tz)::date = wa.today_d
                      WHERE o.timeframe = '1D'
                 ),
                 sigs AS (

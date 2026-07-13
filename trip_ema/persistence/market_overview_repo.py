@@ -13,6 +13,9 @@ from datetime import date, datetime
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
+from ..domain.market_session import (
+    market_tz_name,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,10 +88,15 @@ class MarketOverviewRepository:
                   FROM market_overview_daily
                  WHERE exchange = :ex
                    AND snapshot_date
-                       >= CURRENT_DATE - CAST(:days AS integer)
+                       >= (NOW() AT TIME ZONE :tz)::date
+                          - CAST(:days AS integer)
                  ORDER BY snapshot_date ASC
             """),
-            {"ex": exchange, "days": n_days},
+            # snapshot_date is WRITTEN as (NOW() AT TIME ZONE :tz)::date — the
+            # market's calendar. It was READ against CURRENT_DATE — the session's.
+            # Two clocks for one column, agreeing only while the server's TZ
+            # happens to equal the market's.
+            {"ex": exchange, "days": n_days, "tz": market_tz_name(exchange)},
         ).all()
         return [_row_to_dc(r) for r in rows]
 

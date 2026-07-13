@@ -384,9 +384,20 @@ class TestFilterBarsToRange:
         # Bars 0..51 are < cutoff, bars 52+ are >=. Allow ±1 for rounding.
         assert len(out) == pytest.approx(len(bars) - 52, abs=1)
 
-    def test_tz_naive_bar_against_tz_aware_reference(self):
-        """A naive bar_timestamp should still compare correctly when
-        the reference is tz-aware."""
+    def test_tz_naive_bar_is_rejected(self):
+        """A naive bar_timestamp is an error, not a comparison problem.
+
+        This test used to assert the opposite — that a naive bar "should still
+        compare correctly" against a tz-aware reference. It cannot. A naive
+        datetime names no instant, so there is no correct comparison to make; the
+        old code grafted whichever tzinfo the OTHER operand happened to carry
+        ("prefer the more-specific one") and produced an answer that silently
+        depended on the caller. A backtest window a week out is exactly the kind of
+        wrong that nobody notices.
+
+        Every producer of this payload emits an aware timestamp. A naive one means
+        something upstream dropped the zone, and that is worth a traceback.
+        """
         bar_naive = {
             "bar_timestamp": datetime(2025, 6, 1),  # naive
             "open": 0, "high": 0, "low": 0, "close": 0,
@@ -394,6 +405,5 @@ class TestFilterBarsToRange:
             "med_ema": 100, "long_ema": 100, "longest_ema": 100,
         }
         ref = datetime(2026, 6, 1, tzinfo=UTC)
-        out = filter_bars_to_range([bar_naive], years=2, reference_dt=ref)
-        # bar is 1 year ago → within 2y window
-        assert len(out) == 1
+        with pytest.raises(ValueError, match="naive"):
+            filter_bars_to_range([bar_naive], years=2, reference_dt=ref)

@@ -63,7 +63,11 @@ from ....transports.http.schemas import (
     HistoricalSignalEventPayload,
     SignalHistoryPayload,
 )
-from ....domain.market_session import market_tz
+from ....domain.market_session import (
+    exchange_of_conn,
+    market_tz,
+    market_tz_name,
+)
 
 
 # ============================================================
@@ -267,11 +271,12 @@ def _load_daily_bars_for_window(
           FROM ohlcv_bars
          WHERE ticker_id = :tid
            AND timeframe = '1D'
-           AND bar_timestamp::date BETWEEN :start AND :end
+           AND (bar_timestamp AT TIME ZONE :tz)::date BETWEEN :start AND :end
       ORDER BY bar_timestamp
     """)
     rows = conn.execute(sql, {
         "tid": ticker_id, "start": start, "end": end,
+        "tz": market_tz_name(exchange_of_conn(conn)),
     }).fetchall()
     return [
         OHLCVBar(
@@ -400,10 +405,11 @@ def _load_signal_events_for_window(
           FROM current_signals
          WHERE ticker_id = :tid
            AND timeframe = :tf
-           AND bar_timestamp::date BETWEEN :start AND :end
+           AND (bar_timestamp AT TIME ZONE :tz)::date BETWEEN :start AND :end
     """), {
         "tid": ticker_id, "tf": timeframe.value,
         "start": start, "end": end,
+        "tz": market_tz_name(exchange_of_conn(conn)),
     }).first()
     if cur is not None:
         rows.append(HistoricalSignalEventPayload(

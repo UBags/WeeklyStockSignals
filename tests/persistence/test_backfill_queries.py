@@ -20,6 +20,8 @@ from trip_ema.persistence.backfill_queries import (
     min_bar_date,
     resolve_ticker_ids_by_symbol,
 )
+from zoneinfo import ZoneInfo
+from trip_ema.domain.market_session import week_anchor
 
 
 # ============================================================
@@ -141,16 +143,36 @@ class TestMondayOf:
 
 
 class TestFromDt:
+    """The delete window opens at the WEEK ANCHOR — local midnight of the local
+    Monday — and the old assertions here were the bug in test form.
 
-    def test_is_utc_anchored(self):
-        result = _from_dt(date(2026, 6, 28))
-        assert result.tzinfo == UTC
+    `test_is_utc_anchored` demanded midnight UTC, which for NSE is 05:30 on Monday
+    morning IST: five and a half hours INSIDE the week it claims to open. Every
+    signal computed in that gap sat outside the delete window and survived a
+    rebuild that was supposed to replace it.
+    """
 
-    def test_is_midnight_of_monday(self):
-        result = _from_dt(date(2026, 6, 28))
-        # Sunday → preceding Monday is 2026-06-22
-        assert result == datetime(
-            2026, 6, 22, 0, 0, tzinfo=UTC,
+    def test_is_the_local_monday_midnight_instant(self):
+        # Sunday 2026-06-28 → its local Monday is 2026-06-22.
+        # Monday 00:00 IST == Sunday 2026-06-21 18:30 UTC.
+        result = _from_dt(date(2026, 6, 28), "NSE")
+        assert result == datetime(2026, 6, 21, 18, 30, tzinfo=UTC)
+        assert result.astimezone(ZoneInfo("Asia/Kolkata")) == datetime(
+            2026, 6, 22, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"),
+        )
+
+    def test_mirrors_the_pipeline_exactly(self):
+        """The GUI's pre-flight count and the pipeline's DELETE must open on the
+        same instant, or the number shown is not the number that goes."""
+        assert _from_dt(date(2026, 6, 28), "NSE") == week_anchor(
+            date(2026, 6, 28), "NSE",
+        )
+
+    def test_the_anchor_follows_the_market(self):
+        """Same date, different exchange, different instant. The old helper
+        hardcoded IST and could not express this."""
+        assert _from_dt(date(2026, 6, 28), "NSE") != _from_dt(
+            date(2026, 6, 28), "NYSE",
         )
 
 

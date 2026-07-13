@@ -90,7 +90,7 @@ def _monday_of(d: date) -> date:
     Monday" and "mirrors backfill_pipeline._monday_of" — both a hardcoded market
     and a promise no compiler checks.
     """
-    return _domain_monday_of(d)
+    return monday_of(d)   # L4-FIX-FORWARD: the alias was never needed
 
 
 def _from_dt(date_from: date, exchange: str) -> datetime:

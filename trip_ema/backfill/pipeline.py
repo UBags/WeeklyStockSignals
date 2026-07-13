@@ -1408,7 +1408,7 @@ def _monday_of(d: date) -> date:
     as "mirrors the other one" — which is a comment, not a mechanism. The
     duplicates are gone; the fact has one home.
     """
-    return _domain_monday_of(d)
+    return monday_of(d)   # L4-FIX-FORWARD: the alias was never needed
 
 
 def _emit_progress(

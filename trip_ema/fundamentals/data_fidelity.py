@@ -43,6 +43,9 @@ from datetime import UTC, date, datetime
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+from ..domain.market_session import (
+    market_tz_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +349,7 @@ def _audit_ohlcv(
                 SELECT t.ticker_id,
                        t.listing_date,
                        count(o.ticker_id) AS n_bars,
-                       min((o.bar_timestamp AT TIME ZONE 'UTC')::date) AS first_bar
+                       min((o.bar_timestamp AT TIME ZONE :tz)::date) AS first_bar
                   FROM tickers t
                   LEFT JOIN ohlcv_bars o
                     ON o.ticker_id = t.ticker_id AND o.timeframe = '1D'
@@ -385,6 +388,12 @@ def _audit_ohlcv(
             "minbars": _MIN_BARS_FOR_SIGNAL,
             "gap": gap_days,
             "start": requested_start,
+            # 'UTC' was explicit, and session-independent, and WRONG: it asked for
+            # the UTC date of an anchor that is local midnight, which for NSE is
+            # the day BEFORE. first_bar is compared against listing_date — a local
+            # calendar fact — so the truncation predicate was off by a day for
+            # every ticker. Explicit is necessary; explicit and correct is the job.
+            "tz": market_tz_name(exchange),
         },
     ).one()
 

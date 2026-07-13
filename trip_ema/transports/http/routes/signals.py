@@ -31,6 +31,11 @@ from ..schemas import (
     SignalHistoryPayload,
 )
 from ....persistence import TickersRepository
+from ....domain.market_session import (
+    exchange_of_conn,
+    market_tz_name,
+    week_anchor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +95,12 @@ def get_industry_history(
         # Joining the daily-grain table directly would fan every daily index
         # value out across all ~5 state rows of its week.
         #
-        # bar_timestamp is `timestamp` (no tz) in this table, so ::date is a
-        # plain cast with no session-timezone trap.
+        # The comment that stood here said: "bar_timestamp is `timestamp` (no tz)
+        # in this table, so ::date is a plain cast with no session-timezone trap."
+        # The DDL says `timestamp with time zone`. It was a timestamptz all along,
+        # the cast WAS session-dependent, and the join only ever matched because
+        # the server's TZ is Asia/Kolkata. A belief the database contradicts is
+        # the most expensive kind of comment.
         rows = conn.execute(text("""
             WITH weekly_state AS (
                 SELECT DISTINCT ON (industry_name, bar_timestamp)
@@ -117,12 +126,16 @@ def get_industry_history(
             FROM industry_index_value v
             LEFT JOIN weekly_state s
                    ON s.industry_name = v.industry_name
-                  AND s.bar_timestamp::date
+                  AND (s.bar_timestamp AT TIME ZONE :tz)::date
                       = DATE_TRUNC('week', v.trade_date)::date
             WHERE v.industry_name = :n
               AND v.trade_date >= :since
             ORDER BY v.trade_date ASC
-        """), {"n": industry_name, "since": since.date()}).all()
+        """), {
+            "n": industry_name,
+            "since": since.date(),
+            "tz": market_tz_name(exchange_of_conn(conn)),
+        }).all()
 
     if not rows:
         return SignalHistoryPayload(
@@ -185,11 +198,12 @@ def get_industry_history(
         # Field kept for backward compat with consumers that read it.
         core_bg = display_bg
 
-        # bar_timestamp: encode the Monday as a UTC datetime at 00:00.
-        # Same shape as the ticker endpoint's bar_timestamps.
-        bar_ts = datetime.combine(
-            week_start, datetime.min.time(), tzinfo=UTC,
-        )
+        # bar_timestamp: the week anchor — the local-Monday-midnight INSTANT, the
+        # same value the database holds. It used to encode Monday 00:00 UTC, which
+        # for NSE is 5h30m away from the anchor in every row of
+        # industry_indicator_state. The endpoint was emitting a timestamp that
+        # matched nothing it was describing.
+        bar_ts = week_anchor(week_start, exchange_of_conn(conn))
         bars.append(HistoricalBarPayload(
             bar_timestamp=bar_ts,
             open=open_, high=high, low=low, close=close,

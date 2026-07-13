@@ -49,6 +49,10 @@ from ..persistence.fundamentals_repo import (
     DailyMarketCapRepository,
     InstrumentSharesRepository,
 )
+from ..domain.market_session import (
+    market_tz_name,
+    range_bounds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -281,22 +285,32 @@ def _trading_days_from_bars(
     """Distinct 1d-bar trade dates for the exchange in [date_from, date_to],
     ascending. Trading days come from ohlcv_bars (daily_market_cap is what we
     are populating, so it can't be the source)."""
-    from datetime import datetime as _dt
-    start = _dt.combine(date_from, _dt.min.time())
-    end = _dt.combine(date_to, _dt.max.time())
+    # Two faults in four lines, and both were invisible on this box:
+    #   * `_dt.combine(...)` with no tzinfo produced a NAIVE datetime, which
+    #     Postgres coerced to timestamptz using the session TZ;
+    #   * `bar_timestamp::date` cast the anchor back to a date in that same
+    #     session TZ.
+    # Two implicit reads of an unchosen clock, cancelling each other out under
+    # Asia/Kolkata. Both are named now, and the window is half-open so no bar can
+    # be lost to a `23:59:59.999999` that is a fact about microsecond precision
+    # rather than about the day.
+    start, end = range_bounds(date_from, date_to, exchange)
     with db_engine.connect() as conn:
         rows = conn.execute(
             text("""
-                SELECT DISTINCT b.bar_timestamp::date AS d
+                SELECT DISTINCT (b.bar_timestamp AT TIME ZONE :tz)::date AS d
                 FROM ohlcv_bars b
                 JOIN tickers t ON t.ticker_id = b.ticker_id
                 WHERE b.timeframe = '1D'
                   AND t.exchange = :ex
                   AND b.bar_timestamp >= :start
-                  AND b.bar_timestamp <= :end
+                  AND b.bar_timestamp <  :end
                 ORDER BY d ASC
             """),
-            {"ex": exchange, "start": start, "end": end},
+            {
+                "ex": exchange, "start": start, "end": end,
+                "tz": market_tz_name(exchange),
+            },
         ).fetchall()
     return [r[0] for r in rows]
 

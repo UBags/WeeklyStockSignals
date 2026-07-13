@@ -48,6 +48,10 @@ from .benchmark_stats_compute import (
     compute_regression_stats,
     slice_window,
 )
+from ..domain.market_session import (
+    exchange_of_conn,
+    trading_date_of,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +90,8 @@ def _fetch_nifty_weekly_closes(conn):
                        "NIFTY benchmark stats unavailable")
         return []
     bars = _fetch_bars_at_timeframe(conn, nifty_row.ticker_id, "1W")
-    return [(b.timestamp.date(), float(b.close)) for b in bars]
+    _ex = exchange_of_conn(conn)
+    return [(trading_date_of(b.timestamp, _ex), float(b.close)) for b in bars]
 
 
 def _industry_for_ticker(conn, ticker_id: int) -> str | None:
@@ -140,7 +145,8 @@ def run_benchmark_stats_for_ticker(
             logger.info("run_benchmark_stats_for_ticker: ticker_id=%d "
                         "has no weekly bars; skipping", ticker_id)
             return 0
-        stock_pairs = [(b.timestamp.date(), float(b.close))
+        _ex = exchange_of_conn(conn)
+        stock_pairs = [(trading_date_of(b.timestamp, _ex), float(b.close))
                        for b in stock_bars]
 
         # 2. Industry benchmark series

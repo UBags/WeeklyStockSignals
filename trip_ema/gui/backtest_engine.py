@@ -390,11 +390,6 @@ def filter_bars_to_range(
     out: list[dict] = []
     for bar in bars:
         bar_dt = _parse_bar_dt(bar)
-        # Align naive vs tz-aware: prefer the more-specific one.
-        if bar_dt.tzinfo is None and cutoff.tzinfo is not None:
-            bar_dt = bar_dt.replace(tzinfo=cutoff.tzinfo)
-        elif bar_dt.tzinfo is not None and cutoff.tzinfo is None:
-            cutoff = cutoff.replace(tzinfo=bar_dt.tzinfo)
         if bar_dt >= cutoff:
             out.append(bar)
     return out
@@ -405,6 +400,18 @@ def _parse_bar_dt(bar: dict) -> datetime:
     (when called from in-process code with cached payloads) or an ISO
     string (when called after a JSON deserialization)."""
     ts = bar["bar_timestamp"]
-    if isinstance(ts, datetime):
-        return ts
-    return datetime.fromisoformat(ts)
+    if not isinstance(ts, datetime):
+        ts = datetime.fromisoformat(ts)
+    if ts.tzinfo is None:
+        # The old code grafted the cutoff's tzinfo onto a naive bar and vice
+        # versa — "prefer the more-specific one", which invents an instant out of
+        # a value that names none. Whatever zone happened to be on the other
+        # operand became the answer. Every producer of this payload (the HTTP
+        # routes) emits an aware timestamp; a naive one means something upstream
+        # dropped the zone, and silently backfilling a guess is how a backtest
+        # ends up a week out without anyone noticing.
+        raise ValueError(
+            f"bar_timestamp is naive ({ts!r}). A naive datetime names no instant; "
+            f"the producer must supply the zone."
+        )
+    return ts

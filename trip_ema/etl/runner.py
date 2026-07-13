@@ -70,7 +70,12 @@ from .types import (
     Tier,
 )
 from .yfinance_source import YFinanceSource
-from ..domain.market_session import exchange_of_engine, market_today
+from ..domain.market_session import (
+    bar_anchor,
+    exchange_of_engine,
+    market_today,
+    trading_date_of,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -366,17 +371,26 @@ def _fetch_existing_bars_for_tickers(
             WHERE ticker_id = ANY(:tids) AND timeframe = :tf
         """
         params: dict[str, Any] = {"tids": ticker_ids, "tf": timeframe.value}
+        _ex = exchange_of_engine(db_engine)
         if since is not None:
             query += " AND bar_timestamp >= :since"
-            params["since"] = datetime.combine(
-                since, datetime.min.time(), tzinfo=UTC,
-            )
+            # The lower bound must be the SAME instant the writer would stamp for
+            # that trading date, or the boundary day falls out of the window: the
+            # anchor is local midnight (18:30Z the previous day for IST), and a
+            # bound at 00:00Z sits five and a half hours LATER than the bar it is
+            # meant to include.
+            params["since"] = bar_anchor(since, _ex)
         rows = conn.execute(text(query), params)
 
         out: dict[int, list[_StoredBar]] = {tid: [] for tid in ticker_ids}
         for r in rows:
             out[r.ticker_id].append(_StoredBar(
-                trading_date=r.bar_timestamp.date(),
+                # NOT r.bar_timestamp.date(). psycopg hands back an aware datetime
+                # in the SESSION zone, so a bare .date() silently reads a clock
+                # nobody chose. Reconciliation keys on trading_date — get this
+                # wrong and bars reconcile against the wrong day, which is the
+                # quietest possible way to corrupt a price series.
+                trading_date=trading_date_of(r.bar_timestamp, _ex),
                 open=r.open, high=r.high, low=r.low, close=r.close,
                 adj_close=r.adj_close,
                 volume=r.volume,
@@ -1144,21 +1158,30 @@ def _process_one_batch(
             rolling_window_days=config.etl.reconcile_window_days,
         )
 
+        _ex = exchange_of_engine(db_engine)
         with db_engine.begin() as conn:
             bars_repo = BarsRepository(conn)
             ca_repo = CorporateActionsRepository(conn)
             status_repo = EtlStatusRepository(conn)
 
             for w in plan.writes:
-                ts_utc = datetime.combine(
-                    w.trading_date, datetime.min.time(),
-                    tzinfo=UTC,
-                )
+                # THE ANCHOR. Local midnight of the trading date, in the market's
+                # own zone — not midnight UTC.
+                #
+                # Midnight-UTC is invertible only for zones EAST of UTC: for NSE,
+                # 00:00Z reads back as 05:30 IST, same calendar day, so it worked.
+                # For NYSE, 00:00Z reads back as 20:00 ET the PREVIOUS day — every
+                # bar shifts back one day and every Monday bar files into the
+                # previous week. Wrong week, wrong weekly OHLC, wrong EMA, wrong
+                # signal, no exception, no gap, no audit finding.
+                #
+                # bar_anchor() is invertible in both hemispheres. See L1.
+                ts = bar_anchor(w.trading_date, _ex)
                 bars_repo.upsert_bar(
                     ticker.ticker_id,
                     timeframe,
                     OHLCVBar(
-                        timestamp=ts_utc, open=w.open, high=w.high,
+                        timestamp=ts, open=w.open, high=w.high,
                         low=w.low, close=w.close, volume=w.volume,
                     ),
                     adj_close=w.adj_close,

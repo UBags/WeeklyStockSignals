@@ -21,6 +21,10 @@ from ..domain.signal_event import (
     SIGNAL_TYPES,
     SignalEvent,
 )
+from ..domain.market_session import (
+    exchange_of_conn,
+    trading_date_of,
+)
 
 
 # Column order — must match _row_to_signal unpacking. We do NOT
@@ -56,6 +60,7 @@ class HistoricalSignalsRepository:
 
     def __init__(self, conn: Connection):
         self._conn = conn
+        self._exchange_cache: str | None = None
 
     # ---------- writes ---------- #
 
@@ -91,7 +96,12 @@ class HistoricalSignalsRepository:
         )
         params: dict = {"ids": ticker_ids, "from_dt": from_date}
         if to_date is not None:
-            sql += " AND computed_at <= :to_dt"
+            # Half-open. `<=` forced the caller to invent a last representable
+            # instant (23:59:59.999999), which is a fact about microsecond storage
+            # precision, not about the end of a day. Callers now pass the next
+            # local midnight; the boundary belongs to the next day and to nobody
+            # else.
+            sql += " AND computed_at < :to_dt"
             params["to_dt"] = to_date
         result = self._conn.execute(text(sql), params)
         return result.rowcount
@@ -268,8 +278,7 @@ class HistoricalSignalsRepository:
                 f"got {s.price_at_signal}"
             )
 
-    @staticmethod
-    def _params(s: SignalEvent, archived_at: datetime | None) -> dict:
+    def _params(self, s: SignalEvent, archived_at: datetime | None) -> dict:
         return {
             "tid": s.ticker_id,
             "tf": s.timeframe,
@@ -280,9 +289,21 @@ class HistoricalSignalsRepository:
             "p": s.price_at_signal,
             "ca": s.computed_at,
             "aa": archived_at,   # None → DB default NOW()
+            # NOT s.bar_timestamp.date(). bar_timestamp is the week anchor — the
+            # local-Monday-midnight INSTANT, which is Sunday 18:30 UTC for NSE. A
+            # bare .date() on it answers "Sunday" the moment the process is not
+            # running on an Indian clock, and signal_date is what the per-day
+            # delete/insert primitive keys on.
             "sd": (s.signal_date if s.signal_date is not None
-                   else s.bar_timestamp.date()),
+                   else trading_date_of(s.bar_timestamp, self._exchange())),
         }
+
+    def _exchange(self) -> str:
+        """Resolved once per repository instance — the value cannot change
+        underneath a connection, and a per-row query would be absurd."""
+        if self._exchange_cache is None:
+            self._exchange_cache = exchange_of_conn(self._conn)
+        return self._exchange_cache
 
 
 def _row_to_signal(row) -> SignalEvent:
