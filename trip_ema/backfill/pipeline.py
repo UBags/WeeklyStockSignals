@@ -50,7 +50,7 @@ from sqlalchemy.engine import Engine
 from .bulk_daywalk import backfill_daywalk_bulk
 
 from ..domain import Timeframe
-from ..etl.runner import fetch_bars_for_tickers, run_backfill
+from ..etl.runner import fetch_bars_for_tickers, refresh_listings, run_backfill
 from ..fundamentals.merged_state_enrichment import (  # MERGED-STATE-ENRICHMENT
     populate_stock_state_and_enrichment_for_ticker,
 )
@@ -70,6 +70,9 @@ from ..fundamentals.parallel import (
 )
 from ..fundamentals.market_cap_compute import populate_market_cap_range
 from ..fundamentals.runners import (
+    run_financials_refresh,
+    run_industry_refresh,
+    run_shares_refresh,
     build_all_industry_index_chains,
     clear_industry_derived_for_rebuild,
 )
@@ -226,6 +229,7 @@ def backfill(
     exchange: str = "NSE",
     stocks: list[int] | None = None,
     refetch_bars: bool = True,
+    refresh_reference: bool = True,
     resume: bool = True,
     progress_cb: Callable[[str, str], None] | None = None,
 ) -> BackfillResult:
@@ -278,6 +282,44 @@ def backfill(
     # belongs to someone else, stop here rather than discovering it in the
     # signals a week later.
     _assert_industry_layer_belongs_to(db_engine, exchange)
+
+    # ---- Stage 0: listings ----
+    # This MUST run before _resolve_tickers, which raises "no active tickers
+    # resolved" on an exchange that has none. On a fresh database that is exactly
+    # the situation, so the sync that would FIX it would never get to run — the
+    # backfill would refuse to build the very universe it needs.
+    #
+    # Outside the phase ledger by necessity (no run_id yet) and by nature: it is
+    # an idempotent upsert of the exchange's listings and takes about a minute.
+    #
+    # Skipped for a partial run: adding tickers to the universe midway through a
+    # scoped run changes the scope under the run's feet.
+    #
+    # NOTE: refresh_listings raises UnsupportedExchangeError for anything but NSE
+    # — there is no listings source for any other exchange yet. A NYSE backfill
+    # therefore fails HERE, with that explicit message, rather than dying later at
+    # _resolve_tickers with a mystifying "no active tickers".
+    if refresh_reference and stocks is None:
+        _emit_progress(progress_cb, "stage_0_listings", "starting")
+        _lr = refresh_listings(db_engine, config, exchange=exchange)
+        logger.info(
+            "backfill: listings synced — new=%d renamed=%d delisted=%d",
+            _lr.sync_result.new_listings,
+            _lr.sync_result.renamed_symbols,
+            _lr.sync_result.delisted,
+        )
+        _emit_progress(
+            progress_cb, "stage_0_listings",
+            f"completed: {_lr.sync_result.new_listings} new",
+        )
+    elif not refresh_reference:
+        _emit_progress(
+            progress_cb, "stage_0_listings", "skipped (--no_refresh_reference)",
+        )
+    else:
+        _emit_progress(
+            progress_cb, "stage_0_listings", "skipped (partial ticker scope)",
+        )
 
     scoped_tickers = _resolve_tickers(db_engine, exchange, stocks)
     if not scoped_tickers:
@@ -337,6 +379,49 @@ def backfill(
     error_message: str | None = None
 
     try:
+        # ---- Stages 0b-0d: reference data (industry, shares, financials) ----
+        #
+        # These runners have always existed; backfill() simply never called them,
+        # so it began at OHLCV and assumed a reference layer nothing built.
+        #
+        # only_missing=True is what makes them affordable enough to belong here.
+        # A full sweep is ~90 minutes PER RUNNER at 2s/ticker; a gap-only sweep
+        # over a satisfied layer costs seconds, because tickers with data are
+        # skipped and tickers the provider has nothing for are recorded in
+        # fundamentals_fetch_status and skipped too.
+        #
+        # Ordering: shares MUST precede stage 3b (market_cap is derived from
+        # instrument_shares x ohlcv_bars) and industry MUST precede the index
+        # build. Both hold.
+        if refresh_reference:
+            for _label, _phase, _fn in (
+                ("stage_0b_industry", "reference_industry",
+                 run_industry_refresh),
+                ("stage_0c_shares", "reference_shares", run_shares_refresh),
+                ("stage_0d_financials", "reference_financials",
+                 run_financials_refresh),
+            ):
+                _emit_progress(progress_cb, _label, "starting (gaps only)")
+                run_phase(
+                    db_engine, exchange, _phase,
+                    # force=True: the runners carry an 80-day
+                    # skip-if-the-RUN-was-recent guard, which exists to stop a
+                    # needless FULL re-sweep. A gap-only pass is precisely the
+                    # thing that guard should not block — and the phase ledger
+                    # already handles "don't redo completed work" for us.
+                    lambda fn=_fn: fn(
+                        db_engine, exchange,
+                        force=True, only_missing=True,
+                    ),
+                    backfill_run_id=run_id, force=_force,
+                )
+                _emit_progress(progress_cb, _label, "completed")
+        else:
+            _emit_progress(
+                progress_cb, "stage_0b_reference",
+                "skipped (--no_refresh_reference)",
+            )
+
         # ---- Stage 1: yfinance bar refetch ----
         if refetch_bars:
             _emit_progress(progress_cb, "stage_1_fetch_bars", "starting")

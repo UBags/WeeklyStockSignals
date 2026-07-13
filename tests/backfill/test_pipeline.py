@@ -219,11 +219,41 @@ def stub_populators(monkeypatch):
     def _noop_industry_iiv(*args, **kwargs):
         return {"succeeded": [], "failed": []}
 
+    # Stages 0-0d hit the network (NSE listings CSVs, yfinance fundamentals).
+    # Stub them: these are ORCHESTRATION tests, and the runners have their own.
+    # Without this the suite would download NSE's listings on every backfill test.
+    class _NoopSync:
+        new_listings = 0
+        renamed_symbols = 0
+        enriched_existing = 0
+        delisted = 0
+        unchanged = 0
+
+    class _NoopListingsResult:
+        sync_result = _NoopSync()
+
+    def _noop_refresh_listings(*args, **kwargs):
+        return _NoopListingsResult()
+
+    def _noop_reference_runner(*args, **kwargs):
+        return 0
+
     def _noop_industry_state(*args, **kwargs):
         return {"succeeded": [], "failed": []}
 
     def _noop_industry_enrichment(*args, **kwargs):
         return {"succeeded": [], "failed": []}
+
+    monkeypatch.setattr(
+        "trip_ema.backfill.pipeline.refresh_listings",
+        _noop_refresh_listings,
+    )
+    for _name in (
+        "run_industry_refresh", "run_shares_refresh", "run_financials_refresh",
+    ):
+        monkeypatch.setattr(
+            f"trip_ema.backfill.pipeline.{_name}", _noop_reference_runner,
+        )
 
     monkeypatch.setattr(
         "trip_ema.backfill.pipeline."
