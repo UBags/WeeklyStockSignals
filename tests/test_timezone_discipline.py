@@ -76,14 +76,23 @@ TZ_AUTHORITY = {"market_session.py"}   # now trip_ema/domain/
 #                     count cannot creep.
 #   archive/*         dead code, on no path.
 #
-_BASELINE: dict[str, int] = {
-    # The ONLY survivor, and deliberately so: a config-file BACKUP
-    # filename is stamped with the OPERATOR'S machine time, not a
-    # market clock. Not every clock read is a market clock, and forcing
-    # an exchange timezone onto a local backup file would be its own
-    # kind of wrong.
-    "trip_ema/gui/views/settings.py": 1,
-}
+# L9-BASELINE-IS-EMPTY. It took the whole timezone workstream to get here.
+#
+# The last survivor was settings.py's backup-filename timestamp, grandfathered on
+# the argument that "a config-file BACKUP filename is stamped with the OPERATOR'S
+# machine time, not a market clock... forcing an exchange timezone onto a local
+# backup file would be its own kind of wrong."
+#
+# The premise is right — a config file belongs to no exchange, and there is no
+# market_now() to reach for. The conclusion is not. The choice was never "market
+# clock or machine clock"; it was "named clock or unnamed one". datetime.now() with
+# no argument is NAIVE: it names nothing, and whoever reads that filename later
+# cannot tell whose midnight it was. datetime.now(UTC) with a Z on it does not force
+# an exchange timezone onto a local file — it makes the file say what it means. It
+# is the same call display_now() makes when it has no exchange to ask.
+#
+# Keep this empty. An entry here is a debt, and the test below will not let it rot.
+_BASELINE: dict[str, int] = {}
 
 
 class _ClockVisitor(ast.NodeVisitor):
