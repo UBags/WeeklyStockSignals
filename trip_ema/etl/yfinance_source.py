@@ -1,11 +1,17 @@
 """yfinance source.
 
-Wraps yf.download() with batching, retry-with-backoff, and validation.
-The output is a dict of {bare_symbol: FetchOutcome} so callers can
-match results back to their input tickers.
+Wraps a Downloader (see ports.py) with batching, retry-with-backoff, throttle
+detection, and validation. The output is a dict of {bare_symbol: FetchOutcome}
+so callers can match results back to their input tickers.
+
+Collaborators are injected, not imported: the raw download call, the sleeper,
+and the ThrottleGate. The gate in particular is meant to be SHARED across every
+source in a fetch pass — a single solo re-fetch cannot tell a delisted ticker
+from a rate-limit, but three in a row can, and only a shared object can see
+that. See throttle.py.
 
 Design notes:
-  - We use yf.download(list_of_symbols, ...) for efficiency. yfinance
+  - We download a list of symbols at once for efficiency. yfinance
     handles HTTP keep-alive internally for batched calls.
   - Batch size is small enough (default 50) that one bad symbol
     doesn't poison the whole batch — yfinance returns a partial frame
@@ -47,6 +53,8 @@ from .exchanges import (
     from_yfinance_symbol as _from_yf_canonical,
     yfinance_symbol as _to_yf_canonical,
 )
+from .ports import Downloader, Sleeper, yf_download
+from .throttle import ThrottleConfig, ThrottleGate, looks_rate_limited
 from .types import FetchOutcome, RawBar
 
 logger = logging.getLogger(__name__)
@@ -104,7 +112,23 @@ class YFinanceSource:
         request_delay_seconds: float = 0.0,
         repair: bool = True,
         throttle_backoff_seconds: float = 30.0,
+        download: Downloader = yf_download,
+        sleep: Sleeper = time.sleep,
+        throttle: ThrottleGate | None = None,
     ):
+        """`download`, `sleep` and `throttle` are collaborators, injected.
+
+        `download` is the raw call into the provider. It used to be an inline
+        lazy import of the yfinance module followed by a call to its download
+        function, which left tests no choice but to patch that function
+        globally.
+
+        `throttle` is the rate-limit state. Pass ONE gate to every source in
+        a fetch pass and they corroborate each other's empty frames — which
+        is the whole point: a solo re-fetch cannot detect a throttle on its
+        own, but three of them in a row can. Defaults to a private gate,
+        which is correct for a source used alone.
+        """
         # NB: exchange is validated by the runner before YFinanceSource
         # is constructed. We trust it here. A misformatted exchange
         # would surface when _yf() is first called.
@@ -118,8 +142,14 @@ class YFinanceSource:
         # volumes. The solo-retry recovery pass sets repair=False to
         # rescue those.
         self._repair = repair
-        # Yahoo's rate-limit is NOT an exception — see _is_throttled.
+        self._download = download
+        self._sleep = sleep
+        # Yahoo's rate-limit is NOT an exception — see throttle.py.
         self._throttle_backoff = throttle_backoff_seconds
+        self._gate = throttle or ThrottleGate(
+            ThrottleConfig(base_seconds=throttle_backoff_seconds),
+            sleep=sleep,
+        )
 
     @property
     def exchange(self) -> str:
@@ -157,7 +187,7 @@ class YFinanceSource:
             batch_results = self._fetch_batch_daily(batch, start, end_date)
             results.update(batch_results)
             if self._request_delay > 0:
-                time.sleep(self._request_delay)
+                self._sleep(self._request_delay)
         return results
 
     def fetch_hourly_recent(
@@ -180,7 +210,7 @@ class YFinanceSource:
             batch_results = self._fetch_batch_hourly(batch, capped_lookback)
             results.update(batch_results)
             if self._request_delay > 0:
-                time.sleep(self._request_delay)
+                self._sleep(self._request_delay)
         return results
 
     # ---------- internal ---------- #
@@ -191,24 +221,25 @@ class YFinanceSource:
             yield items[i : i + n]
 
     @staticmethod
-    def _is_throttled(
+    def _all_empty(
         outcomes: dict[str, FetchOutcome], symbols: list[str],
     ) -> bool:
-        """True when the batch looks rate-limited rather than genuinely empty.
+        """True when every symbol in the frame came back with no bars and no
+        error — the shape a throttled response takes.
 
         Yahoo does not raise when it throttles. It returns the frame with every
-        requested symbol's column present and all-NaN, which _normalize_df_to_outcomes
-        faithfully turns into FetchOutcome(bars=(), error_message=None) — a
-        "success" with nothing in it.
+        requested symbol's column present and all-NaN, which
+        _normalize_df_to_outcomes faithfully turns into
+        FetchOutcome(bars=(), error_message=None) — a "success" with nothing in
+        it.
 
-        The discriminator is unanimity. One NSE equity returning zero bars over a
-        multi-year window is plausible (delisted, never traded). ALL of them doing
-        so simultaneously is not a mass delisting; it is a rate-limit. We require
-        >= 2 symbols so a solo-retry fetch (batch of 1) can never be mistaken for
-        a throttle — for a single ticker, zero bars is genuinely ambiguous and is
-        handled downstream by the runner's empty/short buckets.
+        This function no longer decides whether that IS a throttle; it only
+        reports the shape. The decision needs corroboration across fetches, not
+        just across columns, and so it lives on the ThrottleGate — which is what
+        finally lets the solo (batch-of-one) recovery path detect a rate-limit
+        it previously could not see. See throttle.py.
         """
-        if len(symbols) < 2:
+        if not symbols:
             return False
         return all(
             (o := outcomes.get(s)) is not None
@@ -223,14 +254,15 @@ class YFinanceSource:
         start: date,
         end: date,
     ) -> dict[str, FetchOutcome]:
-        import random
-        import yfinance as yf  # lazy: only required when an ETL run fires
-
         yf_symbols = [self._yf(s) for s in symbols]
         last_error = None
         for attempt in range(1, self._max_retries + 1):
+            # Sit out any backoff window another fetch in this pass opened.
+            # This is what slows the WHOLE pass down once Yahoo starts
+            # throttling, instead of each fetch discovering it alone.
+            self._gate.wait()
             try:
-                df = yf.download(
+                df = self._download(
                     tickers=yf_symbols,
                     start=start.isoformat(),
                     end=(end + timedelta(days=1)).isoformat(),  # yf is end-exclusive
@@ -246,25 +278,18 @@ class YFinanceSource:
 
                 # The throttle check lives HERE, after normalisation, because the
                 # rate-limit is invisible at the exception level — it is a shape
-                # in the returned data, not an error. Retrying immediately would
-                # just take another swing at a closed door, so this uses its own
-                # long backoff rather than the 2s/4s exception one.
-                if self._is_throttled(outcomes, symbols) and attempt < self._max_retries:
-                    delay = self._throttle_backoff * (2 ** (attempt - 1))
-                    delay *= 0.5 + random.random()  # jitter: don't sync the workers
-                    logger.warning(
-                        "yfinance THROTTLED (all %d symbols returned zero bars); "
-                        "backing off %.1fs before attempt %d/%d",
-                        len(symbols), delay, attempt + 1, self._max_retries,
-                        extra={
-                            "attempt": attempt,
-                            "batch_size": len(symbols),
-                            "exchange": self._exchange,
-                            "backoff_seconds": delay,
-                        },
-                    )
-                    time.sleep(delay)
-                    continue
+                # in the returned data, not an error. The GATE decides whether
+                # this empty frame is evidence of a throttle, because that
+                # decision needs the rest of the pass to make it: one empty solo
+                # frame is ambiguous, three in a row are not.
+                if self._all_empty(outcomes, symbols):
+                    if (
+                        attempt < self._max_retries
+                        and self._gate.observe_empty(len(symbols))
+                    ):
+                        continue
+                else:
+                    self._gate.observe_data()
 
                 return outcomes
             except Exception as e:
@@ -278,8 +303,15 @@ class YFinanceSource:
                         "error": str(e),
                     },
                 )
-                if attempt < self._max_retries:
-                    time.sleep(self._retry_backoff_base ** attempt)
+                if attempt >= self._max_retries:
+                    continue
+                if looks_rate_limited(e):
+                    # An explicit 429. This is not a flake; retrying in two
+                    # seconds is another swing at the same closed door. Take the
+                    # long backoff, and let the rest of the pass see it.
+                    self._gate.observe_rate_limit_error(e)
+                    continue
+                self._sleep(self._retry_backoff_base ** attempt)
 
         # All retries exhausted — every ticker in the batch fails.
         err = f"batch fetch failed after {self._max_retries} retries: {last_error}"
@@ -293,13 +325,12 @@ class YFinanceSource:
         symbols: list[str],
         lookback_days: int,
     ) -> dict[str, FetchOutcome]:
-        import yfinance as yf
-
         yf_symbols = [self._yf(s) for s in symbols]
         last_error = None
         for attempt in range(1, self._max_retries + 1):
+            self._gate.wait()
             try:
-                df = yf.download(
+                df = self._download(
                     tickers=yf_symbols,
                     period=f"{lookback_days}d",
                     interval="1h",
@@ -310,11 +341,24 @@ class YFinanceSource:
                     progress=False,
                     group_by="ticker",
                 )
-                return self._normalize_df_to_outcomes(df, symbols)
+                outcomes = self._normalize_df_to_outcomes(df, symbols)
+                if self._all_empty(outcomes, symbols):
+                    if (
+                        attempt < self._max_retries
+                        and self._gate.observe_empty(len(symbols))
+                    ):
+                        continue
+                else:
+                    self._gate.observe_data()
+                return outcomes
             except Exception as e:
                 last_error = e
-                if attempt < self._max_retries:
-                    time.sleep(self._retry_backoff_base ** attempt)
+                if attempt >= self._max_retries:
+                    continue
+                if looks_rate_limited(e):
+                    self._gate.observe_rate_limit_error(e)
+                    continue
+                self._sleep(self._retry_backoff_base ** attempt)
 
         err = f"hourly batch failed after {self._max_retries} retries: {last_error}"
         return {

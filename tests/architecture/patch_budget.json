@@ -26,6 +26,11 @@
       "mock_patch": 0,
       "setattr": 0
     },
+    "etl/fakes.py": {
+      "env": 0,
+      "mock_patch": 1,
+      "setattr": 0
+    },
     "etl/test_cmd_backfill.py": {
       "env": 0,
       "mock_patch": 0,
@@ -45,11 +50,6 @@
       "env": 0,
       "mock_patch": 0,
       "setattr": 2
-    },
-    "etl/test_yfinance_source.py": {
-      "env": 0,
-      "mock_patch": 7,
-      "setattr": 0
     },
     "fundamentals/test_cli.py": {
       "env": 0,

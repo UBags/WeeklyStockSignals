@@ -69,6 +69,7 @@ from .types import (
     RunOutcome,
     Tier,
 )
+from .throttle import ThrottleConfig, ThrottleGate
 from .yfinance_source import YFinanceSource
 from ..domain.market_session import (
     bar_anchor,
@@ -860,6 +861,20 @@ def _solo_retry_once(
     if not snapshot:
         return
 
+    # ONE gate for the whole recovery — both layers, every ticker. This is
+    # the point of the exercise. Each solo fetch is a batch of one, and a
+    # lone empty frame is ambiguous, so no single fetch here can tell a
+    # delisted ticker from a rate-limit. Shared, they can: three consecutive
+    # solo fetches returning nothing is a throttle, and the gate makes every
+    # subsequent fetch in the pass sit out the backoff. Before this, the solo
+    # passes walked the entire snapshot at full speed against a closed door
+    # and wrote every ticker off as dataless.
+    gate = ThrottleGate(
+        ThrottleConfig(
+            base_seconds=config.etl.yfinance_throttle_backoff_seconds,
+        ),
+    )
+
     def _solo_pass(pass_snapshot, *, repair):
         """One bounded solo pass. Returns (recovered, still_failed).
         Plain `for` over a fixed snapshot; no `while`, hard-bounded —
@@ -870,12 +885,11 @@ def _solo_retry_once(
             request_delay_seconds=(
                 config.etl.yfinance_request_delay_seconds
             ),
-            # batch_size=1 means _is_throttled can never fire here (it requires
-            # >= 2 symbols, because for a lone ticker zero bars really might mean
-            # delisted). Passed regardless: every source is built from config, so
-            # this site cannot go stale if that predicate ever changes.
             throttle_backoff_seconds=config.etl.yfinance_throttle_backoff_seconds,
             repair=repair,
+            # The shared gate. Every solo fetch in both layers corroborates
+            # every other one.
+            throttle=gate,
         )
         bound = len(pass_snapshot)
         recovered = 0

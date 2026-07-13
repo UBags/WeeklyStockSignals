@@ -1,19 +1,29 @@
-"""Tests for the yfinance source. We mock yfinance entirely — these
-tests verify our DataFrame normalization and batching logic, not
-yfinance's behavior."""
+"""Tests for the yfinance source.
+
+The source takes a Downloader (trip_ema/etl/ports.py) — the raw call into
+yfinance — plus an injected sleeper and throttle gate. These tests hand it a
+FakeDownloader instead of patching `yfinance.download` globally, so they assert
+on what the source ASKED for rather than on a mock's call records, and they run
+without yfinance installed.
+
+What is under test here is our normalisation, batching, retry and throttle
+behaviour, not yfinance's."""
 
 from __future__ import annotations
 
 from datetime import date, datetime
-from unittest.mock import MagicMock, patch
 
 import pytest
 
+from trip_ema.etl.ports import BarSource
+from trip_ema.etl.throttle import ThrottleConfig, ThrottleGate
 from trip_ema.etl.yfinance_source import (
     YFinanceSource,
     from_yfinance_symbol,
     to_yfinance_symbol,
 )
+
+from .fakes import FakeDownloader, RecordingSleeper, SleepingClock
 
 
 class TestSymbolMapping:
@@ -72,9 +82,8 @@ def _build_flat_df(fields: dict):
 
 class TestNormalization:
 
-    @patch("yfinance.download")
-    def test_two_symbols_both_succeed(self, mock_download):
-        mock_download.return_value = _build_multi_df({
+    def test_two_symbols_both_succeed(self):
+        dl = FakeDownloader(_build_multi_df({
             "RELIANCE.NS": {
                 "Open": [100.0, 101.0],
                 "High": [102.0, 103.0],
@@ -91,8 +100,8 @@ class TestNormalization:
                 "Adj Close": [3015.0, 3025.0],
                 "Volume": [500.0, 550.0],
             },
-        })
-        src = YFinanceSource()
+        }))
+        src = YFinanceSource(download=dl)
         results = src.fetch_daily_history(
             ["RELIANCE", "TCS"], start=date(2026, 1, 1),
         )
@@ -105,18 +114,17 @@ class TestNormalization:
         assert results["RELIANCE"].bars[0].close == 101.5
         assert results["TCS"].bars[1].close == 3025.0
 
-    @patch("yfinance.download")
-    def test_missing_symbol_returns_error_outcome(self, mock_download):
+    def test_missing_symbol_returns_error_outcome(self):
         """yfinance returns a DataFrame missing one of the requested
         symbols — we report an error for it but succeed on the other."""
-        mock_download.return_value = _build_multi_df({
+        dl = FakeDownloader(_build_multi_df({
             "RELIANCE.NS": {
                 "Open": [100.0], "High": [101.0], "Low": [99.0],
                 "Close": [100.5], "Adj Close": [100.5], "Volume": [1000.0],
             },
             # TCS.NS not in the response
-        })
-        src = YFinanceSource()
+        }))
+        src = YFinanceSource(download=dl)
         results = src.fetch_daily_history(
             ["RELIANCE", "TCS"], start=date(2026, 1, 1),
         )
@@ -124,29 +132,26 @@ class TestNormalization:
         assert not results["TCS"].succeeded
         assert "not in returned columns" in results["TCS"].error_message
 
-    @patch("yfinance.download")
-    def test_nan_rows_are_skipped_not_written(self, mock_download):
+    def test_nan_rows_are_skipped_not_written(self):
         # A symbol whose first row is all NaN (missing day) — should
         # be skipped in the bars output.
-        mock_download.return_value = _build_flat_df({
+        dl = FakeDownloader(_build_flat_df({
             "Open": [float("nan"), 101.0],
             "High": [float("nan"), 103.0],
             "Low": [float("nan"), 100.0],
             "Close": [float("nan"), 102.5],
             "Adj Close": [float("nan"), 102.5],
             "Volume": [float("nan"), 1100.0],
-        })
-        src = YFinanceSource()
+        }))
+        src = YFinanceSource(download=dl)
         results = src.fetch_daily_history(["RELIANCE"], start=date(2026, 1, 1))
         # Only the non-NaN bar
         assert len(results["RELIANCE"].bars) == 1
         assert results["RELIANCE"].bars[0].close == 102.5
 
-    @patch("yfinance.download")
-    def test_empty_dataframe_all_symbols_fail(self, mock_download):
+    def test_empty_dataframe_all_symbols_fail(self):
         import pandas as pd
-        mock_download.return_value = pd.DataFrame()
-        src = YFinanceSource()
+        src = YFinanceSource(download=FakeDownloader(pd.DataFrame()))
         results = src.fetch_daily_history(
             ["RELIANCE", "TCS"], start=date(2026, 1, 1),
         )
@@ -157,34 +162,38 @@ class TestNormalization:
 
 class TestRetryAndFailure:
 
-    @patch("yfinance.download")
-    def test_all_retries_failing_yields_error_outcomes(self, mock_download):
-        mock_download.side_effect = RuntimeError("simulated yfinance error")
-        src = YFinanceSource(max_retries=2, retry_backoff_base=0.0)
+    def test_all_retries_failing_yields_error_outcomes(self):
+        dl = FakeDownloader(RuntimeError("simulated yfinance error"))
+        sleeper = RecordingSleeper()
+        src = YFinanceSource(
+            max_retries=2, retry_backoff_base=0.0,
+            download=dl, sleep=sleeper,
+        )
         results = src.fetch_daily_history(["RELIANCE"], start=date(2026, 1, 1))
         assert not results["RELIANCE"].succeeded
         assert "simulated yfinance error" in results["RELIANCE"].error_message
         # Verify it retried twice
-        assert mock_download.call_count == 2
+        assert dl.call_count == 2
 
-    @patch("yfinance.download")
-    def test_retry_succeeds_after_initial_failure(self, mock_download):
+    def test_retry_succeeds_after_initial_failure(self):
         good_df = _build_flat_df({
             "Open": [100.0], "High": [101.0], "Low": [99.0],
             "Close": [100.5], "Adj Close": [100.5], "Volume": [1000.0],
         })
-        mock_download.side_effect = [RuntimeError("first try fails"), good_df]
-        src = YFinanceSource(max_retries=3, retry_backoff_base=0.0)
+        dl = FakeDownloader(RuntimeError("first try fails"), good_df)
+        src = YFinanceSource(
+            max_retries=3, retry_backoff_base=0.0,
+            download=dl, sleep=RecordingSleeper(),
+        )
         results = src.fetch_daily_history(["RELIANCE"], start=date(2026, 1, 1))
         assert results["RELIANCE"].succeeded
         assert len(results["RELIANCE"].bars) == 1
-        assert mock_download.call_count == 2
+        assert dl.call_count == 2
 
 
 class TestBatching:
 
-    @patch("yfinance.download")
-    def test_large_list_is_split_into_batches(self, mock_download):
+    def test_large_list_is_split_into_batches(self):
         # 75 symbols, batch_size=50 → 2 batches
         def fake_download(tickers=None, **kwargs):
             return _build_multi_df({
@@ -194,16 +203,127 @@ class TestBatching:
                 }
                 for t in tickers
             })
-        mock_download.side_effect = fake_download
-        src = YFinanceSource(batch_size=50)
+        dl = FakeDownloader(fake_download)
+        src = YFinanceSource(batch_size=50, download=dl)
         symbols = [f"SYM{i}" for i in range(75)]
         results = src.fetch_daily_history(symbols, start=date(2026, 1, 1))
         assert len(results) == 75
         # 2 batches expected
-        assert mock_download.call_count == 2
-        # First batch had 50 tickers
-        first_call_kwargs = mock_download.call_args_list[0].kwargs
-        assert len(first_call_kwargs["tickers"]) == 50
-        # Second batch had 25
-        second_call_kwargs = mock_download.call_args_list[1].kwargs
-        assert len(second_call_kwargs["tickers"]) == 25
+        assert dl.call_count == 2
+        # First batch had 50 tickers, second had 25
+        assert len(dl.calls[0]["tickers"]) == 50
+        assert len(dl.calls[1]["tickers"]) == 25
+
+
+def _empty_multi_df(symbols):
+    """The shape a THROTTLED response takes: every requested column present,
+    every value NaN. Yahoo does not raise; it hands back nothing and calls it a
+    success."""
+    return _build_multi_df({
+        s: {c: [float("nan")] for c in
+            ("Open", "High", "Low", "Close", "Adj Close", "Volume")}
+        for s in symbols
+    })
+
+
+class TestThrottleDetection:
+    """The batched path could always see a throttle. The solo path — the one the
+    recovery layers actually use — could not, because a lone empty frame is
+    ambiguous. The gate is shared, so it can."""
+
+    def test_unanimous_empty_batch_backs_off_and_retries(self):
+        good = _build_multi_df({
+            "A.NS": {"Open": [1.0], "High": [1.0], "Low": [1.0],
+                     "Close": [1.0], "Adj Close": [1.0], "Volume": [1.0]},
+            "B.NS": {"Open": [2.0], "High": [2.0], "Low": [2.0],
+                     "Close": [2.0], "Adj Close": [2.0], "Volume": [2.0]},
+        })
+        dl = FakeDownloader(_empty_multi_df(["A.NS", "B.NS"]), good)
+        sc = SleepingClock()
+        gate = ThrottleGate(
+            ThrottleConfig(base_seconds=30.0),
+            sleep=sc.sleep, clock=sc.clock, jitter=lambda: 0.5,
+        )
+        src = YFinanceSource(download=dl, throttle=gate, sleep=sc.sleep)
+
+        results = src.fetch_daily_history(["A", "B"], start=date(2026, 1, 1))
+
+        assert dl.call_count == 2          # it retried
+        assert sc.slept == [30.0]          # after backing off
+        assert results["A"].bars           # and got the data on the retry
+
+    def test_solo_empty_fetches_corroborate_across_a_shared_gate(self):
+        """Three separate single-ticker fetches, all empty, on ONE gate. No
+        individual fetch can call that a throttle. Together they can — which is
+        exactly the shape of the solo-retry recovery pass."""
+        empty = _empty_multi_df(["X.NS"])
+        dl = FakeDownloader(empty)         # always empty
+        sc = SleepingClock()
+        gate = ThrottleGate(
+            ThrottleConfig(base_seconds=30.0, solo_empty_streak_to_trip=3),
+            sleep=sc.sleep, clock=sc.clock, jitter=lambda: 0.5,
+        )
+        src = YFinanceSource(
+            batch_size=1, download=dl, throttle=gate, sleep=sc.sleep,
+        )
+
+        for _ in range(3):
+            src.fetch_daily_history(["X"], start=date(2026, 1, 1))
+
+        # Two ambiguous empties, then the third trips it and the source retries
+        # behind a real backoff instead of walking on at full speed.
+        assert sc.slept, "third consecutive empty solo fetch must back off"
+        assert gate.snapshot()["backoff_level"] >= 1
+
+    def test_a_single_empty_solo_fetch_does_not_back_off(self):
+        """A delisted ticker must not cost the pass a 30-second penalty."""
+        dl = FakeDownloader(_empty_multi_df(["X.NS"]))
+        sc = SleepingClock()
+        gate = ThrottleGate(
+            ThrottleConfig(base_seconds=30.0, solo_empty_streak_to_trip=3),
+            sleep=sc.sleep, clock=sc.clock, jitter=lambda: 0.5,
+        )
+        src = YFinanceSource(
+            batch_size=1, download=dl, throttle=gate, sleep=sc.sleep,
+        )
+        src.fetch_daily_history(["X"], start=date(2026, 1, 1))
+        assert sc.slept == []
+        assert dl.call_count == 1
+
+    def test_429_takes_the_long_backoff_not_the_flake_backoff(self):
+        """retry_backoff_base would give this 2s. A rate-limit needs 30."""
+        good = _build_flat_df({
+            "Open": [1.0], "High": [1.0], "Low": [1.0],
+            "Close": [1.0], "Adj Close": [1.0], "Volume": [1.0],
+        })
+        dl = FakeDownloader(Exception("HTTP Error 429: Too Many Requests"), good)
+        sc = SleepingClock()
+        gate = ThrottleGate(
+            ThrottleConfig(base_seconds=30.0),
+            sleep=sc.sleep, clock=sc.clock, jitter=lambda: 0.5,
+        )
+        src = YFinanceSource(
+            retry_backoff_base=2.0, download=dl, throttle=gate, sleep=sc.sleep,
+        )
+        results = src.fetch_daily_history(["RELIANCE"], start=date(2026, 1, 1))
+        assert sc.slept == [30.0]
+        assert results["RELIANCE"].succeeded
+
+    def test_ordinary_error_still_takes_the_short_backoff(self):
+        good = _build_flat_df({
+            "Open": [1.0], "High": [1.0], "Low": [1.0],
+            "Close": [1.0], "Adj Close": [1.0], "Volume": [1.0],
+        })
+        dl = FakeDownloader(RuntimeError("connection reset"), good)
+        sleeper = RecordingSleeper()
+        src = YFinanceSource(
+            retry_backoff_base=2.0, download=dl, sleep=sleeper,
+        )
+        src.fetch_daily_history(["RELIANCE"], start=date(2026, 1, 1))
+        assert sleeper.slept == [2.0]      # 2 ** 1, the flake backoff
+
+
+class TestPortConformance:
+
+    def test_yfinance_source_is_a_bar_source(self):
+        assert isinstance(YFinanceSource(), BarSource)
