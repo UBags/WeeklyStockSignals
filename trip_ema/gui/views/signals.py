@@ -32,10 +32,11 @@ from PySide6.QtGui import (
     QBrush, QColor, QStandardItem, QStandardItemModel,
 )
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QGroupBox, QHBoxLayout,
-    QLabel, QListWidget, QMessageBox, QPushButton, QSizePolicy,
-    QSplitter, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
+    QListWidget, QPushButton, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
+
+from ..prompts import DEFAULT_PROMPTS, Prompts
 from sqlalchemy import text  # noqa: F401 — retained for future inline SQL
 
 from ..backtest_engine import (
@@ -86,8 +87,10 @@ class SignalsView(QWidget):
         *,
         parent: QWidget | None = None,
         populate_combo_on_init: bool = True,
+        prompts: Prompts = DEFAULT_PROMPTS,
     ):
         super().__init__(parent)
+        self._prompts = prompts
         self._db = db
         # Latest market cap of the currently-loaded ticker.
         # Populated by load_ticker(); consumed by
@@ -557,7 +560,7 @@ class SignalsView(QWidget):
     def _on_history_failed(self, message: str) -> None:
         self._chart_status_label.setText(f"Chart fetch failed: {message}")
         self._main_chart.render(None)
-        QMessageBox.warning(
+        self._prompts.warning(
             self, "Chart fetch failed",
             f"Could not load chart data:\n\n{message}",
         )

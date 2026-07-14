@@ -46,11 +46,12 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFormLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-    QLineEdit, QListWidget, QMessageBox,
-    QPushButton, QTableView, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QPushButton,
+    QTableView, QVBoxLayout, QWidget,
 )
+
+from ..prompts import DEFAULT_PROMPTS, Prompts
 
 from ..csv_export import export_rows_to_csv, timestamped_filename
 from ..db import GuiDbSession
@@ -198,8 +199,10 @@ class SubscribersView(QWidget):
         parent: QWidget | None = None,
         start_refresh_on_init: bool = True,
         populate_ticker_lookup_on_init: bool = True,
+        prompts: Prompts = DEFAULT_PROMPTS,
     ):
         super().__init__(parent)
+        self._prompts = prompts
         self._db = db
         self._http = http
 
@@ -503,12 +506,10 @@ class SubscribersView(QWidget):
         guard in `_on_save_clicked` is the second line of defense.
         """
         if self._form_dirty:
-            confirm = QMessageBox.question(
+            if not self._prompts.confirm(
                 self, "Discard unsaved changes?",
                 "You have unsaved changes. Discard them?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            )
-            if confirm != QMessageBox.Yes:
+            ):
                 return
         self._table.clearSelection()
         self._editing_subscriber_id = None
@@ -535,14 +536,14 @@ class SubscribersView(QWidget):
         # Validate
         address = self._form_address.text().strip()
         if not address:
-            QMessageBox.warning(
+            self._prompts.warning(
                 self, "Address required",
                 "Please enter an address for this subscriber.",
             )
             return
         transport = self._form_transport.currentText()
         if transport == "sms":
-            QMessageBox.warning(
+            self._prompts.warning(
                 self, "SMS not supported",
                 SMS_DISABLED_TOOLTIP,
             )
@@ -556,16 +557,15 @@ class SubscribersView(QWidget):
         # filters; this Yes/No catches that path. Confirming auto-adds
         # the catch-all back so the Save proceeds with a working state.
         if not self._form_filters:
-            confirm = QMessageBox.question(
+            if not self._prompts.confirm(
                 self, "No filters set",
                 "This subscriber has no filters, so the distributor "
                 "will never match any events to them and no "
                 "notifications will be sent.\n\n"
                 "Add an 'all tickers / all signals' catch-all and "
                 "continue?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
-            )
-            if confirm != QMessageBox.Yes:
+                default_yes=True,
+            ):
                 return
             self._form_filters = [_catch_all_filter()]
             self._refresh_filters_list()
@@ -610,7 +610,7 @@ class SubscribersView(QWidget):
         self._set_save_in_progress(False)
         self._form_dirty = False
         self._editing_subscriber_id = new_row.get("subscriber_id")
-        QMessageBox.information(
+        self._prompts.information(
             self, "Subscriber created",
             f"Created subscriber {new_row.get('subscriber_id')} "
             f"({new_row.get('transport')} → {new_row.get('address')})."
@@ -644,12 +644,12 @@ class SubscribersView(QWidget):
     def _on_update_succeeded(self, _payload: dict) -> None:
         self._set_save_in_progress(False)
         self._form_dirty = False
-        QMessageBox.information(self, "Saved", "Subscriber updated.")
+        self._prompts.information(self, "Saved", "Subscriber updated.")
         self._scheduler.trigger_now()
 
     def _on_save_failed(self, message: str) -> None:
         self._set_save_in_progress(False)
-        QMessageBox.warning(self, "Save failed", message)
+        self._prompts.warning(self, "Save failed", message)
 
     def _set_save_in_progress(self, in_progress: bool) -> None:
         self._save_button.setEnabled(not in_progress)
@@ -660,7 +660,7 @@ class SubscribersView(QWidget):
 
     def _on_test_clicked(self) -> None:
         if self._editing_subscriber_id is None:
-            QMessageBox.information(
+            self._prompts.information(
                 self, "Save first",
                 "Save the subscriber before sending a test notification.",
             )
@@ -672,7 +672,7 @@ class SubscribersView(QWidget):
         def on_done(payload: dict):
             self._test_button.setEnabled(self._http.token_configured)
             ok = payload.get("succeeded", False)
-            QMessageBox.information(
+            self._prompts.information(
                 self,
                 "Test notification result",
                 f"{'Success' if ok else 'Failed'}\n\n"
@@ -683,7 +683,7 @@ class SubscribersView(QWidget):
 
         def on_fail(message: str):
             self._test_button.setEnabled(self._http.token_configured)
-            QMessageBox.warning(
+            self._prompts.warning(
                 self, "Test notification request failed",
                 message,
             )
@@ -698,14 +698,12 @@ class SubscribersView(QWidget):
             return
         sid = self._editing_subscriber_id
         addr = self._form_address.text()
-        confirm = QMessageBox.question(
+        if not self._prompts.confirm(
             self, "Delete subscriber?",
             f"Permanently delete subscriber {sid} ({addr})?\n"
             f"This also deletes their filter rows and notification log "
             f"entries (FK cascade).",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if confirm != QMessageBox.Yes:
+        ):
             return
 
         http = self._http
@@ -713,11 +711,11 @@ class SubscribersView(QWidget):
         def on_done(_payload):
             self._editing_subscriber_id = None
             self._clear_form()
-            QMessageBox.information(self, "Deleted", f"Subscriber {sid} deleted.")
+            self._prompts.information(self, "Deleted", f"Subscriber {sid} deleted.")
             self._scheduler.trigger_now()
         def on_fail(message: str):
             self._delete_button.setEnabled(True)
-            QMessageBox.warning(self, "Delete failed", message)
+            self._prompts.warning(self, "Delete failed", message)
         submit(
             lambda: http.delete_subscriber(sid),
             on_finished=on_done,
@@ -732,9 +730,10 @@ class SubscribersView(QWidget):
         ticker_choices = ["(All tickers)"] + [
             f"{t['exchange']}:{t['symbol']}" for t in self._ticker_lookup
         ]
-        ticker_label, ok = QInputDialog.getItem(
+        ticker_label, ok = self._prompts.get_item(
             self, "Add filter — choose ticker",
-            "Ticker:", ticker_choices, 0, False,
+            "Ticker:", ticker_choices,
+            current=0, editable=False,
         )
         if not ok:
             return
@@ -751,18 +750,18 @@ class SubscribersView(QWidget):
                 None,
             )
             if picked is None:
-                QMessageBox.warning(self, "Unknown ticker", ticker_label)
+                self._prompts.warning(self, "Unknown ticker", ticker_label)
                 return
             ticker_id = picked["ticker_id"]
             ticker_symbol = picked["symbol"]
             ticker_exchange = picked["exchange"]
 
         # Step 2: signal_filter
-        signal_label, ok = QInputDialog.getItem(
+        signal_label, ok = self._prompts.get_item(
             self, "Add filter — choose signals",
             "Signals (comma-separated, blank = all):",
             ["(All signals)", "BUY", "SELL", "BUY,SELL"],
-            0, True,  # editable so the user can enter custom like 'BUY,EXIT_FROM_BUY'
+            current=0, editable=True,  # editable so the user can enter custom like 'BUY,EXIT_FROM_BUY'
         )
         if not ok:
             return
@@ -877,6 +876,7 @@ class SubscribersView(QWidget):
                 "last_notified_at", "filter_count", "created_at",
             ],
             rows=rows,
+            prompts=self._prompts,
         )
 
     # ---------- lifecycle ---------- #

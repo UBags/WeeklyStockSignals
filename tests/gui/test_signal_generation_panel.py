@@ -16,7 +16,7 @@ Coverage:
   - on_close stops the polling timers
 
 Conventions inherited from 14.6c:
-  - silent_modals fixture for QMessageBox stubbing
+  - silent_modals fixture supplies a FakePrompts (no global stubbing)
   - _teardown picker drains QThreadPool
   - QSettings cleaned between tests
 """
@@ -27,7 +27,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from PySide6.QtCore import QThreadPool
-from PySide6.QtWidgets import QMessageBox
+
+from .fakes import FakePrompts
 
 from trip_ema.gui.http_client import ApiError
 from trip_ema.gui.views.signal_generation_panel import (
@@ -78,12 +79,16 @@ def _make_http(*, token_configured=True, exchanges=("NSE", "NYSE")):
     return http
 
 
-def _build_panel(*, http=None, start_polling_on_init=False):
+def _build_panel(*, http=None, start_polling_on_init=False, prompts=None):
     """Build a panel with the HTTP mock; polling off by default so
     tests drive _refresh_metadata_rows() manually when they care."""
     if http is None:
         http = _make_http()
-    panel = SignalGenerationPanel(http, start_polling_on_init=start_polling_on_init)
+    panel = SignalGenerationPanel(
+        http,
+        start_polling_on_init=start_polling_on_init,
+        prompts=prompts if prompts is not None else FakePrompts(),
+    )
     return panel, http
 
 
@@ -103,34 +108,16 @@ def _seed_one_metadata_response(panel, exchange, payload):
 
 
 @pytest.fixture
-def silent_modals(monkeypatch):
-    """Same shape as the 14.6c picker tests."""
-    monkeypatch.setattr(
-        QMessageBox, "information",
-        lambda *a, **kw: QMessageBox.Ok,
-    )
-    monkeypatch.setattr(
-        QMessageBox, "warning",
-        lambda *a, **kw: QMessageBox.Ok,
-    )
-    monkeypatch.setattr(
-        QMessageBox, "question",
-        lambda *a, **kw: QMessageBox.Yes,
-    )
+def silent_modals():
+    """Prompts that say yes and remember everything else. Hand it to
+    _build_panel; nothing global is touched."""
+    return FakePrompts(confirm_answer=True)
 
 
 @pytest.fixture
-def cancel_force_full_dialog(monkeypatch):
-    """Variant: confirmation dialog returns Cancel, not Yes. Used by
-    the test that exercises the 'operator cancels the force-full'
-    branch of the action handler."""
-    monkeypatch.setattr(
-        QMessageBox, "question",
-        lambda *a, **kw: QMessageBox.Cancel,
-    )
-    # The other modals can still be silent.
-    monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: QMessageBox.Ok)
-    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **kw: QMessageBox.Ok)
+def cancel_force_full_dialog():
+    """Variant: the operator says No to the force-full confirmation."""
+    return FakePrompts(confirm_answer=False)
 
 
 @pytest.fixture(autouse=True)
@@ -309,7 +296,7 @@ class TestGenerateButtonEnableLogic:
 class TestActionDispatchPostsCorrectQueryParams:
 
     def test_default_1W_only(self, qtbot, silent_modals):
-        panel, http = _build_panel()
+        panel, http = _build_panel(prompts=silent_modals)
         _add(qtbot, panel)
         try:
             _populate_picker(panel, ["NSE"])
@@ -327,7 +314,7 @@ class TestActionDispatchPostsCorrectQueryParams:
             _teardown_panel(panel)
 
     def test_both_timeframes(self, qtbot, silent_modals):
-        panel, http = _build_panel()
+        panel, http = _build_panel(prompts=silent_modals)
         _add(qtbot, panel)
         try:
             _populate_picker(panel, ["NSE"])
@@ -342,7 +329,7 @@ class TestActionDispatchPostsCorrectQueryParams:
             _teardown_panel(panel)
 
     def test_1D_only(self, qtbot, silent_modals):
-        panel, http = _build_panel()
+        panel, http = _build_panel(prompts=silent_modals)
         _add(qtbot, panel)
         try:
             _populate_picker(panel, ["NSE"])
@@ -360,7 +347,7 @@ class TestActionDispatchPostsCorrectQueryParams:
     def test_force_full_propagates_with_confirmation(self, qtbot, silent_modals):
         """silent_modals' question returns Yes, so the force-full
         path goes through to POST with force_full=True."""
-        panel, http = _build_panel()
+        panel, http = _build_panel(prompts=silent_modals)
         _add(qtbot, panel)
         try:
             _populate_picker(panel, ["NSE"])
@@ -387,7 +374,7 @@ class TestForceFullConfirmation:
         dialog, the POST is NOT fired. The button re-enables (it was
         only disabled by the click handler if we got past the
         confirm; cancel returns before that)."""
-        panel, http = _build_panel()
+        panel, http = _build_panel(prompts=cancel_force_full_dialog)
         _add(qtbot, panel)
         try:
             _populate_picker(panel, ["NSE"])
@@ -418,7 +405,7 @@ class TestConflictHandling:
         worker fires `failed` with the error message. The panel
         recognises it and shows the friendly warning modal (stubbed
         to a no-op by silent_modals), then re-enables the button."""
-        panel, http = _build_panel()
+        panel, http = _build_panel(prompts=silent_modals)
         # Make generate_signals raise the 409
         http.generate_signals.side_effect = ApiError(
             409,

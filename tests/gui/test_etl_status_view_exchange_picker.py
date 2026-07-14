@@ -39,16 +39,19 @@ The `_teardown_view` helper closes the view properly and drains the
 global thread pool. Every test that constructs a real EtlStatusView
 calls it before returning.
 
-## (3) Modal dialogs wedge pytest-qt's event loop
+## (3) Modal dialogs used to wedge pytest-qt's event loop
 
-`EtlStatusView._fire_action` pops a `QMessageBox.information(...)`
-in its success callback. `QMessageBox.information` opens a MODAL
-dialog that spins its own event loop until dismissed. With no user
-to click OK, the dialog stays open; pytest-qt's `waitUntil` and the
-modal's event loop conflict; SIGSEGV inside the wait_signal machinery.
+`EtlStatusView._fire_action` shows a message in its success callback. When that
+was `QMessageBox.information(...)` it opened a MODAL dialog which spins its own
+event loop until dismissed — and with no user to click OK, the dialog stayed
+open, pytest-qt's `waitUntil` fought the modal's loop, and the wait_signal
+machinery SIGSEGV'd. The workaround was to monkeypatch the QMessageBox statics
+to no-ops.
 
-Action-dispatch tests monkeypatch QMessageBox.information/warning
-to no-op. The test cares about the HTTP call, not the dialog.
+The view now takes its Prompts (trip_ema/gui/prompts.py), and a FakePrompts
+never opens a dialog at all. The failure mode is designed out rather than
+stubbed out — which is the difference between a test that cannot crash and a
+test that crashes if someone forgets the fixture.
 """
 
 from __future__ import annotations
@@ -57,7 +60,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from PySide6.QtCore import QThreadPool
-from PySide6.QtWidgets import QMessageBox
+
+from .fakes import FakePrompts
 
 from trip_ema.gui.views.etl_status import EtlStatusView
 from trip_ema.gui.views.exchange_state_panel import ExchangeStatePanel
@@ -92,25 +96,14 @@ def _teardown_view(view) -> None:
 
 
 @pytest.fixture
-def silent_modals(monkeypatch):
-    """Replace QMessageBox.information / .warning / .question with
-    no-op stubs so they don't wedge pytest-qt's event loop.
+def silent_modals():
+    """The view's Prompts. Nothing to silence: a FakePrompts never OPENS a
+    dialog, so there is no modal event loop to wedge (see the note at the top of
+    this file — that failure mode is designed out, not stubbed out).
 
-    .question normally returns a button enum; stub returns Yes so
-    flows that branch on the user's answer take the affirmative path.
-    """
-    monkeypatch.setattr(
-        QMessageBox, "information",
-        lambda *a, **kw: QMessageBox.Ok,
-    )
-    monkeypatch.setattr(
-        QMessageBox, "warning",
-        lambda *a, **kw: QMessageBox.Ok,
-    )
-    monkeypatch.setattr(
-        QMessageBox, "question",
-        lambda *a, **kw: QMessageBox.Yes,
-    )
+    confirm() answers yes, so flows that branch on the user's answer take the
+    affirmative path. Every message is recorded, so a test can assert on it."""
+    return FakePrompts(confirm_answer=True)
 
 
 @pytest.fixture(autouse=True)
@@ -240,7 +233,7 @@ class TestExchangeStatePanelRenderStates:
 # ---------- EtlStatusView picker behaviour ---------- #
 
 
-def _build_view(*, token_configured=True, exchanges=("NSE", "BSE")):
+def _build_view(*, token_configured=True, exchanges=("NSE", "BSE"), prompts=None):
     """Construct an EtlStatusView with the HTTP client fully mocked.
     Returns (view, http). Tests must call _teardown_view(view)
     before returning to drain workers."""
@@ -272,14 +265,17 @@ def _build_view(*, token_configured=True, exchanges=("NSE", "BSE")):
         "updated_at": "2026-05-21T10:00:00+00:00",
     }
     # Make action-button calls return a benign payload so on_done gets
-    # something with .get("notes") — even though we monkey-patch the
-    # modal away, the slot still iterates over the payload.
+    # something with .get("notes") — the dialog is a FakePrompts, but the
+    # slot still iterates over the payload.
     http.run_eod.return_value = {"notes": "submitted"}
     http.refresh_listings.return_value = {"notes": "submitted"}
     http.run_intraday.return_value = {"notes": "submitted"}
     http.recompute_tiers.return_value = {"notes": "submitted"}
     http.unpark_all.return_value = {"notes": "submitted"}
-    return EtlStatusView(db=db, http=http, start_refresh_on_init=False), http
+    return EtlStatusView(
+        db=db, http=http, start_refresh_on_init=False,
+        prompts=prompts if prompts is not None else FakePrompts(),
+    ), http
 
 
 def _seed_picker(view, exchanges):
@@ -292,5 +288,3 @@ def _drain_initial_workers(qtbot):
     so it doesn't deliver its signal to a destroyed view at teardown."""
     QThreadPool.globalInstance().waitForDone(500)
     qtbot.wait(50)
-
-

@@ -19,7 +19,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtCore import QProcess
-from PySide6.QtWidgets import QDialog, QMessageBox
+from PySide6.QtWidgets import QDialog
+
+from .fakes import FakePrompts
 
 from trip_ema.gui.views.etl_status import EtlStatusView
 from trip_ema.gui.views.widgets.stage_progress import (
@@ -48,13 +50,20 @@ def fake_http():
 
 
 @pytest.fixture
-def view(qtbot, fake_db, fake_http, monkeypatch):
+def prompts():
+    """The view's Prompts — recording, so tests assert on what the user saw."""
+    return FakePrompts()
+
+
+@pytest.fixture
+def view(qtbot, fake_db, fake_http, monkeypatch, prompts):
     """An EtlStatusView with all background schedulers disabled
     (start_refresh_on_init=False) so tests can drive state
     manually."""
     v = EtlStatusView(
         db=fake_db, http=fake_http,
         start_refresh_on_init=False,
+        prompts=prompts,
     )
     qtbot.addWidget(v)
     return v
@@ -87,17 +96,11 @@ class TestInitialState:
 class TestModalFlow:
 
     def test_no_exchange_shows_warning(
-        self, view, monkeypatch,
-    ):
-        """If no exchange selected, click → QMessageBox.warning."""
+        self, view, monkeypatch, prompts):
+        """If no exchange selected, click → a warning."""
         view._picker.current_exchange = lambda: None
-        warned = []
-        monkeypatch.setattr(
-            QMessageBox, "warning",
-            lambda *a, **k: warned.append(a),
-        )
         view._on_run_intraday_clicked()
-        assert warned, "Expected QMessageBox.warning to fire"
+        assert prompts.warnings, "Expected QMessageBox.warning to fire"
         # No QProcess spawned
         assert view._intraday_process is None
 
@@ -269,9 +272,6 @@ class TestFinishedHandler:
         # Stub the schedulers + QMessageBox to avoid blocking
         view._activity_scheduler.trigger_now = MagicMock()
         view._mutex_scheduler.trigger_now = MagicMock()
-        monkeypatch.setattr(
-            QMessageBox, "information", lambda *a, **k: None,
-        )
 
         view._on_intraday_finished(
             0, QProcess.NormalExit,

@@ -61,6 +61,11 @@
       "mock_patch": 16,
       "setattr": 1
     },
+    "gui/fakes.py": {
+      "env": 0,
+      "mock_patch": 0,
+      "setattr": 1
+    },
     "gui/test_etl_status_13d3_wiring.py": {
       "env": 0,
       "mock_patch": 3,
@@ -69,14 +74,9 @@
     "gui/test_etl_status_backfill_wiring.py": {
       "env": 0,
       "mock_patch": 0,
-      "setattr": 7
+      "setattr": 3
     },
     "gui/test_etl_status_intraday_wiring.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 5
-    },
-    "gui/test_etl_status_view_exchange_picker.py": {
       "env": 0,
       "mock_patch": 0,
       "setattr": 3
@@ -85,21 +85,6 @@
       "env": 0,
       "mock_patch": 0,
       "setattr": 1
-    },
-    "gui/test_signal_generation_panel.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 6
-    },
-    "gui/test_slice4_part3.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 4
-    },
-    "gui/test_slice4_views.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 3
     },
     "gui/test_slice4_wiring.py": {
       "env": 0,

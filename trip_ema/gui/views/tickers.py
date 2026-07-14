@@ -66,9 +66,11 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QTableView, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QHeaderView, QLabel, QLineEdit, QPushButton, QTableView, QTabWidget,
+    QTextEdit, QVBoxLayout, QWidget,
 )
+
+from ..prompts import DEFAULT_PROMPTS, Prompts
 
 from ..db import GuiDbSession
 from ..http_client import TripEmaHttpClient
@@ -441,8 +443,10 @@ class TickersView(QWidget):
         *,
         parent: QWidget | None = None,
         start_refresh_on_init: bool = True,
+        prompts: Prompts = DEFAULT_PROMPTS,
     ):
         super().__init__(parent)
+        self._prompts = prompts
         self._db = db
         self._http = http
 
@@ -1063,6 +1067,7 @@ class TickersView(QWidget):
                 "last_successful_bar_date", "consecutive_failures", "parked",
             ],
             rows=rows,
+            prompts=self._prompts,
         )
 
     def _on_view_chart_clicked(self) -> None:
@@ -1096,14 +1101,12 @@ class TickersView(QWidget):
         if row is None:
             return
 
-        confirm = QMessageBox.question(
+        if not self._prompts.confirm(
             self, f"Reprime {row.symbol}?",
             f"Force-reprime ticker {row.symbol} from DB?\n"
             f"This refreshes its metadata (tz) and "
             f"rebuilds its engine from current bars.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if confirm != QMessageBox.Yes:
+        ):
             return
 
         self._reprime_button.setEnabled(False)
@@ -1112,11 +1115,11 @@ class TickersView(QWidget):
             msg = f"Reprime: succeeded={payload.get('succeeded')}, " \
                   f"bars_loaded={payload.get('bars_loaded')}\n" \
                   f"{payload.get('notes', '')}"
-            QMessageBox.information(self, f"Reprime {row.symbol}", msg)
+            self._prompts.information(self, f"Reprime {row.symbol}", msg)
             self._scheduler.trigger_now()
         def on_fail(message: str):
             self._reprime_button.setEnabled(self._http.token_configured)
-            QMessageBox.warning(
+            self._prompts.warning(
                 self, f"Reprime {row.symbol} failed", message,
             )
         submit(

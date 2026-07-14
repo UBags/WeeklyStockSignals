@@ -39,11 +39,12 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
-    QButtonGroup, QCompleter, QDateEdit, QGroupBox,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QRadioButton, QTableView,
+    QButtonGroup, QCompleter, QDateEdit, QGroupBox, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QPushButton, QRadioButton, QTableView,
     QVBoxLayout, QWidget,
 )
+
+from ..prompts import DEFAULT_PROMPTS, Prompts
 
 from ..db import GuiDbSession
 from ..http_client import TripEmaHttpClient
@@ -192,8 +193,10 @@ class EtlStatusView(QWidget):
         *,
         parent: QWidget | None = None,
         start_refresh_on_init: bool = True,
+        prompts: Prompts = DEFAULT_PROMPTS,
     ):
         super().__init__(parent)
+        self._prompts = prompts
         self._db = db
         self._http = http
 
@@ -1426,7 +1429,7 @@ class EtlStatusView(QWidget):
 
         exchange = self._picker.current_exchange()
         if exchange is None:
-            QMessageBox.warning(
+            self._prompts.warning(
                 self, "Run Intraday blocked",
                 "Select an exchange first.",
             )
@@ -1505,14 +1508,14 @@ class EtlStatusView(QWidget):
         if not self._active_ticker_set:
             # Universe not loaded yet — refuse rather than allow
             # arbitrary text through
-            QMessageBox.warning(
+            self._prompts.warning(
                 self, "ADD blocked",
                 "Active-ticker list isn't loaded yet. Select an "
                 "exchange first.",
             )
             return
         if text not in self._active_ticker_set:
-            QMessageBox.warning(
+            self._prompts.warning(
                 self, "Unknown symbol",
                 f"'{text}' is not in the active-ticker universe "
                 f"for {self._picker.current_exchange()}. "
@@ -1539,7 +1542,7 @@ class EtlStatusView(QWidget):
 
         exchange = self._picker.current_exchange()
         if exchange is None:
-            QMessageBox.warning(
+            self._prompts.warning(
                 self, "Backfill blocked",
                 "Select an exchange first.",
             )
@@ -1549,7 +1552,7 @@ class EtlStatusView(QWidget):
         date_from = self._from_date.date().toPython()
         date_to = self._to_date.date().toPython()
         if date_from > date_to:
-            QMessageBox.warning(
+            self._prompts.warning(
                 self, "Invalid dates",
                 f"From date ({date_from}) must be on or before "
                 f"To date ({date_to}).",
@@ -1582,7 +1585,7 @@ class EtlStatusView(QWidget):
                         )
                     )
                     if unresolved:
-                        QMessageBox.warning(
+                        self._prompts.warning(
                             self, "Symbol resolution failed",
                             f"These chips no longer match active "
                             f"tickers (universe may have changed): "
@@ -1604,7 +1607,7 @@ class EtlStatusView(QWidget):
                     date_from=date_from,
                 )
         except Exception as e:
-            QMessageBox.critical(
+            self._prompts.critical(
                 self, "Pre-flight query failed",
                 f"Could not compute deletion counts: {e}",
             )
@@ -1800,7 +1803,7 @@ class EtlStatusView(QWidget):
                 "Backfill complete (exit 0). Activity log "
                 "updated."
             )
-            QMessageBox.information(
+            self._prompts.information(
                 self, "Backfill complete",
                 "Backfill finished successfully.",
             )
@@ -1984,7 +1987,7 @@ class EtlStatusView(QWidget):
                 "Intraday cycle complete (exit 0). Activity "
                 "log updated."
             )
-            QMessageBox.information(
+            self._prompts.information(
                 self, "Cycle complete",
                 "V1 cycle finished successfully.",
             )
@@ -2042,7 +2045,7 @@ class EtlStatusView(QWidget):
             return
 
         # === CANCEL-DIALOG-INTRADAY: updated for auto-cleanup ===
-        reply = QMessageBox.question(
+        if not self._prompts.confirm(
             self, "Cancel intraday cycle?",
             "This will interrupt the running cycle. The pipeline "
             "rolls back any in-progress transaction. On process exit "
@@ -2050,10 +2053,7 @@ class EtlStatusView(QWidget):
             "(belt-and-suspenders: cmd_cycle's finally block normally "
             "does this, the GUI cleanup is the safety net for SIGKILL).\n\n"
             "Cancel anyway?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
+        ):
             return
 
         logger.warning("Sending SIGTERM to intraday QProcess")
@@ -2089,7 +2089,7 @@ class EtlStatusView(QWidget):
             return
 
         # === CANCEL-DIALOG-BACKFILL: updated for auto-cleanup ===
-        reply = QMessageBox.question(
+        if not self._prompts.confirm(
             self, "Cancel backfill?",
             "This will interrupt the running backfill. The pipeline "
             "rolls back its current transaction. On process exit the "
@@ -2097,10 +2097,7 @@ class EtlStatusView(QWidget):
             "compute_runs rows finished, so you can re-trigger "
             "immediately — no manual cleanup needed.\n\n"
             "Cancel anyway?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
+        ):
             return
 
         logger.warning("Sending SIGTERM to backfill QProcess")
@@ -2134,7 +2131,7 @@ class EtlStatusView(QWidget):
     def _open_trend_dialog(self, kind: TrendKind) -> None:
         exchange = self._picker.current_exchange()
         if exchange is None:
-            QMessageBox.information(
+            self._prompts.information(
                 self, "Trend", "Select an exchange first.",
             )
             return

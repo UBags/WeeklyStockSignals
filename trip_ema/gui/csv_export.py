@@ -17,7 +17,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from collections.abc import Callable, Iterable
 
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
+from PySide6.QtWidgets import QWidget
+
+from .prompts import DEFAULT_PROMPTS, Prompts
 from ..domain.market_session import market_now
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,7 @@ def export_rows_to_csv(
     columns: list[str],
     rows: Iterable[list],
     success_callback: Callable | None = None,
+    prompts: Prompts = DEFAULT_PROMPTS,
 ) -> Path | None:
     """Prompt for a save path and write rows.
 
@@ -46,7 +49,7 @@ def export_rows_to_csv(
     or the write failed (the user has already seen an error dialog
     in that case)."""
     suggested = str(Path.cwd() / default_filename)
-    path_str, _ = QFileDialog.getSaveFileName(
+    path_str = prompts.get_save_filename(
         parent, "Export to CSV", suggested, "CSV files (*.csv);;All files (*)",
     )
     if not path_str:
@@ -69,7 +72,7 @@ def export_rows_to_csv(
         )
     except Exception as e:
         logger.exception("CSV export failed")
-        QMessageBox.warning(
+        prompts.warning(
             parent, "Export failed",
             f"Could not write {path}:\n\n{e}",
         )

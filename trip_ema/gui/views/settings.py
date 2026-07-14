@@ -37,10 +37,11 @@ from pathlib import Path
 from PySide6.QtCore import QSettings
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QMessageBox, QPushButton, QSpinBox, QTextEdit,
-    QVBoxLayout, QWidget,
+    QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
+    QSpinBox, QTextEdit, QVBoxLayout, QWidget,
 )
+
+from ..prompts import DEFAULT_PROMPTS, Prompts
 
 logger = logging.getLogger(__name__)
 
@@ -143,12 +144,14 @@ class SettingsView(QWidget):
         *,
         config_path: Path | None = None,
         parent: QWidget | None = None,
+        prompts: Prompts = DEFAULT_PROMPTS,
     ):
         """Args:
           config_path: Path to the loaded config.yaml. Used by the
             viewer + backup action. None → viewer shows '(no config
             path provided)'."""
         super().__init__(parent)
+        self._prompts = prompts
         self._config_path = config_path
         self._dirty_prefs = False
 
@@ -313,19 +316,17 @@ class SettingsView(QWidget):
         })
         self._dirty_prefs = False
         self._save_prefs_button.setEnabled(False)
-        QMessageBox.information(
+        self._prompts.information(
             self, "Preferences saved",
             "GUI preferences saved. Close and reopen trip-ema-console "
             "to pick them up.",
         )
 
     def _on_reset_prefs_clicked(self) -> None:
-        confirm = QMessageBox.question(
+        if not self._prompts.confirm(
             self, "Reset preferences?",
             "Restore all GUI preferences to their default values?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if confirm != QMessageBox.Yes:
+        ):
             return
         self._with_signals_blocked(lambda: self._set_form_values(DEFAULT_SETTINGS))
         self._dirty_prefs = True
@@ -361,7 +362,7 @@ class SettingsView(QWidget):
         """Copy config.yaml to a user-chosen location. Default
         filename is timestamped so successive backups don't collide."""
         if self._config_path is None or not self._config_path.exists():
-            QMessageBox.warning(
+            self._prompts.warning(
                 self, "No config to back up",
                 "The current config path is not set or does not exist.",
             )
@@ -374,7 +375,7 @@ class SettingsView(QWidget):
         suggested = str(
             Path.cwd() / f"{self._config_path.stem}_{ts}.yaml"
         )
-        path_str, _ = QFileDialog.getSaveFileName(
+        path_str = self._prompts.get_save_filename(
             self, "Backup config", suggested,
             "YAML files (*.yaml *.yml);;All files (*)",
         )
@@ -386,7 +387,7 @@ class SettingsView(QWidget):
                 f"Backed up to {path_str}"
             )
         except Exception as e:
-            QMessageBox.warning(
+            self._prompts.warning(
                 self, "Backup failed",
                 f"Could not copy config to {path_str}:\n\n{e}",
             )

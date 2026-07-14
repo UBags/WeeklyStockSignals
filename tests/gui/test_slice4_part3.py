@@ -9,7 +9,7 @@ Coverage:
   - SettingsView populates form from QSettings, marks dirty on edit,
     saves correctly, reset-to-defaults works
   - Settings config viewer renders file contents
-  - Backup-config writes to chosen path (with QFileDialog mocked)
+  - Backup-config writes to chosen path (via an injected FakePrompts)
   - AboutDialog constructs and shows version info
 """
 
@@ -20,7 +20,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QSettings, Qt
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication
+
+from .fakes import FakePrompts
 
 from trip_ema.gui.about_dialog import AboutDialog
 from trip_ema.gui.views.settings import (
@@ -257,8 +259,11 @@ class TestSettingsPersistence:
 # ============================================================
 
 
-def _make_settings_view(config_path=None):
-    return SettingsView(config_path=config_path)
+def _make_settings_view(config_path=None, prompts=None):
+    return SettingsView(
+        config_path=config_path,
+        prompts=prompts if prompts is not None else FakePrompts(),
+    )
 
 
 class TestSettingsViewBasics:
@@ -304,13 +309,9 @@ class TestSettingsViewForm:
         assert v._save_prefs_button.isEnabled()
         assert v._dirty_prefs
 
-    def test_save_persists_to_qsettings(self, qtbot, monkeypatch):
-        # Suppress the success dialog
-        from PySide6.QtWidgets import QMessageBox
-        monkeypatch.setattr(
-            QMessageBox, "information", lambda *a, **k: None,
-        )
-        v = _make_settings_view()
+    def test_save_persists_to_qsettings(self, qtbot):
+        prompts = FakePrompts()
+        v = _make_settings_view(prompts=prompts)
         qtbot.addWidget(v)
         v._etl_spin.setValue(77)
         v._tickers_spin.setValue(88)
@@ -321,16 +322,13 @@ class TestSettingsViewForm:
         assert prefs[KEY_TICKERS_REFRESH] == 88
         # Save button disabled after save
         assert not v._save_prefs_button.isEnabled()
+        # The success dialog fired. The old stub threw this away.
+        assert len(prompts.informations) == 1
 
-    def test_reset_to_defaults_marks_dirty(self, qtbot, monkeypatch):
+    def test_reset_to_defaults_marks_dirty(self, qtbot):
         save_gui_settings({KEY_ETL_REFRESH: 99})
-        from PySide6.QtWidgets import QMessageBox
-        # Auto-confirm the Yes/No dialog
-        monkeypatch.setattr(
-            QMessageBox, "question",
-            lambda *a, **k: QMessageBox.Yes,
-        )
-        v = _make_settings_view()
+        prompts = FakePrompts(confirm_answer=True)   # user clicks Yes
+        v = _make_settings_view(prompts=prompts)
         qtbot.addWidget(v)
         # Loaded from QSettings as 99
         assert v._etl_spin.value() == 99
@@ -339,6 +337,8 @@ class TestSettingsViewForm:
         assert v._etl_spin.value() == DEFAULT_SETTINGS[KEY_ETL_REFRESH]
         # And marked dirty so user has to click Save
         assert v._save_prefs_button.isEnabled()
+        # Reset is destructive: the dialog must NOT default to Yes.
+        assert prompts.confirm_defaults == [False]
 
 
 class TestSettingsViewConfigViewer:
@@ -354,29 +354,22 @@ class TestSettingsViewConfigViewer:
         v._on_reload_clicked()
         assert "a: 999" in v._config_viewer.toPlainText()
 
-    def test_backup_copies_file(self, qtbot, tmp_path, monkeypatch):
+    def test_backup_copies_file(self, qtbot, tmp_path):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("hello: world\n")
         target = tmp_path / "backup.yaml"
-        monkeypatch.setattr(
-            QFileDialog, "getSaveFileName",
-            lambda *a, **k: (str(target), "*.yaml"),
-        )
-        v = _make_settings_view(config_path=cfg)
+        prompts = FakePrompts(save_path=str(target))
+        v = _make_settings_view(config_path=cfg, prompts=prompts)
         qtbot.addWidget(v)
         v._on_backup_clicked()
         assert target.exists()
         assert target.read_text() == "hello: world\n"
 
-    def test_backup_cancel_does_nothing(self, qtbot, tmp_path, monkeypatch):
+    def test_backup_cancel_does_nothing(self, qtbot, tmp_path):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("x\n")
-        # User cancels
-        monkeypatch.setattr(
-            QFileDialog, "getSaveFileName",
-            lambda *a, **k: ("", ""),
-        )
-        v = _make_settings_view(config_path=cfg)
+        prompts = FakePrompts(save_path=None)        # user cancels
+        v = _make_settings_view(config_path=cfg, prompts=prompts)
         qtbot.addWidget(v)
         v._on_backup_clicked()
         # No copy made, no exception

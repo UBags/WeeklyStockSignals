@@ -23,9 +23,11 @@ from datetime import (
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QMessageBox, QPushButton, QRadioButton, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
+
+from ..prompts import DEFAULT_PROMPTS, Prompts
 
 from ..http_client import TripEmaHttpClient
 from ..workers import submit
@@ -105,8 +107,10 @@ class SignalGenerationPanel(QGroupBox):
         *,
         parent: QWidget | None = None,
         start_polling_on_init: bool = True,
+        prompts: Prompts = DEFAULT_PROMPTS,
     ):
         super().__init__("Generate backtest signal history", parent)
+        self._prompts = prompts
         self._http = http
         self._metadata_labels: dict[str, QLabel] = {}
 
@@ -261,7 +265,7 @@ class SignalGenerationPanel(QGroupBox):
 
         if force_full:
             filename = f"generated_signals/{exchange}.json"
-            reply = QMessageBox.question(
+            if not self._prompts.confirm(
                 self,
                 "Confirm force-full regeneration",
                 (
@@ -270,11 +274,7 @@ class SignalGenerationPanel(QGroupBox):
                     f"{filename}.\n\nThis may take 30+ minutes. "
                     f"Continue?"
                 ),
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
+            ):
                 return
 
         self._generate_btn.setEnabled(False)
@@ -295,7 +295,7 @@ class SignalGenerationPanel(QGroupBox):
 
     def _on_post_succeeded(self, payload: dict, exchange: str) -> None:
         run_id = payload.get("run_id", "?")
-        QMessageBox.information(
+        self._prompts.information(
             self,
             "Backtest started",
             (
@@ -310,7 +310,7 @@ class SignalGenerationPanel(QGroupBox):
 
     def _on_post_failed(self, message: str, exchange: str) -> None:
         if "already in flight" in message or "run_id=" in message:
-            QMessageBox.warning(
+            self._prompts.warning(
                 self,
                 "Backtest already running",
                 (
@@ -321,7 +321,7 @@ class SignalGenerationPanel(QGroupBox):
                 ),
             )
         else:
-            QMessageBox.warning(
+            self._prompts.warning(
                 self,
                 "Backtest request failed",
                 f"Could not start backtest for {exchange}:\n\n{message}",

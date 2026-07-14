@@ -21,6 +21,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from .fakes import FakePrompts
+
 from trip_ema.gui.views.etl_status import build_backfill_argv
 
 
@@ -105,8 +107,15 @@ class TestBuildBackfillArgv:
 # These tests construct the view with mocks just enough to drive
 # the validation paths.
 
+
 @pytest.fixture
-def view(qtbot, monkeypatch):
+def prompts():
+    """The view's Prompts. Recording, so a test can assert on WHAT the user was
+    told — the old QMessageBox stub returned Ok and threw the message away."""
+    return FakePrompts()
+
+@pytest.fixture
+def view(qtbot, monkeypatch, prompts):
     """A minimally-wired EtlStatusView with all the schedulers
     disabled. Returns the view; teardown handled by qtbot."""
     # Stub the picker's HTTP fetch so init doesn't try to call
@@ -121,6 +130,7 @@ def view(qtbot, monkeypatch):
     http = MagicMock()
     v = EtlStatusView(
         db=db, http=http, start_refresh_on_init=False,
+        prompts=prompts,
     )
     qtbot.addWidget(v)
     return v
@@ -134,43 +144,21 @@ class TestAddValidation:
         assert view._chip_area.chips() == []
 
     def test_unloaded_universe_rejects(
-        self, view, monkeypatch,
+        self, view, monkeypatch, prompts,
     ):
         # _active_ticker_set is empty (initial state)
-        from PySide6.QtWidgets import QMessageBox
-        warning_called = False
-
-        def _capture_warning(*args, **kwargs):
-            nonlocal warning_called
-            warning_called = True
-            return QMessageBox.Ok
-
-        monkeypatch.setattr(
-            QMessageBox, "warning", _capture_warning,
-        )
         view._stocks_input.setText("RELIANCE")
         view._on_add_stock_clicked()
-        assert warning_called is True
+        assert len(prompts.warnings) == 1
         assert view._chip_area.chips() == []
 
     def test_unknown_symbol_rejects(
-        self, view, monkeypatch,
+        self, view, monkeypatch, prompts,
     ):
         view._active_ticker_set = frozenset(["RELIANCE", "TCS"])
-        from PySide6.QtWidgets import QMessageBox
-        warning_called = False
-
-        def _capture_warning(*args, **kwargs):
-            nonlocal warning_called
-            warning_called = True
-            return QMessageBox.Ok
-
-        monkeypatch.setattr(
-            QMessageBox, "warning", _capture_warning,
-        )
         view._stocks_input.setText("PHANTOM")
         view._on_add_stock_clicked()
-        assert warning_called is True
+        assert len(prompts.warnings) == 1
         assert view._chip_area.chips() == []
 
     def test_known_symbol_added(self, view):
@@ -201,28 +189,17 @@ class TestBackfillButton:
         # opened, no exception
         assert view._backfill_process is not None
 
-    def test_blocks_without_exchange(self, view, monkeypatch):
+    def test_blocks_without_exchange(self, view, prompts, monkeypatch):
         # Picker returns None (loading sentinel)
         monkeypatch.setattr(
             view._picker, "current_exchange",
             lambda: None,
         )
-        from PySide6.QtWidgets import QMessageBox
-        warning_called = False
-
-        def _capture_warning(*args, **kwargs):
-            nonlocal warning_called
-            warning_called = True
-            return QMessageBox.Ok
-
-        monkeypatch.setattr(
-            QMessageBox, "warning", _capture_warning,
-        )
         view._on_backfill_clicked()
-        assert warning_called is True
+        assert len(prompts.warnings) == 1
 
     def test_blocks_when_date_from_after_date_to(
-        self, view, monkeypatch,
+        self, view, monkeypatch, prompts,
     ):
         monkeypatch.setattr(
             view._picker, "current_exchange",
@@ -232,19 +209,8 @@ class TestBackfillButton:
         view._from_date.setDate(QDate(2026, 6, 28))
         view._to_date.setDate(QDate(2024, 1, 1))
 
-        from PySide6.QtWidgets import QMessageBox
-        warning_called = False
-
-        def _capture_warning(*args, **kwargs):
-            nonlocal warning_called
-            warning_called = True
-            return QMessageBox.Ok
-
-        monkeypatch.setattr(
-            QMessageBox, "warning", _capture_warning,
-        )
         view._on_backfill_clicked()
-        assert warning_called is True
+        assert len(prompts.warnings) == 1
 
 
 # ============================================================

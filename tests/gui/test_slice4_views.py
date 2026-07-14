@@ -22,6 +22,8 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
+from .fakes import FakePrompts
+
 from trip_ema.gui.csv_export import export_rows_to_csv, timestamped_filename
 from trip_ema.gui.views.notifications import (
     NotificationLogModel, NotificationLogView,
@@ -260,7 +262,7 @@ class TestSubscriberTableModel:
 # ============================================================
 
 
-def _make_subscribers_view():
+def _make_subscribers_view(prompts=None):
     db = MagicMock()
     http = MagicMock()
     http.token_configured = True
@@ -268,10 +270,11 @@ def _make_subscribers_view():
         db=db, http=http,
         start_refresh_on_init=False,
         populate_ticker_lookup_on_init=False,
+        prompts=prompts if prompts is not None else FakePrompts(),
     )
 
 
-def _make_subscribers_view_no_token():
+def _make_subscribers_view_no_token(prompts=None):
     db = MagicMock()
     http = MagicMock()
     http.token_configured = False
@@ -279,6 +282,7 @@ def _make_subscribers_view_no_token():
         db=db, http=http,
         start_refresh_on_init=False,
         populate_ticker_lookup_on_init=False,
+        prompts=prompts if prompts is not None else FakePrompts(),
     )
 
 
@@ -400,26 +404,19 @@ class TestSubscribersFormBehavior:
 
 class TestSubscribersAddFilter:
 
-    def test_add_filter_appends_to_local_list(self, qtbot, monkeypatch):
-        """Mock QInputDialog to skip the user prompt, then verify
-        _form_filters got the new entry and the QListWidget refreshed."""
-        v = _make_subscribers_view()
+    def test_add_filter_appends_to_local_list(self, qtbot):
+        """The prompts answer for the user; verify _form_filters got the new
+        entry and the QListWidget refreshed."""
+        prompts = FakePrompts()
+        v = _make_subscribers_view(prompts=prompts)
         qtbot.addWidget(v)
         # Pre-populate the ticker lookup so the dialog has options
         v._ticker_lookup = [
             {"ticker_id": 1, "exchange": "NSE", "symbol": "RELIANCE"},
         ]
 
-        # Stub QInputDialog.getItem to simulate user picking the
-        # ticker then the signals.
-        from PySide6.QtWidgets import QInputDialog
-        calls = []
-        def fake_getitem(*args, **kwargs):
-            calls.append(args)
-            if len(calls) == 1:
-                return ("NSE:RELIANCE", True)
-            return ("BUY,SELL", True)
-        monkeypatch.setattr(QInputDialog, "getItem", fake_getitem)
+        # The user picks the ticker, then the signals.
+        prompts.item_answers = [("NSE:RELIANCE", True), ("BUY,SELL", True)]
 
         assert len(v._form_filters) == 0
         v._on_add_filter_clicked()
@@ -589,15 +586,11 @@ class TestCsvExport:
         parts = name[len("foo_"):-len(".csv")]
         assert len(parts) == 15  # 8 + 1 + 6
 
-    def test_export_writes_csv(self, qtbot, tmp_path, monkeypatch):
-        """Patch QFileDialog to return a known path; verify CSV
-        contents on disk."""
-        from PySide6.QtWidgets import QFileDialog
+    def test_export_writes_csv(self, qtbot, tmp_path):
+        """The save dialog answers with a known path; verify CSV contents on
+        disk."""
         target = tmp_path / "out.csv"
-        monkeypatch.setattr(
-            QFileDialog, "getSaveFileName",
-            lambda *args, **kwargs: (str(target), "*.csv"),
-        )
+        prompts = FakePrompts(save_path=str(target))
 
         from PySide6.QtWidgets import QWidget
         dummy_parent = QWidget()
@@ -605,6 +598,7 @@ class TestCsvExport:
 
         result = export_rows_to_csv(
             dummy_parent,
+            prompts=prompts,
             default_filename="x.csv",
             columns=["a", "b", "c"],
             rows=[
@@ -620,16 +614,13 @@ class TestCsvExport:
         # None should render as empty
         assert lines[2].startswith(",four,")
 
-    def test_export_cancel_returns_none(self, qtbot, monkeypatch):
-        from PySide6.QtWidgets import QFileDialog, QWidget
-        monkeypatch.setattr(
-            QFileDialog, "getSaveFileName",
-            lambda *args, **kwargs: ("", ""),
-        )
+    def test_export_cancel_returns_none(self, qtbot):
+        from PySide6.QtWidgets import QWidget
+        prompts = FakePrompts(save_path=None)        # user cancels
         dummy = QWidget()
         qtbot.addWidget(dummy)
         result = export_rows_to_csv(
-            dummy, default_filename="x.csv",
+            dummy, prompts=prompts, default_filename="x.csv",
             columns=["a"], rows=[[1]],
         )
         assert result is None
