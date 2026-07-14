@@ -7,6 +7,7 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "README.md"
+      - "docs/**"
       - "PHASE11_CHANGELOG.md"
       - "PHASE12_CHANGELOG.md"
       - ".github/workflows/docs.yml"

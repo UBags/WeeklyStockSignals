@@ -200,7 +200,7 @@ ls migrations/legacy/*.sql
 
 Then compare. The post-Phase-12 expectation: every Alembic revision that
 creates or modifies a table has a matching `NNN_*.sql` parity file in
-`migrations/legacy/`. See `migrations/legacy/README.md` for the obligation.
+`migrations/legacy/`. See `docs/migrations.legacy-README.md` for the obligation.
 
 ---
 
