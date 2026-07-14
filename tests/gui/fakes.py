@@ -1,7 +1,7 @@
 """Test doubles for the GUI ports.
 
-Replaces `monkeypatch.setattr(QMessageBox, "warning", ...)` — which reached into
-a third-party class and, for the duration of the test, broke QMessageBox for
+Replaces the old QMessageBox.warning monkeypatch — which reached into a
+third-party class and, for the duration of the test, broke QMessageBox for
 everything else in the process. A view now takes its Prompts, so a test hands it
 one.
 

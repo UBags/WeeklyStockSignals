@@ -189,22 +189,18 @@ class TestBackfillButton:
         # opened, no exception
         assert view._backfill_process is not None
 
-    def test_blocks_without_exchange(self, view, prompts, monkeypatch):
-        # Picker returns None (loading sentinel)
-        monkeypatch.setattr(
-            view._picker, "current_exchange",
-            lambda: None,
-        )
+    def test_blocks_without_exchange(self, view, prompts):
+        # Picker returns None (loading sentinel). Instance attribute —
+        # plain assignment; the view is fixture-scoped and dies with
+        # the test, so no monkeypatch cleanup is needed.
+        view._picker.current_exchange = lambda: None
         view._on_backfill_clicked()
         assert len(prompts.warnings) == 1
 
     def test_blocks_when_date_from_after_date_to(
-        self, view, monkeypatch, prompts,
+        self, view, prompts,
     ):
-        monkeypatch.setattr(
-            view._picker, "current_exchange",
-            lambda: "NSE",
-        )
+        view._picker.current_exchange = lambda: "NSE"
         from PySide6.QtCore import QDate
         view._from_date.setDate(QDate(2026, 6, 28))
         view._to_date.setDate(QDate(2024, 1, 1))
