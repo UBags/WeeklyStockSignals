@@ -262,6 +262,18 @@ def get_fundamentals_runners():
     return DEFAULT_FUNDAMENTALS_RUNNERS
 
 
+def get_gateways():
+    """The route-collaborator registry (Phase 10).
+
+    Same shape and same reasoning as get_fundamentals_runners: routes
+    take a `Gateways` frozen dataclass containing the repo factories
+    and read-only helpers they use. Tests override this at the app
+    level rather than monkeypatching the route module's `mod.<Repo>`.
+    """
+    from .gateways import DEFAULT_GATEWAYS
+    return DEFAULT_GATEWAYS
+
+
 def get_etl_executor():
     """Return the AppState's ETL ThreadPoolExecutor. Returns None when
     the ETL admin endpoints are disabled — the route handlers then

@@ -218,6 +218,25 @@ CLOSED_SEAMS: list[Seam] = [
         # etl/cli.py::cmd_refresh_reference reads ctx.runners and calls
         # runners.for_phase(name) — again, no local import.
     ),
+
+    # ---- Phase 10: the Gateways registry ----
+    Seam(
+        "patching a repository or read-helper on an admin route module",
+        "10",
+        r'(?:patch|setattr)\(\s*\n?\s*[\w.]*\s*,\s*'
+        r'["\'](?:EtlStatusRepository|ExchangeStateRepository|_tier_counts)["\']',
+        "the routes take `gateways: Gateways` via Depends(get_gateways). "
+        "Derive a variant: DEFAULT_GATEWAYS.with_(etl_status=FakeRepo) or "
+        ".with_(exchange_state=FakeRepo, tier_counts=lambda conn, ex: ...) "
+        "and pass through _make_client(gateways=...).",
+        scope="tests",
+        exempt=(
+            # test_runner_progress patches EtlStatusRepository on the ETL
+            # runner module (runner_mod), not a route module. Same shape,
+            # different port — belongs to the EtlRunners phase, not Phase 10.
+            "etl/test_runner_progress.py",
+        ),
+    ),
 ]
 
 
@@ -387,6 +406,8 @@ def test_every_seam_pattern_is_live():
             # INDENTED, deliberately. A module-top import is not the thing
             # this seam bans, and the probe has to prove the difference.
             '    from ....fundamentals.runners import run_shares_refresh',
+        "patching a repository or read-helper on an admin route module":
+            'monkeypatch.setattr(mod, "EtlStatusRepository", FakeRepo)',
     }
     for seam in CLOSED_SEAMS:
         probe = probes[seam.name]

@@ -23,11 +23,13 @@ from datetime import datetime, UTC
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import Engine
 
-from ....persistence.exchange_state_repo import (
-    ExchangeState,
-    ExchangeStateRepository,
+from ....persistence.exchange_state_repo import ExchangeState
+from ..dependencies import (
+    get_db_engine,
+    get_gateways,
+    require_admin_token,
 )
-from ..dependencies import get_db_engine, require_admin_token
+from ..gateways import Gateways
 from ..schemas import ExchangeStateListPayload, ExchangeStatePayload
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,7 @@ router = APIRouter(
 @router.get("", response_model=ExchangeStateListPayload)
 def admin_exchange_state_list(
     db_engine: Engine = Depends(get_db_engine),
+    gateways: Gateways = Depends(get_gateways),
 ) -> ExchangeStateListPayload:
     """Return every row from exchange_state, ordered by exchange code.
 
@@ -51,7 +54,7 @@ def admin_exchange_state_list(
     had any ETL activity yet (or the table was wiped).
     """
     with db_engine.connect() as conn:
-        rows = ExchangeStateRepository(conn).list_all()
+        rows = gateways.exchange_state(conn).list_all()
     return ExchangeStateListPayload(
         exchanges=[_to_payload(r) for r in rows],
         total=len(rows),
@@ -63,6 +66,7 @@ def admin_exchange_state_list(
 def admin_exchange_state_one(
     exchange: str,
     db_engine: Engine = Depends(get_db_engine),
+    gateways: Gateways = Depends(get_gateways),
 ) -> ExchangeStatePayload:
     """Return the row for one exchange, or 404 if there isn't one.
 
@@ -71,7 +75,7 @@ def admin_exchange_state_one(
     that distinction is the runner's job, not this read endpoint's).
     """
     with db_engine.connect() as conn:
-        row = ExchangeStateRepository(conn).get(exchange)
+        row = gateways.exchange_state(conn).get(exchange)
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

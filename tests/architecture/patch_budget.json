@@ -94,12 +94,7 @@
     "transports_pure/test_admin_etl.py": {
       "env": 0,
       "mock_patch": 0,
-      "setattr": 7
-    },
-    "transports_pure/test_admin_exchange_state.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 5
+      "setattr": 1
     }
   }
 }

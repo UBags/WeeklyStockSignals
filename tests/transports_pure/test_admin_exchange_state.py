@@ -20,7 +20,8 @@ from trip_ema.transports.http.dependencies import (
     get_admin_token,
     # === STEP 14B-FIXUP4-import: scheduler/distributor getters stripped ===
     get_config, get_db_engine,
-    get_etl_executor, get_redis_queue, )
+    get_etl_executor, get_gateways, get_redis_queue, )
+from trip_ema.transports.http.gateways import DEFAULT_GATEWAYS
 
 
 # ---------- shared fixtures ---------- #
@@ -44,7 +45,7 @@ def _make_config():
     return cfg
 
 
-def _make_client(*, db_engine=None, admin_token=ADMIN_TOKEN):
+def _make_client(*, db_engine=None, admin_token=ADMIN_TOKEN, gateways=None):
     app = create_app()
     app.dependency_overrides[get_admin_token] = lambda: admin_token
     app.dependency_overrides[get_config] = lambda: _make_config()
@@ -53,6 +54,12 @@ def _make_client(*, db_engine=None, admin_token=ADMIN_TOKEN):
     # Stubs for unrelated deps so DI resolves cleanly:
     # === STEP 14B-FIXUP4-overrides: scheduler/distributor overrides removed ===
     app.dependency_overrides[get_redis_queue] = lambda: None
+    # Phase 10: Gateways registry. Tests pass a derived variant via
+    # gateways=DEFAULT_GATEWAYS.with_(exchange_state=FakeRepo); no-arg
+    # callers get the production wiring, unchanged behaviorally.
+    app.dependency_overrides[get_gateways] = lambda: (
+        gateways if gateways is not None else DEFAULT_GATEWAYS
+    )
     return TestClient(app)
 
 
@@ -83,15 +90,14 @@ def _make_state(exchange: str, **overrides) -> ExchangeState:
 
 class TestExchangeStateList:
 
-    def test_empty_list(self, auth_headers, monkeypatch):
-        import trip_ema.transports.http.routes.admin_exchange_state as mod
-
+    def test_empty_list(self, auth_headers):
         class FakeRepo:
             def __init__(self, conn): pass
             def list_all(self): return []
-        monkeypatch.setattr(mod, "ExchangeStateRepository", FakeRepo)
 
-        client = _make_client()
+        client = _make_client(
+            gateways=DEFAULT_GATEWAYS.with_(exchange_state=FakeRepo),
+        )
         resp = client.get(
             "/v1/admin/exchange-state", headers=auth_headers,
         )
@@ -101,9 +107,7 @@ class TestExchangeStateList:
         assert body["total"] == 0
         assert "snapshot_taken_at" in body
 
-    def test_returns_multiple_rows(self, auth_headers, monkeypatch):
-        import trip_ema.transports.http.routes.admin_exchange_state as mod
-
+    def test_returns_multiple_rows(self, auth_headers):
         nse = _make_state(
             "NSE",
             initial_load_started_at=datetime(2026, 5, 18, 17, 22, 37, tzinfo=UTC),
@@ -121,9 +125,10 @@ class TestExchangeStateList:
         class FakeRepo:
             def __init__(self, conn): pass
             def list_all(self): return [bse, nse]  # arbitrary order from repo
-        monkeypatch.setattr(mod, "ExchangeStateRepository", FakeRepo)
 
-        client = _make_client()
+        client = _make_client(
+            gateways=DEFAULT_GATEWAYS.with_(exchange_state=FakeRepo),
+        )
         resp = client.get(
             "/v1/admin/exchange-state", headers=auth_headers,
         )
@@ -150,9 +155,7 @@ class TestExchangeStateList:
 
 class TestExchangeStateOne:
 
-    def test_returns_one_row(self, auth_headers, monkeypatch):
-        import trip_ema.transports.http.routes.admin_exchange_state as mod
-
+    def test_returns_one_row(self, auth_headers):
         nse = _make_state(
             "NSE",
             last_eod_run_at=datetime(2026, 5, 19, 19, 31, 21, tzinfo=UTC),
@@ -165,9 +168,10 @@ class TestExchangeStateOne:
             def __init__(self, conn): pass
             def get(self, ex):
                 return nse if ex == "NSE" else None
-        monkeypatch.setattr(mod, "ExchangeStateRepository", FakeRepo)
 
-        client = _make_client()
+        client = _make_client(
+            gateways=DEFAULT_GATEWAYS.with_(exchange_state=FakeRepo),
+        )
         resp = client.get(
             "/v1/admin/exchange-state/NSE", headers=auth_headers,
         )
@@ -178,15 +182,14 @@ class TestExchangeStateOne:
         assert body["last_eod_data_date"] == "2026-05-19"
         assert body["last_eod_run_id"] == 11
 
-    def test_404_when_exchange_absent(self, auth_headers, monkeypatch):
-        import trip_ema.transports.http.routes.admin_exchange_state as mod
-
+    def test_404_when_exchange_absent(self, auth_headers):
         class FakeRepo:
             def __init__(self, conn): pass
             def get(self, ex): return None
-        monkeypatch.setattr(mod, "ExchangeStateRepository", FakeRepo)
 
-        client = _make_client()
+        client = _make_client(
+            gateways=DEFAULT_GATEWAYS.with_(exchange_state=FakeRepo),
+        )
         resp = client.get(
             "/v1/admin/exchange-state/BSE", headers=auth_headers,
         )
@@ -209,17 +212,16 @@ class TestPayloadShape:
     """Round-trip every nullable field to make sure the Pydantic
     model accepts None and serializes correctly."""
 
-    def test_all_nulls_serializes(self, auth_headers, monkeypatch):
-        import trip_ema.transports.http.routes.admin_exchange_state as mod
-
+    def test_all_nulls_serializes(self, auth_headers):
         bare = _make_state("LSE")
 
         class FakeRepo:
             def __init__(self, conn): pass
             def get(self, ex): return bare if ex == "LSE" else None
-        monkeypatch.setattr(mod, "ExchangeStateRepository", FakeRepo)
 
-        client = _make_client()
+        client = _make_client(
+            gateways=DEFAULT_GATEWAYS.with_(exchange_state=FakeRepo),
+        )
         resp = client.get(
             "/v1/admin/exchange-state/LSE", headers=auth_headers,
         )

@@ -24,7 +24,9 @@ from trip_ema.transports.http.dependencies import (
     get_admin_token,
     # === STEP 14B-FIXUP4-import: scheduler/distributor getters stripped ===
     get_config, get_db_engine,
-    get_etl_executor, get_redis_queue, )
+    get_etl_executor, get_gateways, get_redis_queue, )
+from trip_ema.transports.http.gateways import DEFAULT_GATEWAYS
+from trip_ema.transports.http.schemas import EtlTierCounts
 
 
 # ---------- shared fixtures ---------- #
@@ -73,10 +75,14 @@ def _make_config(*, market_hours_exchanges=("NSE",)):
     return cfg
 
 
-def _make_client(*, config=None, db_engine=None, executor=None, admin_token=ADMIN_TOKEN):
+def _make_client(*, config=None, db_engine=None, executor=None, admin_token=ADMIN_TOKEN, gateways=None):
     """Build a TestClient with the standard overrides. Any arg=None
     means use a default MagicMock; pass an explicit value (including
-    the literal None for executor, via FakeExecutor()) to override."""
+    the literal None for executor, via FakeExecutor()) to override.
+
+    Phase 10: `gateways=` accepts a derived Gateways registry (via
+    DEFAULT_GATEWAYS.with_(...)); no-arg callers get the production
+    wiring. Replaces monkeypatch.setattr on the route module."""
     app = create_app()
     app.dependency_overrides[get_admin_token] = lambda: admin_token
     app.dependency_overrides[get_config] = lambda: (config or _make_config())
@@ -85,6 +91,9 @@ def _make_client(*, config=None, db_engine=None, executor=None, admin_token=ADMI
     # Stub the rest so deps resolve cleanly
     # === STEP 14B-FIXUP4-overrides: scheduler/distributor overrides removed ===
     app.dependency_overrides[get_redis_queue] = lambda: None
+    app.dependency_overrides[get_gateways] = lambda: (
+        gateways if gateways is not None else DEFAULT_GATEWAYS
+    )
     return TestClient(app)
 
 
@@ -347,14 +356,9 @@ class TestBackfill:
 
 class TestStatusEndpoint:
 
-    def test_composes_response_from_repo_and_tier_counts(
-        self, auth_headers, monkeypatch,
-    ):
-        """Status is a read aggregator. Mock both the repo and the
-        tier-counts helper and assert the JSON shape."""
-        import trip_ema.transports.http.routes.admin_etl as mod
-
-        # Stub the EtlStatusRepository's methods we use
+    def test_composes_response_from_repo_and_tier_counts(self, auth_headers):
+        """Status is a read aggregator. Inject a fake gateway registry
+        (stub repo + stub tier_counts) and assert the JSON shape."""
         from trip_ema.etl.status_repo import RunRecord
         fake_recent = [
             RunRecord(
@@ -373,17 +377,20 @@ class TestStatusEndpoint:
             def list_recent_runs(self, limit): return fake_recent
             def count_parked(self): return 12
 
-        monkeypatch.setattr(mod, "EtlStatusRepository", FakeRepo)
-        monkeypatch.setattr(
-            mod, "_tier_counts",
-            lambda conn, ex: mod.EtlTierCounts(tier_1=200, tier_2=500, tier_3=1600),
+        gateways = DEFAULT_GATEWAYS.with_(
+            etl_status=FakeRepo,
+            tier_counts=lambda conn, ex: EtlTierCounts(
+                tier_1=200, tier_2=500, tier_3=1600,
+            ),
         )
 
         # Need a real-ish engine that supports `with engine.connect()`
         engine = MagicMock()
         # MagicMock's context manager returns another MagicMock — fine
 
-        client = _make_client(db_engine=engine, executor=FakeExecutor())
+        client = _make_client(
+            db_engine=engine, executor=FakeExecutor(), gateways=gateways,
+        )
         resp = client.get(
             "/v1/admin/etl/status?limit=5", headers=auth_headers,
         )
@@ -397,14 +404,10 @@ class TestStatusEndpoint:
         assert body["tier_counts"]["tier_2"] == 500
         assert body["tier_counts"]["tier_3"] == 1600
 
-    def test_exchange_param_passed_to_tier_counts(
-        self, auth_headers, monkeypatch,
-    ):
-        """Phase 14.6c: ?exchange=BSE → _tier_counts called with 'BSE',
+    def test_exchange_param_passed_to_tier_counts(self, auth_headers):
+        """Phase 14.6c: ?exchange=BSE → tier_counts called with 'BSE',
         not config.etl.exchange. The recent_runs/parked_count remain
         global regardless."""
-        import trip_ema.transports.http.routes.admin_etl as mod
-
         seen_exchanges = []
 
         class FakeRepo:
@@ -414,15 +417,17 @@ class TestStatusEndpoint:
 
         def fake_tier_counts(conn, ex):
             seen_exchanges.append(ex)
-            return mod.EtlTierCounts(tier_1=10, tier_2=20, tier_3=30)
+            return EtlTierCounts(tier_1=10, tier_2=20, tier_3=30)
 
-        monkeypatch.setattr(mod, "EtlStatusRepository", FakeRepo)
-        monkeypatch.setattr(mod, "_tier_counts", fake_tier_counts)
+        gateways = DEFAULT_GATEWAYS.with_(
+            etl_status=FakeRepo, tier_counts=fake_tier_counts,
+        )
 
         engine = MagicMock()
         cfg = _make_config()  # cfg.etl.exchange = "NSE"
         client = _make_client(
             config=cfg, db_engine=engine, executor=FakeExecutor(),
+            gateways=gateways,
         )
 
         # Without ?exchange=, falls back to config.etl.exchange = "NSE"
@@ -435,25 +440,26 @@ class TestStatusEndpoint:
         )
         assert seen_exchanges[-1] == "BSE"
 
-    def test_status_does_not_require_exchange(self, auth_headers, monkeypatch):
+    def test_status_does_not_require_exchange(self, auth_headers):
         """Backward compat: ?exchange= is OPTIONAL. Existing clients
         that don't send it must still get a 200 with tier counts
         scoped to config.etl.exchange."""
-        import trip_ema.transports.http.routes.admin_etl as mod
-
         class FakeRepo:
             def __init__(self, conn): pass
             def list_recent_runs(self, limit): return []
             def count_parked(self): return 0
 
-        monkeypatch.setattr(mod, "EtlStatusRepository", FakeRepo)
-        monkeypatch.setattr(
-            mod, "_tier_counts",
-            lambda conn, ex: mod.EtlTierCounts(tier_1=0, tier_2=0, tier_3=0),
+        gateways = DEFAULT_GATEWAYS.with_(
+            etl_status=FakeRepo,
+            tier_counts=lambda conn, ex: EtlTierCounts(
+                tier_1=0, tier_2=0, tier_3=0,
+            ),
         )
 
         engine = MagicMock()
-        client = _make_client(db_engine=engine, executor=FakeExecutor())
+        client = _make_client(
+            db_engine=engine, executor=FakeExecutor(), gateways=gateways,
+        )
         resp = client.get(
             "/v1/admin/etl/status", headers=auth_headers,  # no ?exchange=
         )

@@ -46,15 +46,16 @@ from ....etl.runner import (
     run_intraday,
     unpark_all,
 )
-from ....etl.status_repo import EtlStatusRepository
 from ....fundamentals.stages import FundamentalsRunners
 from ..dependencies import (
     get_config,
     get_db_engine,
     get_etl_executor,
     get_fundamentals_runners,
+    get_gateways,
     require_admin_token,
 )
+from ..gateways import Gateways
 from ..schemas import (
     EtlActionAcceptedPayload,
     EtlParkedListPayload,
@@ -487,6 +488,7 @@ def admin_etl_status(
     ),
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
+    gateways: Gateways = Depends(get_gateways),
 ) -> EtlStatusPayload:
     """Composite read for the GUI's ETL Status tab. Returns recent
     runs, the current parked count, and tier counts. Cheap — one
@@ -512,10 +514,10 @@ def admin_etl_status(
     effective_exchange = exchange or config.etl.exchange
 
     with db_engine.connect() as conn:
-        status_repo = EtlStatusRepository(conn)
+        status_repo = gateways.etl_status(conn)
         recent = status_repo.list_recent_runs(limit=limit)
         parked_count = status_repo.count_parked()
-        tier_counts = _tier_counts(conn, effective_exchange)
+        tier_counts = gateways.tier_counts(conn, effective_exchange)
 
     return EtlStatusPayload(
         recent_runs=[
@@ -568,24 +570,6 @@ def admin_etl_parked(
 
 
 # ---------- Internal runner wrappers (catch + log) ---------- #
-
-
-def _tier_counts(conn, exchange: str) -> EtlTierCounts:
-    """How many active tickers in each tier."""
-    result = conn.execute(text("""
-        SELECT tier, COUNT(*) AS n FROM tickers
-        WHERE is_active = TRUE AND delisted_at IS NULL
-          AND exchange = :ex
-        GROUP BY tier
-    """), {"ex": exchange})
-    counts = {1: 0, 2: 0, 3: 0}
-    for row in result:
-        counts[row.tier] = row.n
-    return EtlTierCounts(
-        tier_1=counts.get(1, 0),
-        tier_2=counts.get(2, 0),
-        tier_3=counts.get(3, 0),
-    )
 
 
 # These wrappers run inside the ThreadPoolExecutor. They catch every
