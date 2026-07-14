@@ -6,17 +6,7 @@
       "mock_patch": 2,
       "setattr": 0
     },
-    "config/test_exchange_overrides.py": {
-      "env": 1,
-      "mock_patch": 0,
-      "setattr": 0
-    },
     "config/test_loader.py": {
-      "env": 1,
-      "mock_patch": 0,
-      "setattr": 0
-    },
-    "config/test_tick_schedule.py": {
       "env": 1,
       "mock_patch": 0,
       "setattr": 0
@@ -30,11 +20,6 @@
       "env": 0,
       "mock_patch": 0,
       "setattr": 4
-    },
-    "etl/test_fetch_bars_for_tickers.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 6
     },
     "etl/test_runner_progress.py": {
       "env": 0,

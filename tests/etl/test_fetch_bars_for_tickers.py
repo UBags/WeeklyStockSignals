@@ -95,9 +95,7 @@ class TestFetchBarsForTickers:
                 start_date=date(2024, 6, 1),
             )
 
-    def test_inactive_tickers_silently_dropped(
-        self, db_engine, monkeypatch,
-    ):
+    def test_inactive_tickers_silently_dropped(self, db_engine):
         """Inactive tickers in the input list are silently filtered
         out — the fetch proceeds for the active subset."""
         _seed_ticker(
@@ -115,31 +113,21 @@ class TestFetchBarsForTickers:
             # _execute_batches now returns (outcome, failed_tickers).
             return RunOutcome.SUCCESS, []
 
-        monkeypatch.setattr(
-            "trip_ema.etl.runner._execute_batches",
-            _spy_execute_batches,
-        )
-        monkeypatch.setattr(
-            "trip_ema.etl.runner.YFinanceSource",
-            MagicMock(return_value=MagicMock()),
-        )
-        monkeypatch.setattr(
-            "trip_ema.etl.runner.validate_exchange",
-            lambda *a, **k: None,
-        )
-
         run_id = fetch_bars_for_tickers(
             db_engine, _MockConfig(),
             ticker_ids=[1, 2],
             start_date=date(2024, 6, 1),
             end_date=date(2024, 6, 5),
+            source=MagicMock(),
+            execute_batches_fn=_spy_execute_batches,
+            validate_exchange_fn=lambda *a, **k: None,
         )
         assert run_id > 0
         # Only the active ticker was passed through
         assert len(captured_tickers) == 1
         assert captured_tickers[0].ticker_id == 1
 
-    def test_returns_etl_run_id(self, db_engine, monkeypatch):
+    def test_returns_etl_run_id(self, db_engine):
         _seed_ticker(db_engine, ticker_id=1, symbol="T1")
 
         def _stub_execute_batches(**kwargs):
@@ -147,23 +135,13 @@ class TestFetchBarsForTickers:
             # _execute_batches now returns (outcome, failed_tickers).
             return RunOutcome.SUCCESS, []
 
-        monkeypatch.setattr(
-            "trip_ema.etl.runner._execute_batches",
-            _stub_execute_batches,
-        )
-        monkeypatch.setattr(
-            "trip_ema.etl.runner.YFinanceSource",
-            MagicMock(return_value=MagicMock()),
-        )
-        monkeypatch.setattr(
-            "trip_ema.etl.runner.validate_exchange",
-            lambda *a, **k: None,
-        )
-
         run_id = fetch_bars_for_tickers(
             db_engine, _MockConfig(),
             ticker_ids=[1],
             start_date=date(2024, 6, 1),
+            source=MagicMock(),
+            execute_batches_fn=_stub_execute_batches,
+            validate_exchange_fn=lambda *a, **k: None,
         )
         # Verify the etl_runs row exists
         with db_engine.connect() as conn:

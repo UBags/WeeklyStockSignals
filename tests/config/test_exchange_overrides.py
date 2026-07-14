@@ -89,8 +89,10 @@ exchange_overrides:
 
 
 @pytest.fixture
-def db_pwd(monkeypatch):
-    monkeypatch.setenv("TEST_DB_PWD", "secret")
+def db_pwd():
+    # Phase 13: yields the env dict instead of mutating os.environ.
+    # Call sites pass `env=db_pwd` to load_config.
+    return {"TEST_DB_PWD": "secret"}
 
 
 # ---------- Backward compatibility ---------- #
@@ -103,7 +105,7 @@ class TestExchangeOverridesBackCompat:
         """Existing configs with no exchange_overrides: block keep
         working. The Config.exchange_overrides field defaults to None."""
         p = _write(tmp_path, _BASE_YAML)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         assert cfg.exchange_overrides is None
 
     def test_resolve_indicator_params_no_overrides_returns_global(
@@ -112,7 +114,7 @@ class TestExchangeOverridesBackCompat:
         """When exchange_overrides is None, resolve_indicator_params
         returns the global params from to_indicator_params()."""
         p = _write(tmp_path, _BASE_YAML)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         params = resolve_indicator_params(cfg, "NSE", Timeframe.WEEKLY)
         expected = cfg.to_indicator_params()
         assert params == expected
@@ -127,7 +129,7 @@ class TestResolveIndicatorParams:
     ):
         """NSE 1W is overridden; resolver returns the override."""
         p = _write(tmp_path, _BASE_YAML + _NSE_1W_OVERRIDE)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         params = resolve_indicator_params(cfg, "NSE", Timeframe.WEEKLY)
         assert params.med_base == 10        # overridden
         assert params.longest_base == 50    # overridden
@@ -143,14 +145,14 @@ class TestResolveIndicatorParams:
         """NSE has a 1W override but no 1D override → NSE 1D falls
         back to the global block."""
         p = _write(tmp_path, _BASE_YAML + _NSE_1W_OVERRIDE)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         nse_daily = resolve_indicator_params(cfg, "NSE", Timeframe.DAILY)
         assert nse_daily == cfg.to_indicator_params()
 
     def test_other_exchange_falls_back_to_global(self, tmp_path, db_pwd):
         """NYSE has no override at all → NYSE 1W falls back."""
         p = _write(tmp_path, _BASE_YAML + _NSE_1W_OVERRIDE)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         nyse_weekly = resolve_indicator_params(cfg, "NYSE", Timeframe.WEEKLY)
         assert nyse_weekly == cfg.to_indicator_params()
 
@@ -161,7 +163,7 @@ class TestResolveIndicatorParams:
         falling back. Per design D4."""
         # NSE 1W overridden via _NSE_1W_OVERRIDE; NSE 1D not overridden.
         p = _write(tmp_path, _BASE_YAML + _NSE_1W_OVERRIDE)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         weekly = resolve_indicator_params(cfg, "NSE", Timeframe.WEEKLY)
         daily = resolve_indicator_params(cfg, "NSE", Timeframe.DAILY)
         assert weekly.med_base == 10       # override
@@ -198,7 +200,7 @@ exchange_overrides:
         outer_mult: 6.0
 """
         p = _write(tmp_path, yaml)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         nse = resolve_indicator_params(cfg, "NSE", Timeframe.WEEKLY)
         nyse = resolve_indicator_params(cfg, "NYSE", Timeframe.WEEKLY)
         assert nse.med_base == 10
@@ -227,7 +229,7 @@ exchange_overrides:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError, match="unknown exchange"):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
     def test_unsupported_timeframe_rejected(self, tmp_path, db_pwd):
         """Timeframes other than '1D' / '1W' are rejected. Phase 15
@@ -245,7 +247,7 @@ exchange_overrides:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError, match="not supported by"):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
     def test_extra_field_in_override_rejected(self, tmp_path, db_pwd):
         """ExchangeIndicatorOverride uses extra='forbid'; a typo'd
@@ -263,7 +265,7 @@ exchange_overrides:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
     def test_invalid_atr_multiplier_rejected(self, tmp_path, db_pwd):
         """ATRConfig requires multipliers > 0; an override with a
@@ -280,7 +282,7 @@ exchange_overrides:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
 
 # ---------- Module-level constants ---------- #

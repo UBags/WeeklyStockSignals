@@ -489,6 +489,8 @@ def fetch_bars_for_tickers(
     start_date: date,
     end_date: date | None = None,
     source: YFinanceSource | None = None,
+    execute_batches_fn: 'Callable | None' = None,
+    validate_exchange_fn: 'Callable | None' = None,
 ) -> int:
     """Per-ticker yfinance daily-bar fetch for a date range.
 
@@ -551,7 +553,7 @@ def fetch_bars_for_tickers(
             f"exchanges {exchanges!r}; call once per exchange"
         )
     exchange = exchanges.pop()
-    validate_exchange(exchange, config)
+    (validate_exchange_fn or validate_exchange)(exchange, config)
 
     # This path used to be `YFinanceSource(exchange=exchange)` — no batch_size,
     # no request_delay. It therefore ran at the constructor defaults (delay 0.0)
@@ -586,7 +588,7 @@ def fetch_bars_for_tickers(
                 exchange=exchange,
                 correlation_id=cid,
             )
-        outcome, _failed_tickers = _execute_batches(
+        outcome, _failed_tickers = (execute_batches_fn or _execute_batches)(
             db_engine=db_engine,
             config=config,
             src=src,

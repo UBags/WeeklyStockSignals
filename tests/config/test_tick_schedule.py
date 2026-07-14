@@ -92,8 +92,10 @@ _NSE_TICK_SCHEDULE = """
 
 
 @pytest.fixture
-def db_pwd(monkeypatch):
-    monkeypatch.setenv("TEST_DB_PWD", "secret")
+def db_pwd():
+    # Phase 13: yields the env dict instead of mutating os.environ.
+    # Call sites pass `env=db_pwd` to load_config.
+    return {"TEST_DB_PWD": "secret"}
 
 
 # ---------- Backward compatibility ---------- #
@@ -108,7 +110,7 @@ class TestTickScheduleBackCompat:
         self, tmp_path, db_pwd,
     ):
         p = _write(tmp_path, _BASE_YAML)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         assert len(cfg.market_hours) == 1
         nse = cfg.market_hours[0]
         assert nse.tick_schedule is None
@@ -120,7 +122,7 @@ class TestTickScheduleBackCompat:
         ignored when tick_schedule is set. With tick_schedule absent,
         the defaults are unchanged from pre-16a."""
         p = _write(tmp_path, _BASE_YAML)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         nse = cfg.market_hours[0]
         assert nse.post_open_offset_minutes == 5
         assert nse.pre_close_offset_minutes == 15
@@ -132,7 +134,7 @@ class TestTickScheduleBackCompat:
         tick_planner rewrite consumes the new shape via a different
         adapter; this one stays unchanged for callers that still need it."""
         p = _write(tmp_path, _BASE_YAML)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         nse = cfg.market_hours[0]
         # Lazy import sidesteps the scheduler-package dependency at test
         # collection time; same pattern as the existing adapter.
@@ -154,7 +156,7 @@ class TestTickScheduleValidYaml:
     def test_four_tick_schedule_parses(self, tmp_path, db_pwd):
         yaml = _BASE_YAML + _NSE_TICK_SCHEDULE
         p = _write(tmp_path, yaml)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         nse = cfg.market_hours[0]
         assert nse.tick_schedule is not None
         names = [t.name for t in nse.tick_schedule]
@@ -163,7 +165,7 @@ class TestTickScheduleValidYaml:
     def test_anchors_parse_correctly(self, tmp_path, db_pwd):
         yaml = _BASE_YAML + _NSE_TICK_SCHEDULE
         p = _write(tmp_path, yaml)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         nse = cfg.market_hours[0]
         by_name = {t.name: t for t in nse.tick_schedule}
         assert by_name["post_open"].anchor == "open"
@@ -174,7 +176,7 @@ class TestTickScheduleValidYaml:
     def test_signed_offsets_parse_correctly(self, tmp_path, db_pwd):
         yaml = _BASE_YAML + _NSE_TICK_SCHEDULE
         p = _write(tmp_path, yaml)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         nse = cfg.market_hours[0]
         by_name = {t.name: t for t in nse.tick_schedule}
         assert by_name["post_open"].offset_minutes == 15
@@ -199,7 +201,7 @@ class TestTickScheduleValidYaml:
       - { name: post_close,  anchor: close,    offset_minutes:  60 }
 """
         p = _write(tmp_path, yaml)
-        cfg = load_config(p)
+        cfg = load_config(p, env=db_pwd)
         assert len(cfg.market_hours) == 2
         by_exchange = {mh.exchange: mh for mh in cfg.market_hours}
         # Same offsets in this fixture, but the point is each market
@@ -229,7 +231,7 @@ class TestTickScheduleValidation:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError, match="tick_schedule is empty"):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
     def test_duplicate_tick_name_rejected(self, tmp_path, db_pwd):
         """Two entries with the same name silently mask one tick at
@@ -241,7 +243,7 @@ class TestTickScheduleValidation:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError, match="duplicate tick name"):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
     def test_midpoint_without_open_anchored_entry_rejected(
         self, tmp_path, db_pwd,
@@ -255,7 +257,7 @@ class TestTickScheduleValidation:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError, match="missing 'open'"):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
     def test_midpoint_without_close_anchored_entry_rejected(
         self, tmp_path, db_pwd,
@@ -268,7 +270,7 @@ class TestTickScheduleValidation:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError, match="missing 'close'"):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
     def test_midpoint_with_offset_rejected(self, tmp_path, db_pwd):
         """The midpoint anchor is fully determined by the flanking
@@ -281,7 +283,7 @@ class TestTickScheduleValidation:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError, match="does not support"):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
     def test_unknown_anchor_value_rejected(self, tmp_path, db_pwd):
         """Anchor must be one of the three Literal values — typos like
@@ -294,7 +296,7 @@ class TestTickScheduleValidation:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
     def test_extra_field_on_entry_rejected(self, tmp_path, db_pwd):
         """TickScheduleEntry uses extra='forbid'; a typo'd sub-key
@@ -306,7 +308,7 @@ class TestTickScheduleValidation:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
     def test_offset_out_of_range_rejected(self, tmp_path, db_pwd):
         """offset_minutes is bounded [-720, 720] (12 hours either side
@@ -319,7 +321,7 @@ class TestTickScheduleValidation:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
     def test_bad_name_with_special_char_rejected(self, tmp_path, db_pwd):
         """Names go into log labels and (potentially) Prometheus metric
@@ -332,7 +334,7 @@ class TestTickScheduleValidation:
 """
         p = _write(tmp_path, yaml)
         with pytest.raises(ConfigError, match="ASCII alphanumeric"):
-            load_config(p)
+            load_config(p, env=db_pwd)
 
 
 # ---------- Direct schema-level checks (no YAML/loader detour) ---------- #
