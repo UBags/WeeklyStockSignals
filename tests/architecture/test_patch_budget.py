@@ -16,8 +16,33 @@ This test does not forbid them. It freezes them:
                                            one way
   * a file not in the ledger has budget 0
 
-Target: every count reaches 0, this file is deleted, and the ban becomes
-absolute. Until then, `patch_budget.json` is the scoreboard.
+This file counts. It cannot see WHAT is being patched, so it cannot stop
+someone from removing a patch here and re-drilling the same hole there. Its
+sibling, test_closed_seams.py, names every seam a phase has closed and fails
+if one is reopened. The two are a pair: this one caps the debt, that one stops
+you paying for the same ground twice.
+
+WHERE THIS STANDS (phases 0-9 landed):
+
+    ~480 patches at the start; 88 remain, in a long tail across 24 files.
+    Nothing left is a big seam. What is left, and the phase that retires it:
+
+      52  gui/test_http_client.py + gui_pure/test_http_client.py
+          -> an HttpTransport port. The client calls requests directly.
+      17  fundamentals/test_scheduler.py
+          -> a runner registry, exactly like MarketStages/BackfillStages.
+      12  transports/http + transports_pure route tests
+          -> FastAPI dependency overrides, like Phase 3's get_admin_token.
+       6  etl/test_fetch_bars_for_tickers.py
+          -> the runner's own module attrs; a BarSource is already there.
+       6  observability/test_tracing.py
+          -> a tracer collaborator.
+      the rest: repository seams (MarketHoursService, ComputeRunsRepository,
+      `transaction`), which want one repo-injection phase between them.
+
+Zero is reachable, but it is FOUR more phases, not a tidy-up. Saying so here
+is the point: a budget that pretends the finish line is close is a budget
+nobody believes. `patch_budget.json` is the scoreboard; this is the map.
 
 To re-baseline after legitimately removing patches:
 
@@ -36,6 +61,10 @@ from pathlib import Path
 SELF = Path(__file__).resolve()
 TESTS_ROOT = SELF.parents[1]
 BUDGET_FILE = SELF.with_name("patch_budget.json")
+
+# The two architecture guards. Both necessarily contain the patterns they
+# police, so neither may be counted as debt.
+_GUARDS = {SELF, SELF.with_name("test_closed_seams.py")}
 
 # Categories are tracked separately because they retire in different phases:
 #   setattr    -> phases 4-8 (ports, contexts, stage registries, GUI prompts)
@@ -61,8 +90,13 @@ def _scan_tree() -> dict[str, dict[str, int]]:
     """{relative posix path: {category: count}} for every non-zero file."""
     found: dict[str, dict[str, int]] = {}
     for py in sorted(TESTS_ROOT.rglob("*.py")):
-        if py.resolve() == SELF:
-            continue  # this file contains the patterns as literals
+        if py.resolve() in _GUARDS:
+            # The guards quote the very patterns they police — as literals in
+            # PATTERNS here, and as sample banned code in test_closed_seams
+            # (which feeds each rule the code it bans and asserts it still
+            # matches). Counting those as debt would be counting the alarm as
+            # the burglary.
+            continue
         counts = _scan(py)
         if any(counts.values()):
             found[py.relative_to(TESTS_ROOT).as_posix()] = counts
