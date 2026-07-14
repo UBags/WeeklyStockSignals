@@ -86,8 +86,29 @@ def _scan(path: Path) -> dict[str, int]:
     return {k: len(p.findall(text)) for k, p in PATTERNS.items()}
 
 
+def _load_exempt_paths() -> set[str]:
+    """Files permanently exempt from budget tracking. Each entry in
+    patch_budget.json's `exempt` list names a file plus a one-line
+    rationale. The ledger is the audit trail — don't delete an entry
+    without a commit message that replaces its rationale.
+
+    Legitimate reasons to be here:
+      - the file is the seam's own spec test (e.g. config/test_loader.py
+        proves the default env=os.environ path);
+      - the file uses monkeypatch.setitem(sys.modules, ...) to simulate
+        a package-not-installed environment condition, which is under
+        test rather than a production-code seam.
+
+    Not legitimate: 'we didn't get around to it.'
+    """
+    raw = json.loads(BUDGET_FILE.read_text(encoding="utf-8"))
+    return {e["path"] for e in raw.get("exempt", [])}
+
+
 def _scan_tree() -> dict[str, dict[str, int]]:
-    """{relative posix path: {category: count}} for every non-zero file."""
+    """{relative posix path: {category: count}} for every non-zero file.
+    Skips guards and permanently-exempt paths."""
+    exempt = _load_exempt_paths()
     found: dict[str, dict[str, int]] = {}
     for py in sorted(TESTS_ROOT.rglob("*.py")):
         if py.resolve() in _GUARDS:
@@ -97,9 +118,12 @@ def _scan_tree() -> dict[str, dict[str, int]]:
             # matches). Counting those as debt would be counting the alarm as
             # the burglary.
             continue
+        rel = py.relative_to(TESTS_ROOT).as_posix()
+        if rel in exempt:
+            continue
         counts = _scan(py)
         if any(counts.values()):
-            found[py.relative_to(TESTS_ROOT).as_posix()] = counts
+            found[rel] = counts
     return found
 
 
@@ -109,12 +133,16 @@ def _load_budget() -> dict[str, dict[str, int]]:
 
 
 def _regen() -> None:
+    # Preserve the exempt list across regen — the scanner would otherwise
+    # blow it away and silently reopen the entries as debt.
+    existing = json.loads(BUDGET_FILE.read_text(encoding="utf-8"))
     payload = {
         "_comment": (
             "Patch budget ledger. Counts may only go DOWN. See "
             "tests/architecture/test_patch_budget.py. Regenerate with: "
             "python tests/architecture/test_patch_budget.py"
         ),
+        "exempt": existing.get("exempt", []),
         "files": _scan_tree(),
     }
     BUDGET_FILE.write_text(
@@ -177,6 +205,20 @@ def test_budget_has_no_entries_for_deleted_files() -> None:
         "patch_budget.json lists files that no longer exist:\n  "
         + "\n  ".join(missing)
         + "\n\nRegenerate: python tests/architecture/test_patch_budget.py"
+    )
+
+
+def test_exempt_paths_exist() -> None:
+    """Stale exempt entries silently permit patches in files that no
+    longer exist. Fail loudly instead."""
+    raw = json.loads(BUDGET_FILE.read_text(encoding="utf-8"))
+    missing = [
+        e["path"] for e in raw.get("exempt", [])
+        if not (TESTS_ROOT / e["path"]).is_file()
+    ]
+    assert not missing, (
+        "patch_budget.json's `exempt` list names files that no longer "
+        "exist:\n  " + "\n  ".join(missing)
     )
 
 

@@ -1,6 +1,6 @@
 """Test doubles for the ETL ports.
 
-Replaces what used to be `@patch("yfinance.download")` — a global patch of a
+Replaces the old @patch on yfinance.download — a global reach into a
 third-party module, which meant the test suite could not run without yfinance
 installed and could not see what the source actually asked for without
 interrogating a mock.

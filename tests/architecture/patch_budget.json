@@ -1,25 +1,20 @@
 {
   "_comment": "Patch budget ledger. Counts may only go DOWN. See tests/architecture/test_patch_budget.py. Regenerate with: python tests/architecture/test_patch_budget.py",
+  "exempt": [
+    {
+      "path": "config/test_loader.py",
+      "rationale": "test_default_env_is_os_environ deliberately proves the default env=os.environ path \u2014 the loader's own spec test. The one env-var patch here is the assertion, not debt."
+    },
+    {
+      "path": "observability/test_tracing.py",
+      "rationale": "The six monkeypatch.setitem(sys.modules, 'opentelemetry', None) calls simulate the 'OTel package not installed' environment condition \u2014 that condition is what's under test. Not a production-code seam."
+    }
+  ],
   "files": {
-    "config/test_loader.py": {
-      "env": 1,
-      "mock_patch": 0,
-      "setattr": 0
-    },
-    "etl/fakes.py": {
-      "env": 0,
-      "mock_patch": 1,
-      "setattr": 0
-    },
     "gui/test_slice4_wiring.py": {
       "env": 0,
       "mock_patch": 0,
       "setattr": 1
-    },
-    "observability/test_tracing.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 6
     }
   }
 }
