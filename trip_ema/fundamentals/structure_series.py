@@ -1,9 +1,30 @@
 """§4 enrichment series — pure, recursive, causal (spec v0.3 §4).
 
 Scalar state-carry computers for the smoothed-RSI / MACD / detrended /
-EMA-spread families + atr28. No pandas, no I/O — same philosophy as
+EMA-spread families + the ATRs. No pandas, no I/O — same philosophy as
 `pattern_rules`: the numeric layer differs between walkers, the recursion
 lives here once.
+
+TWO KINDS OF ATR live here and they are not interchangeable:
+
+  atr28    the engine's internal normaliser. smacd and sdosc are divided by
+           it; dist_to_*_in_hl_units is expressed in it. Changing it changes
+           the meaning of half the §4 series. Leave it alone.
+
+  atr10/15/20/30/40 (signal_bands.ATR_PERIODS)
+           the ruler the signal-bar bands are measured against (§20). Five
+           of them because the same bar reads as "stretched" under a tight
+           ATR and "nothing happened" under a wide one, and which of those
+           is true is the thing being studied.
+
+All six are Wilder RMAs of the SAME true range, so they cost one max() and
+five multiply-adds per bar between them.
+
+Wilder RMA seeds on the first true range, so atr40 is non-NaN from bar one.
+Non-NaN is not the same as meaningful: it takes ~40 bars before atr40 says
+anything about a 40-bar range. That is exactly how atr28 has always behaved,
+so it is consistent rather than correct, and any training set that cares
+must filter on bars-available — not on NULL.
 
 Fed one bar at a time via `update(...)`, given the raw close/high/low and
 the *already-computed* med/long/longest EMAs + ATR (from
@@ -20,6 +41,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+
+from .signal_bands import ATR_PERIODS
 
 _NAN = float("nan")
 
@@ -95,10 +118,18 @@ class StructureSeriesEngine:
     _ee_diff: list = field(default_factory=lambda: [None, None, None])
     _atr28: float | None = None               # Wilder RMA of TR, n=28
     _atr28_prev_close: float | None = None
+    # The §20 band rulers, one Wilder RMA per signal_bands.ATR_PERIODS.
+    _atr_n: dict = field(
+        default_factory=lambda: {n: None for n in ATR_PERIODS},
+    )
 
     # -------------------- snapshot / restore -------------------- #
 
     def snapshot(self) -> tuple:
+        # POSITIONAL. restore() unpacks it positionally and the signal walk
+        # branches off one of these at every signal week. If you append here,
+        # append to restore() in the same edit or the walk silently keeps the
+        # pre-branch ATR state.
         return (
             self._prev_close,
             self._rsi14.snapshot(), self._rsi28.snapshot(),
@@ -107,15 +138,21 @@ class StructureSeriesEngine:
             self._sdosc,
             tuple(self._ee_diff),
             self._atr28, self._atr28_prev_close,
+            tuple(self._atr_n[n] for n in ATR_PERIODS),
         )
 
     def restore(self, s: tuple) -> None:
         (self._prev_close, r14, r28, self._ema_srsi_diff,
          self._macd_fast, self._macd_slow, self._macd_sig, self._smacd,
-         self._sdosc, ee, self._atr28, self._atr28_prev_close) = s
+         self._sdosc, ee, self._atr28, self._atr28_prev_close,
+         atr_n) = s
         self._rsi14.restore(r14)
         self._rsi28.restore(r28)
         self._ee_diff = list(ee)
+        # strict=True: a snapshot taken under a different ATR_PERIODS is a
+        # bug, and a silent zip() truncation would leave the longer periods
+        # frozen at their pre-branch values.
+        self._atr_n = dict(zip(ATR_PERIODS, atr_n, strict=True))
 
     # -------------------- per-bar advance -------------------- #
 
@@ -129,6 +166,8 @@ class StructureSeriesEngine:
         return _out(st.srsi)
 
     def _true_range_28(self, high: float, low: float, close: float) -> float:
+        """The true range. Named for atr28 for historical reasons; it is the
+        same TR every ATR here consumes, computed once per bar."""
         pc = self._atr28_prev_close
         if pc is None:
             return high - low  # first bar: prev_close undefined
@@ -185,9 +224,12 @@ class StructureSeriesEngine:
         for i in range(3):
             self._ee_diff[i] = _ema_step(self._ee_diff[i], raw[i], 3)
 
-        # ATR28 (Wilder RMA of true range, n=28).
+        # The ATRs. One true range, six Wilder RMAs (28 = the normaliser;
+        # ATR_PERIODS = the §20 band rulers).
         tr = self._true_range_28(high, low, close)
         self._atr28 = _rma_step(self._atr28, tr, 28)
+        for n in ATR_PERIODS:
+            self._atr_n[n] = _rma_step(self._atr_n[n], tr, n)
         self._atr28_prev_close = close
 
         self._prev_close = close
@@ -207,4 +249,5 @@ class StructureSeriesEngine:
             "ema_ema_diff_2": _out(self._ee_diff[1]),
             "ema_ema_diff_3": _out(self._ee_diff[2]),
             "atr28": _out(self._atr28),
+            **{f"atr{n}": _out(self._atr_n[n]) for n in ATR_PERIODS},
         }

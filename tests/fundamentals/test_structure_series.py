@@ -8,6 +8,7 @@ import math
 import numpy as np
 import pandas as pd
 
+from trip_ema.fundamentals.signal_bands import ATR_PERIODS
 from trip_ema.fundamentals.structure_series import StructureSeriesEngine
 
 
@@ -72,6 +73,12 @@ def _pandas_ref(close, high, low, med, lng, lngst, atr):
         "ema_ema_diff_2": d2.ewm(span=3, adjust=False).mean(),
         "ema_ema_diff_3": d3.ewm(span=3, adjust=False).mean(),
         "atr28": pd.Series(tr).ewm(alpha=1 / 28, adjust=False).mean(),
+        # The §20 band rulers. Same true range, same Wilder alpha, held to
+        # the same bit-parity bar as everything above.
+        **{
+            f"atr{nn}": pd.Series(tr).ewm(alpha=1 / nn, adjust=False).mean()
+            for nn in ATR_PERIODS
+        },
     }
     return {k: v.to_numpy() for k, v in ref.items()}
 

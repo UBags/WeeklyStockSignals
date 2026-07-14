@@ -21,6 +21,7 @@ from statistics import mean, median, pstdev
 import math
 
 from .causal_pivots import CausalPivotTracker
+from .signal_bands import ATR_PERIODS
 from .pattern_rules import (
     LABEL_1_HIGHER_VALLEY,
     STRUCT_UPTREND,
@@ -403,6 +404,20 @@ class SignalFeatureAssembler:
         self._cur_squeeze = cur_sq
         self._cur_release = cur_rel
         self._cur_wir = cur_wir
+
+    def atrs(self) -> dict[int, float]:
+        """The §20 band rulers at the current bar, {period: value}.
+
+        Deliberately NOT part of features(): these are columns on
+        signal_enrichment now, and a number written into both a column and
+        the features jsonb is a number that will eventually disagree with
+        itself. The walk reads them from here and passes them to
+        signal_bands.band_flags().
+
+        NaN before the first update(), and for any period the engine has not
+        seen a true range for.
+        """
+        return {n: self._latest.get(f"atr{n}", _NAN) for n in ATR_PERIODS}
 
     def features(self) -> dict:
         """The derived feature vector at the current bar (call at a
