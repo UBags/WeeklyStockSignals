@@ -70,15 +70,15 @@ def test_stamp_baseline_returns_false_without_alembic(caplog):
     # import alembic; we simulate that import failing.
     fake_engine = MagicMock()
 
-    with patch(
-        "trip_ema.persistence.alembic_bridge._legacy_has_reached_baseline",
-        return_value=True,
-    ), patch(
-        "trip_ema.persistence.alembic_bridge._alembic_has_a_version",
-        return_value=False,
-    ), patch.dict(sys.modules, {"alembic": None, "alembic.command": None}):
+    # Phase 14: the two branch probes are kwargs now; only the
+    # sys.modules stub remains (environment simulation, not a seam).
+    with patch.dict(sys.modules, {"alembic": None, "alembic.command": None}):
         with caplog.at_level(logging.WARNING, logger="trip_ema.persistence.alembic_bridge"):
-            result = stamp_baseline_if_needed(fake_engine)
+            result = stamp_baseline_if_needed(
+                fake_engine,
+                legacy_has_reached_baseline_fn=lambda e: True,
+                alembic_has_a_version_fn=lambda e: False,
+            )
 
     assert result is False
     assert any(

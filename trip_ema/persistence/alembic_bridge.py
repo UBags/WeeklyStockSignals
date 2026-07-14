@@ -32,6 +32,7 @@ Public API:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from sqlalchemy import Engine, text
@@ -103,6 +104,8 @@ def stamp_baseline_if_needed(
     engine: Engine,
     *,
     config_path: Path | None = None,
+    legacy_has_reached_baseline_fn: Callable[[Engine], bool] | None = None,
+    alembic_has_a_version_fn: Callable[[Engine], bool] | None = None,
 ) -> bool:
     """If the legacy migrator has reached the post-Phase-11 state and
     Alembic hasn't been initialized yet, stamp the baseline revision.
@@ -122,13 +125,13 @@ def stamp_baseline_if_needed(
         Anything Alembic raises if the stamp itself fails. The most
         likely cause is a missing alembic.ini in CWD.
     """
-    if _alembic_has_a_version(engine):
+    if (alembic_has_a_version_fn or _alembic_has_a_version)(engine):
         logger.debug(
             "Alembic version table already populated; skipping baseline stamp"
         )
         return False
 
-    if not _legacy_has_reached_baseline(engine):
+    if not (legacy_has_reached_baseline_fn or _legacy_has_reached_baseline)(engine):
         logger.debug(
             "Legacy migrator has not reached %s yet; skipping baseline stamp",
             _PHASE_11_LEGACY_VERSION,
