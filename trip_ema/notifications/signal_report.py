@@ -29,7 +29,7 @@ Parameter semantics (locked with the operator):
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, UTC
 from enum import IntFlag
 
@@ -90,6 +90,7 @@ def send_signal_report(
     now: datetime | None = None,
     cycle_id: str | None = None,
     subscriber_id: int = 0,
+    send: 'Callable[..., SendResult]' = send_email,
 ) -> SendResult | None:
     """Send one filtered signal report to `notification_mailid`.
 
@@ -141,7 +142,7 @@ def send_signal_report(
         last_notified_at=None,
         is_active=True,
     )
-    return send_email(
+    return send(
         subscriber, body,
         api_key=brevo_api_key,
         from_address=brevo_from_address,

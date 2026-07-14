@@ -52,17 +52,13 @@ class TestEmitNotifyProgress:
 
 class TestNotifyProgressNoSignals:
 
-    def test_emits_skipped_when_no_signals(self, monkeypatch):
+    def test_emits_skipped_when_no_signals(self):
         """When current_signals is empty, the function returns
         early with NotifyResult.signals_in_current=0. The progress
         cb should still see "running" then "done: skipped...".
         """
         repo = MagicMock()
         repo.count = MagicMock(return_value=0)
-        monkeypatch.setattr(
-            notify_mod, "CurrentSignalsRepository",
-            lambda conn: repo,
-        )
 
         engine = MagicMock()
         ctx = MagicMock()
@@ -78,6 +74,7 @@ class TestNotifyProgressNoSignals:
             cycle_id="test-cycle",
             now=datetime(2026, 6, 28, 12, 0, tzinfo=UTC),
             progress_cb=lambda s, m: calls.append((s, m)),
+            signals_repo_factory=lambda conn: repo,
         )
 
         assert calls[0] == ("notify", "running")
@@ -88,14 +85,10 @@ class TestNotifyProgressNoSignals:
 
 class TestNotifyProgressBackwardCompat:
 
-    def test_no_progress_cb_is_safe(self, monkeypatch):
+    def test_no_progress_cb_is_safe(self):
         """Default path (no progress_cb) still works."""
         repo = MagicMock()
         repo.count = MagicMock(return_value=0)
-        monkeypatch.setattr(
-            notify_mod, "CurrentSignalsRepository",
-            lambda conn: repo,
-        )
         engine = MagicMock()
         ctx = MagicMock()
         ctx.__enter__ = lambda self: MagicMock()
@@ -108,5 +101,6 @@ class TestNotifyProgressBackwardCompat:
             brevo_from_address="from@example.com",
             cycle_id="test-cycle",
             now=datetime(2026, 6, 28, 12, 0, tzinfo=UTC),
+            signals_repo_factory=lambda conn: repo,
         )
         assert result.signals_in_current == 0

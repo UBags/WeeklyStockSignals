@@ -13,7 +13,6 @@ compose → send → log → update_last_notified.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, UTC
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import text
@@ -186,15 +185,12 @@ class TestHappyPath:
             _seed_current_signal(conn, ticker_id=1001)
 
         now = datetime(2026, 6, 27, 14, 30, tzinfo=UTC)
-        with patch(
-            "trip_ema.notifications.signal_report.send_email",
-            side_effect=_make_send_result(success=True),
-        ):
-            result = notify_subscribers(
-                db_engine,
-                **_BREVO_KWARGS,
-                cycle_id="HAPPY", now=now,
-            )
+        result = notify_subscribers(
+            db_engine,
+            **_BREVO_KWARGS,
+            cycle_id="HAPPY", now=now,
+            send=_make_send_result(success=True),
+        )
 
         assert result.signals_in_current == 1
         assert result.subscribers_due == 1
@@ -239,15 +235,12 @@ class TestHappyPath:
                 )
                 _seed_current_signal(conn, ticker_id=tid)
 
-        with patch(
-            "trip_ema.notifications.signal_report.send_email",
-            side_effect=_make_send_result(success=True),
-        ):
-            result = notify_subscribers(
-                db_engine,
-                **_BREVO_KWARGS,
-                cycle_id="X", now=datetime.now(UTC),
-            )
+        result = notify_subscribers(
+            db_engine,
+            **_BREVO_KWARGS,
+            cycle_id="X", now=datetime.now(UTC),
+            send=_make_send_result(success=True),
+        )
         assert result.signals_in_current == 3
         assert result.emails_sent == 1
         assert result.log_rows_written == 3
@@ -269,15 +262,12 @@ class TestHappyPath:
             )
             _seed_current_signal(conn, ticker_id=1002)
 
-        with patch(
-            "trip_ema.notifications.signal_report.send_email",
-            side_effect=_make_send_result(success=True),
-        ):
-            result = notify_subscribers(
-                db_engine,
-                **_BREVO_KWARGS,
-                cycle_id="X", now=datetime.now(UTC),
-            )
+        result = notify_subscribers(
+            db_engine,
+            **_BREVO_KWARGS,
+            cycle_id="X", now=datetime.now(UTC),
+            send=_make_send_result(success=True),
+        )
         assert result.signals_in_current == 2
         assert result.subscribers_due == 3
         assert result.emails_sent == 3
@@ -300,17 +290,14 @@ class TestFailureIsolation:
             )
             _seed_current_signal(conn, ticker_id=1001)
 
-        with patch(
-            "trip_ema.notifications.signal_report.send_email",
-            side_effect=_make_send_result(
+        result = notify_subscribers(
+            db_engine,
+            **_BREVO_KWARGS,
+            cycle_id="X", now=datetime.now(UTC),
+            send=_make_send_result(
                 success=False, error="500 Internal Server Error",
             ),
-        ):
-            result = notify_subscribers(
-                db_engine,
-                **_BREVO_KWARGS,
-                cycle_id="X", now=datetime.now(UTC),
-            )
+        )
 
         assert result.emails_failed == 1
         assert result.emails_sent == 0
@@ -357,15 +344,12 @@ class TestFailureIsolation:
                 sent_at=now,
             )
 
-        with patch(
-            "trip_ema.notifications.signal_report.send_email",
-            side_effect=selective_fake,
-        ):
-            result = notify_subscribers(
-                db_engine,
-                **_BREVO_KWARGS,
-                cycle_id="X", now=datetime.now(UTC),
-            )
+        result = notify_subscribers(
+            db_engine,
+            **_BREVO_KWARGS,
+            cycle_id="X", now=datetime.now(UTC),
+            send=selective_fake,
+        )
         assert result.subscribers_due == 3
         assert result.emails_sent == 2
         assert result.emails_failed == 1

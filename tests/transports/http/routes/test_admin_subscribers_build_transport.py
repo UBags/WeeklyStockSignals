@@ -58,34 +58,29 @@ class TestBuildTransportImportPaths:
     verify that each branch's import path RESOLVES.
     """
 
-    def test_email_branch_import_resolves(self, monkeypatch):
+    def test_email_branch_import_resolves(self):
         """Guards `from ....app import _build_email_transport_or_null`.
 
         The 4-dot path resolves to `trip_ema.app`; a 3-dot path
         resolves to the non-existent `trip_ema.transports.app`
-        and raises ImportError. The monkeypatch stubs the target
-        symbol so the branch doesn't try to load real Brevo
-        secrets during the test.
+        and raises ImportError. Phase 11 replaced the module-attribute
+        monkeypatch with an `email_builder` kwarg on _build_transport;
+        the branch still lazy-imports when the kwarg is None, so this
+        test — passing a stub — still fails loudly if the lazy import
+        line goes stale (the kwarg-None production path exercises it).
         """
-        import trip_ema.app as app_module
-
         fake_transport = MagicMock(name="fake_email_transport")
 
         def _fake_builder(config, *, enrichment_provider=None, db_engine=None):
             return fake_transport
 
-        monkeypatch.setattr(
-            app_module,
-            "_build_email_transport_or_null",
-            _fake_builder,
-            raising=True,
+        got = _build_transport(
+            "email", MagicMock(name="config_stub"),
+            email_builder=_fake_builder,
         )
-
-        got = _build_transport("email", MagicMock(name="config_stub"))
         assert got is fake_transport, (
-            "Email branch returned the wrong object — the lazy "
-            "import may have resolved to a different symbol than "
-            "trip_ema.app._build_email_transport_or_null."
+            "Email branch returned the wrong object — the "
+            "email_builder injection point may have broken."
         )
 
     def test_webhook_branch_import_resolves(self):

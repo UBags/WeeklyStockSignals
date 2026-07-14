@@ -237,6 +237,20 @@ CLOSED_SEAMS: list[Seam] = [
             "etl/test_runner_progress.py",
         ),
     ),
+
+    # ---- Phase 11: notify collaborators as injectables ----
+    Seam(
+        "patching notify collaborators (send_email, notify's signals repo, "
+        "or admin_subscribers' email transport builder)",
+        "11",
+        r'(?:patch|setattr)\([^)\n]*?'
+        r'["\'](?:trip_ema\.notifications\.signal_report\.send_email|'
+        r'_build_email_transport_or_null|CurrentSignalsRepository)["\']',
+        "the collaborators are now injectable kwargs: "
+        "`notify_subscribers(..., send=fake, signals_repo_factory=lambda conn: repo)` "
+        "and `_build_transport(name, config, email_builder=fake_builder)`.",
+        scope="tests",
+    ),
 ]
 
 
@@ -408,6 +422,9 @@ def test_every_seam_pattern_is_live():
             '    from ....fundamentals.runners import run_shares_refresh',
         "patching a repository or read-helper on an admin route module":
             'monkeypatch.setattr(mod, "EtlStatusRepository", FakeRepo)',
+        "patching notify collaborators (send_email, notify's signals repo, "
+        "or admin_subscribers' email transport builder)":
+            'patch("trip_ema.notifications.signal_report.send_email")',
     }
     for seam in CLOSED_SEAMS:
         probe = probes[seam.name]

@@ -76,21 +76,6 @@
       "mock_patch": 0,
       "setattr": 6
     },
-    "orchestrator/test_notify_progress.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 2
-    },
-    "orchestrator/test_notify_subscribers.py": {
-      "env": 0,
-      "mock_patch": 5,
-      "setattr": 0
-    },
-    "transports/http/routes/test_admin_subscribers_build_transport.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 1
-    },
     "transports_pure/test_admin_etl.py": {
       "env": 0,
       "mock_patch": 0,

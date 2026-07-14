@@ -385,21 +385,30 @@ def _row_to_payload(
     )
 
 
-def _build_transport(transport_name: str, config: Config):
+def _build_transport(
+    transport_name: str, config: Config, *, email_builder=None,
+):
     """Construct a transport for the test-notification call. We
     bypass the SubscriberDistributor / circuit breaker — the test
     is supposed to verify reachability of the underlying channel,
     not the production routing fabric.
 
     Reuses the same transport-builder helpers app.py uses so the
-    test sends through the same code paths production does."""
+    test sends through the same code paths production does.
+
+    `email_builder` is an injection point for tests that want to
+    bypass the real Brevo-secret-loading path. Production callers
+    pass None and get the lazy import of trip_ema.app's builder.
+    Phase 11 of the de-monkeypatching programme."""
     if transport_name == "email":
         # 4 dots: trip_ema.transports.http.routes -> trip_ema.app
         # (this used to be 3 dots, resolving to the non-existent
         # trip_ema.transports.app; silently broken until the test-
         # notification endpoint was first exercised.)
-        from ....app import _build_email_transport_or_null
-        return _build_email_transport_or_null(config)
+        if email_builder is None:
+            from ....app import _build_email_transport_or_null
+            email_builder = _build_email_transport_or_null
+        return email_builder(config)
     if transport_name == "webhook":
         from ....notifications.webhook_transport import WebhookTransport
         return WebhookTransport()

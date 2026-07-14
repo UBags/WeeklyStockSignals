@@ -38,6 +38,7 @@ from datetime import datetime, UTC
 
 from sqlalchemy.engine import Engine
 
+from ..notifications.send_email import send_email
 from ..notifications.signal_report import send_signal_report
 from ..persistence import transaction
 from ..persistence.current_signals_repo import CurrentSignalsRepository
@@ -102,6 +103,8 @@ def notify_subscribers(
     cycle_id: str,
     now: datetime,
     progress_cb: Callable[[str, str], None] | None = None,
+    send: Callable = send_email,
+    signals_repo_factory: Callable = CurrentSignalsRepository,
 ) -> NotifyResult:
     """V1 distribute stage. See module docstring for the flow.
 
@@ -131,7 +134,7 @@ def notify_subscribers(
 
     # ---- Early exit: any signals to send? ----
     with db_engine.connect() as conn:
-        signal_count = CurrentSignalsRepository(conn).count()
+        signal_count = signals_repo_factory(conn).count()
     if signal_count == 0:
         logger.info(
             "notify_subscribers[%s] early exit: current_signals empty",
@@ -174,7 +177,7 @@ def notify_subscribers(
     # current_signals is stable (the compute side finished before
     # distribute started), so the two reads see identical data.
     with db_engine.connect() as conn:
-        signals_snapshot = CurrentSignalsRepository(conn).list_all()
+        signals_snapshot = signals_repo_factory(conn).list_all()
     log_entries_template = [
         (s.ticker_id, s.timeframe, s.bar_timestamp,
          s.signal_type, s.price_at_signal)
@@ -197,6 +200,7 @@ def notify_subscribers(
                 brevo_from_address=brevo_from_address,
                 brevo_from_name=brevo_from_name,
                 log_entries_template=log_entries_template,
+                send=send,
             )
             emails_composed += outcome["composed"]
             emails_sent += outcome["sent"]
@@ -255,6 +259,7 @@ def _process_one_subscriber(
     log_entries_template: list[
         tuple[int, str, datetime, str, float]
     ],
+    send: Callable = send_email,
 ) -> dict:
     """One subscriber's full pipeline: compose → send → log → mark
     notified. Returns a dict of counters + optional error string.
@@ -275,6 +280,7 @@ def _process_one_subscriber(
         now=now,
         cycle_id=cycle_id,
         subscriber_id=subscriber.subscriber_id,
+        send=send,
     )
     if result is None:
         # Gated out (no signals after filtering, or outside the
