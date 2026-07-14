@@ -53,6 +53,7 @@ from ..dependencies import (
     get_etl_executor,
     get_fundamentals_runners,
     get_gateways,
+    get_unpark_all,
     require_admin_token,
 )
 from ..gateways import Gateways
@@ -352,6 +353,7 @@ def admin_etl_unpark_all(
     exchange: str = Query(..., min_length=2, max_length=10),
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
+    unpark_all_fn=Depends(get_unpark_all),
 ) -> EtlActionAcceptedPayload:
     """Clear the parked flag for every parked ticker on `exchange`.
     Synchronous — this is a single UPDATE, doesn't need the executor."""
@@ -360,7 +362,7 @@ def admin_etl_unpark_all(
         "Admin: ETL unpark-all requested",
         extra={"exchange": exchange},
     )
-    count = unpark_all(db_engine, config, exchange=exchange)
+    count = unpark_all_fn(db_engine, config, exchange=exchange)
     return EtlActionAcceptedPayload(
         action="unpark-all", run_id=None,
         accepted_at=datetime.now(UTC),

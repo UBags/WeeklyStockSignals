@@ -43,28 +43,33 @@ class TestEmitFetchProgress:
 
 class TestRunFetchPassProgressCb:
 
-    def test_emits_running_and_done(self, monkeypatch):
-        """Fully mock out the body so we can observe the wire."""
+    def test_emits_running_and_done(self):
+        """Verify the "running" progress-marker fires before any DB
+        activity in _run_fetch_pass.
+
+        Phase ETL: EtlStatusRepository is injected via kwarg. The fake
+        repo's `open_run` raises StopAfterRunning, which short-circuits
+        the function after cleanup_stale_runs — by that point the
+        "running" emit has already fired (line ordering in
+        _run_fetch_pass). No more setattr on the runner module.
+        """
         from trip_ema.etl.types import RunKind, Tier
         from trip_ema.domain import Timeframe
 
-        # Mock the inner cleanup_stale_runs call
-        fake_repo = MagicMock()
-        fake_repo.cleanup_stale_runs = MagicMock(return_value=0)
-        monkeypatch.setattr(
-            runner_mod, "EtlStatusRepository",
-            lambda conn: fake_repo,
-        )
+        class StopAfterRunning(Exception):
+            pass
 
-        # Mock the rest of _run_fetch_pass's body via a custom
-        # implementation that just returns. We do this by patching
-        # the YFinanceSource construction so it doesn't try to
-        # actually hit yfinance.
-        # ALTERNATIVE: since _run_fetch_pass is long and has many
-        # internal calls, we'll just patch the top-level orchestration
-        # function. The progress_cb wire is the FIRST thing inside
-        # the `with correlation_id` block, so we only need it to
-        # reach that point.
+        class FakeRepo:
+            def __init__(self, conn):
+                pass
+
+            def cleanup_stale_runs(self, *, exchange):
+                return 0
+
+            def open_run(self, *args, **kwargs):
+                # By the time this is called, `_emit_fetch_progress(
+                # progress_cb, "running")` has already run.
+                raise StopAfterRunning("test stop")
 
         # Make db_engine.begin() return a context manager
         engine = MagicMock()
@@ -74,29 +79,6 @@ class TestRunFetchPassProgressCb:
         engine.begin = lambda: ctx
 
         calls = []
-
-        # We need to intercept the function's exit before it gets
-        # to the actual yfinance call. Patch the function to raise
-        # an early sentinel exception after the running emit fires.
-        # OR: just let it call the real function with a heavily
-        # mocked source, and check that the progress_cb was hit.
-
-        # Simplest: patch the post-cleanup path to raise immediately
-        # so we can verify the "running" emit fired before the raise.
-        class StopAfterRunning(Exception):
-            pass
-
-        original_emit = runner_mod._emit_fetch_progress
-
-        def wrapped_emit(cb, msg):
-            original_emit(cb, msg)
-            if msg == "running":
-                raise StopAfterRunning("test stop")
-
-        monkeypatch.setattr(
-            runner_mod, "_emit_fetch_progress", wrapped_emit,
-        )
-
         config = MagicMock()
         config.etl.yfinance_batch_size = 100
         config.etl.yfinance_request_delay_seconds = 0.0
@@ -111,6 +93,7 @@ class TestRunFetchPassProgressCb:
                 timeframe=Timeframe.DAILY,
                 source=None,
                 progress_cb=lambda s, m: calls.append((s, m)),
+                etl_status_repo_factory=FakeRepo,
             )
 
         # We caught the StopAfterRunning, which means the "running"

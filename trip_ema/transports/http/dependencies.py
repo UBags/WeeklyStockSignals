@@ -245,6 +245,17 @@ def require_admin_token(
         )
 
 
+def get_unpark_all():
+    """Return the unpark_all runner (Phase ETL).
+
+    Same shape and reasoning as get_fundamentals_runners: routes
+    take the callable via Depends so tests override at the app
+    level rather than monkeypatching the route module.
+    """
+    from ...etl.runner import unpark_all
+    return unpark_all
+
+
 def get_fundamentals_runners():
     """The fundamentals runner registry the route handlers fire.
 

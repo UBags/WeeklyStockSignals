@@ -677,6 +677,7 @@ def _run_fetch_pass(
     days_lookback: int = 7,
     intraday: bool = False,
     progress_cb: Callable[[str, str], None] | None = None,
+    etl_status_repo_factory: 'Callable | None' = None,
 ) -> int:
     """Shared spine for backfill / eod / intraday. Differences:
 
@@ -693,6 +694,7 @@ def _run_fetch_pass(
     Caller is responsible for validating the exchange BEFORE calling
     this helper (the public entry points do that).
     """
+    _EtlStatusRepository = etl_status_repo_factory or EtlStatusRepository
     cid = new_correlation_id()
     src = source or YFinanceSource(
         exchange=exchange,
@@ -724,7 +726,7 @@ def _run_fetch_pass(
         # EtlStatusRepository.cleanup_stale_runs for the threshold
         # rationale.
         with db_engine.begin() as conn:
-            n_orphans = EtlStatusRepository(conn).cleanup_stale_runs(
+            n_orphans = _EtlStatusRepository(conn).cleanup_stale_runs(
                 exchange=exchange,
             )
         if n_orphans > 0:
@@ -740,7 +742,7 @@ def _run_fetch_pass(
 
         # Open the run row first
         with db_engine.begin() as conn:
-            run_id = EtlStatusRepository(conn).open_run(
+            run_id = _EtlStatusRepository(conn).open_run(
                 kind, exchange=exchange, correlation_id=cid,
             )
             # Phase 14.6b: a backfill is the only ETL operation that

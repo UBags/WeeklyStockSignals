@@ -11,16 +11,6 @@
       "mock_patch": 1,
       "setattr": 0
     },
-    "etl/test_cmd_cycle.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 4
-    },
-    "etl/test_runner_progress.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 2
-    },
     "gui/fakes.py": {
       "env": 0,
       "mock_patch": 0,
@@ -55,11 +45,6 @@
       "env": 0,
       "mock_patch": 0,
       "setattr": 6
-    },
-    "transports_pure/test_admin_etl.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 1
     }
   }
 }

@@ -694,7 +694,14 @@ def cmd_approve_action(args, ctx: AppContext) -> int:
 
 
 # === STEP 13D1: cmd_cycle ===
-def cmd_cycle(args, ctx: AppContext, *, recompute_fn=None, notify_fn=None, fetch_fn=None) -> int:
+def cmd_cycle(
+    args, ctx: AppContext, *,
+    recompute_fn=None, notify_fn=None, fetch_fn=None,
+    market_hours_factory=None,
+    compute_runs_repo_factory=None,
+    tx_fn=None,
+    brevo_key_loader=None,
+) -> int:
     """Run the full V1 live cycle: fetch + recompute_market + notify.
 
     Mirrors what `MarketOrchestrator.run_once()` does on a scheduled
@@ -735,6 +742,11 @@ def cmd_cycle(args, ctx: AppContext, *, recompute_fn=None, notify_fn=None, fetch
     from .runner import _run_fetch_pass
     if fetch_fn is None:
         fetch_fn = _run_fetch_pass
+    # Phase ETL: bind the injected collaborators to locals.
+    _MarketHoursService = market_hours_factory or MarketHoursService
+    _ComputeRunsRepository = compute_runs_repo_factory or ComputeRunsRepository
+    _tx = tx_fn or transaction
+    _load_brevo_api_key = brevo_key_loader or load_brevo_api_key
     from .types import RunKind
 
     # PHASE-2-SIGTERM: install SIGTERM handler so dispatcher-
@@ -765,7 +777,7 @@ def cmd_cycle(args, ctx: AppContext, *, recompute_fn=None, notify_fn=None, fetch
 
     # ---- 1. Determine kind via MarketHoursService (F2 lock) ----
     try:
-        market_hours = MarketHoursService(config.market_hours)
+        market_hours = _MarketHoursService(config.market_hours)
         is_open = market_hours.is_open(exchange, now)
     except KeyError:
         print(
@@ -791,8 +803,8 @@ def cmd_cycle(args, ctx: AppContext, *, recompute_fn=None, notify_fn=None, fetch
     # ---- 2. Open DB engine + start compute_runs row ----
 
     try:
-        with transaction(db_engine) as conn:
-            run_id = ComputeRunsRepository(conn).start(
+        with _tx(db_engine) as conn:
+            run_id = _ComputeRunsRepository(conn).start(
                 kind=kind, exchange=exchange,
                 notes="operator-triggered via cli cycle",
             )
@@ -814,8 +826,8 @@ def cmd_cycle(args, ctx: AppContext, *, recompute_fn=None, notify_fn=None, fetch
             # publish failure must never abort the compute.
             if msg == "running" and run_id is not None:
                 try:
-                    with transaction(db_engine) as conn:
-                        ComputeRunsRepository(conn).set_current_stage(
+                    with _tx(db_engine) as conn:
+                        _ComputeRunsRepository(conn).set_current_stage(
                             run_id, stage,
                         )
                 except Exception:
@@ -909,7 +921,7 @@ def cmd_cycle(args, ctx: AppContext, *, recompute_fn=None, notify_fn=None, fetch
                     flush=True,
                 )
             else:
-                api_key = load_brevo_api_key(
+                api_key = _load_brevo_api_key(
                     brevo_config.secrets_file,
                 )
                 cycle_id = now.strftime("%Y%m%d-%H%M%S")
@@ -947,8 +959,8 @@ def cmd_cycle(args, ctx: AppContext, *, recompute_fn=None, notify_fn=None, fetch
             exit_code = 0
 
         # ---- 3. Finish compute_runs row ----
-        with transaction(db_engine) as conn:
-            ComputeRunsRepository(conn).finish(
+        with _tx(db_engine) as conn:
+            _ComputeRunsRepository(conn).finish(
                 run_id,
                 tickers_attempted=tickers_attempted,
                 tickers_fetched=tickers_fetched,
@@ -967,8 +979,8 @@ def cmd_cycle(args, ctx: AppContext, *, recompute_fn=None, notify_fn=None, fetch
         # the DB itself is unreachable at this point, we log and move on.
         if run_id is not None and not _finished:
             try:
-                with transaction(db_engine) as conn:
-                    ComputeRunsRepository(conn).finish(
+                with _tx(db_engine) as conn:
+                    _ComputeRunsRepository(conn).finish(
                         run_id,
                         tickers_attempted=tickers_attempted,
                         tickers_fetched=tickers_fetched,

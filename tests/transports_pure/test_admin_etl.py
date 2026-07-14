@@ -24,7 +24,8 @@ from trip_ema.transports.http.dependencies import (
     get_admin_token,
     # === STEP 14B-FIXUP4-import: scheduler/distributor getters stripped ===
     get_config, get_db_engine,
-    get_etl_executor, get_gateways, get_redis_queue, )
+    get_etl_executor, get_gateways, get_redis_queue,
+    get_unpark_all, )
 from trip_ema.transports.http.gateways import DEFAULT_GATEWAYS
 from trip_ema.transports.http.schemas import EtlTierCounts
 
@@ -264,18 +265,18 @@ class TestRecomputeTiers:
 
 class TestUnparkAll:
 
-    def test_unpark_all_is_synchronous(self, auth_headers, monkeypatch):
-        """unpark-all runs synchronously (no executor needed). We mock
-        the runner.unpark_all directly to assert it was called with
-        the right exchange and the count flows through."""
-        import trip_ema.transports.http.routes.admin_etl as mod
+    def test_unpark_all_is_synchronous(self, auth_headers):
+        """unpark-all runs synchronously (no executor needed).
+        Phase ETL: the runner is resolved via Depends(get_unpark_all);
+        this test overrides that dep at the app level rather than
+        patching mod.unpark_all."""
         called = []
         def fake_unpark(engine, config, *, exchange):
             called.append((engine, config, exchange))
             return 7
-        monkeypatch.setattr(mod, "unpark_all", fake_unpark)
 
         client = _make_client(executor=None)  # No executor needed
+        client.app.dependency_overrides[get_unpark_all] = lambda: fake_unpark
         resp = client.post(
             "/v1/admin/etl/unpark-all?exchange=NSE",
             headers=auth_headers,

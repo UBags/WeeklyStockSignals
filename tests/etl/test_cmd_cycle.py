@@ -54,15 +54,14 @@ def ctx(fake_config):
 
 
 @pytest.fixture
-def patched_market_hours(monkeypatch):
-    """Patch MarketHoursService at the import site inside cmd_cycle.
+def patched_market_hours():
+    """Fake MarketHoursService factory injected into cmd_cycle.
 
-    cmd_cycle imports MarketHoursService inside its function body
-    via `from ..scheduler.market_hours import MarketHoursService`.
-    To intercept this, we patch the module's attribute.
+    Phase ETL: replaces the setattr on mh_mod with a
+    factory the test hands to cmd_cycle via market_hours_factory=.
+    Fixture returns the mutable state dict; the FakeMarketHours
+    class is stashed on state["factory"].
     """
-    import trip_ema.scheduler.market_hours as mh_mod
-
     state = {"is_open": True, "raise_keyerror": False}
 
     class FakeMarketHours:
@@ -74,17 +73,14 @@ def patched_market_hours(monkeypatch):
                 raise KeyError(exchange)
             return state["is_open"]
 
-    monkeypatch.setattr(
-        mh_mod, "MarketHoursService", FakeMarketHours,
-    )
+    state["factory"] = FakeMarketHours
     return state
 
 
 @pytest.fixture
-def patched_compute_runs(monkeypatch):
-    """Patch ComputeRunsRepository.start()/finish()."""
-    import trip_ema.persistence.compute_runs_repo as cr_mod
-
+def patched_compute_runs():
+    """Fake ComputeRunsRepository factory + captured start/finish
+    call args. Phase ETL: injected via compute_runs_repo_factory=."""
     captured = {"start": None, "finish": None}
 
     class FakeRepo:
@@ -102,50 +98,74 @@ def patched_compute_runs(monkeypatch):
                 "run_id": run_id, **kwargs,
             }
 
-    monkeypatch.setattr(
-        cr_mod, "ComputeRunsRepository", FakeRepo,
-    )
+        def set_current_stage(self, run_id, stage):
+            # No-op — the real repo publishes to a live compute_runs
+            # row, but the tests don't assert on the intermediate
+            # stage transitions.
+            pass
+
+    captured["factory"] = FakeRepo
     return captured
 
 
 @pytest.fixture
-def patched_transaction(monkeypatch):
-    """Patch trip_ema.persistence.transaction to a no-op context
-    manager."""
-    import trip_ema.persistence as p_mod
+def patched_transaction():
+    """No-op transaction context manager. Phase ETL: injected via
+    tx_fn= kwarg on cmd_cycle rather than monkeypatched on the
+    persistence module."""
     from contextlib import contextmanager
 
     @contextmanager
     def fake_tx(engine):
         yield MagicMock()
 
-    monkeypatch.setattr(p_mod, "transaction", fake_tx)
+    return fake_tx
 
 
 class Stages:
-    """The three stage functions cmd_cycle runs, as collaborators rather than
-    module globals. `**stages.kwargs()` hands them to the command.
+    """The three stage functions cmd_cycle runs, plus the four injected
+    persistence/service collaborators (Phase ETL: market_hours,
+    compute_runs, tx, brevo). `**stages.kwargs()` hands them all to
+    cmd_cycle."""
 
-    This is what the importlib dance at the top of this module was working
-    around: `trip_ema.orchestrator` re-exports the function names, which shadow
-    the submodules, so a string-path monkeypatch resolved to the function and
-    failed. Injection has no such problem — there is no path to resolve."""
-
-    def __init__(self, captured):
+    def __init__(self, captured, mh, cr, tx, brevo_loader=None):
         self.captured = captured
+        self._mh = mh
+        self._cr = cr
+        self._tx = tx
+        self._brevo = brevo_loader
 
     def kwargs(self, **overrides):
         d = {
             "fetch_fn": self.fetch,
             "recompute_fn": self.recompute,
             "notify_fn": self.notify,
+            "market_hours_factory": self._mh["factory"],
+            "compute_runs_repo_factory": self._cr["factory"],
+            "tx_fn": self._tx,
         }
+        if self._brevo is not None:
+            d["brevo_key_loader"] = self._brevo
         d.update(overrides)
         return d
 
 
+def _deps(mh, cr, tx, *, brevo=None):
+    """Kwargs the injected-collaborator tests pass to cmd_cycle
+    when they don't use the `stages` fixture (they wire fetch_fn
+    /recompute_fn/notify_fn explicitly with test-specific stubs)."""
+    d = {
+        "market_hours_factory": mh["factory"],
+        "compute_runs_repo_factory": cr["factory"],
+        "tx_fn": tx,
+    }
+    if brevo is not None:
+        d["brevo_key_loader"] = brevo
+    return d
+
+
 @pytest.fixture
-def stages():
+def stages(patched_market_hours, patched_compute_runs, patched_transaction):
     captured = {
         "fetch_kwargs": None,
         "recompute_kwargs": None,
@@ -180,7 +200,10 @@ def stages():
             cb("notify", "running")
             cb("notify", "done")
 
-    st = Stages(captured)
+    st = Stages(
+        captured, patched_market_hours, patched_compute_runs,
+        patched_transaction,
+    )
     st.fetch, st.recompute, st.notify = fake_fetch, fake_recompute, fake_notify
     return st
 
@@ -254,6 +277,7 @@ class TestComputeRunsLifecycle:
 
         rc = cmd_cycle(
             SimpleNamespace(exchange="NSE"), ctx, fetch_fn=_fetch_fn, recompute_fn=_recompute_fn, notify_fn=_notify_fn,
+            **_deps(patched_market_hours, patched_compute_runs, patched_transaction),
         )
         assert rc == 1
         assert patched_compute_runs["finish"] is not None
@@ -278,6 +302,7 @@ class TestComputeRunsLifecycle:
 
         rc = cmd_cycle(
             SimpleNamespace(exchange="NSE"), ctx, fetch_fn=_fetch_fn, recompute_fn=_recompute_fn, notify_fn=_notify_fn,
+            **_deps(patched_market_hours, patched_compute_runs, patched_transaction),
         )
         assert rc == 1
         finish = patched_compute_runs["finish"]
@@ -316,6 +341,7 @@ class TestStdoutProgress:
         _notify_fn = lambda *a, **k: None
         rc = cmd_cycle(
             SimpleNamespace(exchange="NSE"), ctx, fetch_fn=_fetch_fn, recompute_fn=_recompute_fn, notify_fn=_notify_fn,
+            **_deps(patched_market_hours, patched_compute_runs, patched_transaction),
         )
         assert rc == 1
         err = capsys.readouterr().err
@@ -341,22 +367,19 @@ class TestNotifyConfig:
     def test_brevo_config_present_invokes_notify(
         self, fake_config, ctx,
         patched_market_hours, patched_compute_runs,
-        patched_transaction, stages, monkeypatch, capsys,
+        patched_transaction, stages, capsys,
     ):
-        import trip_ema.config.brevo_secrets as brevo_mod
-
         fake_config.transports.brevo = SimpleNamespace(
             secrets_file="secrets/brevo.yaml",
             sender_email="from@example.com",
             sender_name="Test",
         )
-        monkeypatch.setattr(
-            brevo_mod, "load_brevo_api_key",
-            lambda path: "xkeysib-test-key",
-        )
 
         cmd_cycle(
-            SimpleNamespace(exchange="NSE"), ctx, **stages.kwargs(),
+            SimpleNamespace(exchange="NSE"), ctx,
+            **stages.kwargs(
+                brevo_key_loader=lambda path: "xkeysib-test-key",
+            ),
         )
         notify = stages.captured["notify_kwargs"]
         assert notify is not None
