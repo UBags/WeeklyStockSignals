@@ -121,11 +121,6 @@
       "mock_patch": 5,
       "setattr": 0
     },
-    "orchestrator/test_recompute_market_progress.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 14
-    },
     "transports/http/routes/test_admin_subscribers_build_transport.py": {
       "env": 0,
       "mock_patch": 0,

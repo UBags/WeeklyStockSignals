@@ -52,6 +52,7 @@ from sqlalchemy.engine import Engine
 from ..cache.current_signals_cache import CurrentSignalsCache
 from .intraday_chain import log_intraday_transitions
 from .process_day import process_signals_for_day
+from .stages import MarketStages
 from .industry_stages import (
     _stage_industry_enrichment,
     _stage_industry_state,
@@ -212,6 +213,18 @@ def _stage_rebuild_cache(
 
 
 
+DEFAULT_MARKET_STAGES = MarketStages(
+    stock_state=_stage_stock_state_incremental,
+    stock_enrichment=_stage_stock_enrichment_incremental,
+    rebuild_cache=_stage_rebuild_cache,
+    iiv=_stage_iiv_incremental,
+    industry_state=_stage_industry_state,
+    industry_enrichment=_stage_industry_enrichment,
+)
+"""Production wiring. Assembled here, below the stage definitions, because
+the other direction (stages.py importing these) would be an import cycle."""
+
+
 # === STEP 13D1: progress_cb ===
 def _emit_progress(
     cb,
@@ -249,6 +262,7 @@ def recompute_market(
     cache: CurrentSignalsCache | None = None,
     exchange: str = "NSE",
     progress_cb: Callable[[str, str], None] | None = None,
+    stages: MarketStages = DEFAULT_MARKET_STAGES,
 ) -> RecomputeMarketResult:
     """Run one pass through the V1 cycle compute pipeline.
 
@@ -309,7 +323,7 @@ def recompute_market(
     # ---- Stage 1: stock state ----
     try:
         _emit_progress(progress_cb, "stock_state", "running")
-        stock_state = _stage_stock_state_incremental(
+        stock_state = stages.stock_state(
             db_engine, exchange, n_weeks_to_upsert,
         )
         logger.info(
@@ -328,7 +342,7 @@ def recompute_market(
     if not stage_errors:
         try:
             _emit_progress(progress_cb, "stock_enrichment", "running")
-            stock_enrichment = _stage_stock_enrichment_incremental(
+            stock_enrichment = stages.stock_enrichment(
                 db_engine, exchange, n_weeks_to_upsert,
             )
             logger.info(
@@ -396,7 +410,7 @@ def recompute_market(
     if not stage_errors and cache is not None:
         try:
             _emit_progress(progress_cb, "cache_rebuild", "running")
-            cache_rebuilt = _stage_rebuild_cache(db_engine, cache)
+            cache_rebuilt = stages.rebuild_cache(db_engine, cache)
             logger.info(
                 "recompute_market[%s] stage 5 cache_rebuild: "
                 "entries=%d", exchange, cache.signal_count(),
@@ -412,7 +426,7 @@ def recompute_market(
     if not stage_errors:
         try:
             _emit_progress(progress_cb, "iiv", "running")
-            iiv = _stage_iiv_incremental(
+            iiv = stages.iiv(
                 db_engine, as_of, n_weeks_to_upsert,
             )
             logger.info(
@@ -431,7 +445,7 @@ def recompute_market(
     if not stage_errors:
         try:
             _emit_progress(progress_cb, "industry_state", "running")
-            industry_state = _stage_industry_state(
+            industry_state = stages.industry_state(
                 db_engine, mode="incremental",
                 n_weeks_to_upsert=n_weeks_to_upsert,
             )
@@ -451,7 +465,7 @@ def recompute_market(
     if not stage_errors:
         try:
             _emit_progress(progress_cb, "industry_enrichment", "running")
-            industry_enrichment = _stage_industry_enrichment(
+            industry_enrichment = stages.industry_enrichment(
                 db_engine, mode="incremental",
                 n_weeks_to_upsert=n_weeks_to_upsert,
             )

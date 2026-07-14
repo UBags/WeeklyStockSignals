@@ -1,14 +1,14 @@
 """Tests for the progress_cb hook in recompute_market (Step 13d-1).
 
-Verifies the hook fires at every stage boundary with the right
-shape: (stage_name, message). Uses monkeypatching to stub each
-_stage_* helper so the test runs in isolation (no DB).
+Verifies the hook fires at every stage boundary with the right shape:
+(stage_name, message). The stages themselves are faked so the test runs without
+a DB — but they are PASSED IN (a MarketStages), not monkeypatched onto the
+module. `.with_(iiv=boom)` derives a variant where one stage explodes and the
+rest stay cheap.
 
-NOTE on imports: `trip_ema.orchestrator.__init__.py` re-exports
-`recompute_market` (the function name), which SHADOWS the
-submodule of the same name at the package-attribute level. So we
-use `importlib.import_module()` to get the actual module
-unambiguously.
+The importlib dance below is still needed for `rm_mod._emit_progress`:
+`trip_ema.orchestrator.__init__` re-exports `recompute_market` (the function),
+which SHADOWS the submodule of the same name at the package-attribute level.
 """
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ import pytest
 # `from trip_ema.orchestrator import recompute_market as rm_mod` would
 # yield the FUNCTION (due to __init__ re-export). importlib gives the
 # module.
+from trip_ema.orchestrator.stages import MarketStages
+
 rm_mod = importlib.import_module(
     "trip_ema.orchestrator.recompute_market",
 )
@@ -42,34 +44,24 @@ EXPECTED_STAGES = [
 ]
 
 
+_STUB = MarketStages(
+    stock_state=lambda *a, **k: (10, 0, 0),
+    stock_enrichment=lambda *a, **k: (10, 0, 0),
+    rebuild_cache=lambda *a, **k: True,
+    iiv=lambda *a, **k: (50, 0, 0),
+    industry_state=lambda *a, **k: (50, 0, 0),
+    industry_enrichment=lambda *a, **k: (50, 0, 0),
+)
+"""All six stages faked, so recompute_market runs end to end without a DB. A
+test that cares about one stage derives from this with `.with_(iiv=boom)` — the
+other five stay cheap and quiet."""
+
+
 @pytest.fixture
-def stub_stages(monkeypatch):
-    """Stub all 8 _stage_* helpers to no-op returns so recompute_market
-    runs to completion without touching the DB."""
-    monkeypatch.setattr(
-        rm_mod, "_stage_stock_state_incremental",
-        lambda *a, **k: (10, 0, 0),
-    )
-    monkeypatch.setattr(
-        rm_mod, "_stage_stock_enrichment_incremental",
-        lambda *a, **k: (10, 0, 0),
-    )
-    monkeypatch.setattr(
-        rm_mod, "_stage_rebuild_cache",
-        lambda *a, **k: True,
-    )
-    monkeypatch.setattr(
-        rm_mod, "_stage_iiv_incremental",
-        lambda *a, **k: (50, 0, 0),
-    )
-    monkeypatch.setattr(
-        rm_mod, "_stage_industry_state",
-        lambda *a, **k: (50, 0, 0),
-    )
-    monkeypatch.setattr(
-        rm_mod, "_stage_industry_enrichment",
-        lambda *a, **k: (50, 0, 0),
-    )
+def stub_stages():
+    """The faked stage set, as an argument. This used to rewrite six module
+    attributes on rm_mod; recompute_market now takes them."""
+    return _STUB
 
 
 # ============================================================
@@ -106,6 +98,7 @@ class TestProgressCbWiring:
         cache = MagicMock()
         cache.signal_count = lambda: 0
         recompute_market(
+            stages=stub_stages,
             db_engine=MagicMock(),
             as_of=datetime(2026, 6, 28, 12, 0, tzinfo=UTC),
             cache=cache,
@@ -123,6 +116,7 @@ class TestProgressCbWiring:
         cache = MagicMock()
         cache.signal_count = lambda: 0
         recompute_market(
+            stages=stub_stages,
             db_engine=MagicMock(),
             cache=cache,
             progress_cb=lambda s, m: calls.append((s, m)),
@@ -135,6 +129,7 @@ class TestProgressCbWiring:
         cache = MagicMock()
         cache.signal_count = lambda: 0
         recompute_market(
+            stages=stub_stages,
             db_engine=MagicMock(), cache=cache,
             progress_cb=lambda s, m: calls.append((s, m)),
         )
@@ -147,6 +142,7 @@ class TestProgressCbWiring:
     ):
         calls = []
         recompute_market(
+            stages=stub_stages,
             db_engine=MagicMock(),
             cache=None,
             progress_cb=lambda s, m: calls.append((s, m)),
@@ -160,6 +156,7 @@ class TestProgressCbWiring:
         cache = MagicMock()
         cache.signal_count = lambda: 0
         result = recompute_market(
+            stages=stub_stages,
             db_engine=MagicMock(), cache=cache,
         )
         assert result.stage_errors == []
@@ -171,23 +168,13 @@ class TestProgressCbWiring:
 
 class TestFailurePath:
 
-    def test_stock_state_halt_emits_failed(self, monkeypatch):
+    def test_stock_state_halt_emits_failed(self):
         def boom(*a, **k):
             raise ValueError("synthetic stock_state failure")
-        monkeypatch.setattr(
-            rm_mod, "_stage_stock_state_incremental", boom,
-        )
-        for name in (
-            "_stage_stock_enrichment_incremental", "_stage_rebuild_cache",
-            "_stage_iiv_incremental", "_stage_industry_state",
-            "_stage_industry_enrichment",
-        ):
-            monkeypatch.setattr(
-                rm_mod, name, lambda *a, **k: (0, 0, 0),
-            )
 
         calls = []
         result = recompute_market(
+            stages=_STUB.with_(stock_state=boom),
             db_engine=MagicMock(),
             progress_cb=lambda s, m: calls.append((s, m)),
         )
@@ -201,25 +188,10 @@ class TestFailurePath:
             ("stock_state", "synthetic stock_state failure"),
         ]
 
-    def test_iiv_halt_emits_failed_skips_industry_stages(
-        self, monkeypatch,
-    ):
-        monkeypatch.setattr(
-            rm_mod, "_stage_stock_state_incremental",
-            lambda *a, **k: (10, 0, 0),
-        )
-        monkeypatch.setattr(
-            rm_mod, "_stage_stock_enrichment_incremental",
-            lambda *a, **k: (10, 0, 0),
-        )
-        monkeypatch.setattr(
-            rm_mod, "_stage_rebuild_cache",
-            lambda *a, **k: True,
-        )
+    def test_iiv_halt_emits_failed_skips_industry_stages(self):
 
         def boom(*a, **k):
             raise RuntimeError("iiv boom")
-        monkeypatch.setattr(rm_mod, "_stage_iiv_incremental", boom)
 
         industry_stages_called = []
         def watch_industry_state(*a, **k):
@@ -228,19 +200,18 @@ class TestFailurePath:
         def watch_industry_enrich(*a, **k):
             industry_stages_called.append("industry_enrichment")
             return (0, 0, 0)
-        monkeypatch.setattr(
-            rm_mod, "_stage_industry_state",
-            watch_industry_state,
-        )
-        monkeypatch.setattr(
-            rm_mod, "_stage_industry_enrichment",
-            watch_industry_enrich,
-        )
 
         calls = []
         cache = MagicMock()
         cache.signal_count = lambda: 0
         recompute_market(
+            # The three upstream stages are already fine in _STUB; only the
+            # ones this test is actually about get overridden.
+            stages=_STUB.with_(
+                iiv=boom,
+                industry_state=watch_industry_state,
+                industry_enrichment=watch_industry_enrich,
+            ),
             db_engine=MagicMock(), cache=cache,
             progress_cb=lambda s, m: calls.append((s, m)),
         )
