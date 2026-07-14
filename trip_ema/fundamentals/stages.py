@@ -37,6 +37,7 @@ from .runners import (
     run_industry_index_build,
     run_industry_refresh,
     run_market_cap_backfill,
+    run_shares_backfill,
     run_shares_refresh,
 )
 from .v1_runners import populate_industry_index_value_for_industry
@@ -63,6 +64,7 @@ class FundamentalsRunners:
 
     industry: Callable[..., Any]
     shares: Callable[..., Any]
+    shares_backfill: Callable[..., Any]
     financials: Callable[..., Any]
     market_cap: Callable[..., Any]
     index_build: Callable[..., Any]
@@ -93,6 +95,7 @@ class FundamentalsRunners:
 DEFAULT_FUNDAMENTALS_RUNNERS = FundamentalsRunners(
     industry=run_industry_refresh,
     shares=run_shares_refresh,
+    shares_backfill=run_shares_backfill,
     financials=run_financials_refresh,
     market_cap=run_market_cap_backfill,
     index_build=run_industry_index_build,

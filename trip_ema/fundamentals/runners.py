@@ -113,6 +113,7 @@ def run_industry_refresh(
     recheck_unavailable: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn: Callable[[str, str], IndustryInfo] = fetch_industry,
+    etf_long_name_fn: Callable[[str, str], str | None] | None = None,
 ) -> int:
     """Refresh industry classification for every active ticker on `exchange`.
 
@@ -249,6 +250,7 @@ def run_industry_refresh(
             if itype == "ETF":
                 outcome = _classify_etf(
                     db_engine, tid, symbol, exchange, fetch_fn,
+                    etf_long_name_fn=etf_long_name_fn,
                 )
             else:
                 outcome = _classify_equity(
@@ -415,6 +417,8 @@ def _classify_etf(
     symbol: str,
     exchange: str,
     fetch_fn,
+    *,
+    etf_long_name_fn: Callable[[str, str], str | None] | None = None,
 ) -> str:
     """Classify one ETF: write industry='ETF', sector='ETF', and
     capture the long_name from yfinance if available. Returns
@@ -440,7 +444,8 @@ def _classify_etf(
         # separately. The fetch_fn doesn't currently return longName,
         # so we need a separate path. Lightweight: read yfinance
         # directly here. Falls back to None silently on any error.
-        long_name = _try_fetch_etf_long_name(symbol, exchange)
+        _long_name_fn = etf_long_name_fn or _try_fetch_etf_long_name
+        long_name = _long_name_fn(symbol, exchange)
     except Exception as e:
         # Logged but not fatal — we'll still classify as ETF.
         logger.debug("ETF long-name fetch failed for %s: %s", symbol, e)

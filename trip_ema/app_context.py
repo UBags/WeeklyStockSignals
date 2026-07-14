@@ -25,11 +25,15 @@ context object ought to have them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import Engine
 
 from .config import Config
+from .fundamentals.stages import (
+    DEFAULT_FUNDAMENTALS_RUNNERS,
+    FundamentalsRunners,
+)
 from .persistence.connection import create_engine_from_config
 
 
@@ -43,6 +47,16 @@ class AppContext:
     db_engine: Engine
     """ONE engine for the process, not one per command. Its pool is sized from
     `config.database.pool_*` and it is disposed in `main()`'s finally."""
+
+    runners: FundamentalsRunners = field(
+        default_factory=lambda: DEFAULT_FUNDAMENTALS_RUNNERS,
+    )
+    """The fundamentals runner registry — the seven callables a command may
+    fire (industry / shares / shares_backfill / financials / market_cap /
+    index_build / index_value). Default is the production wiring; tests
+    derive a variant with `DEFAULT_FUNDAMENTALS_RUNNERS.with_(shares=spy)`.
+    Phase 9 of the de-monkeypatching programme — matches MarketStages
+    (Phase 6) and BackfillStages (Phase 8)."""
 
     @classmethod
     def from_config(cls, config: Config) -> AppContext:

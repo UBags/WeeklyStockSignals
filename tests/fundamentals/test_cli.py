@@ -305,33 +305,39 @@ class TestCmdFundamentalsStatus:
 # ---------- end-to-end via main() ---------- #
 
 
-def test_main_dispatches_refresh_industry(monkeypatch, db_engine):
-    """Smoke test: `trip-ema-etl refresh-industry --exchange NSE`
-    parses correctly and calls our handler."""
+def test_main_dispatches_refresh_industry():
+    """Static wire-up test: the ETL CLI's parser resolves the
+    `refresh-industry` sub-command to `cmd_refresh_industry` from
+    trip_ema.fundamentals.cli.
+
+    Previously this test invoked etl_cli.main() with a real config
+    path and monkeypatched cmd_refresh_industry to intercept the call.
+    Both cost were symptomatic of the same problem: main() was the
+    only reachable dispatch surface, so a test HAD to run it. It
+    doesn't — _build_parser() stashes the fundamentals handler map
+    on the parser object as `_fundamentals_handlers`, and that's the
+    exact resolution main() performs. Asserting on it directly needs
+    no config file, no monkeypatch, and no wall-clock time.
+
+    Phase 9 of the de-monkeypatching programme — matches the pattern
+    of every other seam closed by giving the thing under test a
+    handle you can inspect without breaking the encapsulation.
+    """
     from trip_ema.etl import cli as etl_cli
+    from trip_ema.fundamentals.cli import cmd_refresh_industry
 
-    called = {}
-
-    def fake_handler(args, ctx):
-        called["args"] = args
-        return 0
-
-    # This one still patches: it is a test OF the dispatch table, so the thing
-    # under test IS the module attribute the table resolves. Handlers now take
-    # an AppContext, hence the signature.
-    monkeypatch.setattr(
-        "trip_ema.fundamentals.cli.cmd_refresh_industry", fake_handler,
+    parser = etl_cli._build_parser()
+    handlers = getattr(parser, "_fundamentals_handlers", None)
+    assert handlers is not None, (
+        "_build_parser must stash the fundamentals handler map on "
+        "the parser; if this attribute is gone, main()'s dispatch "
+        "is broken."
     )
-
-    # main() needs a config file to exist. Point to the project's config.yaml.
-    rc = etl_cli.main([
-        "--config", "config.yaml",
-        "refresh-industry",
-        "--exchange", "NSE",
-    ])
-    # We can't easily assert rc==0 without setting up a real config;
-    # we just confirm the command resolved (no "unknown command" error).
-    assert rc in (0, 1, 2)
+    assert handlers.get("refresh-industry") is cmd_refresh_industry, (
+        "parser wire-up for 'refresh-industry' does not resolve to "
+        "cmd_refresh_industry — a rename or a missing entry in "
+        "fundamentals.cli.register_subparsers."
+    )
 
 
 # ---------- cmd_backfill_etf_classification ---------- #

@@ -211,19 +211,12 @@ CLOSED_SEAMS: list[Seam] = [
         "INSIDE a function body has no runtime purpose here — no cycle, "
         "nothing lazy. It is a patch target. That is what it was for.",
         scope="src",
-        exempt=(
-            # The only two real violations left, and neither is Phase 9's.
-            # Both import run_shares_backfill, which is not a scheduler or
-            # route phase and so is not a registry field; they belong to the
-            # phase that ports the ETL CLI's command table. A debt with a
-            # name on it — delete this exemption and them together.
-            #
-            # (stages.py and archive/index_value_backfill.py were exempted
-            # here too, until the \s+ newline bug was fixed and it turned
-            # out neither had ever violated anything.)
-            "transports/http/routes/admin_etl.py",
-            "etl/cli.py",
-        ),
+        # Phase 9 finish: the two exemptions here (admin_etl.py and
+        # etl/cli.py) are gone. `run_shares_backfill` is now a
+        # FundamentalsRunners field (`shares_backfill`), so admin_etl.py
+        # dispatches via the registry rather than a function-local import.
+        # etl/cli.py::cmd_refresh_reference reads ctx.runners and calls
+        # runners.for_phase(name) — again, no local import.
     ),
 ]
 

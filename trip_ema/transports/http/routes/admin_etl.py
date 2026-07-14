@@ -47,10 +47,12 @@ from ....etl.runner import (
     unpark_all,
 )
 from ....etl.status_repo import EtlStatusRepository
+from ....fundamentals.stages import FundamentalsRunners
 from ..dependencies import (
     get_config,
     get_db_engine,
     get_etl_executor,
+    get_fundamentals_runners,
     require_admin_token,
 )
 from ..schemas import (
@@ -428,6 +430,7 @@ def admin_etl_backfill_shares(
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
     executor=Depends(get_etl_executor),
+    runners: FundamentalsRunners = Depends(get_fundamentals_runners),
 ) -> EtlActionAcceptedPayload:
     """Trigger historical shares-outstanding backfill for `exchange`.
 
@@ -452,7 +455,7 @@ def admin_etl_backfill_shares(
     )
     executor.submit(
         _run_shares_backfill_safe,
-        db_engine, exchange, start_date, force,
+        db_engine, exchange, start_date, force, runners,
     )
     return EtlActionAcceptedPayload(
         action="backfill-shares", run_id=None,
@@ -647,13 +650,18 @@ def _run_backfill_safe(db_engine, config, exchange, start_date, tier_filter):
 
 def _run_shares_backfill_safe(
     db_engine, exchange: str, start_date: date, force: bool,
+    runners: FundamentalsRunners,
 ) -> None:
-    """Wrap run_shares_backfill in a try/except that logs and
+    """Wrap runners.shares_backfill in a try/except that logs and
     swallows. Runs on the etl_executor thread; uncaught exceptions
-    here become noisy executor tracebacks with no operator context."""
+    here become noisy executor tracebacks with no operator context.
+
+    `runners` is resolved in the HANDLER, on the request thread, and
+    passed down. Resolving it here would put a Depends() lookup on an
+    executor thread that has no request context — same pattern as
+    _run_industry_refresh_safe in fundamentals.py."""
     try:
-        from ....fundamentals.runners import run_shares_backfill
-        run_shares_backfill(
+        runners.shares_backfill(
             db_engine, exchange,
             start_date=start_date, force=force,
         )

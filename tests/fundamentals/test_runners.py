@@ -8,7 +8,7 @@ that the unit tests can't.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone, UTC
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import text
@@ -456,16 +456,15 @@ class TestEtfBranching:
             # Imagine yfinance returns some garbage for ETFs.
             return IndustryInfo("WrongSector", "WrongIndustry")
 
-        # Also patch the ETF longName fetcher so we don't hit network.
-        with patch(
-            "trip_ema.fundamentals.runners._try_fetch_etf_long_name",
-            return_value="Some ETF long name",
-        ):
-            run_industry_refresh(
-                db_engine, "NSE",
-                request_delay_s=0,
-                fetch_fn=fetcher,
-            )
+        # Inject the ETF longName fetcher (no network) — Phase 9
+        # replaced patching of _try_fetch_etf_long_name with a sister
+        # injection point alongside fetch_fn.
+        run_industry_refresh(
+            db_engine, "NSE",
+            request_delay_s=0,
+            fetch_fn=fetcher,
+            etf_long_name_fn=lambda symbol, exchange: "Some ETF long name",
+        )
 
         # The equity fetcher should have been called ONLY for equities.
         assert sorted(eq_calls) == ["HDFCBANK", "RELIANCE", "TCS"]
@@ -489,15 +488,13 @@ class TestEtfBranching:
         def fetcher(symbol, exchange):
             return IndustryInfo("Some", "Sector")
 
-        with patch(
-            "trip_ema.fundamentals.runners._try_fetch_etf_long_name",
-            return_value=None,  # simulate failure / no longName
-        ):
-            run_industry_refresh(
-                db_engine, "NSE",
-                request_delay_s=0,
-                fetch_fn=fetcher,
-            )
+        # simulate longName-fetch failure by injecting a None-returning fn.
+        run_industry_refresh(
+            db_engine, "NSE",
+            request_delay_s=0,
+            fetch_fn=fetcher,
+            etf_long_name_fn=lambda symbol, exchange: None,
+        )
 
         with db_engine.connect() as conn:
             niftybees = InstrumentIndustryRepository(conn).get(
@@ -510,15 +507,12 @@ class TestEtfBranching:
         def fetcher(symbol, exchange):
             return IndustryInfo("Tech", "IT")
 
-        with patch(
-            "trip_ema.fundamentals.runners._try_fetch_etf_long_name",
-            return_value="X",
-        ):
-            run_id = run_industry_refresh(
-                db_engine, "NSE",
-                request_delay_s=0,
-                fetch_fn=fetcher,
-            )
+        run_id = run_industry_refresh(
+            db_engine, "NSE",
+            request_delay_s=0,
+            fetch_fn=fetcher,
+            etf_long_name_fn=lambda symbol, exchange: "X",
+        )
 
         with db_engine.connect() as conn:
             r = FundamentalsRunRepository(conn).get(run_id)
@@ -539,15 +533,12 @@ class TestEtfBranching:
                 set_by="operator",
             )
 
-        with patch(
-            "trip_ema.fundamentals.runners._try_fetch_etf_long_name",
-            return_value="X",
-        ):
-            run_id = run_industry_refresh(
-                db_engine, "NSE",
-                request_delay_s=0,
-                fetch_fn=lambda s, e: IndustryInfo("X", "Y"),
-            )
+        run_id = run_industry_refresh(
+            db_engine, "NSE",
+            request_delay_s=0,
+            fetch_fn=lambda s, e: IndustryInfo("X", "Y"),
+            etf_long_name_fn=lambda symbol, exchange: "X",
+        )
 
         with db_engine.connect() as conn:
             r = FundamentalsRunRepository(conn).get(run_id)

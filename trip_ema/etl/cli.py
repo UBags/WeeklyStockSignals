@@ -578,28 +578,24 @@ def cmd_refresh_reference(args, ctx: AppContext) -> int:
     """
     config = ctx.config
     db_engine = ctx.db_engine
-    from ..fundamentals.runners import (
-        run_financials_refresh,
-        run_industry_refresh,
-        run_shares_refresh,
-    )
+    runners = ctx.runners
 
     wanted = [d.strip() for d in args.datasets.split(",") if d.strip()]
-    runners = {
-        "industry": run_industry_refresh,
-        "shares": run_shares_refresh,
-        "financials": run_financials_refresh,
-    }
-    unknown = [d for d in wanted if d not in runners]
+    # The three refresh-shaped phases the fundamentals scheduler also fires.
+    # NOT runners.phases(), which also exposes market_cap / index_build /
+    # index_value / shares_backfill — those have their own operator
+    # commands.
+    valid = {"industry", "shares", "financials"}
+    unknown = [d for d in wanted if d not in valid]
     if unknown:
         print(f"error: unknown dataset(s) {unknown}; "
-              f"choose from {sorted(runners)}")
+              f"choose from {sorted(valid)}")
         return 2
 
     for name in wanted:
         print(f"[{name}] starting "
               f"({'gaps only' if args.only_missing else 'FULL sweep'})")
-        run_id = runners[name](
+        run_id = runners.for_phase(name)(
             db_engine, args.exchange,
             # only_missing implies force: the 80-day skip-if-recent guard is
             # there to stop a needless full re-sweep, and a gap-only pass is
