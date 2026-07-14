@@ -119,25 +119,28 @@ class TestModalFlow:
         # Should NOT have spawned anything
         assert view._intraday_process is None
 
-    def test_modal_reject_does_not_spawn(
-        self, view, monkeypatch,
-    ):
+    def test_modal_reject_does_not_spawn(self, view):
         view._picker.current_exchange = lambda: "NSE"
-        # Patch SubscribersRepository at the import site that
-        # _on_run_intraday_clicked uses
-        monkeypatch.setattr(
-            "trip_ema.persistence.subscribers_repo."
-            "SubscribersRepository.count_active",
-            lambda self: 0,
-        )
-        # Force modal to return Rejected
-        from trip_ema.gui.views.widgets import (
-            intraday_confirmation_modal as icm,
-        )
-        monkeypatch.setattr(
-            icm.IntradayConfirmationModal, "exec",
-            lambda self: QDialog.Rejected,
-        )
+
+        # Phase GUI-2: injections on the view instance instead of
+        # monkeypatching the persistence + widget modules.
+        class FakeRepo:
+            def __init__(self, conn):
+                pass
+
+            def count_active(self):
+                return 0
+
+        class FakeModal:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                return QDialog.Rejected
+
+        view._subscribers_repo_factory = FakeRepo
+        view._intraday_modal_cls = FakeModal
+
         view._on_run_intraday_clicked()
         assert view._intraday_process is None
 
@@ -283,9 +286,7 @@ class TestFinishedHandler:
         view._activity_scheduler.trigger_now.assert_called_once()
         view._mutex_scheduler.trigger_now.assert_called_once()
 
-    def test_failure_resets_mutex_and_opens_dialog(
-        self, view, monkeypatch,
-    ):
+    def test_failure_resets_mutex_and_opens_dialog(self, view):
         """exit_code != 0 → failure dialog opened + mutex cleared."""
         view._intraday_process = MagicMock()
         view._local_running = True
@@ -296,19 +297,16 @@ class TestFinishedHandler:
         view._activity_scheduler.trigger_now = MagicMock()
         view._mutex_scheduler.trigger_now = MagicMock()
 
-        # Patch the BackfillFailureDialog to no-op
-        from trip_ema.gui.views.widgets import (
-            backfill_failure_dialog as bfd,
+        # Phase GUI-2: injected on the view instance.
+        from trip_ema.gui.views.widgets.backfill_failure_dialog import (
+            BackfillFailureDialog,
         )
         opened = []
-        original_dialog = bfd.BackfillFailureDialog
-        class FakeDialog(original_dialog):
+        class FakeDialog(BackfillFailureDialog):
             def exec(self):
                 opened.append(self)
                 return 0
-        monkeypatch.setattr(
-            bfd, "BackfillFailureDialog", FakeDialog,
-        )
+        view._backfill_failure_dialog_cls = FakeDialog
 
         view._on_intraday_finished(
             1, QProcess.NormalExit,

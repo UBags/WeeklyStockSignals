@@ -51,21 +51,18 @@ class TestColorPalette:
 
 class TestDialogConstruction:
 
-    def _make_dialog(self, qtbot, monkeypatch, rows):
-        """Construct a MarketTrendDialog with stubbed data load."""
-        # Stub the MarketOverviewRepository.range call to return rows
-        import trip_ema.persistence.market_overview_repo as mo_mod
+    def _make_dialog(self, qtbot, rows):
+        """Construct a MarketTrendDialog with stubbed data load.
 
+        Phase GUI-2: MarketOverviewRepository injected as a factory
+        kwarg on MarketTrendDialog rather than monkeypatched on the
+        persistence module."""
         class FakeRepo:
             def __init__(self, conn):
                 pass
 
             def range(self, *, exchange, n_days):
                 return rows
-
-        monkeypatch.setattr(
-            mo_mod, "MarketOverviewRepository", FakeRepo,
-        )
 
         # Stub GuiDbSession.connect to a no-op context manager
         from contextlib import contextmanager
@@ -79,49 +76,42 @@ class TestDialogConstruction:
             db=FakeDb(),
             exchange="NSE",
             kind=TrendKind.SIGNALS,
+            market_overview_repo_factory=FakeRepo,
         )
         qtbot.addWidget(dialog)
         return dialog
 
-    def test_constructs_for_signals_kind(
-        self, qtbot, monkeypatch,
-    ):
+    def test_constructs_for_signals_kind(self, qtbot):
         rows = [
             _row(date(2026, 6, 1)),
             _row(date(2026, 6, 2), n_buys=15, n_sells=7),
             _row(date(2026, 6, 3), n_buys=12, n_sells=6),
         ]
-        dialog = self._make_dialog(qtbot, monkeypatch, rows)
+        dialog = self._make_dialog(qtbot, rows)
         assert "Signal" in dialog.windowTitle()
 
-    def test_empty_rows_shows_no_data_label(
-        self, qtbot, monkeypatch,
-    ):
-        dialog = self._make_dialog(qtbot, monkeypatch, [])
+    def test_empty_rows_shows_no_data_label(self, qtbot):
+        dialog = self._make_dialog(qtbot, [])
         assert dialog._empty_label.isVisible() or True
         # Header reflects no data
         assert "no data" in dialog._header_label.text()
 
-    def test_signals_branch_adds_bar_items(
-        self, qtbot, monkeypatch,
-    ):
+    def test_signals_branch_adds_bar_items(self, qtbot):
         """The SIGNALS branch should add 4 BarGraphItems to the
         plot (one per signal kind)."""
         import pyqtgraph as pg
 
         rows = [_row(date(2026, 6, 1)), _row(date(2026, 6, 2))]
-        dialog = self._make_dialog(qtbot, monkeypatch, rows)
+        dialog = self._make_dialog(qtbot, rows)
         items = dialog._plot.getPlotItem().items
         bar_items = [
             i for i in items if isinstance(i, pg.BarGraphItem)
         ]
         assert len(bar_items) == 4
 
-    def test_signals_branch_sets_y_label(
-        self, qtbot, monkeypatch,
-    ):
+    def test_signals_branch_sets_y_label(self, qtbot):
         rows = [_row(date(2026, 6, 1))]
-        dialog = self._make_dialog(qtbot, monkeypatch, rows)
+        dialog = self._make_dialog(qtbot, rows)
         # Y-axis label should mention "Signal count"
         left_axis = dialog._plot.getAxis("left")
         # pyqtgraph stores labels in the axis's label HTML

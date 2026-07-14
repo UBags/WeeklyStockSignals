@@ -88,32 +88,24 @@ class TestRefreshListingsClick:
         view._on_refresh_listings_clicked()
         assert view._singlestage_process is None
 
-    def test_modal_cancelled_no_process(self, view, monkeypatch):
+    def test_modal_cancelled_no_process(self, view):
         view._picker.current_exchange = MagicMock(return_value="NSE")
 
-        # Stub the modal to immediately reject
-        from trip_ema.gui.views.widgets import (
-            refresh_listings_confirmation_modal as rl_mod,
-        )
+        # Phase GUI-2: modal class injected on the instance instead of
+        # monkeypatched on the module.
         FakeModal = MagicMock()
         FakeModal.DialogCode = QDialog.DialogCode
         FakeModal.return_value.exec.return_value = (
             QDialog.DialogCode.Rejected
         )
-        monkeypatch.setattr(
-            rl_mod, "RefreshListingsConfirmationModal", FakeModal,
-        )
+        view._refresh_listings_modal_cls = FakeModal
 
         view._on_refresh_listings_clicked()
         assert view._singlestage_process is None
         assert view._local_running is False
 
-    def test_modal_accepted_acquires_mutex(self, view, monkeypatch):
+    def test_modal_accepted_acquires_mutex(self, view):
         view._picker.current_exchange = MagicMock(return_value="NSE")
-
-        from trip_ema.gui.views.widgets import (
-            refresh_listings_confirmation_modal as rl_mod,
-        )
 
         class FakeModal:
             DialogCode = QDialog.DialogCode
@@ -124,20 +116,18 @@ class TestRefreshListingsClick:
             def exec(self):
                 return QDialog.DialogCode.Accepted
 
-        monkeypatch.setattr(
-            rl_mod, "RefreshListingsConfirmationModal", FakeModal,
-        )
+        view._refresh_listings_modal_cls = FakeModal
 
-        # Stub QProcess.start so we don't actually spawn
-        with patch(
-            "PySide6.QtCore.QProcess.start",
-        ) as mock_start:
-            view._on_refresh_listings_clicked()
+        # QProcess factory returns a MagicMock; we assert on its .start.
+        mock_proc = MagicMock()
+        view._qprocess_factory = lambda parent: mock_proc
+
+        view._on_refresh_listings_clicked()
 
         assert view._local_running is True
         assert view._inflight_kind == "refresh_listings"
-        assert view._singlestage_process is not None
-        mock_start.assert_called_once()
+        assert view._singlestage_process is mock_proc
+        mock_proc.start.assert_called_once()
 
 
 # ============================================================
@@ -151,12 +141,8 @@ class TestRecomputeTiersClick:
         view._on_recompute_tiers_clicked()
         assert view._singlestage_process is None
 
-    def test_modal_accepted_acquires_mutex(self, view, monkeypatch):
+    def test_modal_accepted_acquires_mutex(self, view):
         view._picker.current_exchange = MagicMock(return_value="NSE")
-
-        from trip_ema.gui.views.widgets import (
-            recompute_tiers_confirmation_modal as rt_mod,
-        )
 
         class FakeModal:
             DialogCode = QDialog.DialogCode
@@ -167,18 +153,16 @@ class TestRecomputeTiersClick:
             def exec(self):
                 return QDialog.DialogCode.Accepted
 
-        monkeypatch.setattr(
-            rt_mod, "RecomputeTiersConfirmationModal", FakeModal,
-        )
+        view._recompute_tiers_modal_cls = FakeModal
 
-        with patch(
-            "PySide6.QtCore.QProcess.start",
-        ) as mock_start:
-            view._on_recompute_tiers_clicked()
+        mock_proc = MagicMock()
+        view._qprocess_factory = lambda parent: mock_proc
+
+        view._on_recompute_tiers_clicked()
 
         assert view._local_running is True
         assert view._inflight_kind == "recompute_tiers"
-        mock_start.assert_called_once()
+        mock_proc.start.assert_called_once()
 
 
 # ============================================================
@@ -415,13 +399,11 @@ class TestOperationBannerIntegration:
         assert view._operation_banner.state() == "hidden"
 
     def test_start_singlestage_starts_banner(self, view):
-        with patch(
-            "PySide6.QtCore.QProcess.start",
-        ):
-            view._start_singlestage_process(
-                kind="refresh_listings",
-                cli_subcommand="refresh-listings",
-                exchange="NSE",
-                banner_label="Refresh Listings (NSE) running…",
-            )
+        view._qprocess_factory = lambda parent: MagicMock()
+        view._start_singlestage_process(
+            kind="refresh_listings",
+            cli_subcommand="refresh-listings",
+            exchange="NSE",
+            banner_label="Refresh Listings (NSE) running…",
+        )
         assert view._operation_banner.state() == "running"

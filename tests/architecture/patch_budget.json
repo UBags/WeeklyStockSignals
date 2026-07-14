@@ -11,26 +11,6 @@
       "mock_patch": 1,
       "setattr": 0
     },
-    "gui/test_etl_status_13d3_wiring.py": {
-      "env": 0,
-      "mock_patch": 3,
-      "setattr": 3
-    },
-    "gui/test_etl_status_backfill_wiring.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 1
-    },
-    "gui/test_etl_status_intraday_wiring.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 3
-    },
-    "gui/test_market_trend_dialog_signals.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 1
-    },
     "gui/test_slice4_wiring.py": {
       "env": 0,
       "mock_patch": 0,

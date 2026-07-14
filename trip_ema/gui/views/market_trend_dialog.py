@@ -72,11 +72,13 @@ class MarketTrendDialog(QDialog):
         exchange: str,
         kind: TrendKind,
         parent=None,
+        market_overview_repo_factory=None,
     ) -> None:
         super().__init__(parent)
         self._db = db
         self._exchange = exchange
         self._kind = kind
+        self._market_overview_repo_factory = market_overview_repo_factory
 
         self.setWindowTitle(_TITLES[kind])
         self.setModal(True)
@@ -125,11 +127,14 @@ class MarketTrendDialog(QDialog):
 
     def _load_and_render(self) -> None:
         try:
-            from ...persistence.market_overview_repo import (
-                MarketOverviewRepository,
-            )
+            if self._market_overview_repo_factory is not None:
+                _MarketOverviewRepository = self._market_overview_repo_factory
+            else:
+                from ...persistence.market_overview_repo import (
+                    MarketOverviewRepository as _MarketOverviewRepository,
+                )
             with self._db.connect() as conn:
-                rows = MarketOverviewRepository(conn).range(
+                rows = _MarketOverviewRepository(conn).range(
                     exchange=self._exchange,
                     n_days=TREND_WINDOW_DAYS,
                 )

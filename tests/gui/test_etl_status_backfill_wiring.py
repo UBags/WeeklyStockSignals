@@ -115,22 +115,20 @@ def prompts():
     return FakePrompts()
 
 @pytest.fixture
-def view(qtbot, monkeypatch, prompts):
+def view(qtbot, prompts):
     """A minimally-wired EtlStatusView with all the schedulers
-    disabled. Returns the view; teardown handled by qtbot."""
-    # Stub the picker's HTTP fetch so init doesn't try to call
-    # list_exchanges on a real HTTP client
-    from trip_ema.gui.views.widgets import exchange_picker
-    monkeypatch.setattr(
-        exchange_picker.ExchangePicker, "_fetch_exchanges_list",
-        lambda self: None,
-    )
+    disabled. Returns the view; teardown handled by qtbot.
+
+    Phase GUI-2: picker_auto_fetch=False kwarg replaces the
+    class-method monkeypatch on ExchangePicker._fetch_exchanges_list.
+    """
     from trip_ema.gui.views.etl_status import EtlStatusView
     db = MagicMock()
     http = MagicMock()
     v = EtlStatusView(
         db=db, http=http, start_refresh_on_init=False,
         prompts=prompts,
+        picker_auto_fetch=False,
     )
     qtbot.addWidget(v)
     return v

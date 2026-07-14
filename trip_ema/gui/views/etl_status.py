@@ -194,11 +194,28 @@ class EtlStatusView(QWidget):
         parent: QWidget | None = None,
         start_refresh_on_init: bool = True,
         prompts: Prompts = DEFAULT_PROMPTS,
+        refresh_listings_modal_cls=None,
+        recompute_tiers_modal_cls=None,
+        intraday_modal_cls=None,
+        backfill_failure_dialog_cls=None,
+        qprocess_factory=None,
+        subscribers_repo_factory=None,
+        picker_auto_fetch: bool = True,
     ):
         super().__init__(parent)
         self._prompts = prompts
         self._db = db
         self._http = http
+        # Phase GUI-2: injected collaborators. Defaults None so
+        # production wiring is untouched; tests assign the
+        # attributes on the instance or pass them via __init__.
+        self._refresh_listings_modal_cls = refresh_listings_modal_cls
+        self._recompute_tiers_modal_cls = recompute_tiers_modal_cls
+        self._intraday_modal_cls = intraday_modal_cls
+        self._backfill_failure_dialog_cls = backfill_failure_dialog_cls
+        self._qprocess_factory = qprocess_factory
+        self._subscribers_repo_factory = subscribers_repo_factory
+        self._picker_auto_fetch = picker_auto_fetch
 
         # Mutex state
         self._local_running: bool = False
@@ -292,6 +309,7 @@ class EtlStatusView(QWidget):
 
         self._picker = ExchangePicker(
             self._http, label_text="Exchange:", parent=self,
+            auto_fetch=self._picker_auto_fetch,
         )
         row.addWidget(self._picker)
 
@@ -1214,7 +1232,11 @@ class EtlStatusView(QWidget):
             )
             return
 
-        modal = RefreshListingsConfirmationModal(
+        _RefreshListingsConfirmationModal = (
+            self._refresh_listings_modal_cls
+            or RefreshListingsConfirmationModal
+        )
+        modal = _RefreshListingsConfirmationModal(
             exchange=exchange, parent=self,
         )
         if modal.exec() != modal.DialogCode.Accepted:
@@ -1241,7 +1263,11 @@ class EtlStatusView(QWidget):
             )
             return
 
-        modal = RecomputeTiersConfirmationModal(
+        _RecomputeTiersConfirmationModal = (
+            self._recompute_tiers_modal_cls
+            or RecomputeTiersConfirmationModal
+        )
+        modal = _RecomputeTiersConfirmationModal(
             exchange=exchange, parent=self,
         )
         if modal.exec() != modal.DialogCode.Accepted:
@@ -1275,7 +1301,7 @@ class EtlStatusView(QWidget):
         self._operation_banner.start(banner_label)
         self._set_status(banner_label)
 
-        proc = QProcess(self)
+        proc = (self._qprocess_factory or QProcess)(self)
         # Buffer stdout/stderr separately so we can surface failure
         # text on the banner
         proc.setProcessChannelMode(QProcess.SeparateChannels)
@@ -1440,8 +1466,12 @@ class EtlStatusView(QWidget):
             from ...persistence.subscribers_repo import (
                 SubscribersRepository,
             )
+            _SubscribersRepository = (
+                self._subscribers_repo_factory
+                or SubscribersRepository
+            )
             with self._db.connect() as conn:
-                n_active = SubscribersRepository(
+                n_active = _SubscribersRepository(
                     conn,
                 ).count_active()
         except Exception:
@@ -1476,7 +1506,10 @@ class EtlStatusView(QWidget):
         # at run time, immediately before opening the compute_runs
         # row). The modal's kind_hint / market_open are advisory —
         # they can be stale by a few seconds vs the CLI's own check.
-        modal = IntradayConfirmationModal(
+        _IntradayConfirmationModal = (
+            self._intraday_modal_cls or IntradayConfirmationModal
+        )
+        modal = _IntradayConfirmationModal(
             exchange=exchange,
             kind_hint=kind_hint,
             market_open=market_open,
@@ -1657,7 +1690,7 @@ class EtlStatusView(QWidget):
             stocks=stocks, refetch_bars=refetch_bars,
         )
 
-        proc = QProcess(self)
+        proc = (self._qprocess_factory or QProcess)(self)
         proc.setProcessChannelMode(QProcess.SeparateChannels)
         proc.readyReadStandardOutput.connect(
             self._on_backfill_stdout,
@@ -1819,7 +1852,11 @@ class EtlStatusView(QWidget):
                 + (f" Failed stage: {failed_stage}"
                    if failed_stage else "")
             )
-            BackfillFailureDialog(
+            _BackfillFailureDialog = (
+                self._backfill_failure_dialog_cls
+                or BackfillFailureDialog
+            )
+            _BackfillFailureDialog(
                 exit_code=exit_code,
                 failed_stage=failed_stage,
                 error_message=error_msg,
@@ -1852,7 +1889,7 @@ class EtlStatusView(QWidget):
             "cycle", "--exchange", exchange,
         ]
 
-        proc = QProcess(self)
+        proc = (self._qprocess_factory or QProcess)(self)
         proc.setProcessChannelMode(QProcess.SeparateChannels)
         proc.readyReadStandardOutput.connect(
             self._on_intraday_stdout,
@@ -2011,10 +2048,13 @@ class EtlStatusView(QWidget):
                 + (f" Failed stage: {failed_internal}"
                    if failed_internal else "")
             )
-            from .widgets.backfill_failure_dialog import (
-                BackfillFailureDialog,
-            )
-            BackfillFailureDialog(
+            if self._backfill_failure_dialog_cls is not None:
+                _BackfillFailureDialog = self._backfill_failure_dialog_cls
+            else:
+                from .widgets.backfill_failure_dialog import (
+                    BackfillFailureDialog as _BackfillFailureDialog,
+                )
+            _BackfillFailureDialog(
                 exit_code=exit_code,
                 failed_stage=failed_internal,
                 error_message=error_msg,
