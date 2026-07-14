@@ -21,12 +21,12 @@ from __future__ import annotations
 import os
 import sys
 from datetime import UTC, date, datetime
-from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from trip_ema.app_context import AppContext
 from trip_ema.backfill import BackfillResult
 from trip_ema.etl.cli import cmd_backfill
 from trip_ema.persistence import transaction
@@ -107,9 +107,17 @@ def _make_result(**overrides) -> BackfillResult:
 
 
 class _MockConfig:
-    """Minimal Config stand-in. The CLI passes it to create_engine_from_config
-    (we monkeypatch that) and to the pipeline (we monkeypatch backfill)."""
+    """Minimal Config stand-in. cmd_backfill only passes it through."""
     pass
+
+
+def _ctx(db_engine, config=None) -> AppContext:
+    """The command's collaborators, handed to it.
+
+    This replaces patching `trip_ema.etl.cli.create_engine_from_config` sixteen
+    times over. The engine was never really a global — it just had nowhere else
+    to live, because the command built its own."""
+    return AppContext(config=config or _MockConfig(), db_engine=db_engine)
 
 
 # ============================================================
@@ -119,16 +127,12 @@ class _MockConfig:
 class TestReleaseLockCleanup:
 
     def test_release_lock_alone_no_active_rows(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
         """--release-lock with no other args + no orphan rows →
         exit 0 with informative output."""
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
         rc = cmd_backfill(
-            _make_args(release_lock=True), _MockConfig(),
+            _make_args(release_lock=True), _ctx(db_engine),
         )
         assert rc == 0
         out = capsys.readouterr().out
@@ -137,7 +141,7 @@ class TestReleaseLockCleanup:
         assert "--date_from" in out
 
     def test_release_lock_alone_clears_orphan(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
         """--release-lock with no other args + 1 orphan row →
         clears it, exits 0."""
@@ -150,12 +154,8 @@ class TestReleaseLockCleanup:
                 ticker_scope="ALL",
             )
 
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
         rc = cmd_backfill(
-            _make_args(release_lock=True), _MockConfig(),
+            _make_args(release_lock=True), _ctx(db_engine),
         )
         assert rc == 0
         out = capsys.readouterr().out
@@ -173,43 +173,31 @@ class TestReleaseLockCleanup:
 class TestDateFromRequired:
 
     def test_no_date_from_no_release_lock_errors(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
-        rc = cmd_backfill(_make_args(), _MockConfig())
+        rc = cmd_backfill(_make_args(), _ctx(db_engine))
         assert rc == 2
         err = capsys.readouterr().err
         assert "--date_from is required" in err
 
     def test_invalid_date_from_errors(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
         rc = cmd_backfill(
-            _make_args(date_from="not-a-date"), _MockConfig(),
+            _make_args(date_from="not-a-date"), _ctx(db_engine),
         )
         assert rc == 2
         err = capsys.readouterr().err
         assert "YYYY-MM-DD" in err
 
     def test_invalid_date_to_errors(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
         rc = cmd_backfill(
             _make_args(
                 date_from="2024-06-03", date_to="bogus",
             ),
-            _MockConfig(),
+            _ctx(db_engine),
         )
         assert rc == 2
         err = capsys.readouterr().err
@@ -223,7 +211,7 @@ class TestDateFromRequired:
 class TestSymbolResolution:
 
     def test_comma_separated_stocks_resolved(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
         _seed_ticker(db_engine, ticker_id=10, symbol="ABC")
         _seed_ticker(db_engine, ticker_id=20, symbol="XYZ")
@@ -235,29 +223,19 @@ class TestSymbolResolution:
             return _make_result(
                 ticker_scope_size=2, ticker_scope_label="10,20",
             )
-
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
-        monkeypatch.setattr("trip_ema.backfill.backfill", _spy_backfill)
-        monkeypatch.setattr(
-            "trip_ema.backfill.backfill", _spy_backfill,
-            raising=False,
-        )
 
         rc = cmd_backfill(
             _make_args(
                 date_from="2024-06-03",
                 stocks=["ABC,XYZ"],
             ),
-            _MockConfig(),
+            _ctx(db_engine), backfill_fn=_spy_backfill,
         )
         assert rc == 0
         assert captured_stocks == [[10, 20]]
 
     def test_space_separated_stocks_resolved(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
         _seed_ticker(db_engine, ticker_id=10, symbol="ABC")
         _seed_ticker(db_engine, ticker_id=20, symbol="XYZ")
@@ -269,15 +247,6 @@ class TestSymbolResolution:
             return _make_result(
                 ticker_scope_size=2, ticker_scope_label="10,20",
             )
-
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
-        monkeypatch.setattr(
-            "trip_ema.backfill.backfill", _spy_backfill,
-            raising=False,
-        )
 
         rc = cmd_backfill(
             _make_args(
@@ -285,13 +254,13 @@ class TestSymbolResolution:
                 # nargs='+' would produce a list of separate args
                 stocks=["ABC", "XYZ"],
             ),
-            _MockConfig(),
+            _ctx(db_engine), backfill_fn=_spy_backfill,
         )
         assert rc == 0
         assert captured_stocks == [[10, 20]]
 
     def test_mixed_comma_and_space(
-        self, db_engine, monkeypatch,
+        self, db_engine,
     ):
         """'--stocks A,B C' → 3 symbols A, B, C."""
         _seed_ticker(db_engine, ticker_id=10, symbol="A")
@@ -304,38 +273,26 @@ class TestSymbolResolution:
             captured.append(kwargs.get("stocks"))
             return _make_result(ticker_scope_size=3)
 
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
-        monkeypatch.setattr(
-            "trip_ema.backfill.backfill", _spy, raising=False,
-        )
-
         rc = cmd_backfill(
             _make_args(
                 date_from="2024-06-03",
                 stocks=["A,B", "C"],
             ),
-            _MockConfig(),
+            _ctx(db_engine), backfill_fn=_spy,
         )
         assert rc == 0
         assert captured == [[10, 20, 30]]
 
     def test_missing_symbol_errors(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
         _seed_ticker(db_engine, ticker_id=10, symbol="EXISTS")
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
         rc = cmd_backfill(
             _make_args(
                 date_from="2024-06-03",
                 stocks=["EXISTS,NOPE,ALSO_NOPE"],
             ),
-            _MockConfig(),
+            _ctx(db_engine),
         )
         assert rc == 2
         err = capsys.readouterr().err
@@ -344,25 +301,21 @@ class TestSymbolResolution:
         assert "ALSO_NOPE" in err
 
     def test_inactive_symbol_errors(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
         _seed_ticker(
             db_engine, ticker_id=10, symbol="INA", is_active=False,
         )
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
         rc = cmd_backfill(
             _make_args(date_from="2024-06-03", stocks=["INA"]),
-            _MockConfig(),
+            _ctx(db_engine),
         )
         assert rc == 2
         err = capsys.readouterr().err
         assert "INA" in err
 
     def test_symbol_uppercased(
-        self, db_engine, monkeypatch,
+        self, db_engine,
     ):
         """Lowercase input gets upper-cased before lookup."""
         _seed_ticker(db_engine, ticker_id=10, symbol="ABC")
@@ -372,19 +325,12 @@ class TestSymbolResolution:
             captured.append(kwargs.get("stocks"))
             return _make_result()
 
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
-        monkeypatch.setattr(
-            "trip_ema.backfill.backfill", _spy, raising=False,
-        )
         rc = cmd_backfill(
             _make_args(
                 date_from="2024-06-03",
                 stocks=["abc"],
             ),
-            _MockConfig(),
+            _ctx(db_engine), backfill_fn=_spy,
         )
         assert rc == 0
         assert captured == [[10]]
@@ -397,7 +343,7 @@ class TestSymbolResolution:
 class TestIntegrityErrorHandling:
 
     def test_concurrent_start_friendly_message(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
         _seed_ticker(db_engine, ticker_id=1, symbol="T1")
 
@@ -405,17 +351,9 @@ class TestIntegrityErrorHandling:
             # IntegrityError needs statement + params + orig
             raise IntegrityError("sim", {}, Exception("unique"))
 
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
-        monkeypatch.setattr(
-            "trip_ema.backfill.backfill", _raises, raising=False,
-        )
-
         rc = cmd_backfill(
             _make_args(date_from="2024-06-03"),
-            _MockConfig(),
+            _ctx(db_engine), backfill_fn=_raises,
         )
         assert rc == 1
         err = capsys.readouterr().err
@@ -430,45 +368,29 @@ class TestIntegrityErrorHandling:
 class TestSuccessfulRun:
 
     def test_returns_zero_on_success(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
         _seed_ticker(db_engine, ticker_id=1, symbol="T1")
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
-        monkeypatch.setattr(
-            "trip_ema.backfill.backfill",
-            lambda *a, **k: _make_result(),
-            raising=False,
-        )
+        _backfill_fn = lambda *a, **k: _make_result()
         rc = cmd_backfill(
             _make_args(date_from="2024-06-03"),
-            _MockConfig(),
+            _ctx(db_engine), backfill_fn=_backfill_fn,
         )
         assert rc == 0
         out = capsys.readouterr().out
         assert "backfill complete" in out
 
     def test_returns_one_on_failed_stage(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
         _seed_ticker(db_engine, ticker_id=1, symbol="T1")
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
-        monkeypatch.setattr(
-            "trip_ema.backfill.backfill",
-            lambda *a, **k: _make_result(
-                failed_stage="stage_iiv",
-                error_message="RuntimeError: sim",
-            ),
-            raising=False,
-        )
+        _backfill_fn = lambda *a, **k: _make_result(
+                            failed_stage="stage_iiv",
+                            error_message="RuntimeError: sim",
+                        )
         rc = cmd_backfill(
             _make_args(date_from="2024-06-03"),
-            _MockConfig(),
+            _ctx(db_engine), backfill_fn=_backfill_fn,
         )
         assert rc == 1
         out = capsys.readouterr().out
@@ -483,7 +405,7 @@ class TestSuccessfulRun:
 class TestFlagPropagation:
 
     def test_no_fetch_bars_passed_through(
-        self, db_engine, monkeypatch,
+        self, db_engine,
     ):
         _seed_ticker(db_engine, ticker_id=1, symbol="T1")
         captured = []
@@ -492,23 +414,16 @@ class TestFlagPropagation:
             captured.append(kwargs.get("refetch_bars"))
             return _make_result(refetch_bars=False)
 
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
-        monkeypatch.setattr(
-            "trip_ema.backfill.backfill", _spy, raising=False,
-        )
         cmd_backfill(
             _make_args(
                 date_from="2024-06-03", no_fetch_bars=True,
             ),
-            _MockConfig(),
+            _ctx(db_engine), backfill_fn=_spy,
         )
         assert captured == [False]
 
     def test_release_lock_with_date_from_continues(
-        self, db_engine, capsys, monkeypatch,
+        self, db_engine, capsys,
     ):
         """--release-lock + --date_from: clears orphan THEN runs
         the backfill."""
@@ -529,19 +444,11 @@ class TestFlagPropagation:
             backfill_called.append(True)
             return _make_result()
 
-        monkeypatch.setattr(
-            "trip_ema.etl.cli.create_engine_from_config",
-            lambda cfg: db_engine,
-        )
-        monkeypatch.setattr(
-            "trip_ema.backfill.backfill", _spy, raising=False,
-        )
-
         rc = cmd_backfill(
             _make_args(
                 date_from="2024-06-03", release_lock=True,
             ),
-            _MockConfig(),
+            _ctx(db_engine), backfill_fn=_spy,
         )
         assert rc == 0
         out = capsys.readouterr().out

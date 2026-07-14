@@ -8,39 +8,27 @@ with a compute_runs row lifecycle. Tests verify:
   - failure paths set failed_stage + error_message + return 1
   - notify stage skipped cleanly when brevo not configured
 
-All external dependencies (DB engine, MarketHoursService, the
-three stage functions, ComputeRunsRepository) are monkeypatched.
+The engine and the three stage functions are INJECTED: cmd_cycle takes an
+AppContext and keyword-only fetch_fn / recompute_fn / notify_fn. MarketHoursService,
+ComputeRunsRepository and `transaction` are still patched — those are repository
+seams and belong to a later phase.
 
-NOTE on monkeypatching: `trip_ema.orchestrator.__init__.py`
-re-exports `recompute_market` and `notify_subscribers` function
-names, which shadow the submodules at the package-attribute
-level. pytest's `monkeypatch.setattr("trip_ema.orchestrator.X.X",
-...)` does getattr traversal and fails because the path resolves
-to the function, not the module. Workaround: use
-`importlib.import_module()` to get module objects directly, then
-monkeypatch.setattr with the module object (not a string path).
+The importlib dance this module used to open with is gone with the stage
+patching that needed it: `trip_ema.orchestrator.__init__` re-exports the
+function names, which shadow the submodules, so a string-path monkeypatch
+resolved to the function rather than the module and failed. There is no path to
+resolve when you simply pass the function in.
 """
 from __future__ import annotations
 
-import importlib
 from datetime import datetime, UTC
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from trip_ema.etl import cli as cli_mod
+from trip_ema.app_context import AppContext
 from trip_ema.etl.cli import cmd_cycle
-
-# Module objects for monkeypatching (bypass the orchestrator
-# package-attribute shadow)
-recompute_mod = importlib.import_module(
-    "trip_ema.orchestrator.recompute_market",
-)
-notify_mod = importlib.import_module(
-    "trip_ema.orchestrator.notify_subscribers",
-)
-runner_mod = importlib.import_module("trip_ema.etl.runner")
 
 
 # ============================================================
@@ -56,14 +44,13 @@ def fake_config():
 
 
 @pytest.fixture
-def patched_engine(monkeypatch):
-    """Stub create_engine_from_config to return a MagicMock engine."""
+def ctx(fake_config):
+    """cmd_cycle's collaborators, handed to it. The engine was never a global —
+    the command just built its own, so a test had no way in except to patch the
+    factory."""
     engine = MagicMock()
     engine.dispose = MagicMock()
-    monkeypatch.setattr(
-        cli_mod, "create_engine_from_config", lambda c: engine,
-    )
-    return engine
+    return AppContext(config=fake_config, db_engine=engine)
 
 
 @pytest.fixture
@@ -135,11 +122,30 @@ def patched_transaction(monkeypatch):
     monkeypatch.setattr(p_mod, "transaction", fake_tx)
 
 
+class Stages:
+    """The three stage functions cmd_cycle runs, as collaborators rather than
+    module globals. `**stages.kwargs()` hands them to the command.
+
+    This is what the importlib dance at the top of this module was working
+    around: `trip_ema.orchestrator` re-exports the function names, which shadow
+    the submodules, so a string-path monkeypatch resolved to the function and
+    failed. Injection has no such problem — there is no path to resolve."""
+
+    def __init__(self, captured):
+        self.captured = captured
+
+    def kwargs(self, **overrides):
+        d = {
+            "fetch_fn": self.fetch,
+            "recompute_fn": self.recompute,
+            "notify_fn": self.notify,
+        }
+        d.update(overrides)
+        return d
+
+
 @pytest.fixture
-def patched_stages(monkeypatch):
-    """Patch _run_fetch_pass + recompute_market + notify_subscribers
-    via module-object setattr (avoids the orchestrator-package shadow
-    issue)."""
+def stages():
     captured = {
         "fetch_kwargs": None,
         "recompute_kwargs": None,
@@ -174,14 +180,9 @@ def patched_stages(monkeypatch):
             cb("notify", "running")
             cb("notify", "done")
 
-    monkeypatch.setattr(runner_mod, "_run_fetch_pass", fake_fetch)
-    monkeypatch.setattr(
-        recompute_mod, "recompute_market", fake_recompute,
-    )
-    monkeypatch.setattr(
-        notify_mod, "notify_subscribers", fake_notify,
-    )
-    return captured
+    st = Stages(captured)
+    st.fetch, st.recompute, st.notify = fake_fetch, fake_recompute, fake_notify
+    return st
 
 
 # ============================================================
@@ -191,35 +192,35 @@ def patched_stages(monkeypatch):
 class TestKindDetermination:
 
     def test_market_open_yields_intraday_kind(
-        self, fake_config, patched_engine,
+        self, fake_config, ctx,
         patched_market_hours, patched_compute_runs,
-        patched_transaction, patched_stages, capsys,
+        patched_transaction, stages, capsys,
     ):
         patched_market_hours["is_open"] = True
         args = SimpleNamespace(exchange="NSE")
-        rc = cmd_cycle(args, fake_config)
+        rc = cmd_cycle(args, ctx, **stages.kwargs())
         assert rc == 0
         assert patched_compute_runs["start"]["kind"] == "intraday"
 
     def test_market_closed_yields_eod_kind(
-        self, fake_config, patched_engine,
+        self, fake_config, ctx,
         patched_market_hours, patched_compute_runs,
-        patched_transaction, patched_stages, capsys,
+        patched_transaction, stages, capsys,
     ):
         patched_market_hours["is_open"] = False
         args = SimpleNamespace(exchange="NSE")
-        rc = cmd_cycle(args, fake_config)
+        rc = cmd_cycle(args, ctx, **stages.kwargs())
         assert rc == 0
         assert patched_compute_runs["start"]["kind"] == "eod"
 
     def test_unknown_exchange_returns_2(
-        self, fake_config, patched_engine,
+        self, fake_config, ctx,
         patched_market_hours, patched_compute_runs,
-        patched_transaction, patched_stages, capsys,
+        patched_transaction, stages, capsys,
     ):
         patched_market_hours["raise_keyerror"] = True
         args = SimpleNamespace(exchange="MARS")
-        rc = cmd_cycle(args, fake_config)
+        rc = cmd_cycle(args, ctx, **stages.kwargs())
         assert rc == 2
         assert patched_compute_runs["start"] is None
 
@@ -227,40 +228,32 @@ class TestKindDetermination:
 class TestComputeRunsLifecycle:
 
     def test_finish_called_with_run_id(
-        self, fake_config, patched_engine,
+        self, fake_config, ctx,
         patched_market_hours, patched_compute_runs,
-        patched_transaction, patched_stages, capsys,
+        patched_transaction, stages, capsys,
     ):
         cmd_cycle(
-            SimpleNamespace(exchange="NSE"), fake_config,
+            SimpleNamespace(exchange="NSE"), ctx, **stages.kwargs(),
         )
         assert patched_compute_runs["finish"] is not None
         assert patched_compute_runs["finish"]["run_id"] == 9999
 
     def test_finish_called_even_on_stage_failure(
-        self, fake_config, patched_engine,
+        self, fake_config, ctx,
         patched_market_hours, patched_compute_runs,
-        patched_transaction, monkeypatch, capsys,
+        patched_transaction, capsys,
     ):
         def boom_fetch(*a, **k):
             raise RuntimeError("yfinance dead")
-        monkeypatch.setattr(
-            runner_mod, "_run_fetch_pass", boom_fetch,
-        )
-        monkeypatch.setattr(
-            recompute_mod, "recompute_market",
-            lambda *a, **k: SimpleNamespace(
-                stage_errors=[], stock_state_succeeded=0,
-                stock_state_failed=0, stock_state_skipped=0,
-            ),
-        )
-        monkeypatch.setattr(
-            notify_mod, "notify_subscribers",
-            lambda *a, **k: None,
-        )
+        _fetch_fn = boom_fetch
+        _recompute_fn = lambda *a, **k: SimpleNamespace(
+                            stage_errors=[], stock_state_succeeded=0,
+                            stock_state_failed=0, stock_state_skipped=0,
+                        )
+        _notify_fn = lambda *a, **k: None
 
         rc = cmd_cycle(
-            SimpleNamespace(exchange="NSE"), fake_config,
+            SimpleNamespace(exchange="NSE"), ctx, fetch_fn=_fetch_fn, recompute_fn=_recompute_fn, notify_fn=_notify_fn,
         )
         assert rc == 1
         assert patched_compute_runs["finish"] is not None
@@ -270,30 +263,21 @@ class TestComputeRunsLifecycle:
         )
 
     def test_recompute_stage_error_sets_failed_stage(
-        self, fake_config, patched_engine,
+        self, fake_config, ctx,
         patched_market_hours, patched_compute_runs,
-        patched_transaction, monkeypatch, capsys,
+        patched_transaction, capsys,
     ):
-        monkeypatch.setattr(
-            runner_mod, "_run_fetch_pass",
-            lambda *a, **k: 0,
-        )
-        monkeypatch.setattr(
-            recompute_mod, "recompute_market",
-            lambda *a, **k: SimpleNamespace(
-                stage_errors=[("iiv", "IIV exploded")],
-                stock_state_succeeded=10,
-                stock_state_failed=0,
-                stock_state_skipped=0,
-            ),
-        )
-        monkeypatch.setattr(
-            notify_mod, "notify_subscribers",
-            lambda *a, **k: None,
-        )
+        _fetch_fn = lambda *a, **k: 0
+        _recompute_fn = lambda *a, **k: SimpleNamespace(
+                            stage_errors=[("iiv", "IIV exploded")],
+                            stock_state_succeeded=10,
+                            stock_state_failed=0,
+                            stock_state_skipped=0,
+                        )
+        _notify_fn = lambda *a, **k: None
 
         rc = cmd_cycle(
-            SimpleNamespace(exchange="NSE"), fake_config,
+            SimpleNamespace(exchange="NSE"), ctx, fetch_fn=_fetch_fn, recompute_fn=_recompute_fn, notify_fn=_notify_fn,
         )
         assert rc == 1
         finish = patched_compute_runs["finish"]
@@ -304,12 +288,12 @@ class TestComputeRunsLifecycle:
 class TestStdoutProgress:
 
     def test_progress_cb_writes_stage_markers_to_stdout(
-        self, fake_config, patched_engine,
+        self, fake_config, ctx,
         patched_market_hours, patched_compute_runs,
-        patched_transaction, patched_stages, capsys,
+        patched_transaction, stages, capsys,
     ):
         cmd_cycle(
-            SimpleNamespace(exchange="NSE"), fake_config,
+            SimpleNamespace(exchange="NSE"), ctx, **stages.kwargs(),
         )
         out = capsys.readouterr().out
         assert "[fetch_bars] running" in out
@@ -318,29 +302,20 @@ class TestStdoutProgress:
         assert "[stock_state] done" in out
 
     def test_failure_summary_emitted_to_stderr(
-        self, fake_config, patched_engine,
+        self, fake_config, ctx,
         patched_market_hours, patched_compute_runs,
-        patched_transaction, monkeypatch, capsys,
+        patched_transaction, capsys,
     ):
-        monkeypatch.setattr(
-            runner_mod, "_run_fetch_pass",
-            lambda *a, **k: 0,
-        )
-        monkeypatch.setattr(
-            recompute_mod, "recompute_market",
-            lambda *a, **k: SimpleNamespace(
-                stage_errors=[("derive", "no signals")],
-                stock_state_succeeded=0,
-                stock_state_failed=0,
-                stock_state_skipped=0,
-            ),
-        )
-        monkeypatch.setattr(
-            notify_mod, "notify_subscribers",
-            lambda *a, **k: None,
-        )
+        _fetch_fn = lambda *a, **k: 0
+        _recompute_fn = lambda *a, **k: SimpleNamespace(
+                            stage_errors=[("derive", "no signals")],
+                            stock_state_succeeded=0,
+                            stock_state_failed=0,
+                            stock_state_skipped=0,
+                        )
+        _notify_fn = lambda *a, **k: None
         rc = cmd_cycle(
-            SimpleNamespace(exchange="NSE"), fake_config,
+            SimpleNamespace(exchange="NSE"), ctx, fetch_fn=_fetch_fn, recompute_fn=_recompute_fn, notify_fn=_notify_fn,
         )
         assert rc == 1
         err = capsys.readouterr().err
@@ -351,22 +326,22 @@ class TestStdoutProgress:
 class TestNotifyConfig:
 
     def test_no_brevo_config_skips_notify(
-        self, fake_config, patched_engine,
+        self, fake_config, ctx,
         patched_market_hours, patched_compute_runs,
-        patched_transaction, patched_stages, capsys,
+        patched_transaction, stages, capsys,
     ):
         rc = cmd_cycle(
-            SimpleNamespace(exchange="NSE"), fake_config,
+            SimpleNamespace(exchange="NSE"), ctx, **stages.kwargs(),
         )
         assert rc == 0
-        assert patched_stages["notify_kwargs"] is None
+        assert stages.captured["notify_kwargs"] is None
         out = capsys.readouterr().out
         assert "notify" in out
 
     def test_brevo_config_present_invokes_notify(
-        self, fake_config, patched_engine,
+        self, fake_config, ctx,
         patched_market_hours, patched_compute_runs,
-        patched_transaction, patched_stages, monkeypatch, capsys,
+        patched_transaction, stages, monkeypatch, capsys,
     ):
         import trip_ema.config.brevo_secrets as brevo_mod
 
@@ -381,9 +356,9 @@ class TestNotifyConfig:
         )
 
         cmd_cycle(
-            SimpleNamespace(exchange="NSE"), fake_config,
+            SimpleNamespace(exchange="NSE"), ctx, **stages.kwargs(),
         )
-        notify = patched_stages["notify_kwargs"]
+        notify = stages.captured["notify_kwargs"]
         assert notify is not None
         assert notify["brevo_api_key"] == "xkeysib-test-key"
         assert notify["brevo_from_address"] == "from@example.com"

@@ -15,10 +15,10 @@ from collections.abc import Callable
 
 from sqlalchemy import text
 
+from ..app_context import AppContext
 from ..config import Config
 from ..etl.exchanges import validate_exchange
 from ..persistence import transaction
-from ..persistence.connection import create_engine_from_config
 from ..persistence.fundamentals_repo import (
     FundamentalsRunRepository,
     IndustryOverrideRepository,
@@ -37,265 +37,259 @@ logger = logging.getLogger(__name__)
 # ---------- refresh-industry ---------- #
 
 
-def cmd_refresh_industry(args, config: Config) -> int:
+def cmd_refresh_industry(args, ctx: AppContext, *, refresh_fn=None) -> int:
+    config = ctx.config
+    db_engine = ctx.db_engine
+    if refresh_fn is None:
+        refresh_fn = run_industry_refresh
     validate_exchange(args.exchange, config)
-    db_engine = create_engine_from_config(config)
-    try:
-        run_id = run_industry_refresh(
-            db_engine,
-            args.exchange,
-            resume_run_id=args.resume,
-            force=args.force,
-        )
-        # Read back the run row to print a summary.
-        with db_engine.connect() as conn:
-            r = FundamentalsRunRepository(conn).get(run_id)
-        if r is None:
-            print(f"run_id={run_id} (no row found?)", file=sys.stderr)
-            return 1
-        print(
-            f"run_id={r.run_id} status={r.status} "
-            f"succeeded={r.succeeded} failed={r.failed} skipped={r.skipped}"
-        )
-        if r.status == "SUCCESS":
-            return 0
-        if r.status == "PARTIAL":
-            return 1
-        return 2
-    finally:
-        db_engine.dispose()
+    run_id = refresh_fn(
+        db_engine,
+        args.exchange,
+        resume_run_id=args.resume,
+        force=args.force,
+    )
+    # Read back the run row to print a summary.
+    with db_engine.connect() as conn:
+        r = FundamentalsRunRepository(conn).get(run_id)
+    if r is None:
+        print(f"run_id={run_id} (no row found?)", file=sys.stderr)
+        return 1
+    print(
+        f"run_id={r.run_id} status={r.status} "
+        f"succeeded={r.succeeded} failed={r.failed} skipped={r.skipped}"
+    )
+    if r.status == "SUCCESS":
+        return 0
+    if r.status == "PARTIAL":
+        return 1
+    return 2
 
 
 # ---------- set-industry-override ---------- #
 
 
-def cmd_set_industry_override(args, config: Config) -> int:
+def cmd_set_industry_override(args, ctx: AppContext) -> int:
+    config = ctx.config
+    db_engine = ctx.db_engine
     validate_exchange(args.exchange, config)
-    db_engine = create_engine_from_config(config)
-    try:
-        # Look up the ticker_id.
-        with db_engine.connect() as conn:
-            row = conn.execute(text("""
-                SELECT ticker_id FROM tickers
-                WHERE exchange = :ex AND symbol = :sym
-                  AND is_active = TRUE
-            """), {"ex": args.exchange, "sym": args.symbol}).fetchone()
-        if row is None:
-            print(
-                f"error: ticker {args.exchange}:{args.symbol} not found or inactive",
-                file=sys.stderr,
-            )
-            return 2
-        ticker_id = int(row[0])
-
-        # Sector is optional (the user may know industry but not sector).
-        # If not provided, default to a sensible placeholder.
-        sector = args.sector or "Unclassified"
-
-        with transaction(db_engine) as conn:
-            IndustryOverrideRepository(conn).upsert(
-                ticker_id,
-                sector=sector,
-                industry=args.industry,
-                note=args.note,
-                set_by=args.set_by,
-            )
+    # Look up the ticker_id.
+    with db_engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT ticker_id FROM tickers
+            WHERE exchange = :ex AND symbol = :sym
+              AND is_active = TRUE
+        """), {"ex": args.exchange, "sym": args.symbol}).fetchone()
+    if row is None:
         print(
-            f"override set: ticker_id={ticker_id} "
-            f"{args.exchange}:{args.symbol} → "
-            f"sector={sector!r} industry={args.industry!r}"
+            f"error: ticker {args.exchange}:{args.symbol} not found or inactive",
+            file=sys.stderr,
         )
-        return 0
-    finally:
-        db_engine.dispose()
+        return 2
+    ticker_id = int(row[0])
+
+    # Sector is optional (the user may know industry but not sector).
+    # If not provided, default to a sensible placeholder.
+    sector = args.sector or "Unclassified"
+
+    with transaction(db_engine) as conn:
+        IndustryOverrideRepository(conn).upsert(
+            ticker_id,
+            sector=sector,
+            industry=args.industry,
+            note=args.note,
+            set_by=args.set_by,
+        )
+    print(
+        f"override set: ticker_id={ticker_id} "
+        f"{args.exchange}:{args.symbol} → "
+        f"sector={sector!r} industry={args.industry!r}"
+    )
+    return 0
 
 
 # ---------- delete-industry-override ---------- #
 
 
-def cmd_delete_industry_override(args, config: Config) -> int:
+def cmd_delete_industry_override(args, ctx: AppContext) -> int:
+    config = ctx.config
+    db_engine = ctx.db_engine
     validate_exchange(args.exchange, config)
-    db_engine = create_engine_from_config(config)
-    try:
-        with db_engine.connect() as conn:
-            row = conn.execute(text("""
-                SELECT ticker_id FROM tickers
-                WHERE exchange = :ex AND symbol = :sym
-            """), {"ex": args.exchange, "sym": args.symbol}).fetchone()
-        if row is None:
-            print(
-                f"error: ticker {args.exchange}:{args.symbol} not found",
-                file=sys.stderr,
-            )
-            return 2
-        ticker_id = int(row[0])
-        with transaction(db_engine) as conn:
-            deleted = IndustryOverrideRepository(conn).delete(ticker_id)
-        if deleted:
-            print(f"override removed for ticker_id={ticker_id}")
-            return 0
+    with db_engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT ticker_id FROM tickers
+            WHERE exchange = :ex AND symbol = :sym
+        """), {"ex": args.exchange, "sym": args.symbol}).fetchone()
+    if row is None:
         print(
-            f"no override existed for {args.exchange}:{args.symbol}",
+            f"error: ticker {args.exchange}:{args.symbol} not found",
             file=sys.stderr,
         )
-        return 1
-    finally:
-        db_engine.dispose()
+        return 2
+    ticker_id = int(row[0])
+    with transaction(db_engine) as conn:
+        deleted = IndustryOverrideRepository(conn).delete(ticker_id)
+    if deleted:
+        print(f"override removed for ticker_id={ticker_id}")
+        return 0
+    print(
+        f"no override existed for {args.exchange}:{args.symbol}",
+        file=sys.stderr,
+    )
+    return 1
 
 
 # ---------- fundamentals-status ---------- #
 
 
-def cmd_fundamentals_status(args, config: Config) -> int:
-    db_engine = create_engine_from_config(config)
-    try:
-        # Coverage section: classified counts per (exchange, instrument_type).
-        # EQ and ETF have different shapes — equities aim for ~85%+ via
-        # yfinance; ETFs are 100% deterministically bucketed once a
-        # refresh has run.
-        with db_engine.connect() as conn:
-            counts = InstrumentIndustryRepository(conn).coverage_counts_by_type()
-        if counts:
-            print("Industry classification coverage (by instrument type):")
-            print(
-                f"  {'EXCHANGE':<10} {'TYPE':<6} {'TOTAL':>8} "
-                f"{'CLASSIFIED':>12} {'%':>6}"
-            )
-            for ex, itype, total, classified in counts:
-                pct = (classified * 100.0 / total) if total else 0.0
-                print(
-                    f"  {ex:<10} {itype:<6} {total:>8} "
-                    f"{classified:>12} {pct:>5.1f}%"
-                )
-        else:
-            print("No active tickers / no classification data yet.")
-
-        # Shares-outstanding coverage section (Phase 2). Same shape
-        # as industry coverage. with_shares counts DISTINCT tickers
-        # that have at least one non-NULL shares_outstanding row;
-        # the time-series shape means one ticker can have many rows.
-        with db_engine.connect() as conn:
-            shares_counts = InstrumentSharesRepository(conn).coverage_counts_by_type()
-        if any(w > 0 for _, _, _, w in shares_counts):
-            print()
-            print("Shares-outstanding coverage (by instrument type):")
-            print(
-                f"  {'EXCHANGE':<10} {'TYPE':<6} {'TOTAL':>8} "
-                f"{'WITH_SHARES':>12} {'%':>6}"
-            )
-            for ex, itype, total, with_shares in shares_counts:
-                pct = (with_shares * 100.0 / total) if total else 0.0
-                print(
-                    f"  {ex:<10} {itype:<6} {total:>8} "
-                    f"{with_shares:>12} {pct:>5.1f}%"
-                )
-
-        # Financials coverage section (Phase 3). Same shape as shares
-        # but with TWO data columns (revenue, ebitda) because the
-        # important quality signal is the revenue/EBITDA gap — yfinance
-        # often has revenue but not EBITDA for Indian mid/small caps.
-        from ..persistence.fundamentals_repo import QuarterlyFinancialsRepository
-        with db_engine.connect() as conn:
-            fin_counts = QuarterlyFinancialsRepository(conn).coverage_counts_by_type()
-        if any(w_r > 0 or w_e > 0 for _, _, _, w_r, w_e in fin_counts):
-            print()
-            print("Quarterly financials coverage (by instrument type):")
-            print(
-                f"  {'EXCHANGE':<10} {'TYPE':<6} {'TOTAL':>8} "
-                f"{'W/REVENUE':>10} {'W/EBITDA':>10}"
-            )
-            for ex, itype, total, with_rev, with_ebt in fin_counts:
-                print(
-                    f"  {ex:<10} {itype:<6} {total:>8} "
-                    f"{with_rev:>10} {with_ebt:>10}"
-                )
-
-        # Daily market cap coverage section (Phase 4A). Per-date
-        # breakdown of COMPUTED vs YFINANCE_HIST_MCAP rows. We
-        # show only the most recent ~10 dates to keep the output
-        # readable; the operator can query the table directly for
-        # full history.
-        from ..persistence.fundamentals_repo import DailyMarketCapRepository
-        with db_engine.connect() as conn:
-            mc_counts = DailyMarketCapRepository(conn).coverage_counts_by_date()
-        if mc_counts:
-            print()
-            print("Daily market cap coverage (most recent 10 dates):")
-            print(
-                f"  {'DATE':<12} {'TOTAL':>8} "
-                f"{'COMPUTED':>10} {'HIST_MCAP':>10}"
-            )
-            for td, total, computed, hist in mc_counts[:10]:
-                print(
-                    f"  {td!s:<12} {total:>8} "
-                    f"{computed:>10} {hist:>10}"
-                )
-
-        # Industry indices section (Phase 4B-3). Shows per-index
-        # coverage: name, sector, status, base date, latest value
-        # date, value row count. Only printed if any indices exist.
-        # === STEP 14A-FIXUP3: ISR usage stripped from cmd_fundamentals_status ===
-        from ..persistence.fundamentals_repo import (
-            IndustryIndexRepository,
-            IndustryIndexValueRepository,
+def cmd_fundamentals_status(args, ctx: AppContext) -> int:
+    config = ctx.config
+    db_engine = ctx.db_engine
+    # Coverage section: classified counts per (exchange, instrument_type).
+    # EQ and ETF have different shapes — equities aim for ~85%+ via
+    # yfinance; ETFs are 100% deterministically bucketed once a
+    # refresh has run.
+    with db_engine.connect() as conn:
+        counts = InstrumentIndustryRepository(conn).coverage_counts_by_type()
+    if counts:
+        print("Industry classification coverage (by instrument type):")
+        print(
+            f"  {'EXCHANGE':<10} {'TYPE':<6} {'TOTAL':>8} "
+            f"{'CLASSIFIED':>12} {'%':>6}"
         )
-        with db_engine.connect() as conn:
-            indices = IndustryIndexRepository(conn).list_all()
-            value_summary = IndustryIndexValueRepository(conn).coverage_summary()
-        if indices:
-            # Build name → (rows, earliest, latest) from the summary
-            # so we can join in-memory.
-            value_by_name = {
-                name: (rows, earliest, latest)
-                for name, rows, earliest, latest in value_summary
-            }
-            print()
-            print(f"Industry indices ({len(indices)} total):")
+        for ex, itype, total, classified in counts:
+            pct = (classified * 100.0 / total) if total else 0.0
             print(
-                f"  {'INDUSTRY':<42} {'STATUS':<8} "
-                f"{'BASE DATE':<12} {'LATEST':<12} {'ROWS':>5}"
+                f"  {ex:<10} {itype:<6} {total:>8} "
+                f"{classified:>12} {pct:>5.1f}%"
             )
-            for idx in indices:
-                rows, earliest, latest = value_by_name.get(
-                    idx.industry_name, (0, None, None)
-                )
-                latest_s = str(latest) if latest else "(none)"
-                print(
-                    f"  {idx.industry_name[:42]:<42} {idx.status:<8} "
-                    f"{idx.base_date!s:<12} {latest_s:<12} {rows:>5}"
-                )
+    else:
+        print("No active tickers / no classification data yet.")
 
-        # Recent runs section.
-        with db_engine.connect() as conn:
-            runs = FundamentalsRunRepository(conn).list_recent(
-                phase=args.phase, exchange=args.exchange, limit=args.limit,
-            )
-        if runs:
-            print()
-            print(f"Recent fundamentals_run rows (most recent first, limit {args.limit}):")
+    # Shares-outstanding coverage section (Phase 2). Same shape
+    # as industry coverage. with_shares counts DISTINCT tickers
+    # that have at least one non-NULL shares_outstanding row;
+    # the time-series shape means one ticker can have many rows.
+    with db_engine.connect() as conn:
+        shares_counts = InstrumentSharesRepository(conn).coverage_counts_by_type()
+    if any(w > 0 for _, _, _, w in shares_counts):
+        print()
+        print("Shares-outstanding coverage (by instrument type):")
+        print(
+            f"  {'EXCHANGE':<10} {'TYPE':<6} {'TOTAL':>8} "
+            f"{'WITH_SHARES':>12} {'%':>6}"
+        )
+        for ex, itype, total, with_shares in shares_counts:
+            pct = (with_shares * 100.0 / total) if total else 0.0
             print(
-                f"  {'RUN_ID':>7} {'PHASE':<10} {'EX':<5} {'STATUS':<8} "
-                f"{'SUCC':>6} {'FAIL':>5} {'SKIP':>5} {'STARTED':<20}"
+                f"  {ex:<10} {itype:<6} {total:>8} "
+                f"{with_shares:>12} {pct:>5.1f}%"
             )
-            for r in runs:
-                ex = r.exchange or "-"
-                started = r.started_at.strftime("%Y-%m-%d %H:%M:%S")
-                print(
-                    f"  {r.run_id:>7} {r.phase:<10} {ex:<5} {r.status:<8} "
-                    f"{r.succeeded:>6} {r.failed:>5} {r.skipped:>5} {started:<20}"
-                )
-        else:
-            print()
-            print("No fundamentals_run rows match the filter.")
-        return 0
-    finally:
-        db_engine.dispose()
+
+    # Financials coverage section (Phase 3). Same shape as shares
+    # but with TWO data columns (revenue, ebitda) because the
+    # important quality signal is the revenue/EBITDA gap — yfinance
+    # often has revenue but not EBITDA for Indian mid/small caps.
+    from ..persistence.fundamentals_repo import QuarterlyFinancialsRepository
+    with db_engine.connect() as conn:
+        fin_counts = QuarterlyFinancialsRepository(conn).coverage_counts_by_type()
+    if any(w_r > 0 or w_e > 0 for _, _, _, w_r, w_e in fin_counts):
+        print()
+        print("Quarterly financials coverage (by instrument type):")
+        print(
+            f"  {'EXCHANGE':<10} {'TYPE':<6} {'TOTAL':>8} "
+            f"{'W/REVENUE':>10} {'W/EBITDA':>10}"
+        )
+        for ex, itype, total, with_rev, with_ebt in fin_counts:
+            print(
+                f"  {ex:<10} {itype:<6} {total:>8} "
+                f"{with_rev:>10} {with_ebt:>10}"
+            )
+
+    # Daily market cap coverage section (Phase 4A). Per-date
+    # breakdown of COMPUTED vs YFINANCE_HIST_MCAP rows. We
+    # show only the most recent ~10 dates to keep the output
+    # readable; the operator can query the table directly for
+    # full history.
+    from ..persistence.fundamentals_repo import DailyMarketCapRepository
+    with db_engine.connect() as conn:
+        mc_counts = DailyMarketCapRepository(conn).coverage_counts_by_date()
+    if mc_counts:
+        print()
+        print("Daily market cap coverage (most recent 10 dates):")
+        print(
+            f"  {'DATE':<12} {'TOTAL':>8} "
+            f"{'COMPUTED':>10} {'HIST_MCAP':>10}"
+        )
+        for td, total, computed, hist in mc_counts[:10]:
+            print(
+                f"  {td!s:<12} {total:>8} "
+                f"{computed:>10} {hist:>10}"
+            )
+
+    # Industry indices section (Phase 4B-3). Shows per-index
+    # coverage: name, sector, status, base date, latest value
+    # date, value row count. Only printed if any indices exist.
+    # === STEP 14A-FIXUP3: ISR usage stripped from cmd_fundamentals_status ===
+    from ..persistence.fundamentals_repo import (
+        IndustryIndexRepository,
+        IndustryIndexValueRepository,
+    )
+    with db_engine.connect() as conn:
+        indices = IndustryIndexRepository(conn).list_all()
+        value_summary = IndustryIndexValueRepository(conn).coverage_summary()
+    if indices:
+        # Build name → (rows, earliest, latest) from the summary
+        # so we can join in-memory.
+        value_by_name = {
+            name: (rows, earliest, latest)
+            for name, rows, earliest, latest in value_summary
+        }
+        print()
+        print(f"Industry indices ({len(indices)} total):")
+        print(
+            f"  {'INDUSTRY':<42} {'STATUS':<8} "
+            f"{'BASE DATE':<12} {'LATEST':<12} {'ROWS':>5}"
+        )
+        for idx in indices:
+            rows, earliest, latest = value_by_name.get(
+                idx.industry_name, (0, None, None)
+            )
+            latest_s = str(latest) if latest else "(none)"
+            print(
+                f"  {idx.industry_name[:42]:<42} {idx.status:<8} "
+                f"{idx.base_date!s:<12} {latest_s:<12} {rows:>5}"
+            )
+
+    # Recent runs section.
+    with db_engine.connect() as conn:
+        runs = FundamentalsRunRepository(conn).list_recent(
+            phase=args.phase, exchange=args.exchange, limit=args.limit,
+        )
+    if runs:
+        print()
+        print(f"Recent fundamentals_run rows (most recent first, limit {args.limit}):")
+        print(
+            f"  {'RUN_ID':>7} {'PHASE':<10} {'EX':<5} {'STATUS':<8} "
+            f"{'SUCC':>6} {'FAIL':>5} {'SKIP':>5} {'STARTED':<20}"
+        )
+        for r in runs:
+            ex = r.exchange or "-"
+            started = r.started_at.strftime("%Y-%m-%d %H:%M:%S")
+            print(
+                f"  {r.run_id:>7} {r.phase:<10} {ex:<5} {r.status:<8} "
+                f"{r.succeeded:>6} {r.failed:>5} {r.skipped:>5} {started:<20}"
+            )
+    else:
+        print()
+        print("No fundamentals_run rows match the filter.")
+    return 0
 
 
 # ---------- refresh-shares (Phase 2) ---------- #
 
 
-def cmd_refresh_shares(args, config: Config) -> int:
+def cmd_refresh_shares(args, ctx: AppContext, *, refresh_fn=None) -> int:
     """Yfinance shares-outstanding refresh for an exchange.
 
     Mirrors cmd_refresh_industry — same exit-code conventions, same
@@ -307,37 +301,37 @@ def cmd_refresh_shares(args, config: Config) -> int:
     is the count of ETF units issued, not equity shares — meaningful
     for AUM analytics, harmless if you ignore it.
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from .runners import run_shares_refresh
+    if refresh_fn is None:
+        refresh_fn = run_shares_refresh
     validate_exchange(args.exchange, config)
-    db_engine = create_engine_from_config(config)
-    try:
-        run_id = run_shares_refresh(
-            db_engine,
-            args.exchange,
-            resume_run_id=args.resume,
-            force=args.force,
-        )
-        with db_engine.connect() as conn:
-            r = FundamentalsRunRepository(conn).get(run_id)
-        if r is None:
-            print(f"run_id={run_id} (no row found?)", file=sys.stderr)
-            return 1
-        print(
-            f"run_id={r.run_id} status={r.status} "
-            f"succeeded={r.succeeded} failed={r.failed}"
-        )
-        if r.status == "SUCCESS":
-            return 0
-        if r.status == "PARTIAL":
-            return 1
-        return 2
-    finally:
-        db_engine.dispose()
+    run_id = refresh_fn(
+        db_engine,
+        args.exchange,
+        resume_run_id=args.resume,
+        force=args.force,
+    )
+    with db_engine.connect() as conn:
+        r = FundamentalsRunRepository(conn).get(run_id)
+    if r is None:
+        print(f"run_id={run_id} (no row found?)", file=sys.stderr)
+        return 1
+    print(
+        f"run_id={r.run_id} status={r.status} "
+        f"succeeded={r.succeeded} failed={r.failed}"
+    )
+    if r.status == "SUCCESS":
+        return 0
+    if r.status == "PARTIAL":
+        return 1
+    return 2
 
 
 # ---------- ADDITION 1: cmd_backfill_shares ---------- #
 
-def cmd_backfill_shares(args, config):
+def cmd_backfill_shares(args, ctx: AppContext, *, backfill_fn=None):
     """Yfinance historical-shares-outstanding backfill for an exchange.
 
     Differs from refresh-shares: instead of inserting ONE row per
@@ -354,11 +348,14 @@ def cmd_backfill_shares(args, config):
     Resumable: a Ctrl-C closes the run as PARTIAL with a checkpoint;
     re-run with --resume RUN_ID to pick up where you left off.
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from .runners import run_shares_backfill
+    if backfill_fn is None:
+        backfill_fn = run_shares_backfill
     from datetime import date as _date
 
     validate_exchange(args.exchange, config)  # noqa: F821
-    db_engine = create_engine_from_config(config)  # noqa: F821
     try:
         start_date = _date.fromisoformat(args.start_date)
     except ValueError as e:
@@ -368,35 +365,32 @@ def cmd_backfill_shares(args, config):
         )
         return 2
 
-    try:
-        run_id = run_shares_backfill(
-            db_engine,
-            args.exchange,
-            start_date=start_date,
-            resume_run_id=args.resume,
-            force=args.force,
-        )
-        with db_engine.connect() as conn:
-            r = FundamentalsRunRepository(conn).get(run_id)  # noqa: F821
-        if r is None:
-            print(f"run_id={run_id} (no row found?)", file=sys.stderr)  # noqa: F821
-            return 1
-        print(
-            f"run_id={r.run_id} status={r.status} "
-            f"succeeded={r.succeeded} failed={r.failed}"
-        )
-        if r.status == "SUCCESS":
-            return 0
-        if r.status == "PARTIAL":
-            return 1
-        return 2
-    finally:
-        db_engine.dispose()
+    run_id = backfill_fn(
+        db_engine,
+        args.exchange,
+        start_date=start_date,
+        resume_run_id=args.resume,
+        force=args.force,
+    )
+    with db_engine.connect() as conn:
+        r = FundamentalsRunRepository(conn).get(run_id)  # noqa: F821
+    if r is None:
+        print(f"run_id={run_id} (no row found?)", file=sys.stderr)  # noqa: F821
+        return 1
+    print(
+        f"run_id={r.run_id} status={r.status} "
+        f"succeeded={r.succeeded} failed={r.failed}"
+    )
+    if r.status == "SUCCESS":
+        return 0
+    if r.status == "PARTIAL":
+        return 1
+    return 2
 
 # ---------- refresh-financials (Phase 3.A) ---------- #
 
 
-def cmd_refresh_financials(args, config: Config) -> int:
+def cmd_refresh_financials(args, ctx: AppContext, *, refresh_fn=None) -> int:
     """Yfinance quarterly-financials refresh for an exchange.
 
     Mirrors cmd_refresh_industry / cmd_refresh_shares — same exit-
@@ -404,13 +398,70 @@ def cmd_refresh_financials(args, config: Config) -> int:
     fundamentals_run audit trail. Per-ticker yfinance HTTP cost is
     the same as the others (~2s per ticker × 2300 tickers ≈ 60 min).
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from .runners import run_financials_refresh
+    if refresh_fn is None:
+        refresh_fn = run_financials_refresh
     validate_exchange(args.exchange, config)
-    db_engine = create_engine_from_config(config)
-    try:
-        run_id = run_financials_refresh(
-            db_engine,
-            args.exchange,
+    run_id = refresh_fn(
+        db_engine,
+        args.exchange,
+        resume_run_id=args.resume,
+        force=args.force,
+    )
+    with db_engine.connect() as conn:
+        r = FundamentalsRunRepository(conn).get(run_id)
+    if r is None:
+        print(f"run_id={run_id} (no row found?)", file=sys.stderr)
+        return 1
+    print(
+        f"run_id={r.run_id} status={r.status} "
+        f"succeeded={r.succeeded} failed={r.failed}"
+    )
+    if r.status == "SUCCESS":
+        return 0
+    if r.status == "PARTIAL":
+        return 1
+    return 2
+
+
+# ---------- compute-market-cap (Phase 4A) ---------- #
+
+
+def cmd_compute_market_cap(args, ctx: AppContext, *, compute_fn=None, backfill_fn=None) -> int:
+    """Two modes:
+      - Single-day compute (no --backfill-from): uses local
+        ohlcv_bars × instrument_shares JOIN to compute COMPUTED /
+        APPROX_TODAYS_SHARES rows for one trade_date. Cheap,
+        no yfinance HTTP.
+      - Backfill (--backfill-from given): walks the date range
+        via run_market_cap_backfill, hitting yfinance once per
+        ticker. ~60-90 min for 2300 NSE tickers depending on
+        rate-limit behavior.
+    """
+    config = ctx.config
+    db_engine = ctx.db_engine
+    from datetime import date as _date
+    from .market_cap_compute import compute_market_cap_for_date
+    if compute_fn is None:
+        compute_fn = compute_market_cap_for_date
+    from .runners import run_market_cap_backfill
+    if backfill_fn is None:
+        backfill_fn = run_market_cap_backfill
+
+    validate_exchange(args.exchange, config)
+    if args.backfill_from is not None:
+        # Backfill mode.
+        from_date = _date.fromisoformat(args.backfill_from)
+        to_date = (
+    _date.fromisoformat(args.backfill_to) if args.backfill_to
+    else market_today(args.exchange)
+)
+        run_id = backfill_fn(
+            db_engine, args.exchange,
+            from_date=from_date,
+            to_date=to_date,
             resume_run_id=args.resume,
             force=args.force,
         )
@@ -428,88 +479,33 @@ def cmd_refresh_financials(args, config: Config) -> int:
         if r.status == "PARTIAL":
             return 1
         return 2
-    finally:
-        db_engine.dispose()
 
-
-# ---------- compute-market-cap (Phase 4A) ---------- #
-
-
-def cmd_compute_market_cap(args, config: Config) -> int:
-    """Two modes:
-      - Single-day compute (no --backfill-from): uses local
-        ohlcv_bars × instrument_shares JOIN to compute COMPUTED /
-        APPROX_TODAYS_SHARES rows for one trade_date. Cheap,
-        no yfinance HTTP.
-      - Backfill (--backfill-from given): walks the date range
-        via run_market_cap_backfill, hitting yfinance once per
-        ticker. ~60-90 min for 2300 NSE tickers depending on
-        rate-limit behavior.
-    """
-    from datetime import date as _date
-    from .market_cap_compute import compute_market_cap_for_date
-    from .runners import run_market_cap_backfill
-
-    validate_exchange(args.exchange, config)
-    db_engine = create_engine_from_config(config)
-    try:
-        if args.backfill_from is not None:
-            # Backfill mode.
-            from_date = _date.fromisoformat(args.backfill_from)
-            to_date = (
-        _date.fromisoformat(args.backfill_to) if args.backfill_to
-        else market_today(args.exchange)
+    # Single-day mode.
+    trade_date = (
+    _date.fromisoformat(args.date) if args.date
+    else market_today(args.exchange)
+)
+    result = compute_fn(
+        db_engine, args.exchange, trade_date,
     )
-            run_id = run_market_cap_backfill(
-                db_engine, args.exchange,
-                from_date=from_date,
-                to_date=to_date,
-                resume_run_id=args.resume,
-                force=args.force,
-            )
-            with db_engine.connect() as conn:
-                r = FundamentalsRunRepository(conn).get(run_id)
-            if r is None:
-                print(f"run_id={run_id} (no row found?)", file=sys.stderr)
-                return 1
-            print(
-                f"run_id={r.run_id} status={r.status} "
-                f"succeeded={r.succeeded} failed={r.failed}"
-            )
-            if r.status == "SUCCESS":
-                return 0
-            if r.status == "PARTIAL":
-                return 1
-            return 2
-
-        # Single-day mode.
-        trade_date = (
-        _date.fromisoformat(args.date) if args.date
-        else market_today(args.exchange)
+    print(
+        f"date={result.trade_date} exchange={result.exchange} "
+        f"computed={result.succeeded_computed} "
+        f"approx={result.succeeded_approx} "
+        f"skipped_no_close={result.skipped_no_close} "
+        f"skipped_no_shares={result.skipped_no_shares}"
     )
-        result = compute_market_cap_for_date(
-            db_engine, args.exchange, trade_date,
-        )
-        print(
-            f"date={result.trade_date} exchange={result.exchange} "
-            f"computed={result.succeeded_computed} "
-            f"approx={result.succeeded_approx} "
-            f"skipped_no_close={result.skipped_no_close} "
-            f"skipped_no_shares={result.skipped_no_shares}"
-        )
-        # Exit code policy: 0 if at least one row was written;
-        # 1 if nothing was written (most likely cause: bars
-        # haven't been ingested for the date yet).
-        total_written = result.succeeded_computed + result.succeeded_approx
-        return 0 if total_written > 0 else 1
-    finally:
-        db_engine.dispose()
+    # Exit code policy: 0 if at least one row was written;
+    # 1 if nothing was written (most likely cause: bars
+    # haven't been ingested for the date yet).
+    total_written = result.succeeded_computed + result.succeeded_approx
+    return 0 if total_written > 0 else 1
 
 
 # ---------- build-industry-indices (Phase 4B-3) ---------- #
 
 
-def cmd_build_industry_indices(args, config: Config) -> int:
+def cmd_build_industry_indices(args, ctx: AppContext, *, build_fn=None) -> int:
     """Auto-discover qualifying industries and create indices for
     those with ≥ min_constituents active EQ tickers.
 
@@ -521,19 +517,19 @@ def cmd_build_industry_indices(args, config: Config) -> int:
     Reports a tabular summary of qualified / unqualified / indexed /
     failed industries.
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from .runners import run_industry_index_build
+    if build_fn is None:
+        build_fn = run_industry_index_build
 
     validate_exchange(args.exchange, config)
-    db_engine = create_engine_from_config(config)
-    try:
-        report = run_industry_index_build(
-            db_engine, args.exchange,
-            min_constituents=args.min_constituents,
-            n=args.n,
-            base_value=args.base_value,
-        )
-    finally:
-        db_engine.dispose()
+    report = build_fn(
+        db_engine, args.exchange,
+        min_constituents=args.min_constituents,
+        n=args.n,
+        base_value=args.base_value,
+    )
 
     # Print a tabular summary. The output is intentionally
     # operator-readable rather than machine-parseable — automation
@@ -573,7 +569,7 @@ def cmd_build_industry_indices(args, config: Config) -> int:
 # ---------- compute-index-values (Phase 4B-3) ---------- #
 
 
-def cmd_compute_index_values(args, config: Config) -> int:
+def cmd_compute_index_values(args, ctx: AppContext, *, populate_fn=None) -> int:
     """Backfill daily index values for one industry or all active
     industries.
 
@@ -587,8 +583,12 @@ def cmd_compute_index_values(args, config: Config) -> int:
     Date range defaults: from = max(index.base_date, --from);
     to = --to or today.
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from datetime import date as _date
     from .v1_runners import populate_industry_index_value_for_industry
+    if populate_fn is None:
+        populate_fn = populate_industry_index_value_for_industry
     from ..persistence.fundamentals_repo import IndustryIndexRepository
 
     if not args.industry and not args.all_active:
@@ -616,119 +616,115 @@ def cmd_compute_index_values(args, config: Config) -> int:
     # one-database-per-exchange is the same question.
     cli_to = _date.fromisoformat(args.to) if args.to else None
 
-    db_engine = create_engine_from_config(config)
-    try:
-        # Resolve the list of indices to process.
-        with db_engine.connect() as conn:
-            ir = IndustryIndexRepository(conn)
-            if args.industry:
-                idx = ir.get(args.industry)
-                if idx is None:
-                    print(
-                        f"error: industry {args.industry!r} is not indexed. "
-                        f"Run `build-industry-indices` first.",
-                        file=sys.stderr,
-                    )
-                    return 2
-                indices = [idx]
-            else:
-                indices = ir.list_active()
-                if not indices:
-                    print(
-                        "No active industry indices exist. Run "
-                        "`build-industry-indices` first.",
-                        file=sys.stderr,
-                    )
-                    return 1
-
-        # Resolve the default `--to` HERE, not when the engine opens.
-        #
-        # Both early returns above (unknown industry -> 2, no active indices -> 1)
-        # complete without ever needing a date, and cli_to is first used inside the
-        # loop below. Resolving it eagerly meant asking the database what exchange
-        # it is in order to compute a default for work we had already decided not
-        # to do — and on a database with no tickers that raises.
-        #
-        # compute-index-values has no --exchange (it takes --industry /
-        # --all-active), so the exchange comes from the database, which under
-        # one-database-per-exchange is the same question.
-        if cli_to is None:
-            cli_to = market_today(exchange_of_engine(db_engine))
-
-        total_indices = len(indices)
-        # Counters across the loop. Resume is per-call (single
-        # --resume RUN_ID makes sense only with --industry).
-        successes = 0
-        partials = 0
-        failures = 0
-
-        for i, idx in enumerate(indices, start=1):
-            # from_date is the later of CLI --from and the index's
-            # own base_date. We can't compute values before
-            # base_date anyway.
-            from_date = (
-                max(cli_from, idx.base_date) if cli_from else idx.base_date
-            )
-            if from_date > cli_to:
+    # Resolve the list of indices to process.
+    with db_engine.connect() as conn:
+        ir = IndustryIndexRepository(conn)
+        if args.industry:
+            idx = ir.get(args.industry)
+            if idx is None:
                 print(
-                    f"  [{i}/{total_indices}] {idx.industry_name}: "
-                    f"from_date {from_date} > to_date {cli_to}; skipping",
+                    f"error: industry {args.industry!r} is not indexed. "
+                    f"Run `build-industry-indices` first.",
+                    file=sys.stderr,
                 )
-                continue
-            try:
-                run_id = populate_industry_index_value_for_industry(
-                    db_engine, idx.industry_name,
-                    from_date=from_date,
-                    to_date=cli_to,
-                    resume_run_id=args.resume,
-                )
-                with db_engine.connect() as conn:
-                    r = FundamentalsRunRepository(conn).get(run_id)
-                status = r.status if r else "?"
+                return 2
+            indices = [idx]
+        else:
+            indices = ir.list_active()
+            if not indices:
                 print(
-                    f"  [{i}/{total_indices}] {idx.industry_name}: "
-                    f"run_id={run_id} status={status} "
-                    f"s={r.succeeded if r else '?'} "
-                    f"sk={r.skipped if r else '?'} "
-                    f"f={r.failed if r else '?'}"
+                    "No active industry indices exist. Run "
+                    "`build-industry-indices` first.",
+                    file=sys.stderr,
                 )
-                if status == "SUCCESS":
-                    successes += 1
-                elif status == "PARTIAL":
-                    partials += 1
-                else:
-                    failures += 1
-            except Exception as e:
-                logger.exception(
-                    "compute-index-values for %s failed: %s",
-                    idx.industry_name, e,
-                )
-                print(
-                    f"  [{i}/{total_indices}] {idx.industry_name}: "
-                    f"FAILED ({e})",
-                )
-                failures += 1
+                return 1
 
-        # Summary line.
-        print()
-        print(
-            f"compute-index-values done: "
-            f"{successes} SUCCESS, {partials} PARTIAL, {failures} FAILED "
-            f"(of {total_indices} indices)"
+    # Resolve the default `--to` HERE, not when the engine opens.
+    #
+    # Both early returns above (unknown industry -> 2, no active indices -> 1)
+    # complete without ever needing a date, and cli_to is first used inside the
+    # loop below. Resolving it eagerly meant asking the database what exchange
+    # it is in order to compute a default for work we had already decided not
+    # to do — and on a database with no tickers that raises.
+    #
+    # compute-index-values has no --exchange (it takes --industry /
+    # --all-active), so the exchange comes from the database, which under
+    # one-database-per-exchange is the same question.
+    if cli_to is None:
+        cli_to = market_today(exchange_of_engine(db_engine))
+
+    total_indices = len(indices)
+    # Counters across the loop. Resume is per-call (single
+    # --resume RUN_ID makes sense only with --industry).
+    successes = 0
+    partials = 0
+    failures = 0
+
+    for i, idx in enumerate(indices, start=1):
+        # from_date is the later of CLI --from and the index's
+        # own base_date. We can't compute values before
+        # base_date anyway.
+        from_date = (
+            max(cli_from, idx.base_date) if cli_from else idx.base_date
         )
-        if failures > 0:
-            return 2
-        if partials > 0:
-            return 1
-        return 0
-    finally:
-        db_engine.dispose()
+        if from_date > cli_to:
+            print(
+                f"  [{i}/{total_indices}] {idx.industry_name}: "
+                f"from_date {from_date} > to_date {cli_to}; skipping",
+            )
+            continue
+        try:
+            run_id = populate_fn(
+                db_engine, idx.industry_name,
+                from_date=from_date,
+                to_date=cli_to,
+                resume_run_id=args.resume,
+            )
+            with db_engine.connect() as conn:
+                r = FundamentalsRunRepository(conn).get(run_id)
+            status = r.status if r else "?"
+            print(
+                f"  [{i}/{total_indices}] {idx.industry_name}: "
+                f"run_id={run_id} status={status} "
+                f"s={r.succeeded if r else '?'} "
+                f"sk={r.skipped if r else '?'} "
+                f"f={r.failed if r else '?'}"
+            )
+            if status == "SUCCESS":
+                successes += 1
+            elif status == "PARTIAL":
+                partials += 1
+            else:
+                failures += 1
+        except Exception as e:
+            logger.exception(
+                "compute-index-values for %s failed: %s",
+                idx.industry_name, e,
+            )
+            print(
+                f"  [{i}/{total_indices}] {idx.industry_name}: "
+                f"FAILED ({e})",
+            )
+            failures += 1
+
+    # Summary line.
+    print()
+    print(
+        f"compute-index-values done: "
+        f"{successes} SUCCESS, {partials} PARTIAL, {failures} FAILED "
+        f"(of {total_indices} indices)"
+    )
+    if failures > 0:
+        return 2
+    if partials > 0:
+        return 1
+    return 0
 
 
 # ---------- rebalance-industry-index (Phase 4B-3) ---------- #
 
 
-def cmd_rebalance_industry_index(args, config: Config) -> int:
+def cmd_rebalance_industry_index(args, ctx: AppContext, *, rebalance_fn=None) -> int:
     """Manually run a rebalance for one industry on a specific date.
 
     Normal lifecycle: auto-rebalance happens at every semiannual
@@ -737,13 +733,16 @@ def cmd_rebalance_industry_index(args, config: Config) -> int:
     or re-running a rebalance with different inputs (after operator
     overrides change the universe).
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from datetime import date as _date
     from .runners import run_rebalance
+    if rebalance_fn is None:
+        rebalance_fn = run_rebalance
 
     rebalance_date = _date.fromisoformat(args.date)
-    db_engine = create_engine_from_config(config)
     try:
-        result = run_rebalance(
+        result = rebalance_fn(
             db_engine, args.industry, rebalance_date,
             n=args.n,
             exchange=args.exchange,
@@ -754,8 +753,6 @@ def cmd_rebalance_industry_index(args, config: Config) -> int:
         # a friendly hint rather than a stack trace.
         print(f"error: {e}", file=sys.stderr)
         return 2
-    finally:
-        db_engine.dispose()
 
     if result.rebalance_skipped:
         print(
@@ -775,7 +772,7 @@ def cmd_rebalance_industry_index(args, config: Config) -> int:
 # ---------- compute-benchmark-stats (Phase 6-3) ---------- #
 
 
-def cmd_compute_benchmark_stats(args, config) -> int:
+def cmd_compute_benchmark_stats(args, ctx: AppContext) -> int:
     """Compute alpha/beta/RS regression statistics for stocks and
     industries vs their benchmarks (INDUSTRY index + NIFTY).
 
@@ -789,6 +786,8 @@ def cmd_compute_benchmark_stats(args, config) -> int:
       --ticker / --exchange → single ticker (6 rows)
       --industry NAME    → single industry (3 rows)
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from datetime import date as _date
     from sqlalchemy import text as _text
 
@@ -798,13 +797,12 @@ def cmd_compute_benchmark_stats(args, config) -> int:
         run_benchmark_stats_for_industry,
         run_benchmark_stats_for_ticker,
     )
-    from ..persistence.connection import create_engine_from_config
 
     as_of: _date | None = None
     if getattr(args, "as_of_date", None):
         as_of = _date.fromisoformat(args.as_of_date)
 
-    engine = create_engine_from_config(config)
+    engine = db_engine
 
     # Industry-only mode
     if getattr(args, "all_industries", False):
@@ -870,7 +868,7 @@ def cmd_compute_benchmark_stats(args, config) -> int:
 # ---------- backfill-etf-classification ---------- #
 
 
-def cmd_backfill_etf_classification(args, config: Config) -> int:
+def cmd_backfill_etf_classification(args, ctx: AppContext, *, classify_fn=None) -> int:
     """Re-classify ETFs against the ETF-specific path.
 
     Use case: after a normal `refresh-industry` was run before the
@@ -883,100 +881,100 @@ def cmd_backfill_etf_classification(args, config: Config) -> int:
     AND (no instrument_industry row exists OR
          classification_source != 'INSTRUMENT_TYPE' AND not overridden).
 
-    Implementation reuses the existing _classify_etf() helper from
+    Implementation reuses the existing classify_fn() helper from
     the runner — same code path the main refresh uses — so behavior
     is identical.
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from ..etl.exchanges import validate_exchange
     from .runners import _classify_etf
+    if classify_fn is None:
+        classify_fn = _classify_etf
 
     validate_exchange(args.exchange, config)
-    db_engine = create_engine_from_config(config)
+    # Load the ETF candidates.
+    with db_engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT t.ticker_id, t.symbol
+            FROM tickers t
+            LEFT JOIN instrument_industry ii ON ii.ticker_id = t.ticker_id
+            LEFT JOIN industry_override io   ON io.ticker_id = t.ticker_id
+            WHERE t.exchange = :ex
+              AND t.is_active = TRUE
+              AND t.delisted_at IS NULL
+              AND t.instrument_type = 'ETF'
+              AND io.ticker_id IS NULL
+              AND (
+                  ii.ticker_id IS NULL
+                  OR ii.classification_source != 'INSTRUMENT_TYPE'
+              )
+            ORDER BY t.symbol
+        """), {"ex": args.exchange}).fetchall()
+    candidates = [{"id": int(r[0]), "symbol": r[1]} for r in rows]
+    total = len(candidates)
+    if total == 0:
+        print(f"No ETFs need backfill on {args.exchange}. Nothing to do.")
+        return 0
+    print(
+        f"Backfilling ETF classification for {total} tickers on "
+        f"{args.exchange}. Estimated time: ~{total * 2}s."
+    )
+
+    # Open a fundamentals_run for audit trail.
+    with transaction(db_engine) as conn:
+        run_id = FundamentalsRunRepository(conn).open(
+            phase="industry", exchange=args.exchange,
+            notes=f"ETF backfill: {total} tickers",
+        )
+
+    succeeded = 0
+    failed = 0
     try:
-        # Load the ETF candidates.
-        with db_engine.connect() as conn:
-            rows = conn.execute(text("""
-                SELECT t.ticker_id, t.symbol
-                FROM tickers t
-                LEFT JOIN instrument_industry ii ON ii.ticker_id = t.ticker_id
-                LEFT JOIN industry_override io   ON io.ticker_id = t.ticker_id
-                WHERE t.exchange = :ex
-                  AND t.is_active = TRUE
-                  AND t.delisted_at IS NULL
-                  AND t.instrument_type = 'ETF'
-                  AND io.ticker_id IS NULL
-                  AND (
-                      ii.ticker_id IS NULL
-                      OR ii.classification_source != 'INSTRUMENT_TYPE'
-                  )
-                ORDER BY t.symbol
-            """), {"ex": args.exchange}).fetchall()
-        candidates = [{"id": int(r[0]), "symbol": r[1]} for r in rows]
-        total = len(candidates)
-        if total == 0:
-            print(f"No ETFs need backfill on {args.exchange}. Nothing to do.")
-            return 0
-        print(
-            f"Backfilling ETF classification for {total} tickers on "
-            f"{args.exchange}. Estimated time: ~{total * 2}s."
-        )
-
-        # Open a fundamentals_run for audit trail.
-        with transaction(db_engine) as conn:
-            run_id = FundamentalsRunRepository(conn).open(
-                phase="industry", exchange=args.exchange,
-                notes=f"ETF backfill: {total} tickers",
+        for idx, t in enumerate(candidates):
+            outcome = classify_fn(
+                db_engine, t["id"], t["symbol"], args.exchange,
+                fetch_fn=None,  # _classify_etf doesn't use it
             )
-
-        succeeded = 0
-        failed = 0
-        try:
-            for idx, t in enumerate(candidates):
-                outcome = _classify_etf(
-                    db_engine, t["id"], t["symbol"], args.exchange,
-                    fetch_fn=None,  # _classify_etf doesn't use it
+            if outcome == "succeeded":
+                succeeded += 1
+            else:
+                failed += 1
+            if (idx + 1) % 25 == 0:
+                print(
+                    f"  {idx + 1}/{total} processed "
+                    f"(s={succeeded} f={failed})"
                 )
-                if outcome == "succeeded":
-                    succeeded += 1
-                else:
-                    failed += 1
-                if (idx + 1) % 25 == 0:
-                    print(
-                        f"  {idx + 1}/{total} processed "
-                        f"(s={succeeded} f={failed})"
+                with transaction(db_engine) as conn:
+                    FundamentalsRunRepository(conn).update_progress(
+                        run_id,
+                        succeeded=succeeded, failed=failed, skipped=0,
                     )
-                    with transaction(db_engine) as conn:
-                        FundamentalsRunRepository(conn).update_progress(
-                            run_id,
-                            succeeded=succeeded, failed=failed, skipped=0,
-                        )
-        except KeyboardInterrupt:
-            with transaction(db_engine) as conn:
-                FundamentalsRunRepository(conn).close(
-                    run_id, status="PARTIAL",
-                    succeeded=succeeded, failed=failed, skipped=0,
-                    notes="Interrupted",
-                )
-            print(f"\nInterrupted. Closed run {run_id} as PARTIAL.")
-            return 1
-
-        status_value = "SUCCESS" if failed == 0 else (
-            "PARTIAL" if succeeded > 0 else "FAILED"
-        )
+    except KeyboardInterrupt:
         with transaction(db_engine) as conn:
             FundamentalsRunRepository(conn).close(
-                run_id, status=status_value,
+                run_id, status="PARTIAL",
                 succeeded=succeeded, failed=failed, skipped=0,
+                notes="Interrupted",
             )
-        print(
-            f"\nETF backfill complete: run_id={run_id} "
-            f"status={status_value} succeeded={succeeded} failed={failed}"
+        print(f"\nInterrupted. Closed run {run_id} as PARTIAL.")
+        return 1
+
+    status_value = "SUCCESS" if failed == 0 else (
+        "PARTIAL" if succeeded > 0 else "FAILED"
+    )
+    with transaction(db_engine) as conn:
+        FundamentalsRunRepository(conn).close(
+            run_id, status=status_value,
+            succeeded=succeeded, failed=failed, skipped=0,
         )
-        return 0 if status_value == "SUCCESS" else (
-            1 if status_value == "PARTIAL" else 2
-        )
-    finally:
-        db_engine.dispose()
+    print(
+        f"\nETF backfill complete: run_id={run_id} "
+        f"status={status_value} succeeded={succeeded} failed={failed}"
+    )
+    return 0 if status_value == "SUCCESS" else (
+        1 if status_value == "PARTIAL" else 2
+    )
 
 
 # ---------- argparse registration helper ---------- #

@@ -1,17 +1,21 @@
 """CLI tests for Phase 1 fundamentals commands.
 
-The CLI handlers thinly wrap the runner and repos, so these tests
-focus on the command parsing, output formatting, and exit codes.
-We patch the runner so we don't make HTTP calls.
+The CLI handlers thinly wrap the runner and repos, so these tests focus on the
+command parsing, output formatting, and exit codes.
+
+Handlers take an AppContext and their runner as a keyword-only argument, so a
+test hands them a Spy rather than rewriting a module attribute. The one
+surviving monkeypatch is a test OF the dispatch table, where the module
+attribute is the thing under test.
 """
 from __future__ import annotations
 
 from datetime import date, datetime, timezone, UTC
 from io import StringIO
-from unittest.mock import patch
 
 import pytest
 
+from trip_ema.app_context import AppContext
 from trip_ema.domain import TickerRef
 from trip_ema.fundamentals.cli import (
     cmd_backfill_etf_classification,
@@ -27,6 +31,30 @@ from trip_ema.persistence.fundamentals_repo import (
     InstrumentIndustryRepository,
 )
 from trip_ema.persistence.tickers_repo import TickersRepository
+
+
+class Spy:
+    """A recording stand-in for a runner. Replaces `unittest.mock.patch` of the
+    runner's module path: the command takes the runner as a keyword argument
+    now, so a test hands it one instead of rewriting a module attribute."""
+
+    def __init__(self, return_value=None):
+        self.return_value = return_value
+        self.calls: list[tuple] = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        if isinstance(self.return_value, BaseException):
+            raise self.return_value
+        return self.return_value
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+    @property
+    def call_args(self):
+        return self.calls[-1] if self.calls else None
 
 
 # ---------- fixtures ---------- #
@@ -49,17 +77,14 @@ def fake_config(db_engine):
 
 
 @pytest.fixture
-def patched_engine_factory(db_engine):
-    """Patch create_engine_from_config to return our test engine.
-    Each cmd_* opens-and-disposes its own engine; we redirect that
-    to the per-test fixture engine."""
-    with patch(
-        "trip_ema.fundamentals.cli.create_engine_from_config",
-        return_value=db_engine,
-    ):
-        # Don't let cli's .dispose() actually dispose the fixture engine.
-        with patch.object(db_engine, "dispose"):
-            yield db_engine
+def ctx(fake_config, db_engine):
+    """The command's collaborators, handed to it.
+
+    This replaces patching create_engine_from_config AND patching the engine's
+    own `dispose` — the latter was needed because every command disposed the
+    engine it built, which would have torn down the fixture engine mid-test.
+    Commands no longer own the engine, so neither problem exists."""
+    return AppContext(config=fake_config, db_engine=db_engine)
 
 
 @pytest.fixture
@@ -78,74 +103,68 @@ def reliance_ticker(db_engine):
 class TestCmdRefreshIndustry:
 
     def test_returns_0_on_success(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker, capsys,
+        self, db_engine, fake_config, ctx, reliance_ticker, capsys,
     ):
-        with patch(
-            "trip_ema.fundamentals.cli.run_industry_refresh",
-        ) as mock_runner:
-            # Make the mock simulate a successful run by writing the row
-            # ourselves and returning the run_id.
-            with transaction(db_engine) as conn:
-                rid = FundamentalsRunRepository(conn).open(
-                    phase="industry", exchange="NSE",
-                )
-                FundamentalsRunRepository(conn).close(
-                    rid, status="SUCCESS", succeeded=1, failed=0, skipped=0,
-                )
-            mock_runner.return_value = rid
+        mock_runner = Spy()
+        # Make the mock simulate a successful run by writing the row
+        # ourselves and returning the run_id.
+        with transaction(db_engine) as conn:
+            rid = FundamentalsRunRepository(conn).open(
+                phase="industry", exchange="NSE",
+            )
+            FundamentalsRunRepository(conn).close(
+                rid, status="SUCCESS", succeeded=1, failed=0, skipped=0,
+            )
+        mock_runner.return_value = rid
 
-            args = type("A", (), {})()
-            args.exchange = "NSE"
-            args.force = False
-            args.resume = None
-            rc = cmd_refresh_industry(args, fake_config)
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.force = False
+        args.resume = None
+        rc = cmd_refresh_industry(args, ctx, refresh_fn=mock_runner)
         assert rc == 0
         out = capsys.readouterr().out
         assert "status=SUCCESS" in out
         assert "succeeded=1" in out
 
     def test_returns_1_on_partial(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        self, db_engine, fake_config, ctx, reliance_ticker,
     ):
-        with patch(
-            "trip_ema.fundamentals.cli.run_industry_refresh",
-        ) as mock_runner:
-            with transaction(db_engine) as conn:
-                rid = FundamentalsRunRepository(conn).open(
-                    phase="industry", exchange="NSE",
-                )
-                FundamentalsRunRepository(conn).close(
-                    rid, status="PARTIAL", succeeded=3, failed=2, skipped=0,
-                )
-            mock_runner.return_value = rid
+        mock_runner = Spy()
+        with transaction(db_engine) as conn:
+            rid = FundamentalsRunRepository(conn).open(
+                phase="industry", exchange="NSE",
+            )
+            FundamentalsRunRepository(conn).close(
+                rid, status="PARTIAL", succeeded=3, failed=2, skipped=0,
+            )
+        mock_runner.return_value = rid
 
-            args = type("A", (), {})()
-            args.exchange = "NSE"
-            args.force = False
-            args.resume = None
-            rc = cmd_refresh_industry(args, fake_config)
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.force = False
+        args.resume = None
+        rc = cmd_refresh_industry(args, ctx, refresh_fn=mock_runner)
         assert rc == 1
 
     def test_returns_2_on_failed(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        self, db_engine, fake_config, ctx, reliance_ticker,
     ):
-        with patch(
-            "trip_ema.fundamentals.cli.run_industry_refresh",
-        ) as mock_runner:
-            with transaction(db_engine) as conn:
-                rid = FundamentalsRunRepository(conn).open(
-                    phase="industry", exchange="NSE",
-                )
-                FundamentalsRunRepository(conn).close(
-                    rid, status="FAILED", succeeded=0, failed=5, skipped=0,
-                )
-            mock_runner.return_value = rid
+        mock_runner = Spy()
+        with transaction(db_engine) as conn:
+            rid = FundamentalsRunRepository(conn).open(
+                phase="industry", exchange="NSE",
+            )
+            FundamentalsRunRepository(conn).close(
+                rid, status="FAILED", succeeded=0, failed=5, skipped=0,
+            )
+        mock_runner.return_value = rid
 
-            args = type("A", (), {})()
-            args.exchange = "NSE"
-            args.force = False
-            args.resume = None
-            rc = cmd_refresh_industry(args, fake_config)
+        args = type("A", (), {})()
+        args.exchange = "NSE"
+        args.force = False
+        args.resume = None
+        rc = cmd_refresh_industry(args, ctx, refresh_fn=mock_runner)
         assert rc == 2
 
 
@@ -155,7 +174,7 @@ class TestCmdRefreshIndustry:
 class TestCmdSetIndustryOverride:
 
     def test_writes_override_and_classification(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker, capsys,
+        self, db_engine, fake_config, ctx, reliance_ticker, capsys,
     ):
         args = type("A", (), {})()
         args.exchange = "NSE"
@@ -164,7 +183,7 @@ class TestCmdSetIndustryOverride:
         args.sector = "Energy"
         args.note = "test"
         args.set_by = "test-runner"
-        rc = cmd_set_industry_override(args, fake_config)
+        rc = cmd_set_industry_override(args, ctx)
         assert rc == 0
         with db_engine.connect() as conn:
             ov = IndustryOverrideRepository(conn).get(reliance_ticker)
@@ -174,7 +193,7 @@ class TestCmdSetIndustryOverride:
         assert ind.classification_source == "MANUAL_OVERRIDE"
 
     def test_sector_defaults_to_unclassified(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        self, db_engine, fake_config, ctx, reliance_ticker,
     ):
         args = type("A", (), {})()
         args.exchange = "NSE"
@@ -183,14 +202,14 @@ class TestCmdSetIndustryOverride:
         args.sector = None
         args.note = None
         args.set_by = None
-        rc = cmd_set_industry_override(args, fake_config)
+        rc = cmd_set_industry_override(args, ctx)
         assert rc == 0
         with db_engine.connect() as conn:
             ov = IndustryOverrideRepository(conn).get(reliance_ticker)
         assert ov.sector == "Unclassified"
 
     def test_returns_2_for_unknown_symbol(
-        self, db_engine, fake_config, patched_engine_factory, capsys,
+        self, db_engine, fake_config, ctx, capsys,
     ):
         args = type("A", (), {})()
         args.exchange = "NSE"
@@ -199,7 +218,7 @@ class TestCmdSetIndustryOverride:
         args.sector = "Y"
         args.note = None
         args.set_by = None
-        rc = cmd_set_industry_override(args, fake_config)
+        rc = cmd_set_industry_override(args, ctx)
         assert rc == 2
         assert "not found" in capsys.readouterr().err
 
@@ -210,7 +229,7 @@ class TestCmdSetIndustryOverride:
 class TestCmdDeleteIndustryOverride:
 
     def test_removes_existing_override(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        self, db_engine, fake_config, ctx, reliance_ticker,
     ):
         with transaction(db_engine) as conn:
             IndustryOverrideRepository(conn).upsert(
@@ -219,18 +238,18 @@ class TestCmdDeleteIndustryOverride:
         args = type("A", (), {})()
         args.exchange = "NSE"
         args.symbol = "RELIANCE"
-        rc = cmd_delete_industry_override(args, fake_config)
+        rc = cmd_delete_industry_override(args, ctx)
         assert rc == 0
         with db_engine.connect() as conn:
             assert IndustryOverrideRepository(conn).get(reliance_ticker) is None
 
     def test_returns_1_when_no_override(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        self, db_engine, fake_config, ctx, reliance_ticker,
     ):
         args = type("A", (), {})()
         args.exchange = "NSE"
         args.symbol = "RELIANCE"
-        rc = cmd_delete_industry_override(args, fake_config)
+        rc = cmd_delete_industry_override(args, ctx)
         assert rc == 1
 
 
@@ -240,7 +259,7 @@ class TestCmdDeleteIndustryOverride:
 class TestCmdFundamentalsStatus:
 
     def test_prints_coverage_and_recent_runs(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, capsys,
     ):
         # Set up some data so output isn't empty.
@@ -259,7 +278,7 @@ class TestCmdFundamentalsStatus:
         args.exchange = None
         args.phase = None
         args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
+        rc = cmd_fundamentals_status(args, ctx)
         out = capsys.readouterr().out
         assert rc == 0
         assert "Industry classification coverage" in out
@@ -270,13 +289,13 @@ class TestCmdFundamentalsStatus:
         assert "industry" in out
 
     def test_empty_db_doesnt_crash(
-        self, db_engine, fake_config, patched_engine_factory, capsys,
+        self, db_engine, fake_config, ctx, capsys,
     ):
         args = type("A", (), {})()
         args.exchange = None
         args.phase = None
         args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
+        rc = cmd_fundamentals_status(args, ctx)
         out = capsys.readouterr().out
         assert rc == 0
         # Either "No active tickers" or "No fundamentals_run rows" — both fine.
@@ -292,11 +311,14 @@ def test_main_dispatches_refresh_industry(monkeypatch, db_engine):
     from trip_ema.etl import cli as etl_cli
 
     called = {}
-    def fake_handler(args, config):
+
+    def fake_handler(args, ctx):
         called["args"] = args
         return 0
 
-    # Override the handler in the dispatch table after parsing.
+    # This one still patches: it is a test OF the dispatch table, so the thing
+    # under test IS the module attribute the table resolves. Handlers now take
+    # an AppContext, hence the signature.
     monkeypatch.setattr(
         "trip_ema.fundamentals.cli.cmd_refresh_industry", fake_handler,
     )
@@ -368,7 +390,7 @@ class TestCmdBackfillEtfClassification:
         return ids
 
     def test_backfill_selects_only_eligible_etfs(
-        self, db_engine, fake_config, patched_engine_factory, etf_universe,
+        self, db_engine, fake_config, ctx, etf_universe,
         monkeypatch, capsys,
     ):
         """GOLDBEES (no row) + ITBEES (YFINANCE-junk row) should be
@@ -384,13 +406,11 @@ class TestCmdBackfillEtfClassification:
                     tid, etf_long_name=f"{symbol} long name",
                 )
             return "succeeded"
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners._classify_etf", stub_classify_etf,
-        )
+        _classify_fn = stub_classify_etf
 
         args = type("A", (), {})()
         args.exchange = "NSE"
-        rc = cmd_backfill_etf_classification(args, fake_config)
+        rc = cmd_backfill_etf_classification(args, ctx, classify_fn=_classify_fn)
         assert rc == 0
         assert set(called_with) == {"GOLDBEES", "ITBEES"}
 
@@ -404,17 +424,17 @@ class TestCmdBackfillEtfClassification:
             assert ir.get(etf_universe["EQUITY1"]).classification_source == "YFINANCE"
 
     def test_backfill_with_nothing_to_do_returns_0(
-        self, db_engine, fake_config, patched_engine_factory, capsys,
+        self, db_engine, fake_config, ctx, capsys,
     ):
         """No ETF tickers in DB → command exits cleanly with rc=0."""
         args = type("A", (), {})()
         args.exchange = "NSE"
-        rc = cmd_backfill_etf_classification(args, fake_config)
+        rc = cmd_backfill_etf_classification(args, ctx)
         assert rc == 0
         assert "Nothing to do" in capsys.readouterr().out
 
     def test_backfill_writes_fundamentals_run_row(
-        self, db_engine, fake_config, patched_engine_factory, etf_universe,
+        self, db_engine, fake_config, ctx, etf_universe,
         monkeypatch,
     ):
         """An audit row should exist in fundamentals_run after the
@@ -425,13 +445,11 @@ class TestCmdBackfillEtfClassification:
                     tid, etf_long_name=None,
                 )
             return "succeeded"
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners._classify_etf", stub_classify_etf,
-        )
+        _classify_fn = stub_classify_etf
 
         args = type("A", (), {})()
         args.exchange = "NSE"
-        cmd_backfill_etf_classification(args, fake_config)
+        cmd_backfill_etf_classification(args, ctx, classify_fn=_classify_fn)
         with db_engine.connect() as conn:
             runs = FundamentalsRunRepository(conn).list_recent(
                 phase="industry", exchange="NSE", limit=5,
@@ -442,7 +460,7 @@ class TestCmdBackfillEtfClassification:
         assert latest.succeeded == 2  # GOLDBEES + ITBEES
 
     def test_backfill_with_failures_returns_partial(
-        self, db_engine, fake_config, patched_engine_factory, etf_universe,
+        self, db_engine, fake_config, ctx, etf_universe,
         monkeypatch,
     ):
         """If some ETFs fail to classify, the run should close as
@@ -457,13 +475,11 @@ class TestCmdBackfillEtfClassification:
                     tid, etf_long_name=None,
                 )
             return "succeeded"
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners._classify_etf", stub_classify_etf,
-        )
+        _classify_fn = stub_classify_etf
 
         args = type("A", (), {})()
         args.exchange = "NSE"
-        rc = cmd_backfill_etf_classification(args, fake_config)
+        rc = cmd_backfill_etf_classification(args, ctx, classify_fn=_classify_fn)
         assert rc == 1  # PARTIAL
 
 
@@ -473,8 +489,8 @@ class TestCmdBackfillEtfClassification:
 class TestCmdRefreshShares:
 
     def test_returns_0_on_success(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
-        capsys, monkeypatch,
+        self, db_engine, fake_config, ctx, reliance_ticker,
+        capsys,
     ):
         """Patch the runner to simulate a SUCCESS run and verify
         the CLI handler returns rc=0 and prints the summary."""
@@ -486,31 +502,20 @@ class TestCmdRefreshShares:
             FundamentalsRunRepository(conn).close(
                 rid, status="SUCCESS", succeeded=1, failed=0, skipped=0,
             )
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.cli.run_shares_refresh",
-            lambda *a, **kw: rid,
-            raising=False,
-        )
-        # cmd_refresh_shares imports run_shares_refresh inside the
-        # function body, so monkeypatching that attribute on the
-        # module doesn't work — we patch the runner's source instead.
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_shares_refresh",
-            lambda *a, **kw: rid,
-        )
+        _refresh_fn = lambda *a, **kw: rid
 
         args = type("A", (), {})()
         args.exchange = "NSE"
         args.force = False
         args.resume = None
-        rc = cmd_refresh_shares(args, fake_config)
+        rc = cmd_refresh_shares(args, ctx, refresh_fn=_refresh_fn)
         assert rc == 0
         out = capsys.readouterr().out
         assert "status=SUCCESS" in out
         assert "succeeded=1" in out
 
     def test_returns_1_on_partial(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        self, db_engine, fake_config, ctx, reliance_ticker,
         monkeypatch,
     ):
         from trip_ema.fundamentals.cli import cmd_refresh_shares
@@ -521,19 +526,16 @@ class TestCmdRefreshShares:
             FundamentalsRunRepository(conn).close(
                 rid, status="PARTIAL", succeeded=3, failed=2, skipped=0,
             )
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_shares_refresh",
-            lambda *a, **kw: rid,
-        )
+        _refresh_fn = lambda *a, **kw: rid
         args = type("A", (), {})()
         args.exchange = "NSE"
         args.force = False
         args.resume = None
-        rc = cmd_refresh_shares(args, fake_config)
+        rc = cmd_refresh_shares(args, ctx, refresh_fn=_refresh_fn)
         assert rc == 1
 
     def test_returns_2_on_failed(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        self, db_engine, fake_config, ctx, reliance_ticker,
         monkeypatch,
     ):
         from trip_ema.fundamentals.cli import cmd_refresh_shares
@@ -544,15 +546,12 @@ class TestCmdRefreshShares:
             FundamentalsRunRepository(conn).close(
                 rid, status="FAILED", succeeded=0, failed=5, skipped=0,
             )
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_shares_refresh",
-            lambda *a, **kw: rid,
-        )
+        _refresh_fn = lambda *a, **kw: rid
         args = type("A", (), {})()
         args.exchange = "NSE"
         args.force = False
         args.resume = None
-        rc = cmd_refresh_shares(args, fake_config)
+        rc = cmd_refresh_shares(args, ctx, refresh_fn=_refresh_fn)
         assert rc == 2
 
 
@@ -561,7 +560,7 @@ class TestCmdFundamentalsStatusShowsShares:
     industry coverage when shares data exists."""
 
     def test_shows_shares_coverage_when_present(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, capsys,
     ):
         from trip_ema.persistence.fundamentals_repo import (
@@ -582,14 +581,14 @@ class TestCmdFundamentalsStatusShowsShares:
         args.exchange = None
         args.phase = None
         args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
+        rc = cmd_fundamentals_status(args, ctx)
         out = capsys.readouterr().out
         assert rc == 0
         assert "Shares-outstanding coverage" in out
         assert "WITH_SHARES" in out
 
     def test_omits_shares_section_when_no_data(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, capsys,
     ):
         """If no shares data, don't print an empty shares section."""
@@ -601,7 +600,7 @@ class TestCmdFundamentalsStatusShowsShares:
         args.exchange = None
         args.phase = None
         args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
+        rc = cmd_fundamentals_status(args, ctx)
         out = capsys.readouterr().out
         assert rc == 0
         assert "Shares-outstanding coverage" not in out
@@ -613,8 +612,8 @@ class TestCmdFundamentalsStatusShowsShares:
 class TestCmdRefreshFinancials:
 
     def test_returns_0_on_success(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
-        capsys, monkeypatch,
+        self, db_engine, fake_config, ctx, reliance_ticker,
+        capsys,
     ):
         from trip_ema.fundamentals.cli import cmd_refresh_financials
         with transaction(db_engine) as conn:
@@ -624,21 +623,18 @@ class TestCmdRefreshFinancials:
             FundamentalsRunRepository(conn).close(
                 rid, status="SUCCESS", succeeded=1, failed=0, skipped=0,
             )
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_financials_refresh",
-            lambda *a, **kw: rid,
-        )
+        _refresh_fn = lambda *a, **kw: rid
         args = type("A", (), {})()
         args.exchange = "NSE"
         args.force = False
         args.resume = None
-        rc = cmd_refresh_financials(args, fake_config)
+        rc = cmd_refresh_financials(args, ctx, refresh_fn=_refresh_fn)
         assert rc == 0
         out = capsys.readouterr().out
         assert "status=SUCCESS" in out
 
     def test_returns_1_on_partial(
-        self, db_engine, fake_config, patched_engine_factory, reliance_ticker,
+        self, db_engine, fake_config, ctx, reliance_ticker,
         monkeypatch,
     ):
         from trip_ema.fundamentals.cli import cmd_refresh_financials
@@ -649,22 +645,19 @@ class TestCmdRefreshFinancials:
             FundamentalsRunRepository(conn).close(
                 rid, status="PARTIAL", succeeded=3, failed=2, skipped=0,
             )
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_financials_refresh",
-            lambda *a, **kw: rid,
-        )
+        _refresh_fn = lambda *a, **kw: rid
         args = type("A", (), {})()
         args.exchange = "NSE"
         args.force = False
         args.resume = None
-        rc = cmd_refresh_financials(args, fake_config)
+        rc = cmd_refresh_financials(args, ctx, refresh_fn=_refresh_fn)
         assert rc == 1
 
 
 class TestCmdFundamentalsStatusShowsFinancials:
 
     def test_shows_financials_coverage_when_present(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, capsys,
     ):
         from trip_ema.persistence.fundamentals_repo import (
@@ -680,7 +673,7 @@ class TestCmdFundamentalsStatusShowsFinancials:
         args.exchange = None
         args.phase = None
         args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
+        rc = cmd_fundamentals_status(args, ctx)
         out = capsys.readouterr().out
         assert rc == 0
         assert "Quarterly financials coverage" in out
@@ -688,7 +681,7 @@ class TestCmdFundamentalsStatusShowsFinancials:
         assert "W/EBITDA" in out
 
     def test_omits_financials_section_when_no_data(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, capsys,
     ):
         with transaction(db_engine) as conn:
@@ -699,7 +692,7 @@ class TestCmdFundamentalsStatusShowsFinancials:
         args.exchange = None
         args.phase = None
         args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
+        rc = cmd_fundamentals_status(args, ctx)
         out = capsys.readouterr().out
         assert rc == 0
         assert "Quarterly financials coverage" not in out
@@ -711,7 +704,7 @@ class TestCmdFundamentalsStatusShowsFinancials:
 class TestCmdComputeMarketCap:
 
     def test_single_day_mode_writes_rows_and_returns_0(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, monkeypatch, capsys,
     ):
         """The single-day mode calls compute_market_cap_for_date and
@@ -726,10 +719,7 @@ class TestCmdComputeMarketCap:
                 succeeded_computed=1, succeeded_approx=0,
                 skipped_no_close=0, skipped_no_shares=0,
             )
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.market_cap_compute.compute_market_cap_for_date",
-            stub_compute,
-        )
+        _compute_fn = stub_compute
 
         args = type("A", (), {})()
         args.exchange = "NSE"
@@ -738,13 +728,13 @@ class TestCmdComputeMarketCap:
         args.backfill_to = None
         args.force = False
         args.resume = None
-        rc = cmd_compute_market_cap(args, fake_config)
+        rc = cmd_compute_market_cap(args, ctx, compute_fn=_compute_fn)
         assert rc == 0
         out = capsys.readouterr().out
         assert "computed=1" in out
 
     def test_single_day_mode_returns_1_when_nothing_written(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, monkeypatch, capsys,
     ):
         """If no rows were written (e.g. no bars for the date),
@@ -759,10 +749,7 @@ class TestCmdComputeMarketCap:
                 succeeded_computed=0, succeeded_approx=0,
                 skipped_no_close=10, skipped_no_shares=0,
             )
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.market_cap_compute.compute_market_cap_for_date",
-            stub_compute,
-        )
+        _compute_fn = stub_compute
 
         args = type("A", (), {})()
         args.exchange = "NSE"
@@ -771,11 +758,11 @@ class TestCmdComputeMarketCap:
         args.backfill_to = None
         args.force = False
         args.resume = None
-        rc = cmd_compute_market_cap(args, fake_config)
+        rc = cmd_compute_market_cap(args, ctx, compute_fn=_compute_fn)
         assert rc == 1
 
     def test_backfill_mode_routes_to_runner(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, monkeypatch, capsys,
     ):
         """When --backfill-from is given, the CLI calls the runner
@@ -789,10 +776,7 @@ class TestCmdComputeMarketCap:
                 rid, status="SUCCESS",
                 succeeded=1, failed=0, skipped=0,
             )
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_market_cap_backfill",
-            lambda *a, **kw: rid,
-        )
+        _backfill_fn = lambda *a, **kw: rid
         args = type("A", (), {})()
         args.exchange = "NSE"
         args.date = None
@@ -800,7 +784,7 @@ class TestCmdComputeMarketCap:
         args.backfill_to = "2026-05-01"
         args.force = False
         args.resume = None
-        rc = cmd_compute_market_cap(args, fake_config)
+        rc = cmd_compute_market_cap(args, ctx, backfill_fn=_backfill_fn)
         assert rc == 0
         out = capsys.readouterr().out
         assert "status=SUCCESS" in out
@@ -809,7 +793,7 @@ class TestCmdComputeMarketCap:
 class TestCmdFundamentalsStatusShowsMarketCap:
 
     def test_shows_mcap_section_when_present(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, capsys,
     ):
         from trip_ema.persistence.fundamentals_repo import (
@@ -828,14 +812,14 @@ class TestCmdFundamentalsStatusShowsMarketCap:
         args.exchange = None
         args.phase = None
         args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
+        rc = cmd_fundamentals_status(args, ctx)
         out = capsys.readouterr().out
         assert rc == 0
         assert "Daily market cap coverage" in out
         assert "COMPUTED" in out
 
     def test_omits_mcap_section_when_no_data(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, capsys,
     ):
         with transaction(db_engine) as conn:
@@ -846,7 +830,7 @@ class TestCmdFundamentalsStatusShowsMarketCap:
         args.exchange = None
         args.phase = None
         args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
+        rc = cmd_fundamentals_status(args, ctx)
         out = capsys.readouterr().out
         assert rc == 0
         assert "Daily market cap coverage" not in out
@@ -863,7 +847,7 @@ class TestCmdFundamentalsStatusShowsMarketCap:
 class TestCmdBuildIndustryIndices:
 
     def test_calls_runner_and_prints_summary(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         monkeypatch, capsys,
     ):
         """The handler delegates to run_industry_index_build and
@@ -884,17 +868,14 @@ class TestCmdBuildIndustryIndices:
                 ],
                 "failed": [],
             }
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_industry_index_build",
-            fake_build,
-        )
+        _build_fn = fake_build
         args = type("A", (), {})()
         args.exchange = "NSE"
         args.min_constituents = 10
         args.n = 10
         args.base_value = 1000.0
         from trip_ema.fundamentals.cli import cmd_build_industry_indices
-        rc = cmd_build_industry_indices(args, fake_config)
+        rc = cmd_build_industry_indices(args, ctx, build_fn=_build_fn)
         out = capsys.readouterr().out
         assert rc == 0
         assert "Qualified industries" in out
@@ -904,7 +885,7 @@ class TestCmdBuildIndustryIndices:
         assert "IT - Services" in out
 
     def test_returns_1_when_some_failed(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         monkeypatch, capsys,
     ):
         def fake_build(engine, exchange, *, min_constituents, n, base_value):
@@ -914,23 +895,20 @@ class TestCmdBuildIndustryIndices:
                 "indexed": [],
                 "failed": [("A", "below threshold on rebalance date")],
             }
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_industry_index_build",
-            fake_build,
-        )
+        _build_fn = fake_build
         args = type("A", (), {})()
         args.exchange = "NSE"
         args.min_constituents = 10
         args.n = 10
         args.base_value = 1000.0
         from trip_ema.fundamentals.cli import cmd_build_industry_indices
-        rc = cmd_build_industry_indices(args, fake_config)
+        rc = cmd_build_industry_indices(args, ctx, build_fn=_build_fn)
         out = capsys.readouterr().out
         assert rc == 1
         assert "Failed" in out
 
     def test_rejects_invalid_exchange(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
     ):
         from trip_ema.etl.exchanges import UnsupportedExchangeError
         args = type("A", (), {})()
@@ -940,7 +918,7 @@ class TestCmdBuildIndustryIndices:
         args.base_value = 1000.0
         from trip_ema.fundamentals.cli import cmd_build_industry_indices
         with pytest.raises(UnsupportedExchangeError):
-            cmd_build_industry_indices(args, fake_config)
+            cmd_build_industry_indices(args, ctx)
 
 
 # ---------- cmd_compute_index_values ---------- #
@@ -959,7 +937,7 @@ class TestCmdComputeIndexValues:
             )
 
     def test_rejects_no_industry_and_no_all_active(
-        self, db_engine, fake_config, patched_engine_factory, capsys,
+        self, db_engine, fake_config, ctx, capsys,
     ):
         args = type("A", (), {})()
         args.industry = None
@@ -969,13 +947,13 @@ class TestCmdComputeIndexValues:
         args.force = False
         args.resume = None
         from trip_ema.fundamentals.cli import cmd_compute_index_values
-        rc = cmd_compute_index_values(args, fake_config)
+        rc = cmd_compute_index_values(args, ctx)
         err = capsys.readouterr().err
         assert rc == 2
         assert "--industry" in err or "all-active" in err
 
     def test_rejects_both_industry_and_all_active(
-        self, db_engine, fake_config, patched_engine_factory, capsys,
+        self, db_engine, fake_config, ctx, capsys,
     ):
         args = type("A", (), {})()
         args.industry = "IT - Services"
@@ -985,13 +963,13 @@ class TestCmdComputeIndexValues:
         args.force = False
         args.resume = None
         from trip_ema.fundamentals.cli import cmd_compute_index_values
-        rc = cmd_compute_index_values(args, fake_config)
+        rc = cmd_compute_index_values(args, ctx)
         err = capsys.readouterr().err
         assert rc == 2
         assert "mutually exclusive" in err
 
     def test_single_industry_unknown_returns_2(
-        self, db_engine, fake_config, patched_engine_factory, capsys,
+        self, db_engine, fake_config, ctx, capsys,
     ):
         args = type("A", (), {})()
         args.industry = "Nonexistent"
@@ -1001,13 +979,13 @@ class TestCmdComputeIndexValues:
         args.force = False
         args.resume = None
         from trip_ema.fundamentals.cli import cmd_compute_index_values
-        rc = cmd_compute_index_values(args, fake_config)
+        rc = cmd_compute_index_values(args, ctx)
         err = capsys.readouterr().err
         assert rc == 2
         assert "is not indexed" in err
 
     def test_single_industry_calls_runner(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         monkeypatch, capsys,
     ):
         """Set up one index, stub the runner, confirm it gets called
@@ -1027,11 +1005,7 @@ class TestCmdComputeIndexValues:
                     succeeded=10, failed=0, skipped=2,
                 )
             return rid
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.v1_runners."
-            "populate_industry_index_value_for_industry",
-            fake_backfill,
-        )
+        _populate_fn = fake_backfill
         args = type("A", (), {})()
         args.industry = "IT - Services"
         args.all_active = False
@@ -1040,7 +1014,7 @@ class TestCmdComputeIndexValues:
         args.force = False
         args.resume = None
         from trip_ema.fundamentals.cli import cmd_compute_index_values
-        rc = cmd_compute_index_values(args, fake_config)
+        rc = cmd_compute_index_values(args, ctx, populate_fn=_populate_fn)
         out = capsys.readouterr().out
         assert rc == 0
         # The runner was called with the right industry and dates.
@@ -1054,7 +1028,7 @@ class TestCmdComputeIndexValues:
         assert "status=SUCCESS" in out
 
     def test_all_active_iterates_indices(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         monkeypatch, capsys, reliance_ticker,
     ):
         """--all-active calls the runner once per active index."""
@@ -1072,11 +1046,7 @@ class TestCmdComputeIndexValues:
                     succeeded=1, failed=0, skipped=0,
                 )
             return rid
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.v1_runners."
-            "populate_industry_index_value_for_industry",
-            fake_backfill,
-        )
+        _populate_fn = fake_backfill
         args = type("A", (), {})()
         args.industry = None
         args.all_active = True
@@ -1085,7 +1055,7 @@ class TestCmdComputeIndexValues:
         args.force = False
         args.resume = None
         from trip_ema.fundamentals.cli import cmd_compute_index_values
-        rc = cmd_compute_index_values(args, fake_config)
+        rc = cmd_compute_index_values(args, ctx, populate_fn=_populate_fn)
         out = capsys.readouterr().out
         assert rc == 0
         # Both indices got backfilled.
@@ -1093,7 +1063,7 @@ class TestCmdComputeIndexValues:
         assert "2 SUCCESS" in out
 
     def test_all_active_when_no_indices_returns_1(
-        self, db_engine, fake_config, patched_engine_factory, capsys,
+        self, db_engine, fake_config, ctx, capsys,
     ):
         args = type("A", (), {})()
         args.industry = None
@@ -1103,13 +1073,13 @@ class TestCmdComputeIndexValues:
         args.force = False
         args.resume = None
         from trip_ema.fundamentals.cli import cmd_compute_index_values
-        rc = cmd_compute_index_values(args, fake_config)
+        rc = cmd_compute_index_values(args, ctx)
         err = capsys.readouterr().err
         assert rc == 1
         assert "build-industry-indices" in err
 
     def test_partial_status_returns_1(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         monkeypatch, capsys, reliance_ticker,
     ):
         self._setup_one_index(db_engine, "IT - Services")
@@ -1123,11 +1093,7 @@ class TestCmdComputeIndexValues:
                     succeeded=5, failed=2, skipped=1,
                 )
             return rid
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.v1_runners."
-            "populate_industry_index_value_for_industry",
-            fake_backfill,
-        )
+        _populate_fn = fake_backfill
         args = type("A", (), {})()
         args.industry = "IT - Services"
         args.all_active = False
@@ -1136,7 +1102,7 @@ class TestCmdComputeIndexValues:
         args.force = False
         args.resume = None
         from trip_ema.fundamentals.cli import cmd_compute_index_values
-        rc = cmd_compute_index_values(args, fake_config)
+        rc = cmd_compute_index_values(args, ctx, populate_fn=_populate_fn)
         assert rc == 1
 
 
@@ -1146,7 +1112,7 @@ class TestCmdComputeIndexValues:
 class TestCmdRebalanceIndustryIndex:
 
     def test_returns_0_on_successful_rebalance(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         monkeypatch, capsys,
     ):
         from trip_ema.fundamentals.runners import RebalanceResult
@@ -1159,9 +1125,7 @@ class TestCmdRebalanceIndustryIndex:
                 rebalance_skipped=False,
                 skip_reason=None,
             )
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_rebalance", fake_run,
-        )
+        _rebalance_fn = fake_run
         args = type("A", (), {})()
         args.industry = "IT - Services"
         args.date = "2026-04-01"
@@ -1169,14 +1133,14 @@ class TestCmdRebalanceIndustryIndex:
         args.min_constituents = None
         args.exchange = None
         from trip_ema.fundamentals.cli import cmd_rebalance_industry_index
-        rc = cmd_rebalance_industry_index(args, fake_config)
+        rc = cmd_rebalance_industry_index(args, ctx, rebalance_fn=_rebalance_fn)
         out = capsys.readouterr().out
         assert rc == 0
         assert "picked=10" in out
         assert "closed_prior=10" in out
 
     def test_returns_1_when_skipped(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         monkeypatch, capsys,
     ):
         from trip_ema.fundamentals.runners import RebalanceResult
@@ -1189,9 +1153,7 @@ class TestCmdRebalanceIndustryIndex:
                 rebalance_skipped=True,
                 skip_reason="picked 5 < min_constituents 10",
             )
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_rebalance", fake_run,
-        )
+        _rebalance_fn = fake_run
         args = type("A", (), {})()
         args.industry = "Sparse Industry"
         args.date = "2026-04-01"
@@ -1199,21 +1161,19 @@ class TestCmdRebalanceIndustryIndex:
         args.min_constituents = None
         args.exchange = None
         from trip_ema.fundamentals.cli import cmd_rebalance_industry_index
-        rc = cmd_rebalance_industry_index(args, fake_config)
+        rc = cmd_rebalance_industry_index(args, ctx, rebalance_fn=_rebalance_fn)
         out = capsys.readouterr().out
         assert rc == 1
         assert "SKIPPED" in out
         assert "min_constituents" in out
 
     def test_returns_2_when_index_unknown(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         monkeypatch, capsys,
     ):
         def fake_run(engine, industry, rebalance_date, **kw):
             raise ValueError(f"index {industry!r} does not exist")
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_rebalance", fake_run,
-        )
+        _rebalance_fn = fake_run
         args = type("A", (), {})()
         args.industry = "Nonexistent"
         args.date = "2026-04-01"
@@ -1221,7 +1181,7 @@ class TestCmdRebalanceIndustryIndex:
         args.min_constituents = None
         args.exchange = None
         from trip_ema.fundamentals.cli import cmd_rebalance_industry_index
-        rc = cmd_rebalance_industry_index(args, fake_config)
+        rc = cmd_rebalance_industry_index(args, ctx, rebalance_fn=_rebalance_fn)
         err = capsys.readouterr().err
         assert rc == 2
         assert "does not exist" in err
@@ -1233,7 +1193,7 @@ class TestCmdRebalanceIndustryIndex:
 class TestCmdFundamentalsStatusShowsIndices:
 
     def test_shows_indices_section_when_present(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, capsys,
     ):
         from trip_ema.persistence.fundamentals_repo import (
@@ -1257,14 +1217,14 @@ class TestCmdFundamentalsStatusShowsIndices:
         args.exchange = None
         args.phase = None
         args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
+        rc = cmd_fundamentals_status(args, ctx)
         out = capsys.readouterr().out
         assert rc == 0
         assert "Industry indices" in out
         assert "Banks - Regional" in out
 
     def test_omits_indices_section_when_none_exist(
-        self, db_engine, fake_config, patched_engine_factory,
+        self, db_engine, fake_config, ctx,
         reliance_ticker, capsys,
     ):
         # No indices set up; just an industry classification so
@@ -1277,7 +1237,7 @@ class TestCmdFundamentalsStatusShowsIndices:
         args.exchange = None
         args.phase = None
         args.limit = 10
-        rc = cmd_fundamentals_status(args, fake_config)
+        rc = cmd_fundamentals_status(args, ctx)
         out = capsys.readouterr().out
         assert rc == 0
         assert "Industry indices" not in out

@@ -41,11 +41,11 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from ..app_context import AppContext
 from ..config import Config
 from ..config.loader import load_config
 from ..domain.market_session import market_tz
 from ..observability.logging_config import configure_logging
-from ..persistence.connection import create_engine_from_config
 from .corporate_actions_repo import CorporateActionsRepository
 from .exchanges import UnsupportedExchangeError
 from .runner import (
@@ -65,12 +65,10 @@ logger = logging.getLogger(__name__)
 # ---------- Command handlers ---------- #
 
 
-def cmd_refresh_listings(args, config: Config) -> int:
-    db_engine = create_engine_from_config(config)
-    try:
-        result = refresh_listings(db_engine, config, exchange=args.exchange)
-    finally:
-        db_engine.dispose()
+def cmd_refresh_listings(args, ctx: AppContext) -> int:
+    config = ctx.config
+    db_engine = ctx.db_engine
+    result = refresh_listings(db_engine, config, exchange=args.exchange)
     print(
         f"refresh-listings ({args.exchange}): "
         f"new={result.sync_result.new_listings} "
@@ -82,7 +80,7 @@ def cmd_refresh_listings(args, config: Config) -> int:
     return 0 if result.outcome == RunOutcome.SUCCESS else 1
 
 
-def cmd_backfill(args, config: Config) -> int:
+def cmd_backfill(args, ctx: AppContext, *, backfill_fn=None) -> int:
     """V1 backfill — Step 11b2 rewrite.
 
     The legacy implementation called `run_backfill()` which was a
@@ -102,221 +100,221 @@ def cmd_backfill(args, config: Config) -> int:
             then continue with the backfill if date_from given,
             else exit 0)
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from sqlalchemy import text
     from sqlalchemy.exc import IntegrityError
 
     from ..backfill import backfill
+    if backfill_fn is None:
+        backfill_fn = backfill
     from ..persistence import transaction
     from ..persistence.backfill_runs_repo import (
         BackfillRunsRepository,
     )
 
     # ---- 1. Release-lock first (operator-explicit cleanup) ----
-    db_engine = create_engine_from_config(config)
+    if args.release_lock:
+        with transaction(db_engine) as conn:
+            n = BackfillRunsRepository(conn).release_locks()
+        if n == 0:
+            print("--release-lock: no active marker rows found.")
+        else:
+            print(
+                f"--release-lock: cleared {n} orphan marker "
+                f"row(s) in backfill_runs."
+            )
+        if args.date_from is None:
+            # Cleanup-only mode. Print clear guidance about
+            # what arguments to provide for a proper backfill.
+            print()
+            print(
+                "To run a backfill, provide --date_from "
+                "(YYYY-MM-DD, required) and optionally:"
+            )
+            print(
+                "  --date_to YYYY-MM-DD   (default: today)"
+            )
+            print(
+                "  --stocks SYM1,SYM2     (default: ALL "
+                "active tickers on the exchange)"
+            )
+            print(
+                "  --exchange NSE|BSE|NYSE  (default: NSE)"
+            )
+            print(
+                "  --no_fetch_bars        (skip yfinance "
+                "stage 1; useful for state-only rebuild)"
+            )
+            return 0
+    elif args.date_from is None:
+        print(
+            "error: --date_from is required (YYYY-MM-DD), "
+            "or use --release-lock for cleanup-only mode",
+            file=sys.stderr,
+        )
+        return 2
+
+    # ---- 2. Parse + validate dates ----
+    date_from = _parse_date(args.date_from)
+    if date_from is None:
+        print(
+            f"error: --date_from must be YYYY-MM-DD, "
+            f"got {args.date_from!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    date_to = None
+    if args.date_to:
+        date_to = _parse_date(args.date_to)
+        if date_to is None:
+            print(
+                f"error: --date_to must be YYYY-MM-DD, "
+                f"got {args.date_to!r}",
+                file=sys.stderr,
+            )
+            return 2
+
+    # ---- 3. Resolve --stocks symbols → ticker_ids ----
+    stocks: list[int] | None = None
+    if args.stocks:
+        # Accept both 'A,B,C' and 'A B C' shapes.
+        symbols: list[str] = []
+        for item in args.stocks:
+            for part in item.split(","):
+                p = part.strip().upper()
+                if p:
+                    symbols.append(p)
+        if not symbols:
+            print(
+                "error: --stocks must list at least one symbol",
+                file=sys.stderr,
+            )
+            return 2
+
+        with db_engine.connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT ticker_id, symbol FROM tickers
+                     WHERE symbol = ANY(:syms)
+                       AND exchange = :ex
+                       AND is_active = TRUE
+                       AND delisted_at IS NULL
+                """),
+                {"syms": symbols, "ex": args.exchange},
+            ).all()
+        found = {r.symbol: r.ticker_id for r in rows}
+        missing = [s for s in symbols if s not in found]
+        if missing:
+            print(
+                f"error: symbol(s) not found / inactive / wrong "
+                f"exchange on {args.exchange}: "
+                f"{', '.join(missing)}",
+                file=sys.stderr,
+            )
+            return 2
+        stocks = sorted(found.values())
+
+    # ---- 4. Print plan + rough ETA ----
+    refetch = not args.no_fetch_bars
+    _print_backfill_plan(
+        date_from=date_from, date_to=date_to,
+        exchange=args.exchange, stocks=stocks,
+        refetch_bars=refetch, db_engine=db_engine,
+    )
+
+    # ---- 5. Run the pipeline ----
+    def _progress(stage: str, message: str) -> None:
+        print(f"  [{stage}] {message}", flush=True)
+
+    # Step 13a: log this backfill into compute_runs so it
+    # appears in the ETL GUI's activity log alongside
+    # intraday/eod ticks. The backfill_runs row (with its
+    # destructive-lock semantics) is still written by the
+    # pipeline itself; this is the operator-facing "what
+    # ran" record.
+    from ..persistence.compute_runs_repo import (
+        ComputeRunsRepository,
+    )
+    from ..persistence import transaction
+    backfill_run_id: int | None = None
     try:
-        if args.release_lock:
-            with transaction(db_engine) as conn:
-                n = BackfillRunsRepository(conn).release_locks()
-            if n == 0:
-                print("--release-lock: no active marker rows found.")
-            else:
-                print(
-                    f"--release-lock: cleared {n} orphan marker "
-                    f"row(s) in backfill_runs."
-                )
-            if args.date_from is None:
-                # Cleanup-only mode. Print clear guidance about
-                # what arguments to provide for a proper backfill.
-                print()
-                print(
-                    "To run a backfill, provide --date_from "
-                    "(YYYY-MM-DD, required) and optionally:"
-                )
-                print(
-                    "  --date_to YYYY-MM-DD   (default: today)"
-                )
-                print(
-                    "  --stocks SYM1,SYM2     (default: ALL "
-                    "active tickers on the exchange)"
-                )
-                print(
-                    "  --exchange NSE|BSE|NYSE  (default: NSE)"
-                )
-                print(
-                    "  --no_fetch_bars        (skip yfinance "
-                    "stage 1; useful for state-only rebuild)"
-                )
-                return 0
-        elif args.date_from is None:
-            print(
-                "error: --date_from is required (YYYY-MM-DD), "
-                "or use --release-lock for cleanup-only mode",
-                file=sys.stderr,
-            )
-            return 2
-
-        # ---- 2. Parse + validate dates ----
-        date_from = _parse_date(args.date_from)
-        if date_from is None:
-            print(
-                f"error: --date_from must be YYYY-MM-DD, "
-                f"got {args.date_from!r}",
-                file=sys.stderr,
-            )
-            return 2
-
-        date_to = None
-        if args.date_to:
-            date_to = _parse_date(args.date_to)
-            if date_to is None:
-                print(
-                    f"error: --date_to must be YYYY-MM-DD, "
-                    f"got {args.date_to!r}",
-                    file=sys.stderr,
-                )
-                return 2
-
-        # ---- 3. Resolve --stocks symbols → ticker_ids ----
-        stocks: list[int] | None = None
-        if args.stocks:
-            # Accept both 'A,B,C' and 'A B C' shapes.
-            symbols: list[str] = []
-            for item in args.stocks:
-                for part in item.split(","):
-                    p = part.strip().upper()
-                    if p:
-                        symbols.append(p)
-            if not symbols:
-                print(
-                    "error: --stocks must list at least one symbol",
-                    file=sys.stderr,
-                )
-                return 2
-
-            with db_engine.connect() as conn:
-                rows = conn.execute(
-                    text("""
-                        SELECT ticker_id, symbol FROM tickers
-                         WHERE symbol = ANY(:syms)
-                           AND exchange = :ex
-                           AND is_active = TRUE
-                           AND delisted_at IS NULL
-                    """),
-                    {"syms": symbols, "ex": args.exchange},
-                ).all()
-            found = {r.symbol: r.ticker_id for r in rows}
-            missing = [s for s in symbols if s not in found]
-            if missing:
-                print(
-                    f"error: symbol(s) not found / inactive / wrong "
-                    f"exchange on {args.exchange}: "
-                    f"{', '.join(missing)}",
-                    file=sys.stderr,
-                )
-                return 2
-            stocks = sorted(found.values())
-
-        # ---- 4. Print plan + rough ETA ----
-        refetch = not args.no_fetch_bars
-        _print_backfill_plan(
-            date_from=date_from, date_to=date_to,
-            exchange=args.exchange, stocks=stocks,
-            refetch_bars=refetch, db_engine=db_engine,
-        )
-
-        # ---- 5. Run the pipeline ----
-        def _progress(stage: str, message: str) -> None:
-            print(f"  [{stage}] {message}", flush=True)
-
-        # Step 13a: log this backfill into compute_runs so it
-        # appears in the ETL GUI's activity log alongside
-        # intraday/eod ticks. The backfill_runs row (with its
-        # destructive-lock semantics) is still written by the
-        # pipeline itself; this is the operator-facing "what
-        # ran" record.
-        from ..persistence.compute_runs_repo import (
-            ComputeRunsRepository,
-        )
-        from ..persistence import transaction
-        backfill_run_id: int | None = None
-        try:
-            with transaction(db_engine) as conn:
-                backfill_run_id = ComputeRunsRepository(conn).start(
-                    kind="backfill",
-                    exchange=args.exchange,
-                    notes=(
-                        f"date_from={date_from} "
-                        f"date_to={date_to or 'today'} "
-                        f"stocks={'ALL' if stocks is None else len(stocks)} "
-                        f"refetch_bars={refetch}"
-                    ),
-                )
-        except Exception as log_err:
-            print(
-                f"warning: compute_runs.start failed: {log_err} "
-                f"(backfill will proceed without an activity-log row)",
-                file=sys.stderr,
-            )
-
-        bf_error: str | None = None
-        try:
-            result = backfill(
-                db_engine, config,
-                date_from=date_from,
-                date_to=date_to,
+        with transaction(db_engine) as conn:
+            backfill_run_id = ComputeRunsRepository(conn).start(
+                kind="backfill",
                 exchange=args.exchange,
-                stocks=stocks,
-                refetch_bars=refetch,
-                resume=not getattr(args, "rebuild", False),
-                progress_cb=_progress,
+                notes=(
+                    f"date_from={date_from} "
+                    f"date_to={date_to or 'today'} "
+                    f"stocks={'ALL' if stocks is None else len(stocks)} "
+                    f"refetch_bars={refetch}"
+                ),
             )
-        except IntegrityError:
-            bf_error = "concurrent backfill (backfill_runs.uq_one_active fired)"
-            if backfill_run_id is not None:
-                try:
-                    with transaction(db_engine) as conn:
-                        ComputeRunsRepository(conn).finish(
-                            backfill_run_id,
-                            failed_stage="concurrent_start",
-                            error_message=bf_error,
-                        )
-                except Exception:
-                    pass  # best-effort
-            print(
-                "error: another backfill appears to be active "
-                "(backfill_runs.uq_one_active fired). If a previous "
-                "run was Ctrl-C'd or crashed, use "
-                "`backfill --release-lock` to clear the orphan, "
-                "then re-run.",
-                file=sys.stderr,
-            )
-            return 1
+    except Exception as log_err:
+        print(
+            f"warning: compute_runs.start failed: {log_err} "
+            f"(backfill will proceed without an activity-log row)",
+            file=sys.stderr,
+        )
 
-        # Step 13a: close out the compute_runs row before
-        # reporting. tickers_attempted = scope size (the universe
-        # the backfill covered); tickers_fetched left None because
-        # the pipeline doesn't surface a separate fetch count.
+    bf_error: str | None = None
+    try:
+        result = backfill_fn(
+            db_engine, config,
+            date_from=date_from,
+            date_to=date_to,
+            exchange=args.exchange,
+            stocks=stocks,
+            refetch_bars=refetch,
+            resume=not getattr(args, "rebuild", False),
+            progress_cb=_progress,
+        )
+    except IntegrityError:
+        bf_error = "concurrent backfill (backfill_runs.uq_one_active fired)"
         if backfill_run_id is not None:
             try:
                 with transaction(db_engine) as conn:
                     ComputeRunsRepository(conn).finish(
                         backfill_run_id,
-                        tickers_attempted=result.ticker_scope_size,
-                        failed_stage=result.failed_stage,
-                        error_message=result.error_message,
+                        failed_stage="concurrent_start",
+                        error_message=bf_error,
                     )
-            except Exception as log_err:
-                print(
-                    f"warning: compute_runs.finish failed: "
-                    f"{log_err}",
-                    file=sys.stderr,
+            except Exception:
+                pass  # best-effort
+        print(
+            "error: another backfill appears to be active "
+            "(backfill_runs.uq_one_active fired). If a previous "
+            "run was Ctrl-C'd or crashed, use "
+            "`backfill --release-lock` to clear the orphan, "
+            "then re-run.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Step 13a: close out the compute_runs row before
+    # reporting. tickers_attempted = scope size (the universe
+    # the backfill covered); tickers_fetched left None because
+    # the pipeline doesn't surface a separate fetch count.
+    if backfill_run_id is not None:
+        try:
+            with transaction(db_engine) as conn:
+                ComputeRunsRepository(conn).finish(
+                    backfill_run_id,
+                    tickers_attempted=result.ticker_scope_size,
+                    failed_stage=result.failed_stage,
+                    error_message=result.error_message,
                 )
+        except Exception as log_err:
+            print(
+                f"warning: compute_runs.finish failed: "
+                f"{log_err}",
+                file=sys.stderr,
+            )
 
-        # ---- 6. Report ----
-        return _report_backfill_result(result)
+    # ---- 6. Report ----
+    return _report_backfill_result(result)
 
-    finally:
-        db_engine.dispose()
 
 
 def _print_backfill_plan(
@@ -452,7 +450,7 @@ def _report_backfill_result(result) -> int:
     return 0 if result.fidelity_ready is not False else 1
 
 
-def cmd_snapshot(args, config: Config) -> int:
+def cmd_snapshot(args, ctx: AppContext) -> int:
     """V1 cutover Step 13a: trigger a market_overview_daily
     snapshot from the CLI. Useful for filling gaps when an EoD
     tick was missed (system was down at 16:30 IST), or for
@@ -461,80 +459,74 @@ def cmd_snapshot(args, config: Config) -> int:
     Idempotent — UPSERT semantics, multiple invocations for the
     same (date, exchange) yield the latest counts.
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from datetime import datetime
 
     from ..snapshots.market_overview import MarketOverviewSnapshotter
 
-    db_engine = create_engine_from_config(config)
-    try:
-        snap_date = None
-        if args.date is not None:
-            snap_date = _parse_date(args.date)
-            if snap_date is None:
-                print(
-                    f"error: --date must be YYYY-MM-DD, got "
-                    f"{args.date!r}",
-                    file=sys.stderr,
-                )
-                return 2
-
-        snapper = MarketOverviewSnapshotter(db_engine)
-        counts = snapper.snapshot_for_today(
-            exchange=args.exchange, snapshot_date=snap_date,
-        )
-
-        # Operator-facing output
-        when = (
-            snap_date.isoformat() if snap_date is not None
-            else (
-                f"today in {args.exchange} "
-                f"({datetime.now(market_tz(args.exchange)).date().isoformat()})"
+    snap_date = None
+    if args.date is not None:
+        snap_date = _parse_date(args.date)
+        if snap_date is None:
+            print(
+                f"error: --date must be YYYY-MM-DD, got "
+                f"{args.date!r}",
+                file=sys.stderr,
             )
+            return 2
+
+    snapper = MarketOverviewSnapshotter(db_engine)
+    counts = snapper.snapshot_for_today(
+        exchange=args.exchange, snapshot_date=snap_date,
+    )
+
+    # Operator-facing output
+    when = (
+        snap_date.isoformat() if snap_date is not None
+        else (
+            f"today in {args.exchange} "
+            f"({datetime.now(market_tz(args.exchange)).date().isoformat()})"
         )
-        print(f"market_overview snapshot — {args.exchange} — {when}")
-        print(
-            f"  signals: BUY={counts.n_buys} "
-            f"SELL={counts.n_sells} "
-            f"EXIT_BUY={counts.n_exit_buys} "
-            f"EXIT_SELL={counts.n_exit_sells} "
-            f"(total {counts.total_signals})"
-        )
-        print(
-            f"  regimes: green={counts.n_green_regime} "
-            f"red={counts.n_red_regime} "
-            f"neutral={counts.n_neutral_regime} "
-            f"(total {counts.total_regimes})"
-        )
-        print(
-            f"  EMA env: above_highest={counts.n_above_highest_ema} "
-            f"below_lowest={counts.n_below_lowest_ema} "
-            f"between={counts.n_between_emas}"
-        )
-        return 0
-    finally:
-        db_engine.dispose()
+    )
+    print(f"market_overview snapshot — {args.exchange} — {when}")
+    print(
+        f"  signals: BUY={counts.n_buys} "
+        f"SELL={counts.n_sells} "
+        f"EXIT_BUY={counts.n_exit_buys} "
+        f"EXIT_SELL={counts.n_exit_sells} "
+        f"(total {counts.total_signals})"
+    )
+    print(
+        f"  regimes: green={counts.n_green_regime} "
+        f"red={counts.n_red_regime} "
+        f"neutral={counts.n_neutral_regime} "
+        f"(total {counts.total_regimes})"
+    )
+    print(
+        f"  EMA env: above_highest={counts.n_above_highest_ema} "
+        f"below_lowest={counts.n_below_lowest_ema} "
+        f"between={counts.n_between_emas}"
+    )
+    return 0
 
 
-def cmd_incremental_eod(args, config: Config) -> int:
-    db_engine = create_engine_from_config(config)
-    try:
-        run_id = run_eod(
-            db_engine, config,
-            exchange=args.exchange,
-            days_lookback=args.lookback_days,
-        )
-    finally:
-        db_engine.dispose()
+def cmd_incremental_eod(args, ctx: AppContext) -> int:
+    config = ctx.config
+    db_engine = ctx.db_engine
+    run_id = run_eod(
+        db_engine, config,
+        exchange=args.exchange,
+        days_lookback=args.lookback_days,
+    )
     print(f"eod complete ({args.exchange}, run_id={run_id})")
     return 0
 
 
-def cmd_incremental_intraday(args, config: Config) -> int:
-    db_engine = create_engine_from_config(config)
-    try:
-        run_id = run_intraday(db_engine, config, exchange=args.exchange)
-    finally:
-        db_engine.dispose()
+def cmd_incremental_intraday(args, ctx: AppContext) -> int:
+    config = ctx.config
+    db_engine = ctx.db_engine
+    run_id = run_intraday(db_engine, config, exchange=args.exchange)
     if run_id < 0:
         print(f"intraday ({args.exchange}): skipped (non-trading day)")
         return 0
@@ -542,31 +534,27 @@ def cmd_incremental_intraday(args, config: Config) -> int:
     return 0
 
 
-def cmd_recompute_tiers(args, config: Config) -> int:
-    db_engine = create_engine_from_config(config)
-    try:
-        changes = recompute_tiers(db_engine, config, exchange=args.exchange)
-    finally:
-        db_engine.dispose()
+def cmd_recompute_tiers(args, ctx: AppContext) -> int:
+    config = ctx.config
+    db_engine = ctx.db_engine
+    changes = recompute_tiers(db_engine, config, exchange=args.exchange)
     print(f"tier reassignments ({args.exchange}): {changes}")
     return 0
 
 
-def cmd_reference_recheck(args, config: Config) -> int:
+def cmd_reference_recheck(args, ctx: AppContext) -> int:
     """Monthly re-baseline: re-ask every ticker the provider called unavailable.
 
     Safe to run daily from cron with --if-due; it no-ops unless today is the
     first Saturday of the month and nothing has refreshed this month.
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from ..fundamentals.monthly_recheck import run_monthly_recheck
 
-    db_engine = create_engine_from_config(config)
-    try:
-        report = run_monthly_recheck(
-            db_engine, config, args.exchange, if_due=args.if_due,
-        )
-    finally:
-        db_engine.dispose()
+    report = run_monthly_recheck(
+        db_engine, config, args.exchange, if_due=args.if_due,
+    )
 
     print(report.render())
     if not report.ran:
@@ -578,7 +566,7 @@ def cmd_reference_recheck(args, config: Config) -> int:
     return 0
 
 
-def cmd_refresh_reference(args, config: Config) -> int:
+def cmd_refresh_reference(args, ctx: AppContext) -> int:
     """Populate the reference layer: industry, shares, quarterly financials.
 
     With --only-missing (the default), each runner fetches ONLY the tickers that
@@ -588,6 +576,8 @@ def cmd_refresh_reference(args, config: Config) -> int:
 
     Without it, every active ticker is re-fetched.
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from ..fundamentals.runners import (
         run_financials_refresh,
         run_industry_refresh,
@@ -606,29 +596,25 @@ def cmd_refresh_reference(args, config: Config) -> int:
               f"choose from {sorted(runners)}")
         return 2
 
-    db_engine = create_engine_from_config(config)
-    try:
-        for name in wanted:
-            print(f"[{name}] starting "
-                  f"({'gaps only' if args.only_missing else 'FULL sweep'})")
-            run_id = runners[name](
-                db_engine, args.exchange,
-                # only_missing implies force: the 80-day skip-if-recent guard is
-                # there to stop a needless full re-sweep, and a gap-only pass is
-                # precisely the thing that guard should not block.
-                force=args.force or args.only_missing,
-                only_missing=args.only_missing,
-            )
-            print(f"[{name}] done (fundamentals_run_id={run_id})")
-    finally:
-        db_engine.dispose()
+    for name in wanted:
+        print(f"[{name}] starting "
+              f"({'gaps only' if args.only_missing else 'FULL sweep'})")
+        run_id = runners[name](
+            db_engine, args.exchange,
+            # only_missing implies force: the 80-day skip-if-recent guard is
+            # there to stop a needless full re-sweep, and a gap-only pass is
+            # precisely the thing that guard should not block.
+            force=args.force or args.only_missing,
+            only_missing=args.only_missing,
+        )
+        print(f"[{name}] done (fundamentals_run_id={run_id})")
 
     print("\nRe-run the audit to confirm:")
     print(f"  python -m trip_ema.etl.cli audit --exchange {args.exchange}")
     return 0
 
 
-def cmd_audit(args, config: Config) -> int:
+def cmd_audit(args, ctx: AppContext) -> int:
     """Read-only fidelity audit. Writes nothing.
 
     Exit codes are meaningful so this can gate a cold start or a CI job:
@@ -636,16 +622,14 @@ def cmd_audit(args, config: Config) -> int:
         1  gaps (MISSING / PARTIAL) — data is incomplete
         2  BLOCKED — a structural defect makes the data unsafe regardless
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     from ..fundamentals.data_fidelity import audit_exchange
 
-    db_engine = create_engine_from_config(config)
-    try:
-        report = audit_exchange(
-            db_engine, args.exchange,
-            gap_days=config.etl.max_coverage_gap_days,
-        )
-    finally:
-        db_engine.dispose()
+    report = audit_exchange(
+        db_engine, args.exchange,
+        gap_days=config.etl.max_coverage_gap_days,
+    )
 
     print(report.render())
 
@@ -656,42 +640,38 @@ def cmd_audit(args, config: Config) -> int:
     return 0
 
 
-def cmd_status(args, config: Config) -> int:
-    db_engine = create_engine_from_config(config)
-    try:
-        with db_engine.connect() as conn:
-            status_repo = EtlStatusRepository(conn)
-            recent = status_repo.list_recent_runs(limit=args.limit)
-            parked = status_repo.list_parked()
-        print(f"Recent ETL runs (last {len(recent)}):")
-        for r in recent:
+def cmd_status(args, ctx: AppContext) -> int:
+    config = ctx.config
+    db_engine = ctx.db_engine
+    with db_engine.connect() as conn:
+        status_repo = EtlStatusRepository(conn)
+        recent = status_repo.list_recent_runs(limit=args.limit)
+        parked = status_repo.list_parked()
+    print(f"Recent ETL runs (last {len(recent)}):")
+    for r in recent:
+        print(
+            f"  run_id={r.run_id} kind={r.kind:18} "
+            f"outcome={r.outcome or 'in-flight':10} "
+            f"started={r.started_at.isoformat(timespec='seconds')} "
+            f"attempted={r.tickers_attempted} ok={r.tickers_succeeded} "
+            f"fail={r.tickers_failed} bars={r.bars_written}"
+        )
+    print()
+    print(f"Parked tickers: {len(parked)}")
+    if parked and args.verbose:
+        for t in parked[:20]:
             print(
-                f"  run_id={r.run_id} kind={r.kind:18} "
-                f"outcome={r.outcome or 'in-flight':10} "
-                f"started={r.started_at.isoformat(timespec='seconds')} "
-                f"attempted={r.tickers_attempted} ok={r.tickers_succeeded} "
-                f"fail={r.tickers_failed} bars={r.bars_written}"
+                f"  ticker_id={t.ticker_id} "
+                f"parked_at={t.parked_at.isoformat() if t.parked_at else 'n/a'} "
+                f"reason={t.parked_reason}"
             )
-        print()
-        print(f"Parked tickers: {len(parked)}")
-        if parked and args.verbose:
-            for t in parked[:20]:
-                print(
-                    f"  ticker_id={t.ticker_id} "
-                    f"parked_at={t.parked_at.isoformat() if t.parked_at else 'n/a'} "
-                    f"reason={t.parked_reason}"
-                )
-    finally:
-        db_engine.dispose()
     return 0
 
 
-def cmd_unpark(args, config: Config) -> int:
-    db_engine = create_engine_from_config(config)
-    try:
-        count = unpark_all(db_engine, config, exchange=args.exchange)
-    finally:
-        db_engine.dispose()
+def cmd_unpark(args, ctx: AppContext) -> int:
+    config = ctx.config
+    db_engine = ctx.db_engine
+    count = unpark_all(db_engine, config, exchange=args.exchange)
     print(
         f"unparked {count} {args.exchange} tickers "
         f"(next EoD run will retry them)"
@@ -699,14 +679,12 @@ def cmd_unpark(args, config: Config) -> int:
     return 0
 
 
-def cmd_approve_action(args, config: Config) -> int:
-    db_engine = create_engine_from_config(config)
-    try:
-        with db_engine.begin() as conn:
-            repo = CorporateActionsRepository(conn)
-            ok = repo.approve(args.action_id, reviewed_by="cli", notes=args.notes)
-    finally:
-        db_engine.dispose()
+def cmd_approve_action(args, ctx: AppContext) -> int:
+    config = ctx.config
+    db_engine = ctx.db_engine
+    with db_engine.begin() as conn:
+        repo = CorporateActionsRepository(conn)
+        ok = repo.approve(args.action_id, reviewed_by="cli", notes=args.notes)
     if not ok:
         print(
             f"action_id {args.action_id} not found or not in pending_review",
@@ -720,7 +698,7 @@ def cmd_approve_action(args, config: Config) -> int:
 
 
 # === STEP 13D1: cmd_cycle ===
-def cmd_cycle(args, config: Config) -> int:
+def cmd_cycle(args, ctx: AppContext, *, recompute_fn=None, notify_fn=None, fetch_fn=None) -> int:
     """Run the full V1 live cycle: fetch + recompute_market + notify.
 
     Mirrors what `MarketOrchestrator.run_once()` does on a scheduled
@@ -742,17 +720,25 @@ def cmd_cycle(args, config: Config) -> int:
     Returns:
         0 on success, 1 on any stage failure.
     """
+    config = ctx.config
+    db_engine = ctx.db_engine
     import sys
     from datetime import UTC, datetime
 
     from ..config.brevo_secrets import load_brevo_api_key
     from ..domain import Timeframe
     from ..orchestrator.notify_subscribers import notify_subscribers
+    if notify_fn is None:
+        notify_fn = notify_subscribers
     from ..orchestrator.recompute_market import recompute_market
+    if recompute_fn is None:
+        recompute_fn = recompute_market
     from ..persistence import transaction
     from ..persistence.compute_runs_repo import ComputeRunsRepository
     from ..scheduler.market_hours import MarketHoursService
     from .runner import _run_fetch_pass
+    if fetch_fn is None:
+        fetch_fn = _run_fetch_pass
     from .types import RunKind
 
     # PHASE-2-SIGTERM: install SIGTERM handler so dispatcher-
@@ -807,7 +793,6 @@ def cmd_cycle(args, config: Config) -> int:
     )
 
     # ---- 2. Open DB engine + start compute_runs row ----
-    db_engine = create_engine_from_config(config)
 
     try:
         with transaction(db_engine) as conn:
@@ -856,7 +841,7 @@ def cmd_cycle(args, config: Config) -> int:
             # fetch pass closes its own run row (it's committed by the
             # time the call returns, so the SELECT is safe).
             from sqlalchemy import text
-            fetch_run_id = _run_fetch_pass(
+            fetch_run_id = fetch_fn(
                 db_engine, config,
                 exchange=exchange,
                 kind=(
@@ -888,7 +873,7 @@ def cmd_cycle(args, config: Config) -> int:
             )
 
             # ---- Stages 2-9: recompute_market ----
-            recompute_result = recompute_market(
+            recompute_result = recompute_fn(
                 db_engine,
                 mode="live",
                 signal_mode="intraday" if kind == "intraday" else "eod",
@@ -932,7 +917,7 @@ def cmd_cycle(args, config: Config) -> int:
                     brevo_config.secrets_file,
                 )
                 cycle_id = now.strftime("%Y%m%d-%H%M%S")
-                notify_subscribers(
+                notify_fn(
                     db_engine,
                     brevo_api_key=api_key,
                     brevo_from_address=brevo_config.sender_email,
@@ -1008,7 +993,6 @@ def cmd_cycle(args, config: Config) -> int:
                     "failed for run_id=%s — row will remain "
                     "in-flight in the DB", run_id, exc_info=True,
                 )
-        db_engine.dispose()
 
 
 
@@ -1295,8 +1279,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"unknown command: {args.command}")
         return 2
 
+    # ONE engine for the process, built here and disposed in the finally. Each
+    # command used to open its own and leave it to the garbage collector.
+    ctx = AppContext.from_config(config)
     try:
-        return handler(args, config)
+        return handler(args, ctx)
     except UnsupportedExchangeError as e:
         # Clean stderr line, no stack trace — these are user-facing
         # validation errors, not bugs.
@@ -1309,6 +1296,9 @@ def main(argv: list[str] | None = None) -> int:
         logger.exception("Unhandled error in command %s", args.command)
         print(f"error: {e}", file=sys.stderr)
         return 2
+    finally:
+        # A command that raised still gives its connections back.
+        ctx.dispose()
 
 
 def _parse_date(s: str) -> date | None:
