@@ -101,11 +101,6 @@
       "mock_patch": 0,
       "setattr": 1
     },
-    "transports/http/test_fundamentals_routes.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 7
-    },
     "transports_pure/test_admin_etl.py": {
       "env": 0,
       "mock_patch": 0,

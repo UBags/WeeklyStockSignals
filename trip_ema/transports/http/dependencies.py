@@ -245,6 +245,23 @@ def require_admin_token(
         )
 
 
+def get_fundamentals_runners():
+    """The fundamentals runner registry the route handlers fire.
+
+    A dependency rather than a module-level import, for the same reason
+    get_admin_token is a dependency (Phase 3): a test overrides it on the
+    app, not on the module. Rewriting a module global leaks across xdist
+    workers; a dependency override is scoped to the app instance and
+    unwound with it.
+
+    Deliberately NOT parameterised by app state: there is exactly one real
+    registry, and the only reason to want another is a test. Keeping the
+    production path a constant makes that obvious.
+    """
+    from ...fundamentals.stages import DEFAULT_FUNDAMENTALS_RUNNERS
+    return DEFAULT_FUNDAMENTALS_RUNNERS
+
+
 def get_etl_executor():
     """Return the AppState's ETL ThreadPoolExecutor. Returns None when
     the ETL admin endpoints are disabled — the route handlers then

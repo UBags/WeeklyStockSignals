@@ -26,10 +26,33 @@ from trip_ema.persistence.fundamentals_repo import (
 )
 from trip_ema.persistence.tickers_repo import TickersRepository
 from .conftest import ADMIN_TOKEN
+from trip_ema.fundamentals.stages import DEFAULT_FUNDAMENTALS_RUNNERS
 from trip_ema.transports.http.dependencies import (
     get_db_engine,
     get_etl_executor,
+    get_fundamentals_runners,
 )
+
+
+@pytest.fixture
+def use_runners(http_app):
+    """Swap one or more fundamentals runners for this app instance.
+
+        use_runners(shares=fake_runner)
+
+    Replaces rewriting trip_ema.fundamentals.runners' module attributes.
+    A module rewrite is process-global and leaks between xdist workers; a
+    dependency override lives on the app and dies with it. Unknown phase
+    names raise (registry field names are the phase names), so a typo here
+    fails loudly instead of silently testing nothing.
+    """
+    def _use(**overrides):
+        registry = DEFAULT_FUNDAMENTALS_RUNNERS.with_(**overrides)
+        http_app.client.app.dependency_overrides[get_fundamentals_runners] = (
+            lambda: registry
+        )
+        return registry
+    return _use
 
 
 # ---------- fixtures ---------- #
@@ -190,17 +213,13 @@ class TestListRuns:
 class TestRefreshIndustry:
 
     def test_returns_202_and_kicks_runner(
-        self, real_db_client, db_engine, reliance_ticker, monkeypatch,
+        self, real_db_client, db_engine, reliance_ticker, use_runners,
     ):
-        # Patch run_industry_refresh to verify it gets called.
         called = []
         def fake_runner(engine, exchange, *, force=False, **kwargs):
             called.append((exchange, force))
             return 0
-        monkeypatch.setattr(
-            "trip_ema.transports.http.routes.fundamentals.run_industry_refresh",
-            fake_runner,
-        )
+        use_runners(industry=fake_runner)
         r = real_db_client.post(
             "/v1/fundamentals/refresh-industry?exchange=NSE&force=true",
             headers=AUTH_HEADERS,
@@ -446,16 +465,13 @@ class TestGetSharesHistory:
 class TestRefreshShares:
 
     def test_returns_202_and_kicks_runner(
-        self, real_db_client, db_engine, reliance_ticker, monkeypatch,
+        self, real_db_client, db_engine, reliance_ticker, use_runners,
     ):
         called = []
         def fake_runner(engine, exchange, *, force=False, **kw):
             called.append((exchange, force))
             return 0
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_shares_refresh",
-            fake_runner,
-        )
+        use_runners(shares=fake_runner)
         r = real_db_client.post(
             "/v1/fundamentals/refresh-shares?exchange=NSE&force=true",
             headers=AUTH_HEADERS,
@@ -615,16 +631,13 @@ class TestGetQuarterHistory:
 class TestRefreshFinancials:
 
     def test_returns_202_and_kicks_runner(
-        self, real_db_client, db_engine, reliance_ticker, monkeypatch,
+        self, real_db_client, db_engine, reliance_ticker, use_runners,
     ):
         called = []
         def fake_runner(engine, exchange, *, force=False, **kw):
             called.append((exchange, force))
             return 0
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_financials_refresh",
-            fake_runner,
-        )
+        use_runners(financials=fake_runner)
         r = real_db_client.post(
             "/v1/fundamentals/refresh-financials?exchange=NSE&force=true",
             headers=AUTH_HEADERS,
@@ -773,17 +786,14 @@ class TestGetMarketCapHistory:
 class TestComputeMarketCapEndpoint:
 
     def test_returns_202_and_kicks_runner(
-        self, real_db_client, db_engine, reliance_ticker, monkeypatch,
+        self, real_db_client, db_engine, reliance_ticker, use_runners,
     ):
         called = []
         def fake_runner(engine, exchange, *, from_date, to_date,
                         force=False, **kw):
             called.append((exchange, from_date, to_date, force))
             return 0
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_market_cap_backfill",
-            fake_runner,
-        )
+        use_runners(market_cap=fake_runner)
         r = real_db_client.post(
             "/v1/fundamentals/compute-market-cap?exchange=NSE"
             "&backfill_from=2025-05-22&backfill_to=2026-05-22&force=true",
@@ -1095,7 +1105,7 @@ class TestGetIndustryIndexValues:
 class TestBuildIndustryIndicesEndpoint:
 
     def test_returns_202_and_kicks_runner(
-        self, real_db_client, db_engine, monkeypatch,
+        self, real_db_client, db_engine, use_runners,
     ):
         called = []
         def fake_build(engine, exchange, *, min_constituents, n, base_value):
@@ -1104,10 +1114,7 @@ class TestBuildIndustryIndicesEndpoint:
                 "qualified": [], "unqualified": [],
                 "indexed": [], "failed": [],
             }
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.runners.run_industry_index_build",
-            fake_build,
-        )
+        use_runners(index_build=fake_build)
         r = real_db_client.post(
             "/v1/fundamentals/build-industry-indices?exchange=NSE"
             "&min_constituents=10&n=10&base_value=1000.0",
@@ -1164,18 +1171,14 @@ class TestComputeIndexValuesEndpoint:
         assert r.status_code == 400
 
     def test_returns_202_for_industry(
-        self, real_db_client, db_engine, monkeypatch,
+        self, real_db_client, db_engine, use_runners,
     ):
         _create_index(db_engine, "IT - Services")
         called = []
         def fake_backfill(engine, industry_name, **kw):
             called.append((industry_name, kw))
             return 1
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.v1_runners."
-            "populate_industry_index_value_for_industry",
-            fake_backfill,
-        )
+        use_runners(index_value=fake_backfill)
         r = real_db_client.post(
             "/v1/fundamentals/compute-index-values"
             "?industry=IT - Services&from_date=2025-10-01",
@@ -1187,7 +1190,7 @@ class TestComputeIndexValuesEndpoint:
         assert called[0][0] == "IT - Services"
 
     def test_returns_202_for_all_active(
-        self, real_db_client, db_engine, monkeypatch,
+        self, real_db_client, db_engine, use_runners,
     ):
         _create_index(db_engine, "IT - Services")
         _create_index(db_engine, "Banks - Regional", sector="Financials")
@@ -1195,11 +1198,7 @@ class TestComputeIndexValuesEndpoint:
         def fake_backfill(engine, industry_name, **kw):
             called.append(industry_name)
             return 1
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.v1_runners."
-            "populate_industry_index_value_for_industry",
-            fake_backfill,
-        )
+        use_runners(index_value=fake_backfill)
         r = real_db_client.post(
             "/v1/fundamentals/compute-index-values?all_active=true",
             headers=AUTH_HEADERS,

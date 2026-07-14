@@ -186,6 +186,45 @@ CLOSED_SEAMS: list[Seam] = [
         "populator beneath it.",
         scope="tests",
     ),
+
+    # ---- Phase 9: the fundamentals runner registry ----
+    Seam(
+        "patching a fundamentals runner by module path",
+        "9",
+        r'(?:patch|setattr)\(\s*\n?\s*["\']trip_ema\.fundamentals\.'
+        r'(?:runners|v1_runners|scheduler)\.(?:run_|populate_)',
+        "the scheduler takes `runners: FundamentalsRunners`; the routes "
+        "resolve one via Depends(get_fundamentals_runners). Derive a "
+        "variant: DEFAULT_FUNDAMENTALS_RUNNERS.with_(shares=spy), or use "
+        "the use_runners fixture in the route tests.",
+        scope="tests",
+    ),
+    Seam(
+        "a function-local import of a fundamentals runner",
+        "9",
+        # [ \t]+, NOT \s+ : \s matches newlines, so `^\s+from` anchors on the
+        # blank line above a MODULE-TOP import, eats the newline, and matches
+        # it. The first version of this rule flagged industry_stages.py's
+        # top-level import and was correct about nothing.
+        r'^[ \t]+from \.{2,4}fundamentals\.(?:runners|v1_runners) import',
+        "import at module top, or take the registry. A runner imported "
+        "INSIDE a function body has no runtime purpose here — no cycle, "
+        "nothing lazy. It is a patch target. That is what it was for.",
+        scope="src",
+        exempt=(
+            # The only two real violations left, and neither is Phase 9's.
+            # Both import run_shares_backfill, which is not a scheduler or
+            # route phase and so is not a registry field; they belong to the
+            # phase that ports the ETL CLI's command table. A debt with a
+            # name on it — delete this exemption and them together.
+            #
+            # (stages.py and archive/index_value_backfill.py were exempted
+            # here too, until the \s+ newline bug was fixed and it turned
+            # out neither had ever violated anything.)
+            "transports/http/routes/admin_etl.py",
+            "etl/cli.py",
+        ),
+    ),
 ]
 
 
@@ -349,6 +388,12 @@ def test_every_seam_pattern_is_live():
             'monkeypatch.setattr("trip_ema.backfill.pipeline.refresh_listings", f)',
         "patching the industry populators through the orchestrator":
             'monkeypatch.setattr("trip_ema.orchestrator.industry_stages.x", f)',
+        "patching a fundamentals runner by module path":
+            'monkeypatch.setattr("trip_ema.fundamentals.runners.run_shares_refresh", f)',
+        "a function-local import of a fundamentals runner":
+            # INDENTED, deliberately. A module-top import is not the thing
+            # this seam bans, and the probe has to prove the difference.
+            '    from ....fundamentals.runners import run_shares_refresh',
     }
     for seam in CLOSED_SEAMS:
         probe = probes[seam.name]

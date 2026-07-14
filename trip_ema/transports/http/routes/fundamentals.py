@@ -33,7 +33,7 @@ from sqlalchemy import Engine, text
 
 from ....config import Config
 from ....etl.exchanges import UnsupportedExchangeError, validate_exchange
-from ....fundamentals.runners import run_industry_refresh
+from ....fundamentals.stages import FundamentalsRunners
 from ....persistence import transaction
 from ....persistence.fundamentals_repo import (
     FundamentalsRunRepository,
@@ -43,6 +43,7 @@ from ....persistence.fundamentals_repo import (
 from ..dependencies import (
     get_config,
     get_db_engine,
+    get_fundamentals_runners,
     get_etl_executor,
     require_admin_token,
 )
@@ -147,12 +148,17 @@ def _validate_exchange_or_400(exchange: str, config: Config) -> None:
 
 def _run_industry_refresh_safe(
     db_engine: Engine, config: Config, exchange: str, force: bool,
+    runners: FundamentalsRunners,
 ) -> None:
     """Wrapper that runs in the executor — catches exceptions so the
     executor thread doesn't die silently. Errors are logged; the
-    run row's status field carries the real outcome."""
+    run row's status field carries the real outcome.
+
+    `runners` is resolved in the HANDLER, on the request thread, and passed
+    down. Resolving it here would put a Depends() lookup on an executor
+    thread that has no request context."""
     try:
-        run_industry_refresh(db_engine, exchange, force=force)
+        runners.industry(db_engine, exchange, force=force)
     except Exception:
         logger.exception(
             "Industry refresh failed for exchange=%s", exchange,
@@ -263,6 +269,7 @@ def refresh_industry(
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
     executor = Depends(get_etl_executor),
+    runners: FundamentalsRunners = Depends(get_fundamentals_runners),
 ) -> RefreshAcceptedPayload:
     """Fire-and-forget: submits the runner to the ETL executor and
     returns 202 immediately. The GUI polls /runs for the resulting
@@ -273,7 +280,9 @@ def refresh_industry(
         "Admin: refresh-industry requested",
         extra={"exchange": exchange, "force": force},
     )
-    executor.submit(_run_industry_refresh_safe, db_engine, config, exchange, force)
+    executor.submit(
+        _run_industry_refresh_safe, db_engine, config, exchange, force, runners,
+    )
     return RefreshAcceptedPayload(
         action="refresh-industry",
         run_id=None,
@@ -356,13 +365,13 @@ class SharesHistoryPayload(BaseModel):
 
 def _run_shares_refresh_safe(
     db_engine: Engine, config: Config, exchange: str, force: bool,
+    runners: FundamentalsRunners,
 ) -> None:
     """Wrapper for the executor — catches exceptions so the executor
     thread doesn't die silently. Errors are logged; the run row
     carries the real outcome."""
-    from ....fundamentals.runners import run_shares_refresh
     try:
-        run_shares_refresh(db_engine, exchange, force=force)
+        runners.shares(db_engine, exchange, force=force)
     except Exception:
         logger.exception(
             "Shares refresh failed for exchange=%s", exchange,
@@ -459,6 +468,7 @@ def refresh_shares(
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
     executor = Depends(get_etl_executor),
+    runners: FundamentalsRunners = Depends(get_fundamentals_runners),
 ) -> RefreshAcceptedPayload:
     """Fire-and-forget shares refresh. Returns 202 immediately;
     poll /runs for the result."""
@@ -468,7 +478,9 @@ def refresh_shares(
         "Admin: refresh-shares requested",
         extra={"exchange": exchange, "force": force},
     )
-    executor.submit(_run_shares_refresh_safe, db_engine, config, exchange, force)
+    executor.submit(
+        _run_shares_refresh_safe, db_engine, config, exchange, force, runners,
+    )
     return RefreshAcceptedPayload(
         action="refresh-shares",
         run_id=None,
@@ -517,13 +529,13 @@ class FinancialQuartersPayload(BaseModel):
 
 def _run_financials_refresh_safe(
     db_engine: Engine, config: Config, exchange: str, force: bool,
+    runners: FundamentalsRunners,
 ) -> None:
     """Executor wrapper — catches exceptions so the executor thread
     doesn't die silently. Errors are logged; run row carries the
     real outcome."""
-    from ....fundamentals.runners import run_financials_refresh
     try:
-        run_financials_refresh(db_engine, exchange, force=force)
+        runners.financials(db_engine, exchange, force=force)
     except Exception:
         logger.exception(
             "Financials refresh failed for exchange=%s", exchange,
@@ -612,6 +624,7 @@ def refresh_financials(
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
     executor = Depends(get_etl_executor),
+    runners: FundamentalsRunners = Depends(get_fundamentals_runners),
 ) -> RefreshAcceptedPayload:
     """Fire-and-forget financials refresh. Returns 202 immediately;
     poll /runs for the result."""
@@ -621,7 +634,9 @@ def refresh_financials(
         "Admin: refresh-financials requested",
         extra={"exchange": exchange, "force": force},
     )
-    executor.submit(_run_financials_refresh_safe, db_engine, config, exchange, force)
+    executor.submit(
+        _run_financials_refresh_safe, db_engine, config, exchange, force, runners,
+    )
     return RefreshAcceptedPayload(
         action="refresh-financials",
         run_id=None,
@@ -677,12 +692,12 @@ def _mcap_row_payload(r) -> MarketCapRowPayload:
 def _run_mcap_backfill_safe(
     db_engine: Engine, config: Config, exchange: str,
     from_date: date, to_date: date, force: bool,
+    runners: FundamentalsRunners,
 ) -> None:
     """Executor wrapper — catches exceptions so the executor thread
     doesn't die silently."""
-    from ....fundamentals.runners import run_market_cap_backfill
     try:
-        run_market_cap_backfill(
+        runners.market_cap(
             db_engine, exchange,
             from_date=from_date, to_date=to_date, force=force,
         )
@@ -747,6 +762,7 @@ def compute_market_cap_endpoint(
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
     executor = Depends(get_etl_executor),
+    runners: FundamentalsRunners = Depends(get_fundamentals_runners),
 ) -> RefreshAcceptedPayload:
     """Fire-and-forget market cap backfill. Requires backfill_from
     (and optionally backfill_to, defaulting to today). Returns 202
@@ -781,7 +797,7 @@ def compute_market_cap_endpoint(
     )
     executor.submit(
         _run_mcap_backfill_safe, db_engine, config, exchange,
-        backfill_from, backfill_to, force,
+        backfill_from, backfill_to, force, runners,
     )
     return RefreshAcceptedPayload(
         action="compute-market-cap",
@@ -910,10 +926,10 @@ def _value_payload(v) -> IndustryIndexValuePayload:
 def _run_industry_index_build_safe(
     db_engine: Engine, config: Config, exchange: str,
     min_constituents: int, n: int, base_value: float,
+    runners: FundamentalsRunners,
 ) -> None:
-    from ....fundamentals.runners import run_industry_index_build
     try:
-        run_industry_index_build(
+        runners.index_build(
             db_engine, exchange,
             min_constituents=min_constituents,
             n=n,
@@ -929,9 +945,9 @@ def _run_index_value_backfill_safe(
     db_engine: Engine, industry_name: str,
     from_date_param: date | None, to_date_param: date | None,
     force: bool, all_active: bool,
+    runners: FundamentalsRunners,
 ) -> None:
     """Runs either one industry or all active industries."""
-    from ....fundamentals.v1_runners import populate_industry_index_value_for_industry
     try:
         with db_engine.connect() as conn:
             ir = IndustryIndexRepository(conn)
@@ -951,7 +967,7 @@ def _run_index_value_backfill_safe(
             )
             if effective_from > effective_to:
                 continue
-            populate_industry_index_value_for_industry(
+            runners.index_value(
                 db_engine, idx.industry_name,
                 from_date=effective_from,
                 to_date=effective_to,
@@ -1072,6 +1088,7 @@ def build_industry_indices_endpoint(
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
     executor = Depends(get_etl_executor),
+    runners: FundamentalsRunners = Depends(get_fundamentals_runners),
 ) -> RefreshAcceptedPayload:
     """Fire-and-forget auto-discovery + initial rebalance for all
     qualifying industries on the exchange. Returns 202 immediately.
@@ -1087,7 +1104,7 @@ def build_industry_indices_endpoint(
     )
     executor.submit(
         _run_industry_index_build_safe, db_engine, config, exchange,
-        min_constituents, n, base_value,
+        min_constituents, n, base_value, runners,
     )
     return RefreshAcceptedPayload(
         action="build-industry-indices",
@@ -1103,6 +1120,7 @@ def build_industry_indices_endpoint(
 @router.post("/compute-index-values",
              response_model=RefreshAcceptedPayload, status_code=202)
 def compute_index_values_endpoint(
+    runners: FundamentalsRunners = Depends(get_fundamentals_runners),
     industry: str | None = Query(None),
     all_active: bool = Query(False),
     from_date: date | None = Query(None),
@@ -1138,7 +1156,7 @@ def compute_index_values_endpoint(
     )
     executor.submit(
         _run_index_value_backfill_safe, db_engine,
-        industry or "", from_date, to_date, force, all_active,
+        industry or "", from_date, to_date, force, all_active, runners,
     )
     return RefreshAcceptedPayload(
         action="compute-index-values",
