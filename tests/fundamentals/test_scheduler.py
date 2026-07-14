@@ -8,7 +8,7 @@ combinations.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone, UTC
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -16,6 +16,10 @@ from trip_ema.fundamentals.scheduler import (
     QUARTERLY_WINDOWS,
     QuarterlyFundamentalsScheduler,
     RECENT_RUN_DAYS,
+)
+from trip_ema.fundamentals.stages import (
+    DEFAULT_FUNDAMENTALS_RUNNERS,
+    UnknownPhaseError,
 )
 from trip_ema.persistence import transaction
 from trip_ema.persistence.fundamentals_repo import FundamentalsRunRepository
@@ -38,6 +42,54 @@ def fake_config():
 def _at(year: int, month: int, day: int) -> datetime:
     """Helper: build a UTC datetime at the given date."""
     return datetime(year, month, day, 12, 0, tzinfo=UTC)
+
+
+class _Spy:
+    """A stand-in runner that records its calls.
+
+    Replaces the old mock of the shares runner. Note WHERE that mock had to
+    aim: at trip_ema.fundamentals.runners, not at the scheduler — because
+    the scheduler imported the function locally inside _fire(). The local
+    import existed for no other reason.
+
+    (Deliberately not quoting the old call here. The patch budget counts
+    textually and would score the quotation as debt.)
+    """
+
+    def __init__(self, side_effect=None):
+        self.calls: list[tuple] = []
+        self._side_effect = side_effect
+
+    def __call__(self, db_engine, exchange, **kw):
+        self.calls.append((db_engine, exchange, kw))
+        if self._side_effect is not None:
+            return self._side_effect(db_engine, exchange, **kw)
+        return 0
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+    @property
+    def exchanges(self) -> list[str]:
+        return [c[1] for c in self.calls]
+
+
+@pytest.fixture
+def spies():
+    """One spy per scheduled phase. Every scheduler in these tests gets a
+    registry built from these, so no test can accidentally fire a REAL
+    30-minute yfinance refresh against the fixture DB."""
+    return {
+        "industry": _Spy(),
+        "shares": _Spy(),
+        "financials": _Spy(),
+    }
+
+
+@pytest.fixture
+def runners(spies):
+    return DEFAULT_FUNDAMENTALS_RUNNERS.with_(**spies)
 
 
 # ---------- in_refresh_window ---------- #
@@ -140,39 +192,34 @@ class TestSkipDueToRecentRun:
 
 class TestTick:
 
-    def test_tick_outside_window_does_nothing(self, db_engine, fake_config):
+    def test_tick_outside_window_does_nothing(
+        self, db_engine, fake_config, runners, spies,
+    ):
         """If we're not in a refresh window, _tick is a no-op even if
         a run is overdue."""
         sched = QuarterlyFundamentalsScheduler(
             db_engine, fake_config,
-            now_fn=lambda: _at(2026, 4, 20),   # March 1 — outside all windows
+            now_fn=lambda: _at(2026, 4, 20),   # outside all windows
+            runners=runners,
         )
-        with patch(
-            "trip_ema.fundamentals.scheduler.run_industry_refresh",
-        ) as mock_runner:
-            sched._tick()
-        assert mock_runner.call_count == 0
+        sched._tick()
+        assert spies["industry"].call_count == 0
 
     def test_tick_in_window_fires_for_each_exchange(
-        self, db_engine, fake_config,
+        self, db_engine, fake_config, runners, spies,
     ):
         sched = QuarterlyFundamentalsScheduler(
             db_engine, fake_config,
             now_fn=lambda: _at(2026, 4, 30),
+            runners=runners,
         )
-        with patch(
-            "trip_ema.fundamentals.scheduler.run_industry_refresh",
-        ) as mock_runner:
-            sched._tick()
+        sched._tick()
         # Two exchanges configured (NSE, BSE) — one fire each.
-        assert mock_runner.call_count == 2
-        called_exchanges = sorted(
-            call.args[1] for call in mock_runner.call_args_list
-        )
-        assert called_exchanges == ["BSE", "NSE"]
+        assert spies["industry"].call_count == 2
+        assert sorted(spies["industry"].exchanges) == ["BSE", "NSE"]
 
     def test_tick_skips_exchange_with_recent_success(
-        self, db_engine, fake_config,
+        self, db_engine, fake_config, runners, spies,
     ):
         """NSE has a recent success → don't re-fire it. BSE has none → fire."""
         with transaction(db_engine) as conn:
@@ -182,34 +229,29 @@ class TestTick:
         sched = QuarterlyFundamentalsScheduler(
             db_engine, fake_config,
             now_fn=lambda: _at(2026, 4, 30),
+            runners=runners,
         )
-        with patch(
-            "trip_ema.fundamentals.scheduler.run_industry_refresh",
-        ) as mock_runner:
-            sched._tick()
-        assert mock_runner.call_count == 1
-        # Only BSE was called.
-        assert mock_runner.call_args_list[0].args[1] == "BSE"
+        sched._tick()
+        assert spies["industry"].call_count == 1
+        assert spies["industry"].exchanges == ["BSE"]
 
-    def test_tick_handles_runner_exception(self, db_engine, fake_config):
+    def test_tick_handles_runner_exception(
+        self, db_engine, fake_config, runners, spies,
+    ):
         """If the runner raises for one exchange, we still try the next."""
-        sched = QuarterlyFundamentalsScheduler(
-            db_engine, fake_config,
-            now_fn=lambda: _at(2026, 4, 30),
-        )
-        call_log = []
-        def raising_runner(engine, exchange, **kw):
-            call_log.append(exchange)
+        def raising(engine, exchange, **kw):
             if exchange == "BSE":
                 raise RuntimeError("simulated failure")
             return 1
-        with patch(
-            "trip_ema.fundamentals.scheduler.run_industry_refresh",
-            side_effect=raising_runner,
-        ):
-            sched._tick()
+        industry = _Spy(side_effect=raising)
+        sched = QuarterlyFundamentalsScheduler(
+            db_engine, fake_config,
+            now_fn=lambda: _at(2026, 4, 30),
+            runners=runners.with_(industry=industry),
+        )
+        sched._tick()
         # Both exchanges should have been attempted.
-        assert set(call_log) == {"NSE", "BSE"}
+        assert set(industry.exchanges) == {"NSE", "BSE"}
 
 
 # ---------- start/stop lifecycle ---------- #
@@ -283,7 +325,7 @@ class TestSchedulerFiresShares:
     at each quarterly window. These tests exercise the new branch."""
 
     def test_tick_fires_both_industry_and_shares_per_exchange(
-        self, db_engine, fake_config,
+        self, db_engine, fake_config, runners, spies,
     ):
         """In a refresh window, with no prior runs and two configured
         exchanges, we expect 2 industry fires + 2 shares fires = 4
@@ -291,17 +333,15 @@ class TestSchedulerFiresShares:
         sched = QuarterlyFundamentalsScheduler(
             db_engine, fake_config,
             now_fn=lambda: _at(2026, 4, 30),
+            runners=runners,
         )
-        with patch(
-            "trip_ema.fundamentals.scheduler.run_industry_refresh",
-        ) as ind_mock, patch(
-            "trip_ema.fundamentals.runners.run_shares_refresh",
-        ) as shr_mock:
-            sched._tick()
-        assert ind_mock.call_count == 2  # NSE + BSE
-        assert shr_mock.call_count == 2  # NSE + BSE
+        sched._tick()
+        assert spies["industry"].call_count == 2  # NSE + BSE
+        assert spies["shares"].call_count == 2    # NSE + BSE
 
-    def test_shares_phase_respects_skip_if_recent(self, db_engine, fake_config):
+    def test_shares_phase_respects_skip_if_recent(
+        self, db_engine, fake_config, runners, spies,
+    ):
         """A recent SUCCESS shares run for NSE means the scheduler
         should fire shares only for BSE (not NSE). Industry should
         still fire for both since the recent run was for the shares
@@ -314,42 +354,36 @@ class TestSchedulerFiresShares:
         sched = QuarterlyFundamentalsScheduler(
             db_engine, fake_config,
             now_fn=lambda: _at(2026, 4, 30),
+            runners=runners,
         )
-        with patch(
-            "trip_ema.fundamentals.scheduler.run_industry_refresh",
-        ) as ind_mock, patch(
-            "trip_ema.fundamentals.runners.run_shares_refresh",
-        ) as shr_mock:
-            sched._tick()
+        sched._tick()
         # Industry fires for both — no industry recent runs.
-        assert ind_mock.call_count == 2
+        assert spies["industry"].call_count == 2
         # Shares fires only for BSE — NSE was just done.
-        assert shr_mock.call_count == 1
-        assert shr_mock.call_args_list[0].args[1] == "BSE"
+        assert spies["shares"].exchanges == ["BSE"]
 
-    def test_unknown_phase_in_scheduled_phases_is_skipped_safely(
-        self, db_engine, fake_config, monkeypatch,
+    def test_unknown_scheduled_phase_is_rejected_at_construction(
+        self, db_engine, fake_config, runners,
     ):
-        """Defensive: if SCHEDULED_PHASES were ever to grow a phase
-        for which there's no runner, _fire() should warn and skip
-        rather than crash."""
-        # Temporarily extend SCHEDULED_PHASES to include something
-        # we don't have a runner for.
-        monkeypatch.setattr(
-            "trip_ema.fundamentals.scheduler.SCHEDULED_PHASES",
-            ("industry", "shares", "nonexistent_phase"),
-        )
-        sched = QuarterlyFundamentalsScheduler(
-            db_engine, fake_config,
-            now_fn=lambda: _at(2026, 4, 30),
-        )
-        with patch(
-            "trip_ema.fundamentals.scheduler.run_industry_refresh",
-        ), patch(
-            "trip_ema.fundamentals.runners.run_shares_refresh",
-        ):
-            # Should not raise.
-            sched._tick()
+        """The old version of this test monkeypatched SCHEDULED_PHASES to
+        smuggle a runner-less phase past the loop, then asserted _fire()
+        warned and skipped. The registry makes that state unreachable: the
+        legal phase names ARE the dataclass fields, and the scheduler checks
+        the list against them before it owns a thread. Warn-and-skip was
+        the wrong answer anyway — a misconfigured scheduler that silently
+        does less than you asked is exactly the failure this codebase is
+        built to refuse."""
+        with pytest.raises(UnknownPhaseError):
+            QuarterlyFundamentalsScheduler(
+                db_engine, fake_config,
+                now_fn=lambda: _at(2026, 4, 30),
+                runners=runners,
+                scheduled_phases=("industry", "shares", "nonexistent_phase"),
+            )
+
+    def test_registry_rejects_unknown_override(self, runners):
+        with pytest.raises(UnknownPhaseError):
+            runners.with_(nonexistent_phase=lambda *a, **k: None)
 
 
 # ---------- Phase 3: financials scheduling ---------- #
@@ -360,28 +394,22 @@ class TestSchedulerFiresFinancials:
     each quarterly window."""
 
     def test_tick_fires_all_three_phases_per_exchange(
-        self, db_engine, fake_config,
+        self, db_engine, fake_config, runners, spies,
     ):
         """In a refresh window, with two configured exchanges and no
         prior runs: 2 industry + 2 shares + 2 financials = 6 calls."""
         sched = QuarterlyFundamentalsScheduler(
             db_engine, fake_config,
             now_fn=lambda: _at(2026, 4, 30),
+            runners=runners,
         )
-        with patch(
-            "trip_ema.fundamentals.scheduler.run_industry_refresh",
-        ) as ind_mock, patch(
-            "trip_ema.fundamentals.runners.run_shares_refresh",
-        ) as shr_mock, patch(
-            "trip_ema.fundamentals.runners.run_financials_refresh",
-        ) as fin_mock:
-            sched._tick()
-        assert ind_mock.call_count == 2
-        assert shr_mock.call_count == 2
-        assert fin_mock.call_count == 2
+        sched._tick()
+        assert spies["industry"].call_count == 2
+        assert spies["shares"].call_count == 2
+        assert spies["financials"].call_count == 2
 
     def test_financials_phase_respects_skip_if_recent(
-        self, db_engine, fake_config,
+        self, db_engine, fake_config, runners, spies,
     ):
         with transaction(db_engine) as conn:
             r = FundamentalsRunRepository(conn)
@@ -391,15 +419,8 @@ class TestSchedulerFiresFinancials:
         sched = QuarterlyFundamentalsScheduler(
             db_engine, fake_config,
             now_fn=lambda: _at(2026, 4, 30),
+            runners=runners,
         )
-        with patch(
-            "trip_ema.fundamentals.scheduler.run_industry_refresh",
-        ), patch(
-            "trip_ema.fundamentals.runners.run_shares_refresh",
-        ), patch(
-            "trip_ema.fundamentals.runners.run_financials_refresh",
-        ) as fin_mock:
-            sched._tick()
+        sched._tick()
         # Financials fires only for BSE.
-        assert fin_mock.call_count == 1
-        assert fin_mock.call_args_list[0].args[1] == "BSE"
+        assert spies["financials"].exchanges == ["BSE"]

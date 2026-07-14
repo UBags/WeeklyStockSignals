@@ -51,11 +51,6 @@
       "mock_patch": 4,
       "setattr": 0
     },
-    "fundamentals/test_scheduler.py": {
-      "env": 0,
-      "mock_patch": 16,
-      "setattr": 1
-    },
     "gui/fakes.py": {
       "env": 0,
       "mock_patch": 0,

@@ -34,7 +34,11 @@ from sqlalchemy import Engine
 from ..config import Config
 from ..etl.exchanges import UnsupportedExchangeError, configured_exchanges
 from ..persistence.fundamentals_repo import FundamentalsRunRepository
-from .runners import run_industry_refresh
+from .stages import (
+    DEFAULT_FUNDAMENTALS_RUNNERS,
+    FundamentalsRunners,
+    UnknownPhaseError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +90,25 @@ class QuarterlyFundamentalsScheduler:
         *,
         wakeup_seconds: float = 3600.0,  # 1 hour
         now_fn=None,
+        runners: FundamentalsRunners = DEFAULT_FUNDAMENTALS_RUNNERS,
+        scheduled_phases: tuple[str, ...] = SCHEDULED_PHASES,
     ):
+        # Validate the phase list against the registry HERE, not in _fire().
+        # A bogus phase discovered mid-tick is discovered after we have
+        # already committed to a 30-minute refresh; discovered at
+        # construction it is a startup failure, which is what it is.
+        unknown = [p for p in scheduled_phases if p not in runners.phases()]
+        if unknown:
+            raise UnknownPhaseError(
+                f"scheduled_phases names phase(s) with no runner: {unknown}. "
+                f"Known phases: {sorted(runners.phases())}"
+            )
         self._db_engine = db_engine
         self._config = config
         self._wakeup_seconds = wakeup_seconds
         self._now_fn = now_fn or (lambda: datetime.now(UTC))
+        self._runners = runners
+        self._scheduled_phases = tuple(scheduled_phases)
         self._thread: threading.Thread | None = None
         self._stop_evt = threading.Event()
 
@@ -143,7 +161,7 @@ class QuarterlyFundamentalsScheduler:
         for exchange in exchanges:
             if self._stop_evt.is_set():
                 return
-            for phase in SCHEDULED_PHASES:
+            for phase in self._scheduled_phases:
                 if self._stop_evt.is_set():
                     return
                 if self._skip_due_to_recent_run(phase, exchange):
@@ -192,19 +210,11 @@ class QuarterlyFundamentalsScheduler:
         return age_days < RECENT_RUN_DAYS
 
     def _fire(self, phase: str, exchange: str) -> None:
-        if phase == "industry":
-            runner = run_industry_refresh
-        elif phase == "shares":
-            from .runners import run_shares_refresh
-            runner = run_shares_refresh
-        elif phase == "financials":
-            from .runners import run_financials_refresh
-            runner = run_financials_refresh
-        else:
-            # Unknown phase — defensive guard. SCHEDULED_PHASES should
-            # only contain phases we have runners for.
-            logger.warning("Scheduler: no runner for phase %r; skipping", phase)
-            return
+        # No if/elif, no function-local imports, no defensive else. The
+        # registry validated this phase in __init__; for_phase() cannot
+        # miss here without a programming error, and if it does we want
+        # the exception, not a warning we will never read.
+        runner = self._runners.for_phase(phase)
         logger.info(
             "Scheduler: firing %s refresh for %s", phase, exchange,
         )
