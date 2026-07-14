@@ -37,7 +37,13 @@ from .signal_enrichment_walk import compute_ticker_signal_enrichments
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SPEC_VERSION = "v0.4"
+# v0.5 — §20 bands + §21 sequence numbers, as COLUMNS beside the jsonb.
+# Rows written at v0.4 and earlier have every band column NULL; that is a
+# real distinction (an all-FALSE band row means the price was on the wrong
+# side of the EMA, which is a computed result, not an absence). Nothing
+# reads the new columns until the recompute has run the whole history
+# through this version.
+DEFAULT_SPEC_VERSION = "v0.5"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 

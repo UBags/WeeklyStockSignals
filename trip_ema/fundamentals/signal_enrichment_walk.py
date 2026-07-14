@@ -1,4 +1,4 @@
-"""Per-ticker signal-enrichment walk (spec §19). Pure — no DB.
+"""Per-ticker signal-enrichment walk (spec §19/§20/§21). Pure — no DB.
 
 Consumes the shared weekly_forming_walk so the §4 series sit on the exact
 weekly bars the stored EMAs were computed on. Advances the assembler once
@@ -7,14 +7,42 @@ week-start snapshot with the forming (week-to-date) bar as of the signal
 day, so features are causally correct (no lookahead into the rest of the
 signal's week). Inputs are pre-resolved dicts (the DB runner builds them):
 
-  state_by_date     {date: (med, long, longest, atr)}   forming EMAs / day
-  conv_by_monday    {monday_dt: (med, long, longest, atr)} converged / week
+  state_by_date     {date: (med, long, longest, atr, uo, lo, regime)} / day
+  conv_by_monday    {monday_dt: (...same...)}            converged / week
   signals_by_date   {date: [signal_type, ...]}
+
+§20 — THE BANDS ARE CUT AGAINST THE FORMING-DAY EMAs.
+
+`st` here is state_by_date[day], the EMAs as they stood on the signal day —
+the very numbers the signal fired from. NOT conv_by_monday, which holds the
+same week's converged (Friday) EMAs. On Tuesday, Friday's EMAs do not exist.
+Using them would be a lookahead so quiet that nothing downstream could
+detect it: the rows would be complete, plausible, and systematically wrong
+in the direction that flatters the signal.
+
+§20 — POLARITY IS PER ROW, SO THE ROWS CANNOT SHARE.
+
+BUY and EXIT_FROM_SELL are scored with upward geometry; SELL and
+EXIT_FROM_BUY with downward. Four types can print on one bar, at one price,
+against one set of EMAs, and carry four different sets of flags. Each row
+therefore gets its own band dict and its own copy of `features` — an object
+shared across rows is an aliasing bug waiting for the first caller who
+mutates one.
+
+§21 — THE SEQUENCE COUNTS SIGNALS, NOT ROWS.
+
+sequence_numbers() is fed every signal in signals_by_date, including any the
+walk then declines to enrich for want of indicator state (warm-up). That is
+deliberate: the ordinal describes the signal's place in the week's churn,
+which is a fact about the market, not about our ability to compute features
+for it.
 """
 from __future__ import annotations
 
 from ..domain.signal_enrichment import SignalEnrichment
+from .signal_bands import band_flags, polarity_for
 from .signal_features import SignalFeatureAssembler
+from .signal_sequence import sequence_numbers
 from .weekly_walk import weekly_forming_walk
 
 _NAN = float("nan")
@@ -35,6 +63,10 @@ def compute_ticker_signal_enrichments(
     industry_id: int | None = None,
 ) -> list[SignalEnrichment]:
     signal_dates = list(signals_by_date.keys())
+    # Causal, per signal type. Computed once, up front, from the full signal
+    # history for this ticker — the counters look backward only, so this is
+    # not a lookahead (see signal_sequence).
+    seq = sequence_numbers(signals_by_date)
     asm = SignalFeatureAssembler()
     rows: list[SignalEnrichment] = []
     cur_rs_ema = _NAN
@@ -58,12 +90,32 @@ def compute_ticker_signal_enrichments(
             )
             feats = asm.features()
             feats["rs_ema"] = cur_rs_ema
+            atrs = asm.atrs()               # {10: .., 15: .., 20: .., ..}
+            price = day.close               # the close the signal fired from
+
             for stype in signals_by_date[day.date]:
+                # Raises on an unknown type. Better to fail this ticker loudly
+                # than to write 40k rows scored with the wrong geometry.
+                polarity = polarity_for(stype)
+                s = seq[(day.date, stype)]
                 rows.append(SignalEnrichment(
                     ticker_id=ticker_id, timeframe=timeframe,
                     signal_date=day.date, signal_type=stype,
-                    features=feats, feature_spec_version=feature_spec_version,
+                    # dict(feats): one object per row. See the module
+                    # docstring — rows must not alias each other.
+                    features=dict(feats),
+                    feature_spec_version=feature_spec_version,
                     industry_id=industry_id,
+                    bands=band_flags(
+                        price=price,
+                        # st[0:3] is the FORMING-day state. Not conv_by_monday.
+                        med_ema=st[0], long_ema=st[1], longest_ema=st[2],
+                        atr_by_period=atrs, polarity=polarity,
+                    ),
+                    atrs=dict(atrs),
+                    seq_in_week=s.in_week, seq_in_2w=s.in_2w,
+                    signal_price=price,
+                    band_polarity=polarity,
                 ))
 
         asm.restore(snap)                   # discard the forming branch
