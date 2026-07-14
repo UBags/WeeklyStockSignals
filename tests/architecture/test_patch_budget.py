@@ -22,27 +22,36 @@ sibling, test_closed_seams.py, names every seam a phase has closed and fails
 if one is reopened. The two are a pair: this one caps the debt, that one stops
 you paying for the same ground twice.
 
-WHERE THIS STANDS (phases 0-9 landed):
+WHERE THIS STANDS (one injection from the hard ban):
 
-    ~480 patches at the start; 88 remain, in a long tail across 24 files.
-    Nothing left is a big seam. What is left, and the phase that retires it:
+    ~480 patches at the start. EIGHT remain, in three files. Production code
+    contains none: every `monkeypatch` in trip_ema/ is prose in a docstring
+    explaining the seam that replaced it.
 
-      52  gui/test_http_client.py + gui_pure/test_http_client.py
-          -> an HttpTransport port. The client calls requests directly.
-      17  fundamentals/test_scheduler.py
-          -> a runner registry, exactly like MarketStages/BackfillStages.
-      12  transports/http + transports_pure route tests
-          -> FastAPI dependency overrides, like Phase 3's get_admin_token.
-       6  etl/test_fetch_bars_for_tickers.py
-          -> the runner's own module attrs; a BarSource is already there.
-       6  observability/test_tracing.py
-          -> a tracer collaborator.
-      the rest: repository seams (MarketHoursService, ComputeRunsRepository,
-      `transaction`), which want one repo-injection phase between them.
+    Seven of the eight are permanent, and are on the `exempt` list:
 
-Zero is reachable, but it is FOUR more phases, not a tidy-up. Saying so here
-is the point: a budget that pretends the finish line is close is a budget
-nobody believes. `patch_budget.json` is the scoreboard; this is the map.
+      6  observability/test_tracing.py
+         monkeypatch.setitem(sys.modules, "opentelemetry*", None). The
+         condition under test IS the ImportError. Injecting a tracer
+         collaborator tests a fake tracer instead — and leaves the
+         degradation branch, the one that runs on a box without OTel
+         installed, with no coverage at all. Not debt.
+      1  config/test_loader.py
+         monkeypatch.setenv. test_default_env_is_os_environ asserts that
+         `env` DEFAULTS to the real process environment. You cannot assert
+         that binding without touching the real environment. Not debt.
+
+    One is real, and is the whole of `files`:
+
+      1  gui/test_slice4_wiring.py
+         monkeypatch.setattr(about_dialog, "show_about_dialog", ...).
+         MainWindow._on_about_clicked does a function-local import and calls
+         a module function; MainWindow takes no Prompts. A Phase 7 residue —
+         `about()` on the Prompts port retires it, and `files` goes empty.
+
+    That last one is an injection, not a phase. When it lands, this budget
+    should be deleted and replaced by a hard ban: no test file may name
+    `monkeypatch` at all, save the two on the exempt list.
 
 To re-baseline after legitimately removing patches:
 

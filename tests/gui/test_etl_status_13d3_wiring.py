@@ -24,7 +24,7 @@ pytest.importorskip("trip_ema.gui.views.etl_status")
 
 # === STEP 13D3-FIXUP: view fixture ===
 @pytest.fixture
-def view(qtbot, monkeypatch):
+def view(qtbot):
     """Build an EtlStatusView with stubbed db + http.
 
     EtlStatusView.__init__ signature:

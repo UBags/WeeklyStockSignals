@@ -134,7 +134,7 @@ def test_after_nack_same_job_id_can_be_reenqueued(queue):
 # ---------- Dedup TTL sweep ---------- #
 
 
-def test_expire_old_dedup_entries(queue, redis_client, monkeypatch):
+def test_expire_old_dedup_entries(queue, redis_client):
     """Stuck entries (worker crashed before ack) should be cleanable
     by an external sweep."""
     queue.enqueue("stuck-1", {})

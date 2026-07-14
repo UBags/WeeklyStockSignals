@@ -41,7 +41,7 @@ from trip_ema.gui.views.system_health import (
 
 
 @pytest.fixture(autouse=True)
-def isolated_qsettings(monkeypatch, tmp_path, request):
+def isolated_qsettings(tmp_path, request):
     """QSettings persists across tests, which means save_gui_settings
     in one test would bleed into the next. We pin org/app to a unique
     name per test so we don't have cross-test contamination."""

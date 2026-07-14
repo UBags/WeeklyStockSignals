@@ -397,7 +397,7 @@ class TestCmdBackfillEtfClassification:
 
     def test_backfill_selects_only_eligible_etfs(
         self, db_engine, fake_config, ctx, etf_universe,
-        monkeypatch, capsys,
+        capsys,
     ):
         """GOLDBEES (no row) + ITBEES (YFINANCE-junk row) should be
         backfilled. ALPHAETF (already INSTRUMENT_TYPE), OVERRIDE
@@ -441,7 +441,6 @@ class TestCmdBackfillEtfClassification:
 
     def test_backfill_writes_fundamentals_run_row(
         self, db_engine, fake_config, ctx, etf_universe,
-        monkeypatch,
     ):
         """An audit row should exist in fundamentals_run after the
         backfill completes."""
@@ -467,7 +466,6 @@ class TestCmdBackfillEtfClassification:
 
     def test_backfill_with_failures_returns_partial(
         self, db_engine, fake_config, ctx, etf_universe,
-        monkeypatch,
     ):
         """If some ETFs fail to classify, the run should close as
         PARTIAL and the command should return rc=1."""
@@ -522,7 +520,6 @@ class TestCmdRefreshShares:
 
     def test_returns_1_on_partial(
         self, db_engine, fake_config, ctx, reliance_ticker,
-        monkeypatch,
     ):
         from trip_ema.fundamentals.cli import cmd_refresh_shares
         with transaction(db_engine) as conn:
@@ -542,7 +539,6 @@ class TestCmdRefreshShares:
 
     def test_returns_2_on_failed(
         self, db_engine, fake_config, ctx, reliance_ticker,
-        monkeypatch,
     ):
         from trip_ema.fundamentals.cli import cmd_refresh_shares
         with transaction(db_engine) as conn:
@@ -641,7 +637,6 @@ class TestCmdRefreshFinancials:
 
     def test_returns_1_on_partial(
         self, db_engine, fake_config, ctx, reliance_ticker,
-        monkeypatch,
     ):
         from trip_ema.fundamentals.cli import cmd_refresh_financials
         with transaction(db_engine) as conn:
@@ -711,7 +706,7 @@ class TestCmdComputeMarketCap:
 
     def test_single_day_mode_writes_rows_and_returns_0(
         self, db_engine, fake_config, ctx,
-        reliance_ticker, monkeypatch, capsys,
+        reliance_ticker, capsys,
     ):
         """The single-day mode calls compute_market_cap_for_date and
         returns 0 if any rows were written."""
@@ -741,7 +736,7 @@ class TestCmdComputeMarketCap:
 
     def test_single_day_mode_returns_1_when_nothing_written(
         self, db_engine, fake_config, ctx,
-        reliance_ticker, monkeypatch, capsys,
+        reliance_ticker, capsys,
     ):
         """If no rows were written (e.g. no bars for the date),
         rc=1 — operator action needed."""
@@ -769,7 +764,7 @@ class TestCmdComputeMarketCap:
 
     def test_backfill_mode_routes_to_runner(
         self, db_engine, fake_config, ctx,
-        reliance_ticker, monkeypatch, capsys,
+        reliance_ticker, capsys,
     ):
         """When --backfill-from is given, the CLI calls the runner
         instead of the single-day compute."""
@@ -854,7 +849,7 @@ class TestCmdBuildIndustryIndices:
 
     def test_calls_runner_and_prints_summary(
         self, db_engine, fake_config, ctx,
-        monkeypatch, capsys,
+        capsys,
     ):
         """The handler delegates to run_industry_index_build and
         prints a tabular summary. Stub the runner to return a
@@ -892,7 +887,7 @@ class TestCmdBuildIndustryIndices:
 
     def test_returns_1_when_some_failed(
         self, db_engine, fake_config, ctx,
-        monkeypatch, capsys,
+        capsys,
     ):
         def fake_build(engine, exchange, *, min_constituents, n, base_value):
             return {
@@ -992,7 +987,7 @@ class TestCmdComputeIndexValues:
 
     def test_single_industry_calls_runner(
         self, db_engine, fake_config, ctx,
-        monkeypatch, capsys,
+        capsys,
     ):
         """Set up one index, stub the runner, confirm it gets called
         with the right args and rc=0 on SUCCESS."""
@@ -1035,7 +1030,7 @@ class TestCmdComputeIndexValues:
 
     def test_all_active_iterates_indices(
         self, db_engine, fake_config, ctx,
-        monkeypatch, capsys, reliance_ticker,
+        capsys, reliance_ticker,
     ):
         """--all-active calls the runner once per active index."""
         self._setup_one_index(db_engine, "Index A")
@@ -1086,7 +1081,7 @@ class TestCmdComputeIndexValues:
 
     def test_partial_status_returns_1(
         self, db_engine, fake_config, ctx,
-        monkeypatch, capsys, reliance_ticker,
+        capsys, reliance_ticker,
     ):
         self._setup_one_index(db_engine, "IT - Services")
         def fake_backfill(engine, industry_name, **kw):
@@ -1119,7 +1114,7 @@ class TestCmdRebalanceIndustryIndex:
 
     def test_returns_0_on_successful_rebalance(
         self, db_engine, fake_config, ctx,
-        monkeypatch, capsys,
+        capsys,
     ):
         from trip_ema.fundamentals.runners import RebalanceResult
         def fake_run(engine, industry, rebalance_date, **kw):
@@ -1147,7 +1142,7 @@ class TestCmdRebalanceIndustryIndex:
 
     def test_returns_1_when_skipped(
         self, db_engine, fake_config, ctx,
-        monkeypatch, capsys,
+        capsys,
     ):
         from trip_ema.fundamentals.runners import RebalanceResult
         def fake_run(engine, industry, rebalance_date, **kw):
@@ -1175,7 +1170,7 @@ class TestCmdRebalanceIndustryIndex:
 
     def test_returns_2_when_index_unknown(
         self, db_engine, fake_config, ctx,
-        monkeypatch, capsys,
+        capsys,
     ):
         def fake_run(engine, industry, rebalance_date, **kw):
             raise ValueError(f"index {industry!r} does not exist")

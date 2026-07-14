@@ -30,7 +30,7 @@ from trip_ema.gui.views.widgets.stage_progress import (
 
 
 @pytest.fixture
-def fake_db(monkeypatch):
+def fake_db():
     """Fake GuiDbSession that returns a connection allowing
     SubscribersRepository.count_active() to be patched."""
     db = MagicMock()
@@ -56,7 +56,7 @@ def prompts():
 
 
 @pytest.fixture
-def view(qtbot, fake_db, fake_http, monkeypatch, prompts):
+def view(qtbot, fake_db, fake_http, prompts):
     """An EtlStatusView with all background schedulers disabled
     (start_refresh_on_init=False) so tests can drive state
     manually."""
@@ -96,7 +96,7 @@ class TestInitialState:
 class TestModalFlow:
 
     def test_no_exchange_shows_warning(
-        self, view, monkeypatch, prompts):
+        self, view, prompts):
         """If no exchange selected, click → a warning."""
         view._picker.current_exchange = lambda: None
         view._on_run_intraday_clicked()
@@ -266,7 +266,7 @@ class TestStderrBuffering:
 
 class TestFinishedHandler:
 
-    def test_success_resets_mutex(self, view, monkeypatch):
+    def test_success_resets_mutex(self, view):
         """exit_code 0 → mutex flags cleared + activity scheduler
         triggered."""
         view._intraday_process = MagicMock()

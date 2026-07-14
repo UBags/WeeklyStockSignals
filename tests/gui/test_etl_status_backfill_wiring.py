@@ -142,7 +142,7 @@ class TestAddValidation:
         assert view._chip_area.chips() == []
 
     def test_unloaded_universe_rejects(
-        self, view, monkeypatch, prompts,
+        self, view, prompts,
     ):
         # _active_ticker_set is empty (initial state)
         view._stocks_input.setText("RELIANCE")
@@ -151,7 +151,7 @@ class TestAddValidation:
         assert view._chip_area.chips() == []
 
     def test_unknown_symbol_rejects(
-        self, view, monkeypatch, prompts,
+        self, view, prompts,
     ):
         view._active_ticker_set = frozenset(["RELIANCE", "TCS"])
         view._stocks_input.setText("PHANTOM")
@@ -179,7 +179,7 @@ class TestAddValidation:
 
 class TestBackfillButton:
 
-    def test_blocks_when_already_running(self, view, monkeypatch):
+    def test_blocks_when_already_running(self, view):
         # Simulate an in-flight QProcess
         view._backfill_process = MagicMock()
         view._on_backfill_clicked()
