@@ -65,6 +65,7 @@ from ..orchestrator.industry_stages import (
     _stage_industry_enrichment,
     _stage_industry_state,
 )
+from .stages import BackfillStages, ProcessBoundaryError
 from ..persistence import transaction
 from .phase_ledger import reset_phases
 from ..fundamentals.parallel import (
@@ -238,6 +239,23 @@ def _assert_industry_layer_belongs_to(db_engine: Engine, exchange: str) -> None:
         )
 
 
+DEFAULT_BACKFILL_STAGES = BackfillStages(
+    refresh_listings=refresh_listings,
+    run_industry_refresh=run_industry_refresh,
+    run_shares_refresh=run_shares_refresh,
+    run_financials_refresh=run_financials_refresh,
+    populate_stock_state_and_enrichment=(
+        populate_stock_state_and_enrichment_for_ticker
+    ),
+    populate_industry_index_value_for_all=populate_industry_index_value_for_all,
+    industry_state=_stage_industry_state,
+    industry_enrichment=_stage_industry_enrichment,
+)
+"""Production wiring. A test passes `.with_(...)` to swap individual stages —
+and BackfillStages.validate_for() will refuse the one swap that cannot
+survive the process boundary. See stages.py."""
+
+
 def backfill(
     db_engine: Engine,
     config,
@@ -250,6 +268,7 @@ def backfill(
     refresh_reference: bool = True,
     resume: bool = True,
     progress_cb: Callable[[str, str], None] | None = None,
+    stages: BackfillStages | None = None,
 ) -> BackfillResult:
     """Operator entry point for the V1 backfill pipeline.
 
@@ -357,7 +376,7 @@ def backfill(
     # _resolve_tickers with a mystifying "no active tickers".
     if refresh_reference and stocks is None:
         _emit_progress(progress_cb, "stage_0_listings", "starting")
-        _lr = refresh_listings(db_engine, config, exchange=exchange)
+        _lr = stages.refresh_listings(db_engine, config, exchange=exchange)
         logger.info(
             "backfill: listings synced — new=%d renamed=%d delisted=%d",
             _lr.sync_result.new_listings,
@@ -392,6 +411,12 @@ def backfill(
 
     # ---- start() the marker. If unique-active constraint fires, the
     # IntegrityError propagates and the caller (CLI) handles it. ----
+    # Refuse, before anything is written, a configuration whose injected
+    # populator would be silently discarded by the spawned children. This
+    # used to be a comment in two docstrings.
+    stages = stages if stages is not None else DEFAULT_BACKFILL_STAGES
+    stages.validate_for(config, DEFAULT_BACKFILL_STAGES)
+
     repo = BackfillRunsRepository
     with transaction(db_engine) as conn:
         run_id = repo(conn).start(
@@ -489,10 +514,11 @@ def backfill(
         if refresh_reference:
             for _label, _phase, _fn in (
                 ("stage_0b_industry", "reference_industry",
-                 run_industry_refresh),
-                ("stage_0c_shares", "reference_shares", run_shares_refresh),
+                 stages.run_industry_refresh),
+                ("stage_0c_shares", "reference_shares",
+                 stages.run_shares_refresh),
                 ("stage_0d_financials", "reference_financials",
-                 run_financials_refresh),
+                 stages.run_financials_refresh),
             ):
                 _emit_progress(progress_cb, _label, "starting (gaps only)")
                 run_phase(
@@ -547,6 +573,12 @@ def backfill(
             db_engine, exchange, "stock_state",
             lambda: _stage_stock_state_full(
                 db_engine, config, scoped_tickers, progress_cb,
+                populate_fn=(
+                    None
+                    if stages.populate_stock_state_and_enrichment
+                    is DEFAULT_BACKFILL_STAGES.populate_stock_state_and_enrichment
+                    else stages.populate_stock_state_and_enrichment
+                ),
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -703,6 +735,7 @@ def backfill(
             lambda: _stage_industry_index_values(
                 db_engine, date_from=date_from, date_to=date_to,
                 progress_cb=progress_cb,
+                populate_fn=stages.populate_industry_index_value_for_all,
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -717,7 +750,7 @@ def backfill(
         _emit_progress(progress_cb, "stage_5_industry_state", "starting")
         _r = run_phase(
             db_engine, exchange, "industry_state",
-            lambda: _stage_industry_state(
+            lambda: stages.industry_state(
                 db_engine, mode="full", progress_cb=progress_cb,
             )[0],
             backfill_run_id=run_id, force=_force,
@@ -735,7 +768,7 @@ def backfill(
         )
         _r = run_phase(
             db_engine, exchange, "industry_enrichment",
-            lambda: _stage_industry_enrichment(
+            lambda: stages.industry_enrichment(
                 db_engine, mode="full", progress_cb=progress_cb,
             )[0],
             backfill_run_id=run_id, force=_force,
@@ -1104,7 +1137,7 @@ def _stage_fetch_bars(
 _MERGED_RESULT: dict[str, tuple[int, list[tuple[int, str]]]] = {}
 
 
-def _stock_state_worker(db_engine, ticker_id: int) -> None:
+def _stock_state_worker(db_engine, ticker_id: int, populate_fn=None) -> None:
     """One ticker's merged state+enrichment pass.
 
     MODULE-LEVEL on purpose: fan_out_processes ships this to child processes,
@@ -1112,8 +1145,16 @@ def _stock_state_worker(db_engine, ticker_id: int) -> None:
     this replaced captured db_engine, which is not picklable — and must not be,
     since a child inheriting the parent's connections is exactly the bug that
     the spawn context exists to prevent. The child passes its OWN engine in.
+
+    `populate_fn` is only ever supplied on the IN-PROCESS path. fan_out_processes
+    calls this with two arguments, so a spawned child always takes the default —
+    which is the whole reason BackfillStages.validate_for() refuses to let an
+    injected populator coexist with processes > 1. It would land here, in a
+    child, as None, and the child would run the real thing.
     """
-    populate_stock_state_and_enrichment_for_ticker(
+    if populate_fn is None:
+        populate_fn = populate_stock_state_and_enrichment_for_ticker
+    populate_fn(
         db_engine, ticker_id, str(Timeframe.WEEKLY),
         mode="full",
     )
@@ -1122,6 +1163,7 @@ def _stock_state_worker(db_engine, ticker_id: int) -> None:
 def _stage_stock_state_full(
     db_engine, config, scoped_tickers: list[int],
     progress_cb: Callable[[str, str], None] | None = None,
+    populate_fn=None,
 ) -> tuple[int, list[tuple[int, str]]]:
     """Stages 2+3: one engine pass writing state AND enrichment.
 
@@ -1133,11 +1175,16 @@ def _stage_stock_state_full(
           Postgres idle. Processes multiply it. See fan_out_processes.
 
        1: in-process, on threads. Byte-for-byte the pre-process-pool path. This
-          is the ONLY mode in which monkeypatching
-          `populate_stock_state_and_enrichment_for_ticker` has any effect —
+          is the ONLY mode in which an injected `populate_fn` has any effect —
           spawned children re-import this module clean and never see the
-          parent's patches — so orchestration tests that stub the populator must
+          parent's objects — so orchestration tests that stub the populator must
           select it. It is also the production escape hatch.
+
+    That constraint is no longer merely documented: BackfillStages.validate_for()
+    raises ProcessBoundaryError at the top of backfill() if a custom populate_fn
+    is supplied with processes > 1. It used to be possible to stub the populator,
+    leave processes at the default of 3, and have the children silently run the
+    REAL one against your database.
 
     Both modes return (done_count, [(failed_ticker_id, error_str)]) and both
     give per-ticker error isolation, so the phase ledger, _MERGED_RESULT and
@@ -1146,6 +1193,16 @@ def _stage_stock_state_full(
     processes = config.compute.stock_state_processes
 
     if processes > 1:
+        # backfill() has already refused this combination if populate_fn is
+        # custom; belt and braces, because this function is also reachable
+        # directly and a silently-ignored populator is the exact bug we are
+        # closing.
+        if populate_fn is not None:
+            raise ProcessBoundaryError(
+                "_stage_stock_state_full: a custom populate_fn cannot reach "
+                f"spawned children (stock_state_processes={processes}). They "
+                "re-import this module clean and would run the real populator."
+            )
         outcome = fan_out_processes(
             scoped_tickers, _stock_state_worker,
             engine_spec=engine_spec_from_config(config),
@@ -1156,10 +1213,10 @@ def _stage_stock_state_full(
     else:
         # In-process. db_engine is closed over rather than shipped, which is
         # precisely why this path cannot be parallelised across processes and
-        # precisely why monkeypatching works here.
+        # precisely why an injected populator works here.
         outcome = fan_out(
             scoped_tickers,
-            lambda tid: _stock_state_worker(db_engine, tid),
+            lambda tid: _stock_state_worker(db_engine, tid, populate_fn),
             label="stage_2_stock_state", progress_cb=progress_cb,
         )
 
@@ -1247,6 +1304,7 @@ def _stage_industry_index_build(
 def _stage_industry_index_values(
     db_engine: Engine, *, date_from: date, date_to: date,
     progress_cb: Callable[[str, str], None] | None = None,
+    populate_fn=None,
 ) -> int:
     """Backfill daily industry_index_value rows for all active indices.
 
@@ -1257,7 +1315,9 @@ def _stage_industry_index_values(
     handled at the phase-ledger boundary, so no per-industry skip-recent
     guard is needed here. Returns the count of industries computed OK.
     """
-    report = populate_industry_index_value_for_all(
+    if populate_fn is None:
+        populate_fn = populate_industry_index_value_for_all
+    report = populate_fn(
         db_engine, from_date=date_from, to_date=date_to,
         progress_cb=progress_cb,
     )

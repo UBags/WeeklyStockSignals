@@ -1,11 +1,6 @@
 {
   "_comment": "Patch budget ledger. Counts may only go DOWN. See tests/architecture/test_patch_budget.py. Regenerate with: python tests/architecture/test_patch_budget.py",
   "files": {
-    "backfill/test_pipeline.py": {
-      "env": 0,
-      "mock_patch": 0,
-      "setattr": 8
-    },
     "config/test_alembic_bridge_no_db.py": {
       "env": 0,
       "mock_patch": 2,

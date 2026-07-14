@@ -34,7 +34,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from trip_ema.config.schema import ComputeConfig, EtlConfig
-from trip_ema.backfill.pipeline import backfill, BackfillResult
+from trip_ema.backfill.pipeline import DEFAULT_BACKFILL_STAGES, backfill, BackfillResult
+from trip_ema.backfill.stages import ProcessBoundaryError
 
 
 @pytest.fixture(autouse=True)
@@ -205,11 +206,18 @@ def _curr_signal_for_ticker(db_engine, ticker_id: int):
 # ============================================================
 
 @pytest.fixture
-def stub_populators(monkeypatch):
-    """Replace the V1 populator entry points the pipeline calls
-    with no-ops so tests focus on orchestration logic. State data
-    is pre-seeded; recompute would just overwrite with the same
-    values."""
+def stub_populators():
+    """The pipeline's stages, stubbed to no-ops, so these tests focus on
+    orchestration. State data is pre-seeded; recompute would just overwrite it
+    with the same values.
+
+    Hand the result to `backfill(stages=...)`. Nothing is patched — which
+    matters more here than anywhere else in this suite, because a patched
+    populator is SILENTLY DISCARDED by the spawned children at
+    stock_state_processes > 1 and the real one runs against the fixture DB
+    instead. BackfillStages.validate_for() now refuses that combination
+    outright; see the _MockConfig docstring below and stages.py.
+    """
     def _noop_stock_state_and_enrichment(*args, **kwargs):
         # Stages 2 and 3 are ONE engine pass now (the merged runner writes both
         # stock_indicator_state and stock_indicator_enrichment), so a single
@@ -244,36 +252,20 @@ def stub_populators(monkeypatch):
     def _noop_industry_enrichment(*args, **kwargs):
         return {"succeeded": [], "failed": []}
 
-    monkeypatch.setattr(
-        "trip_ema.backfill.pipeline.refresh_listings",
-        _noop_refresh_listings,
-    )
-    for _name in (
-        "run_industry_refresh", "run_shares_refresh", "run_financials_refresh",
-    ):
-        monkeypatch.setattr(
-            f"trip_ema.backfill.pipeline.{_name}", _noop_reference_runner,
-        )
+    def _noop_industry_stage(*args, **kwargs):
+        # The pipeline calls the STAGE function, so stubbing it never reaches
+        # the populator underneath. Returns (done, failed) like the real one.
+        return (0, [])
 
-    monkeypatch.setattr(
-        "trip_ema.backfill.pipeline."
-        "populate_stock_state_and_enrichment_for_ticker",
-        _noop_stock_state_and_enrichment,
-    )
-    monkeypatch.setattr(
-        "trip_ema.backfill.pipeline."
-        "populate_industry_index_value_for_all",
-        _noop_industry_iiv,
-    )
-    monkeypatch.setattr(
-        "trip_ema.orchestrator.industry_stages."
-        "populate_industry_indicator_state_for_all",
-        _noop_industry_state,
-    )
-    monkeypatch.setattr(
-        "trip_ema.orchestrator.industry_stages."
-        "populate_industry_indicator_enrichment_for_all",
-        _noop_industry_enrichment,
+    return DEFAULT_BACKFILL_STAGES.with_(
+        refresh_listings=_noop_refresh_listings,
+        run_industry_refresh=_noop_reference_runner,
+        run_shares_refresh=_noop_reference_runner,
+        run_financials_refresh=_noop_reference_runner,
+        populate_stock_state_and_enrichment=_noop_stock_state_and_enrichment,
+        populate_industry_index_value_for_all=_noop_industry_iiv,
+        industry_state=_noop_industry_stage,
+        industry_enrichment=_noop_industry_stage,
     )
 
 
@@ -289,6 +281,7 @@ class TestMarkerLifecycle:
         _seed_ticker(db_engine, ticker_id=1, symbol="TEST1")
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 3),  # Monday
             date_to=date(2024, 6, 3),
             stocks=[1],
@@ -306,7 +299,7 @@ class TestMarkerLifecycle:
         ).is_running()
 
     def test_marker_finished_even_on_stage_failure(
-        self, db_engine, monkeypatch,
+        self, db_engine, stub_populators,
     ):
         _seed_ticker(db_engine, ticker_id=1, symbol="TEST1")
 
@@ -318,23 +311,14 @@ class TestMarkerLifecycle:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated stage_4 failure")
 
-        monkeypatch.setattr(
-            "trip_ema.backfill.pipeline."
-            "populate_industry_index_value_for_all",
-            _boom,
-        )
-        # Earlier stages no-op so we reach stage 3d cleanly. Stages 2 and 3
-        # are ONE engine pass now (the merged runner writes both
-        # stock_indicator_state and stock_indicator_enrichment), so one no-op
-        # covers both.
-        monkeypatch.setattr(
-            "trip_ema.backfill.pipeline."
-            "populate_stock_state_and_enrichment_for_ticker",
-            lambda *a, **k: (0, 0),
+        # The rest of the stub set stays as it is; only this one explodes.
+        stages = stub_populators.with_(
+            populate_industry_index_value_for_all=_boom,
         )
 
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stages,
             date_from=date(2024, 6, 3),
             stocks=[1],
             refetch_bars=False,
@@ -368,6 +352,7 @@ class TestMarkerLifecycle:
         with pytest.raises(IntegrityError):
             backfill(
                 db_engine, _MockConfig(),
+                stages=stub_populators,
                 date_from=date(2024, 6, 3),
                 stocks=[1],
                 refetch_bars=False,
@@ -387,6 +372,7 @@ class TestDateNormalization:
         # Wednesday June 5 2024 → Monday June 3
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 5),
             date_to=date(2024, 6, 5),
             stocks=[1],
@@ -400,6 +386,7 @@ class TestDateNormalization:
         _seed_ticker(db_engine, ticker_id=1, symbol="TEST1")
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 3),
             # date_to omitted
             stocks=[1],
@@ -414,6 +401,7 @@ class TestDateNormalization:
         with pytest.raises(ValueError, match="date_from"):
             backfill(
                 db_engine, _MockConfig(),
+                stages=stub_populators,
                 date_from=date(2024, 6, 10),
                 date_to=date(2024, 6, 3),
                 stocks=[1],
@@ -439,6 +427,7 @@ class TestTickerScopeResolution:
             ))
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 3),
             date_to=date(2024, 6, 3),
             stocks=None,  # ALL
@@ -454,6 +443,7 @@ class TestTickerScopeResolution:
         with pytest.raises(ValueError, match="not found"):
             backfill(
                 db_engine, _MockConfig(),
+                stages=stub_populators,
                 date_from=date(2024, 6, 3),
                 date_to=date(2024, 6, 3),
                 stocks=[999],
@@ -466,6 +456,7 @@ class TestTickerScopeResolution:
         _seed_ticker(db_engine, ticker_id=1, symbol="T1")
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 3),
             date_to=date(2024, 6, 3),
             stocks=None,
@@ -476,6 +467,7 @@ class TestTickerScopeResolution:
         # Second backfill with partial scope (after first finishes)
         result2 = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 3),
             date_to=date(2024, 6, 3),
             stocks=[1],
@@ -508,6 +500,7 @@ class TestHistoricalSignals:
         ])
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 3),
             date_to=date(2024, 6, 17),
             stocks=[1],
@@ -539,6 +532,7 @@ class TestHistoricalSignals:
         ])
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 3),
             date_to=date(2024, 6, 24),
             stocks=[1],
@@ -568,6 +562,7 @@ class TestHistoricalSignals:
         ])
         backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 10),
             date_to=date(2024, 6, 10),
             stocks=[1],
@@ -598,6 +593,7 @@ class TestHistoricalSignals:
         ])
         result_a = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 10),
             date_to=date(2024, 6, 10),
             stocks=[1],
@@ -607,6 +603,7 @@ class TestHistoricalSignals:
 
         result_b = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 10),
             date_to=date(2024, 6, 10),
             stocks=[1],
@@ -647,6 +644,7 @@ class TestCurrentSignalsRebuild:
         ])
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 10),
             date_to=date(2024, 6, 10),
             stocks=[1],
@@ -688,6 +686,7 @@ class TestCurrentSignalsRebuild:
 
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 10),
             date_to=date(2024, 6, 10),
             stocks=[1],
@@ -739,6 +738,7 @@ class TestPartialScopeIsolation:
 
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 10),
             date_to=date(2024, 6, 10),
             stocks=[1],
@@ -762,6 +762,7 @@ class TestRefetchBarsFlag:
         _seed_ticker(db_engine, ticker_id=1, symbol="NOFETCH")
         result = backfill(
             db_engine, _MockConfig(),
+            stages=stub_populators,
             date_from=date(2024, 6, 3),
             date_to=date(2024, 6, 3),
             stocks=[1],
@@ -769,3 +770,74 @@ class TestRefetchBarsFlag:
         )
         assert result.bars_fetch_run_id is None
         assert result.refetch_bars is False
+
+
+# ============================================================
+# The process-boundary contract
+# ============================================================
+
+class TestPopulatorProcessBoundary:
+    """The constraint that used to live only in a comment.
+
+    Stage 2 fans out to SPAWNED children when stock_state_processes > 1. They
+    re-import pipeline.py clean, so they cannot see an injected populator — they
+    would run the REAL one, against this database, and the test would pass while
+    testing something else. backfill() now refuses that combination up front.
+    """
+
+    def test_custom_populator_with_multiple_processes_is_refused(
+        self, db_engine, stub_populators,
+    ):
+        _seed_ticker(db_engine, ticker_id=1, symbol="TEST1")
+
+        class _ThreeProcesses:
+            etl = EtlConfig()
+            compute = ComputeConfig(stock_state_processes=3)   # the production default
+
+        with pytest.raises(ProcessBoundaryError) as e:
+            backfill(
+                db_engine, _ThreeProcesses(),
+                stages=stub_populators,          # a stubbed populator
+                date_from=date(2024, 6, 3),
+                stocks=[1],
+                refetch_bars=False,
+            )
+        assert "spawned" in str(e.value).lower()
+
+    def test_refusal_happens_before_anything_is_written(
+        self, db_engine, stub_populators,
+    ):
+        """It must raise BEFORE the backfill_runs row is opened, or an operator
+        is left with a phantom in-flight run to clean up."""
+        _seed_ticker(db_engine, ticker_id=1, symbol="TEST1")
+
+        class _ThreeProcesses:
+            etl = EtlConfig()
+            compute = ComputeConfig(stock_state_processes=3)
+
+        with pytest.raises(ProcessBoundaryError):
+            backfill(
+                db_engine, _ThreeProcesses(),
+                stages=stub_populators,
+                date_from=date(2024, 6, 3),
+                stocks=[1],
+                refetch_bars=False,
+            )
+        with db_engine.connect() as conn:
+            assert not BackfillRunsRepository(conn).is_running()
+
+    def test_the_default_populator_is_fine_at_any_process_count(self):
+        """Production passes the real populator, which the children re-import
+        for themselves. Nothing to refuse."""
+        class _ThreeProcesses:
+            compute = ComputeConfig(stock_state_processes=3)
+
+        DEFAULT_BACKFILL_STAGES.validate_for(
+            _ThreeProcesses(), DEFAULT_BACKFILL_STAGES,
+        )
+
+    def test_a_stubbed_populator_is_fine_in_process(self, stub_populators):
+        class _OneProcess:
+            compute = ComputeConfig(stock_state_processes=1)
+
+        stub_populators.validate_for(_OneProcess(), DEFAULT_BACKFILL_STAGES)
