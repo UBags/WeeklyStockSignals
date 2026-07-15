@@ -51,6 +51,11 @@ from sqlalchemy.engine import Engine
 
 from ..cache.current_signals_cache import CurrentSignalsCache
 from .intraday_chain import log_intraday_transitions
+from ..fundamentals.per_signal_stages import run_per_signal_stages
+from .eod_signal_scopes import (
+    tickers_needing_enrichment,
+    tickers_needing_labels,
+)
 from .process_day import process_signals_for_day
 from .stages import MarketStages
 from .industry_stages import (
@@ -70,6 +75,13 @@ from ..domain.market_session import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The spec version the enrichment walk writes; the EOD anti-join must ask for
+# the SAME version so a row at an older version counts as "needs enrichment".
+# Sourced from the runner so there is one definition, not two.
+from ..fundamentals.signal_enrichment_runner import (
+    DEFAULT_SPEC_VERSION as _EOD_SPEC_VERSION,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,6 +492,47 @@ def recompute_market(
             logger.exception("recompute_market[%s] %s", exchange, msg)
             stage_errors.append(("industry_enrichment", str(e)))
             _emit_progress(progress_cb, "industry_enrichment", f"failed: {e}")
+
+    # ---- Stage 9: per-signal enrichment / labels / ensemble (EOD only) ----
+    # Placed LAST so ensemble reads THIS cycle's fresh industry regime.
+    # Intraday skips this entirely: mid-tick there is no settled signal to
+    # enrich. Runs the SAME sequencer backfill uses (see per_signal_stages),
+    # so the enrichment sequence is defined in exactly one place.
+    #
+    # Two scopes (anti-joins, self-correcting):
+    #   enrichment + ensemble -> today's flipped tickers (unenriched signals)
+    #   labels                -> the maturity set (unfinalised labels), a
+    #                            different set: today's flips can't be labelled
+    #                            yet; the rows that mature today flipped weeks
+    #                            ago.
+    if signal_mode == "eod" and not stage_errors:
+        try:
+            _emit_progress(progress_cb, "signal_enrichment_stages", "running")
+            enr_scope = tickers_needing_enrichment(
+                db_engine, exchange, _market_day,
+                spec_version=_EOD_SPEC_VERSION,
+            )
+            lbl_scope = tickers_needing_labels(db_engine, exchange)
+            run_per_signal_stages(
+                db_engine, exchange,
+                enrichment_scope=enr_scope,
+                labels_scope=lbl_scope,
+                ensemble_scope=enr_scope,
+                progress_cb=progress_cb,
+            )
+            logger.info(
+                "recompute_market[%s] stage 9 per-signal: "
+                "enrich/ensemble=%d ticker(s), labels=%d ticker(s)",
+                exchange, len(enr_scope), len(lbl_scope),
+            )
+            _emit_progress(progress_cb, "signal_enrichment_stages", "done")
+        except Exception as e:
+            msg = f"signal_enrichment_stages halted: {e}"
+            logger.exception("recompute_market[%s] %s", exchange, msg)
+            stage_errors.append(("signal_enrichment_stages", str(e)))
+            _emit_progress(
+                progress_cb, "signal_enrichment_stages", f"failed: {e}",
+            )
 
     finished_at = datetime.now(UTC)
     duration_s = (finished_at - started_at).total_seconds()
