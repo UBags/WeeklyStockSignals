@@ -327,3 +327,167 @@ class TestPortConformance:
 
     def test_yfinance_source_is_a_bar_source(self):
         assert isinstance(YFinanceSource(), BarSource)
+
+
+# ---- B1: failure_kind classification ----
+
+
+class TestFailureKindDefault:
+
+    def test_fetch_outcome_default_failure_kind_is_ok(self):
+        """B1 is pure extension: existing FetchOutcome construction sites
+        (in tests + prod code) get failure_kind='ok' by default, so nothing
+        old breaks."""
+        from trip_ema.etl.types import FetchOutcome
+        o = FetchOutcome(yfinance_symbol="FOO.NS")
+        assert o.failure_kind == "ok"
+
+    def test_fetch_outcome_failure_kind_settable(self):
+        from trip_ema.etl.types import FetchOutcome
+        o = FetchOutcome(yfinance_symbol="FOO.NS", failure_kind="intcast")
+        assert o.failure_kind == "intcast"
+
+
+class TestClassifyEmpty:
+
+    def test_intcast_message_classifies_as_intcast(self):
+        from trip_ema.etl.yfinance_source import _classify_empty
+        assert _classify_empty(
+            "CONCOR.NS",
+            {"CONCOR.NS": "IntCastingNaNError('cannot convert')"},
+        ) == "intcast"
+
+    def test_delisted_message_classifies_as_delisted(self):
+        from trip_ema.etl.yfinance_source import _classify_empty
+        assert _classify_empty(
+            "OLDCO.NS",
+            {"OLDCO.NS": "possibly delisted; no price data found"},
+        ) == "delisted"
+
+    def test_unknown_or_missing_classifies_as_empty(self):
+        """B1: no error surface for this symbol -> we cannot tell it apart
+        from a legitimately-dataless ticker; label 'empty' and let the
+        retry layer cover it under repair=True as before. The intcast fast
+        path is opt-in on positive IntCastingNaN evidence, never a guess."""
+        from trip_ema.etl.yfinance_source import _classify_empty
+        assert _classify_empty("MYSTERY.NS", {}) == "empty"
+        assert _classify_empty("MYSTERY.NS", {"OTHER.NS": "x"}) == "empty"
+
+
+class TestSnapshotAndClearYfErrors:
+
+    def test_captures_matching_symbols_and_clears_them(self):
+        """B1: entries for the batch's symbols are captured, then removed
+        from the shared dict so a concurrent batch does not see them.
+        Entries belonging to OTHER batches must be left alone."""
+        import yfinance.shared as yfs
+        from trip_ema.etl.yfinance_source import (
+            _snapshot_and_clear_yf_errors,
+        )
+
+        yfs._ERRORS.clear()
+        yfs._ERRORS["FOO.NS"] = "IntCastingNaNError"
+        yfs._ERRORS["BAR.NS"] = "possibly delisted"
+        yfs._ERRORS["BAZ.NS"] = "should_stay"
+
+        try:
+            captured = _snapshot_and_clear_yf_errors(["FOO.NS", "BAR.NS"])
+            assert captured == {
+                "FOO.NS": "IntCastingNaNError",
+                "BAR.NS": "possibly delisted",
+            }
+            assert "FOO.NS" not in yfs._ERRORS
+            assert "BAR.NS" not in yfs._ERRORS
+            assert yfs._ERRORS["BAZ.NS"] == "should_stay"
+        finally:
+            yfs._ERRORS.clear()
+
+    def test_missing_symbol_is_silently_skipped(self):
+        import yfinance.shared as yfs
+        from trip_ema.etl.yfinance_source import (
+            _snapshot_and_clear_yf_errors,
+        )
+        yfs._ERRORS.clear()
+        try:
+            assert _snapshot_and_clear_yf_errors(["ABSENT.NS"]) == {}
+        finally:
+            yfs._ERRORS.clear()
+
+
+class TestNormalizePropagatesFailureKind:
+
+    def test_all_nan_symbol_with_intcast_error_gets_intcast_kind(self):
+        """B1 integration: build a multi-symbol frame where one column set
+        is all-NaN, and register that symbol's error as IntCastingNaN in
+        yfinance.shared._ERRORS. The resulting FetchOutcome carries
+        failure_kind='intcast' — proving the whole chain
+        (_snapshot -> normalize -> _classify_empty) is wired."""
+        import numpy as np
+        import yfinance.shared as yfs
+
+        yfs._ERRORS.clear()
+        yfs._ERRORS["BAD.NS"] = "IntCastingNaNError(\'cannot convert NaN\')"
+
+        try:
+            df = _build_multi_df({
+                "GOOD.NS": {
+                    "Open": [1.0, 2.0], "High": [1.5, 2.5],
+                    "Low": [0.5, 1.5], "Close": [1.2, 2.2],
+                    "Adj Close": [1.2, 2.2], "Volume": [100.0, 200.0],
+                },
+                "BAD.NS": {
+                    "Open": [np.nan, np.nan], "High": [np.nan, np.nan],
+                    "Low": [np.nan, np.nan], "Close": [np.nan, np.nan],
+                    "Adj Close": [np.nan, np.nan], "Volume": [np.nan, np.nan],
+                },
+            })
+
+            src = YFinanceSource(
+                exchange="NSE",
+                download=FakeDownloader(df),
+                sleep=lambda _s: None,
+            )
+            result = src.fetch_daily_history(
+                ["GOOD", "BAD"],
+                start=date(2026, 1, 1), end=date(2026, 1, 2),
+            )
+            assert result["GOOD"].failure_kind == "ok"
+            assert result["GOOD"].bars
+            assert result["BAD"].failure_kind == "intcast"
+            assert not result["BAD"].bars
+        finally:
+            yfs._ERRORS.clear()
+
+    def test_all_nan_symbol_without_error_gets_empty_kind(self):
+        """B1: same shape but no IntCastingNaN record. Without positive
+        evidence we tag 'empty', not 'intcast' — the retry falls back to
+        the repair=True path first, as it always has."""
+        import numpy as np
+        import yfinance.shared as yfs
+
+        yfs._ERRORS.clear()
+
+        try:
+            df = _build_multi_df({
+                "GOOD.NS": {
+                    "Open": [1.0], "High": [1.5], "Low": [0.5],
+                    "Close": [1.2], "Adj Close": [1.2], "Volume": [100.0],
+                },
+                "BAD.NS": {
+                    "Open": [np.nan], "High": [np.nan], "Low": [np.nan],
+                    "Close": [np.nan], "Adj Close": [np.nan],
+                    "Volume": [np.nan],
+                },
+            })
+            src = YFinanceSource(
+                exchange="NSE",
+                download=FakeDownloader(df),
+                sleep=lambda _s: None,
+            )
+            result = src.fetch_daily_history(
+                ["GOOD", "BAD"],
+                start=date(2026, 1, 1), end=date(2026, 1, 2),
+            )
+            assert result["BAD"].failure_kind == "empty"
+        finally:
+            yfs._ERRORS.clear()

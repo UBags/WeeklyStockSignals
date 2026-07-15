@@ -44,6 +44,7 @@ NOT in here:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 from collections.abc import Iterable
@@ -58,6 +59,52 @@ from .throttle import ThrottleConfig, ThrottleGate, looks_rate_limited
 from .types import FetchOutcome, RawBar
 
 logger = logging.getLogger(__name__)
+
+
+# ---------- yfinance internal error surface (B1) ---------- #
+
+_YF_ERRORS_LOCK = threading.Lock()
+
+
+def _snapshot_and_clear_yf_errors(yf_symbols: list[str]) -> dict[str, str]:
+    """B1: capture yfinance.shared._ERRORS entries for these symbols under a
+    lock, then remove them so subsequent batches on other threads don't see
+    stale attributions.
+
+    yfinance records per-symbol failures (IntCastingNaNError, "possibly
+    delisted", …) in yfinance.shared._ERRORS as a process-global dict. Under
+    concurrent batched downloads, two threads populating that dict would
+    cross-contaminate. Snapshot-and-clear per batch under one lock avoids
+    the race, at the cost of coupling to a yfinance internal — pinned in D5.
+
+    Returns {yf_symbol: error_string} for symbols this batch owned. Symbols
+    not in _ERRORS are omitted (they succeeded or had no error surface).
+    """
+    try:
+        import yfinance.shared as _yfs  # deferred: yfinance is heavy
+    except Exception:  # noqa: BLE001
+        return {}
+    captured: dict[str, str] = {}
+    with _YF_ERRORS_LOCK:
+        errs = getattr(_yfs, "_ERRORS", None)
+        if not isinstance(errs, dict):
+            return {}
+        for s in yf_symbols:
+            if s in errs:
+                captured[s] = str(errs.pop(s))
+    return captured
+
+
+def _classify_empty(yf_symbol: str, errors: dict[str, str]) -> str:
+    """B1: given a symbol that returned no bars, decide whether the cause
+    was IntCastingNaN (recoverable under repair=False), a delisting notice
+    (genuinely dataless), or an unclassified empty."""
+    msg = errors.get(yf_symbol, "")
+    if "IntCastingNaN" in msg:
+        return "intcast"
+    if "delisted" in msg.lower():
+        return "delisted"
+    return "empty"
 
 
 # ---------- Module-level mappers (legacy entry points) ---------- #
@@ -274,7 +321,14 @@ class YFinanceSource:
                     progress=False,
                     group_by="ticker",
                 )
-                outcomes = self._normalize_df_to_outcomes(df, symbols)
+                # B1: snapshot yfinance's own per-symbol error surface for this
+                # batch, before any other batch on another thread can pollute
+                # or clear it. Passed to _normalize so empty outcomes can be
+                # classified intcast / delisted / empty.
+                errors = _snapshot_and_clear_yf_errors(yf_symbols)
+                outcomes = self._normalize_df_to_outcomes(
+                    df, symbols, errors=errors,
+                )
 
                 # The throttle check lives HERE, after normalisation, because the
                 # rate-limit is invisible at the exception level — it is a shape
@@ -316,7 +370,11 @@ class YFinanceSource:
         # All retries exhausted — every ticker in the batch fails.
         err = f"batch fetch failed after {self._max_retries} retries: {last_error}"
         return {
-            s: FetchOutcome(yfinance_symbol=self._yf(s), error_message=err)
+            s: FetchOutcome(
+                yfinance_symbol=self._yf(s),
+                error_message=err,
+                failure_kind="error",
+            )
             for s in symbols
         }
 
@@ -341,7 +399,11 @@ class YFinanceSource:
                     progress=False,
                     group_by="ticker",
                 )
-                outcomes = self._normalize_df_to_outcomes(df, symbols)
+                # B1: see _fetch_batch_daily for rationale.
+                errors = _snapshot_and_clear_yf_errors(yf_symbols)
+                outcomes = self._normalize_df_to_outcomes(
+                    df, symbols, errors=errors,
+                )
                 if self._all_empty(outcomes, symbols):
                     if (
                         attempt < self._max_retries
@@ -362,7 +424,11 @@ class YFinanceSource:
 
         err = f"hourly batch failed after {self._max_retries} retries: {last_error}"
         return {
-            s: FetchOutcome(yfinance_symbol=self._yf(s), error_message=err)
+            s: FetchOutcome(
+                yfinance_symbol=self._yf(s),
+                error_message=err,
+                failure_kind="error",
+            )
             for s in symbols
         }
 
@@ -400,6 +466,8 @@ class YFinanceSource:
         self,
         df,
         symbols: list[str],
+        *,
+        errors: dict[str, str] | None = None,
     ) -> dict[str, FetchOutcome]:
         """yfinance returns either:
           - a multi-index DataFrame {ticker: {col: series}} for multi-symbol calls
@@ -410,14 +478,21 @@ class YFinanceSource:
         with empty bars and an error_message; this is distinct from a
         symbol that succeeded but has zero bars in the period (also
         empty bars, error_message=None).
+
+        B1: `errors` is the snapshot of yfinance.shared._ERRORS for this
+        batch's yf_symbols (see _snapshot_and_clear_yf_errors). It lets us
+        tag empty outcomes as intcast / delisted / empty so the retry layer
+        can route IntCasting straight to repair=False.
         """
         results: dict[str, FetchOutcome] = {}
+        errors = errors or {}
 
         if df is None or df.empty:
             for s in symbols:
                 results[s] = FetchOutcome(
                     yfinance_symbol=self._yf(s),
                     error_message="yfinance returned empty DataFrame",
+                    failure_kind="error",
                 )
             return results
 
@@ -429,6 +504,7 @@ class YFinanceSource:
                     results[symbol] = FetchOutcome(
                         yfinance_symbol=yf_symbol,
                         error_message="symbol not in returned columns",
+                        failure_kind="error",
                     )
                     continue
 
@@ -455,13 +531,19 @@ class YFinanceSource:
                         adj_close=float(ac) if not _is_nan(ac) else float(c),
                         volume=float(v) if not _is_nan(v) else 0.0,
                     ))
+                # B1: bars present -> ok. Bars empty -> classify from the
+                # yfinance error surface. See _classify_empty.
+                kind = "ok" if bars else _classify_empty(yf_symbol, errors)
                 results[symbol] = FetchOutcome(
-                    yfinance_symbol=yf_symbol, bars=tuple(bars),
+                    yfinance_symbol=yf_symbol,
+                    bars=tuple(bars),
+                    failure_kind=kind,
                 )
             except Exception as e:
                 results[symbol] = FetchOutcome(
                     yfinance_symbol=yf_symbol,
                     error_message=f"normalization failed: {e}",
+                    failure_kind="error",
                 )
 
         return results

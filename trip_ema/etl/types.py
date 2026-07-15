@@ -75,6 +75,13 @@ class FetchOutcome:
     yfinance_symbol: str
     bars: tuple[RawBar, ...] = field(default_factory=tuple)
     error_message: str | None = None
+    failure_kind: str = "ok"
+    """B1: classification of this outcome — 'ok' (bars present) | 'empty'
+    (empty frame, no yfinance error) | 'intcast' (IntCastingNaNError, only
+    recoverable under repair=False) | 'delisted' (yfinance's own 'possibly
+    delisted' message) | 'error' (fetch or normalization raised). The retry
+    layer uses this to route IntCasting straight to repair=False and skip
+    the repair=True gauntlet."""
 
     @property
     def succeeded(self) -> bool:
