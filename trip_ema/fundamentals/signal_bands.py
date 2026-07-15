@@ -125,9 +125,21 @@ def band_flags(
     rather than the signal type, so the caller has to have looked at the
     EXIT mapping rather than assuming it.
 
-    Any missing/NaN/non-positive input degrades to False + NaN for the
-    affected (ema, period) pair only. A zero ATR is not a divide-by-zero;
-    it is a bar with no range, and the honest answer is "unknown".
+    Two OUTCOMES that must never be confused (spec §20.4):
+
+      * UNCOMPUTABLE pair — missing/NaN price, EMA, or ATR, or a non-positive
+        ATR. The distance is NaN and all five booleans are None. The repo
+        writes None as SQL NULL, so the column reads NULL = "not computed".
+
+      * COMPUTED, price behind the EMA — a real d < 0. The distance is a real
+        negative number and all five booleans are False. That is an
+        informative state (a BUY that fired with price under the med EMA),
+        not an absence, and it must survive as False rather than collapse
+        into the NULL above.
+
+    The degradation is per (ema, period): one missing ATR nulls fifteen
+    booleans, not the row. A zero ATR is not a divide-by-zero; it is a bar
+    with no range, and the honest answer is "unknown" -> None.
 
     The repo maps every non-finite distance to SQL NULL. It has to: a NaN in
     a double precision column is legal Postgres and silently poisons AVG,
@@ -146,10 +158,17 @@ def band_flags(
         e = emas[ema]
         for n in ATR_PERIODS:
             atr = atr_by_period.get(n)
+            # UNCOMPUTABLE: NaN distance, None flags -> SQL NULL. This is the
+            # one place "we don't know" is separated from "we computed a
+            # below-EMA price". Do not fold the two back together.
             if _bad(price) or _bad(e) or _bad(atr) or atr <= 0.0:
-                d = NAN
-            else:
-                d = sign * (price - e) / atr
+                out[dist_key(ema, n)] = NAN
+                for k in range(1, N_SLABS + 1):
+                    out[band_key(ema, n, k)] = None
+                continue
+            # COMPUTED: real distance, real booleans. A below-EMA price gives
+            # d < 0, slab None, and five honest Falses.
+            d = sign * (price - e) / atr
             out[dist_key(ema, n)] = d
             slab = _slab_of(d)
             for k in range(1, N_SLABS + 1):

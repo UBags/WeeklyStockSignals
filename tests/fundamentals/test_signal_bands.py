@@ -196,45 +196,83 @@ class TestPeriodsAndEmas:
 
 # ---------- degradation: bad inputs must not poison a row ----------
 
+def _flags_of(out, ema, n):
+    """The five raw booleans for (ema, period), in slab order."""
+    return [out[band_key(ema, n, k)] for k in range(1, N_SLABS + 1)]
+
+
 class TestDegradation:
+    """Uncomputable -> None flags + NaN distance (SQL NULL). A below-EMA
+    price -> real False flags + negative distance. These are different rows
+    and this block is what keeps them different."""
 
     def test_missing_atr_for_one_period_only_kills_that_period(self):
         out = _flags(105.0, atrs={**ATRS, 30: None})
         assert _slab(out, "med", 20) == 3
-        assert _slab(out, "med", 30) is None
+        # atr30 is uncomputable: None flags, not False.
+        assert all(v is None for v in _flags_of(out, "med", 30))
         assert math.isnan(out[dist_key("med", 30)])
         assert _slab(out, "med", 40) == 1
 
     def test_zero_atr_is_unknown_not_a_divide_by_zero(self):
         out = _flags(105.0, atrs={**ATRS, 20: 0.0})
         assert math.isnan(out[dist_key("med", 20)])
-        assert _slab(out, "med", 20) is None
+        assert all(v is None for v in _flags_of(out, "med", 20))
 
     def test_nan_atr_is_unknown(self):
         out = _flags(105.0, atrs={**ATRS, 20: float("nan")})
         assert math.isnan(out[dist_key("med", 20)])
+        assert all(v is None for v in _flags_of(out, "med", 20))
 
     def test_an_absent_period_key_is_unknown_not_a_crash(self):
         """A caller that forgets atr15 must get NULLs for atr15, not a
         KeyError that kills the whole ticker's enrichment run."""
         out = _flags(105.0, atrs={10: 5.0, 20: 10.0, 30: 20.0, 40: 40.0})
         assert math.isnan(out[dist_key("med", 15)])
-        assert _slab(out, "med", 15) is None
+        assert all(v is None for v in _flags_of(out, "med", 15))
         assert _slab(out, "med", 20) == 3
 
-    def test_missing_price_kills_everything_quietly(self):
+    def test_missing_price_makes_every_flag_none(self):
+        """No price -> nothing is computable. Every boolean is None (SQL
+        NULL), every distance NaN. NOT all-False: an all-False row is a
+        COMPUTED claim about slab membership, and we computed nothing."""
         out = _flags(None)
         assert set(out) == set(band_keys())
-        assert all(v is False for v in out.values() if isinstance(v, bool))
+        assert all(v is None for v in out.values() if not isinstance(v, float))
         assert all(math.isnan(v) for v in out.values()
                    if isinstance(v, float))
 
     def test_missing_one_ema_kills_only_its_own_flags(self):
         out = _flags(105.0, long=None)
         assert _slab(out, "med", 20) == 3
-        assert _slab(out, "long", 20) is None
+        assert all(v is None for v in _flags_of(out, "long", 20))
         assert math.isnan(out[dist_key("long", 20)])
         assert _slab(out, "longest", 20) == 3
+
+
+class TestBelowEmaIsComputedNotUnknown:
+    """The other half of the split: a real below-EMA price is False, never
+    None. This is the state a naive all-False would have erased."""
+
+    def test_below_ema_buy_is_false_flags_and_negative_distance(self):
+        out = _flags(90.0)                       # below every EMA on a BUY
+        assert _slab(out, "med", 20) is None     # no slab is on...
+        assert all(v is False for v in _flags_of(out, "med", 20))  # ...but False
+        assert out[dist_key("med", 20)] == pytest.approx(-1.0)
+        assert not math.isnan(out[dist_key("med", 20)])
+
+    def test_above_ema_sell_is_false_flags_not_none(self):
+        out = _flags(110.0, polarity=POLARITY_DOWN)   # above EMA on a SELL
+        assert all(v is False for v in _flags_of(out, "med", 20))
+        assert out[dist_key("med", 20)] == pytest.approx(-1.0)
+
+    def test_none_and_false_are_distinguishable_in_one_dict(self):
+        """The whole point, in one assertion: a row whose atr40 is missing
+        but whose atr20 puts the price below the EMA carries None flags for
+        atr40 and False flags for atr20, side by side."""
+        out = _flags(90.0, atrs={**ATRS, 40: None})
+        assert all(v is None for v in _flags_of(out, "med", 40))
+        assert all(v is False for v in _flags_of(out, "med", 20))
 
 
 # ---------- the spec, restated as a test ----------
