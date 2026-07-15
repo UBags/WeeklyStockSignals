@@ -93,6 +93,7 @@ from ..fundamentals.benchmark_stats_runners import (
 )
 from ..fundamentals.signal_ensemble_runner import backfill_signal_ensemble_features
 from ..fundamentals.signal_labels_runner import backfill_signal_labels
+from ..fundamentals.per_signal_stages import run_per_signal_stages
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.historical_signals_repo import (
     HistoricalSignalsRepository,
@@ -919,62 +920,30 @@ def backfill(
             # we didn't run; today_walked stays False.
             today_walked = False
 
-        # ---- Stage 8b: per-signal enrichment ----
-        # Reads the historical_signals the daywalk just wrote and
-        # materialises the causal per-signal feature vector.
-        _emit_progress(
-            progress_cb, "stage_8b_signal_enrichment", "starting",
-        )
-        _enr = run_phase(
-            db_engine, exchange, "signal_enrichment",
-            lambda: backfill_signal_enrichment(
-                db_engine, exchange,
-                scoped_tickers=scoped_tickers,
-                progress_cb=progress_cb,
-            ),
+        # ---- Stages 8b/8c/8d: the per-signal stage sequence ----
+        # enrichment (X) -> labels (y) -> ensemble (X), via the shared
+        # sequencer so this order is defined once and the EOD cycle runs the
+        # identical sequence (see fundamentals/per_signal_stages.py).
+        #
+        # Scopes preserve the ORIGINAL backfill behaviour exactly:
+        #   enrichment + labels : scoped_tickers (the run's tickers, or all)
+        #   ensemble            : None — backfill has ALWAYS swept every
+        #                         signal here, never a ticker subset.
+        # run_phase is passed through so the scoped-run ledger bypass (the
+        # _scoped_run_phase local, when this is a ticker-scoped run) still
+        # governs all three stages.
+        _pss = run_per_signal_stages(
+            db_engine, exchange,
+            enrichment_scope=scoped_tickers,
+            labels_scope=scoped_tickers,
+            ensemble_scope=None,
+            run_phase=run_phase,
+            progress_cb=progress_cb,
             backfill_run_id=run_id, force=_force,
         )
-        _emit_progress(
-            progress_cb, "stage_8b_signal_enrichment",
-            "done" if _enr is not None else "skipped (resume)",
-        )
-
-        # ---- Stage 8c: per-signal labels (retrospective target y) ----
-        # Computes forward-return labels for the signal_enrichment rows
-        # into signal_labels; re-runs finalise a label (horizon_complete)
-        # once all 13 forward weeks exist.
-        _emit_progress(
-            progress_cb, "stage_8c_signal_labels", "starting",
-        )
-        _lbl = run_phase(
-            db_engine, exchange, "signal_labels",
-            lambda: backfill_signal_labels(
-                db_engine, exchange,
-                scoped_tickers=scoped_tickers,
-                progress_cb=progress_cb,
-            ),
-            backfill_run_id=run_id, force=_force,
-        )
-        _emit_progress(
-            progress_cb, "stage_8c_signal_labels",
-            "done" if _lbl is not None else "skipped (resume)",
-        )
-
-        # ---- Stage 8d: per-signal ensemble features (§17.5) ----
-        _emit_progress(
-            progress_cb, "stage_8d_signal_ensemble", "starting",
-        )
-        _sef = run_phase(
-            db_engine, exchange, "signal_ensemble_features",
-            lambda: backfill_signal_ensemble_features(
-                db_engine, exchange, progress_cb=progress_cb,
-            ),
-            backfill_run_id=run_id, force=_force,
-        )
-        _emit_progress(
-            progress_cb, "stage_8d_signal_ensemble",
-            "done" if _sef is not None else "skipped (resume)",
-        )
+        _enr = _pss.enrichment
+        _lbl = _pss.labels
+        _sef = _pss.ensemble
 
         # ---- Notify subscribers — IFF this backfill is current
         # through today (to_monday == the current IST week's Monday).
