@@ -107,6 +107,7 @@ def main() -> int:
     solo_source = YFinanceSource(
         exchange=args.exchange, batch_size=1,
         request_delay_seconds=0.0,  # we sleep between tickers ourselves
+        repair=False,  # D1: IntCastingNaN symbols only recover under repair=False
     )
 
     recovered = 0
