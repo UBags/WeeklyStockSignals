@@ -4,6 +4,12 @@ Loads the influential ensembles and the industry breadth series into
 memory (both small), then walks every signal: stock -> industry I -> I's
 ensemble; aggregate members' regime at the signal's week into the four
 features, per ensemble variant. Read-time join by signal_enrichment_id.
+
+Scope: `scoped_tickers=None` sweeps every signal (backfill). A list restricts
+the sweep to those tickers (the EOD cycle passes the day's flipped tickers).
+This matches the shared per-signal-runner contract used by
+backfill_signal_enrichment and backfill_signal_labels. An empty list means no
+tickers -> no rows, NOT a full sweep.
 """
 from __future__ import annotations
 
@@ -33,6 +39,7 @@ def backfill_signal_ensemble_features(
     db_engine: Engine,
     exchange: str,
     *,
+    scoped_tickers: list[int] | None = None,
     progress_cb=None,
 ):
     market_session_for(exchange)  # validate exchange
@@ -62,11 +69,20 @@ def backfill_signal_ensemble_features(
             v for by_v in ens.values() for v in by_v
         })
 
-        out: list[SignalEnsembleFeatures] = []
-        for s in conn.execute(text(
+        # The ONLY scope-dependent line in this runner. None -> the exact
+        # query this has always run (backfill, byte-identical). A list ->
+        # the same query with a ticker filter; an empty list -> no rows.
+        _sql = (
             "SELECT signal_enrichment_id, ticker_id, signal_type, "
             "signal_date FROM signal_enrichment"
-        )).all():
+        )
+        _params: dict = {}
+        if scoped_tickers is not None:
+            _sql += " WHERE ticker_id = ANY(:ids)"
+            _params["ids"] = list(scoped_tickers)
+
+        out: list[SignalEnsembleFeatures] = []
+        for s in conn.execute(text(_sql), _params).all():
             ind = tick_ind.get(s.ticker_id)
             if ind is None or ind not in ens:
                 continue
