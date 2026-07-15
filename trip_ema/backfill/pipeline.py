@@ -67,7 +67,7 @@ from ..orchestrator.industry_stages import (
 )
 from .stages import BackfillStages, ProcessBoundaryError
 from ..persistence import transaction
-from .phase_ledger import reset_phases
+from .phase_ledger import reset_phases, run_phase as _ledger_run_phase
 from ..fundamentals.parallel import (
     engine_spec_from_config,
     fan_out,
@@ -480,6 +480,11 @@ def backfill(
         )
         return fn()
 
+    # RUN-PHASE-DEFAULT: full runs (stocks is None) use the real phase-ledger
+    # run_phase; only scoped runs swap in the ledger-bypass below. Without
+    # this default the name is a function-local (assigned just below),
+    # unbound on a full run -> UnboundLocalError at the first phase.
+    run_phase = _ledger_run_phase
     if stocks is not None:
         run_phase = _scoped_run_phase
 
