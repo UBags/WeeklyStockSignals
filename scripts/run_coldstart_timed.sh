@@ -3,31 +3,41 @@
 # Timed cold-start backfill: OHLCV -> email. Prints start/end wall clock and a
 # per-stage breakdown from the phase ledger.
 #
-# NOTE ON --no_fetch_bars: it is NOT passed here. You asked to see stage 1 fire,
-# so this REFETCHES every bar from yfinance. Be aware:
-#   * ~2,673 tickers x ~20 years. This is the slowest stage by far and it is
-#     network-bound, not CPU-bound — the 8-worker fan-out will not save you.
-#   * Rate-limit handling IS wired: YFinanceSource holds a ThrottleGate
-#     (throttle_backoff_seconds from config) that trips a bounded exponential
-#     backoff on an explicit 429 / "too many requests" and on repeated empty
-#     batches, plus a bounded solo-retry of tickers that flaked under batch
-#     load. A sustained 429 therefore slows the pass to the backoff rate and,
-#     once max_backoffs is spent, surfaces as failed tickers rather than a
-#     crash. Watch the [stage_1] failed count.
-# If you only want to time the COMPUTE chain, add --no_fetch_bars and skip the
-# refetch entirely.
+# The EXCHANGE is a REQUIRED first argument and is carried into the CLI call and
+# the phase-ledger / concurrency queries below.
 #
-# Usage: bash run_coldstart_timed.sh [extra cli args...]
+#   Usage: bash run_coldstart_timed.sh <EXCHANGE> [extra cli args...]
+#   e.g.:  bash run_coldstart_timed.sh NSE
+#          bash run_coldstart_timed.sh NSE --no_fetch_bars
+#
+# NOTE ON --no_fetch_bars: not passed by default, so this REFETCHES every bar
+# from yfinance (~2,600 tickers x ~20 years — the slowest, network-bound stage).
+# Rate-limit handling IS wired: YFinanceSource holds a ThrottleGate that trips a
+# bounded exponential backoff on an explicit 429 and on repeated empty batches,
+# plus a bounded solo-retry of flaked tickers. A sustained 429 slows the pass
+# and, once max_backoffs is spent, surfaces as failed tickers, not a crash --
+# watch the [stage_1] failed count. Add --no_fetch_bars to time the COMPUTE
+# chain only.
 # =============================================================================
 set -uo pipefail
+
+EXCHANGE="${1:-}"
+if [[ -z "$EXCHANGE" ]]; then
+  echo "error: EXCHANGE is required." >&2
+  echo "usage: bash run_coldstart_timed.sh <EXCHANGE> [extra cli args...]" >&2
+  echo "  e.g. bash run_coldstart_timed.sh NSE" >&2
+  exit 2
+fi
+shift   # remaining "$@" are extra CLI args forwarded verbatim
+
 cd ~/PycharmProjects/WeeklyStockSignals
 
-LOG=/tmp/coldstart_$(date +%Y%m%d_%H%M%S).log
+LOG=/tmp/coldstart_${EXCHANGE}_$(date +%Y%m%d_%H%M%S).log
 START_EPOCH=$(date +%s)
 
 {
   echo "==================================================================="
-  echo " COLD-START BACKFILL"
+  echo " COLD-START BACKFILL -- ${EXCHANGE}"
   echo "==================================================================="
   echo " started : $(date '+%Y-%m-%d %H:%M:%S %Z')  ($(date -u '+%H:%M:%S UTC'))"
   echo " today   : $(date '+%A')"
@@ -39,9 +49,9 @@ START_EPOCH=$(date +%s)
 # ---- the run -------------------------------------------------------------
 # NO --release-lock. That flag stomps a LIVE lock and is what let two backfills
 # run concurrently last time, contaminating every stage measurement. If it
-# complains about an active lock, investigate — don't reflexively force it.
+# complains about an active lock, investigate -- don't reflexively force it.
 python -m trip_ema.etl.cli backfill \
-    --exchange NSE \
+    --exchange "$EXCHANGE" \
     --date_from 2006-04-01 \
     "$@" 2>&1 | tee -a "$LOG"
 
@@ -52,7 +62,7 @@ ELAPSED=$((END_EPOCH - START_EPOCH))
 {
   echo
   echo "==================================================================="
-  echo " FINISHED"
+  echo " FINISHED -- ${EXCHANGE}"
   echo "==================================================================="
   echo " started  : $(date -d "@$START_EPOCH" '+%Y-%m-%d %H:%M:%S %Z')"
   echo " finished : $(date -d "@$END_EPOCH"   '+%Y-%m-%d %H:%M:%S %Z')"
@@ -73,7 +83,7 @@ SELECT phase_name,
        completed_at - started_at           AS duration,
        row_count
   FROM pipeline_phase_status
- WHERE exchange = 'NSE'
+ WHERE exchange = '${EXCHANGE}'
  ORDER BY started_at;
 " | tee -a "$LOG"
 
@@ -83,8 +93,8 @@ echo
 echo "=== CONCURRENCY CHECK (must print NO OVERLAP) ==="
 psql -U trip_gui_user -d trip_ema -tAc "
 SELECT CASE WHEN count(*) = 0
-            THEN 'NO OVERLAP — timings are trustworthy'
-            ELSE 'OVERLAP DETECTED (' || count(*) || ' pairs) — TIMINGS ARE GARBAGE, '
+            THEN 'NO OVERLAP -- timings are trustworthy'
+            ELSE 'OVERLAP DETECTED (' || count(*) || ' pairs) -- TIMINGS ARE GARBAGE, '
                  || 'two backfills ran concurrently'
        END
   FROM pipeline_phase_status a
@@ -93,7 +103,7 @@ SELECT CASE WHEN count(*) = 0
    AND a.exchange = b.exchange
    AND a.started_at < b.completed_at
    AND b.started_at < a.completed_at
- WHERE a.exchange = 'NSE';
+ WHERE a.exchange = '${EXCHANGE}';
 " | tee -a "$LOG"
 
 # ---- did every stage actually produce data? ------------------------------
