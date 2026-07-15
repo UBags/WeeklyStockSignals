@@ -225,8 +225,21 @@ def cmd_backfill(args, ctx: AppContext, *, backfill_fn=None) -> int:
     )
 
     # ---- 5. Run the pipeline ----
+    import time as _prog_time
+    from datetime import datetime as _prog_dt
+    _prog_t0 = _prog_time.monotonic()
+
     def _progress(stage: str, message: str) -> None:
-        print(f"  [{stage}] {message}", flush=True)
+        _el = _prog_time.monotonic() - _prog_t0
+        _elapsed = (
+            f"{int(_el // 3600):02d}:{int(_el % 3600 // 60):02d}:"
+            f"{int(_el % 60):02d}"
+        )
+        print(
+            f"  {_prog_dt.now().strftime('%Y-%m-%d %H:%M:%S')} "
+            f"(+{_elapsed}) [{stage}] {message}",
+            flush=True,
+        )
 
     # Step 13a: log this backfill into compute_runs so it
     # appears in the ETL GUI's activity log alongside
@@ -441,6 +454,16 @@ def _report_backfill_result(result) -> int:
         f"  current:     upserted={result.current_signals_upserted}, "
         f"deleted={result.current_signals_deleted}"
     )
+    # Failed-entity detail (first 10 each) — counts alone don't say WHICH.
+    for _flabel, _flist in (
+        ("stock_state", result.stock_state_failed),
+        ("stock_enrichment", result.stock_enrichment_failed),
+        ("benchmark", result.benchmark_failed),
+    ):
+        if _flist:
+            print(f"  {_flabel} failures ({len(_flist)}), first 10:")
+            for _who, _err in _flist[:10]:
+                print(f"    - {_who}: {_err}")
     if result.failed_stage is not None:
         return 1
     # The pipeline finished, but the DATA may still be incomplete —
