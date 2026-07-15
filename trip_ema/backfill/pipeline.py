@@ -321,6 +321,16 @@ def backfill(
     # signals a week later.
     _assert_industry_layer_belongs_to(db_engine, exchange)
 
+    # STAGES-DEFAULT-BEFORE-STAGE-0: resolve the stages bundle to its
+    # production default BEFORE stage 0's listings refresh uses it.
+    # The assignment used to sit after stage 0, so a caller that did not
+    # inject stages (the CLI) hit 'NoneType object has no attribute
+    # refresh_listings'. validate_for moves up with it: refuse, before ANY
+    # work, a config whose injected populator would be silently discarded
+    # by spawned children.
+    stages = stages if stages is not None else DEFAULT_BACKFILL_STAGES
+    stages.validate_for(config, DEFAULT_BACKFILL_STAGES)
+
     # ---- Stage 0a: fidelity pre-flight ----
     # Ask, BEFORE spending six hours, whether this run can possibly produce
     # correct data.
@@ -412,11 +422,6 @@ def backfill(
 
     # ---- start() the marker. If unique-active constraint fires, the
     # IntegrityError propagates and the caller (CLI) handles it. ----
-    # Refuse, before anything is written, a configuration whose injected
-    # populator would be silently discarded by the spawned children. This
-    # used to be a comment in two docstrings.
-    stages = stages if stages is not None else DEFAULT_BACKFILL_STAGES
-    stages.validate_for(config, DEFAULT_BACKFILL_STAGES)
 
     repo = BackfillRunsRepository
     with transaction(db_engine) as conn:

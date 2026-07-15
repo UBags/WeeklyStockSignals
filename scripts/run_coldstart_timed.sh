@@ -81,7 +81,7 @@ SELECT phase_name,
        to_char(started_at,   'HH24:MI:SS') AS started,
        to_char(completed_at, 'HH24:MI:SS') AS ended,
        completed_at - started_at           AS duration,
-       row_count
+       rows_affected AS row_count
   FROM pipeline_phase_status
  WHERE exchange = '${EXCHANGE}'
  ORDER BY started_at;
