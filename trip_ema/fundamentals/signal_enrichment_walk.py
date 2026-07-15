@@ -92,6 +92,8 @@ def compute_ticker_signal_enrichments(
             feats["rs_ema"] = cur_rs_ema
             atrs = asm.atrs()               # {10: .., 15: .., 20: .., ..}
             price = day.close               # the close the signal fired from
+            bars = asm.bars_seen()          # gates the long-period ATRs
+            dow = day.date.isoweekday()     # Mon=1 .. Sun=7
 
             for stype in signals_by_date[day.date]:
                 # Raises on an unknown type. Better to fail this ticker loudly
@@ -116,6 +118,10 @@ def compute_ticker_signal_enrichments(
                     seq_in_week=s.in_week, seq_in_2w=s.in_2w,
                     signal_price=price,
                     band_polarity=polarity,
+                    bars_available=bars,
+                    day_of_week=dow,
+                    # data_is_valid is set by the repo from the final
+                    # NULL-mapped row — not here. See the repo docstring.
                 ))
 
         asm.restore(snap)                   # discard the forming branch

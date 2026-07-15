@@ -405,6 +405,11 @@ class SignalFeatureAssembler:
         self._cur_release = cur_rel
         self._cur_wir = cur_wir
 
+    def bars_seen(self) -> int:
+        """Weekly bars fed to the assembler so far. self._bar is a 0-based
+        index advanced once per update(); +1 is the count. 0 before any bar."""
+        return self._bar + 1
+
     def atrs(self) -> dict[int, float]:
         """The §20 band rulers at the current bar, {period: value}.
 

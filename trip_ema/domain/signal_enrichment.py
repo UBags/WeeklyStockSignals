@@ -49,3 +49,28 @@ class SignalEnrichment:
     # "UP" | "DOWN" — the geometry the flags were computed with. Read the
     # flags THROUGH this: an EXIT_FROM_BUY carries SELL geometry.
     band_polarity: str | None = None
+
+    # Weekly bars the assembler had seen at the signal bar. The measure of
+    # whether the long-period ATRs are meaningful (Wilder RMA is non-NULL
+    # from bar one but not trustworthy until its period has elapsed).
+    bars_available: int | None = None
+    # ISO weekday of signal_date, Monday=1 .. Sunday=7. DERIVED — a caller
+    # need not (and normally should not) pass it; __post_init__ fills it from
+    # signal_date. It exists as a stored column because the ML layer wants it
+    # indexable alongside seq_in_week without parsing a date.
+    day_of_week: int | None = None
+    # Set by the REPO, not by callers: True iff every band column ended up
+    # non-NULL. Strict literal, by request. A value passed in here is ignored
+    # — the repo always recomputes it from the row it is about to write.
+    data_is_valid: bool = False
+
+    def __post_init__(self) -> None:
+        # frozen dataclass: derive day_of_week from signal_date when the
+        # caller left it unset, so no construction site has to know the ISO
+        # weekday and the NOT NULL column can never receive None. An
+        # explicitly passed value is honoured (the recompute passes none;
+        # this is here for the object's own integrity, not the walk's).
+        if self.day_of_week is None:
+            object.__setattr__(
+                self, "day_of_week", self.signal_date.isoweekday()
+            )

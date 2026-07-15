@@ -61,6 +61,19 @@ _SCALAR_COLS: tuple[str, ...] = _ATR_COLS + (
 )
 _BAND_COLS: tuple[str, ...] = _BAND_KEYS + _SCALAR_COLS      # 99
 
+# The columns whose NULL-ness decides data_is_valid (strict literal, by
+# request): every band boolean, every distance, every ATR. Deliberately the
+# 90 band keys + 5 ATRs — NOT signal_price / seq / polarity, which are always
+# present on a real signal and whose absence means "broken", handled below.
+_VALIDITY_COLS: tuple[str, ...] = _BAND_KEYS + _ATR_COLS     # 95
+
+# Written by the walk, not derived from bands. day_of_week is NOT NULL in the
+# schema, so it must always be supplied.
+_EXTRA_COLS: tuple[str, ...] = (
+    "bars_available", "day_of_week", "data_is_valid",
+)
+_ALL_NEW_COLS: tuple[str, ...] = _BAND_COLS + _EXTRA_COLS    # 102
+
 # Bind parameter names are the column names — they are already valid
 # identifiers and cannot collide with the four short names below.
 _BASE_COLS = (
@@ -69,8 +82,8 @@ _BASE_COLS = (
 )
 _BASE_VALUES = ":tid, :tf, :sd, :st, :ind, CAST(:feat AS JSONB), :ver, NOW()"
 
-_COLUMNS = ", ".join(_BASE_COLS + _BAND_COLS)
-_VALUES = ", ".join([_BASE_VALUES] + [f":{c}" for c in _BAND_COLS])
+_COLUMNS = ", ".join(_BASE_COLS + _ALL_NEW_COLS)
+_VALUES = ", ".join([_BASE_VALUES] + [f":{c}" for c in _ALL_NEW_COLS])
 _UPDATES = ",\n        ".join(
     [
         "industry_id = EXCLUDED.industry_id",
@@ -78,7 +91,7 @@ _UPDATES = ",\n        ".join(
         "feature_spec_version = EXCLUDED.feature_spec_version",
         "computed_at = NOW()",
     ]
-    + [f"{c} = EXCLUDED.{c}" for c in _BAND_COLS]
+    + [f"{c} = EXCLUDED.{c}" for c in _ALL_NEW_COLS]
 )
 _ON_CONFLICT = f"""
     ON CONFLICT (ticker_id, timeframe, signal_date, signal_type)
@@ -92,7 +105,7 @@ _INSERT = (
 _SELECT = (
     "SELECT ticker_id, timeframe, signal_date, signal_type, "
     "industry_id, features, feature_spec_version, "
-    + ", ".join(_BAND_COLS)
+    + ", ".join(_ALL_NEW_COLS)
     + " FROM signal_enrichment "
     "WHERE ticker_id = :tid AND timeframe = :tf "
     "AND signal_date = :sd AND signal_type = :st"
@@ -148,6 +161,9 @@ class SignalEnrichmentRepository:
             seq_in_week=m["seq_in_week"], seq_in_2w=m["seq_in_2w"],
             signal_price=m["signal_price"],
             band_polarity=m["band_polarity"],
+            bars_available=m["bars_available"],
+            day_of_week=m["day_of_week"],
+            data_is_valid=m["data_is_valid"],
         )
 
     def count(self) -> int:
@@ -192,4 +208,16 @@ class SignalEnrichmentRepository:
         p["seq_in_2w"] = row.seq_in_2w
         p["signal_price"] = _num(row.signal_price)
         p["band_polarity"] = row.band_polarity
+
+        p["bars_available"] = row.bars_available
+        # day_of_week is NOT NULL in the schema and can never be None here:
+        # SignalEnrichment.__post_init__ derives it from signal_date for any
+        # caller that did not set it. The domain object owns that invariant.
+        p["day_of_week"] = row.day_of_week
+
+        # STRICT LITERAL data_is_valid, computed HERE because this is the one
+        # place the final NULL-mapped values exist: _num() has already turned
+        # every warm-up NaN into None above. True iff every validity column is
+        # non-None. The row.data_is_valid a caller passed in is ignored.
+        p["data_is_valid"] = all(p[c] is not None for c in _VALIDITY_COLS)
         return p
