@@ -102,6 +102,8 @@ class TestProgressCbWiring:
             db_engine=MagicMock(),
             as_of=datetime(2026, 6, 28, 12, 0, tzinfo=UTC),
             cache=cache,
+            signal_mode="intraday",  # Stage 9 is eod-only; this test is the
+                                     # 7 core stages' contract, DB-free.
             progress_cb=lambda s, m: calls.append((s, m)),
         )
         running_emits = [c for c in calls if c[1] == "running"]
@@ -119,6 +121,7 @@ class TestProgressCbWiring:
             stages=stub_stages,
             db_engine=MagicMock(),
             cache=cache,
+            signal_mode="intraday",  # Stage 9 is eod-only
             progress_cb=lambda s, m: calls.append((s, m)),
         )
         done_stages = [c[0] for c in calls if c[1] == "done"]
@@ -131,6 +134,7 @@ class TestProgressCbWiring:
         recompute_market(
             stages=stub_stages,
             db_engine=MagicMock(), cache=cache,
+            signal_mode="intraday",  # Stage 9 is eod-only
             progress_cb=lambda s, m: calls.append((s, m)),
         )
         for i, stage in enumerate(EXPECTED_STAGES):
