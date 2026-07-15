@@ -236,7 +236,7 @@ def cmd_backfill(args, ctx: AppContext, *, backfill_fn=None) -> int:
             f"{int(_el % 60):02d}"
         )
         print(
-            f"  {_prog_dt.now().strftime('%Y-%m-%d %H:%M:%S')} "
+            f"  {_prog_dt.now(market_tz(args.exchange)).strftime('%Y-%m-%d %H:%M:%S')} "
             f"(+{_elapsed}) [{stage}] {message}",
             flush=True,
         )
