@@ -653,6 +653,12 @@ def audit_exchange(
             # the OHLCV refetch — which is the truth.
             unavailable=dark.get("shares", 0),
         ))
+        # Derived half of the chain (auto-wired). Lazy import breaks the module cycle:
+        # data_fidelity_derived imports helpers from this module.
+        from .data_fidelity_derived import audit_derived_chain
+        datasets.extend(
+            audit_derived_chain(conn, exchange, gap_days=gap_days)
+        )
         datasets.extend(_audit_multi_exchange_safety(conn))
 
     return FidelityReport(

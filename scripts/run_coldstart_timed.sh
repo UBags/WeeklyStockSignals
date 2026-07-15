@@ -7,9 +7,13 @@
 # so this REFETCHES every bar from yfinance. Be aware:
 #   * ~2,673 tickers x ~20 years. This is the slowest stage by far and it is
 #     network-bound, not CPU-bound — the 8-worker fan-out will not save you.
-#   * There is NO exponential backoff on YFRateLimitError / HTTP 429 in the
-#     fetch path (it's a known open item). A sustained 429 will surface as
-#     failed tickers, not a crash. Watch the [stage_1] failed count.
+#   * Rate-limit handling IS wired: YFinanceSource holds a ThrottleGate
+#     (throttle_backoff_seconds from config) that trips a bounded exponential
+#     backoff on an explicit 429 / "too many requests" and on repeated empty
+#     batches, plus a bounded solo-retry of tickers that flaked under batch
+#     load. A sustained 429 therefore slows the pass to the backoff rate and,
+#     once max_backoffs is spent, surfaces as failed tickers rather than a
+#     crash. Watch the [stage_1] failed count.
 # If you only want to time the COMPUTE chain, add --no_fetch_bars and skip the
 # refetch entirely.
 #

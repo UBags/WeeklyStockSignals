@@ -115,11 +115,20 @@ def _resolve_ticker_inputs(conn, ticker_id, timeframe):
 
 
 def _resolve_rs_ema_by_monday(conn, ticker_id, daily, session):
-    """§11 rs_ema per week (stock vs its industry index), or None if the
-    stock has no industry mapping or the index has no values."""
+    """§11 rs_ema per week (stock vs its industry index), or None.
+
+    None arises in three situations that are NOT the same:
+      1. no industry mapping (ETF/unclassified)         — expected, silent
+      2. industry has no ACTIVE index with constituents — expected, silent
+         (sub-threshold industry, < min_constituents)
+      3. industry HAS an active constituent-bearing index but
+         industry_index_value is empty for it           — ANOMALY, logged
+    The number stays fail-safe (None) in all three; only (3) is a defect, so
+    only (3) is logged. The aggregate form lives in data_fidelity_derived
+    (industry_index_value: built but unvalued).
+    """
     industry = conn.execute(
-        text("SELECT industry FROM instrument_industry "
-             "WHERE ticker_id = :t"),
+        text("SELECT industry FROM instrument_industry WHERE ticker_id = :t"),
         {"t": ticker_id},
     ).scalar()
     if not industry:
@@ -130,6 +139,25 @@ def _resolve_rs_ema_by_monday(conn, ticker_id, daily, session):
         {"ind": industry},
     ).all()
     if not idx_rows:
+        index_expected = conn.execute(
+            text(
+                "SELECT EXISTS ("
+                "  SELECT 1 FROM industry_index i "
+                "   WHERE i.industry_name = :ind AND i.status = 'ACTIVE' "
+                "     AND EXISTS (SELECT 1 FROM industry_index_constituent c "
+                "                  WHERE c.industry_name = i.industry_name "
+                "                    AND c.effective_to IS NULL))"
+            ),
+            {"ind": industry},
+        ).scalar()
+        if index_expected:
+            logger.warning(
+                "signal_enrichment: ticker_id=%d industry=%r has an ACTIVE "
+                "index with live constituents but ZERO industry_index_value "
+                "rows — rs_ema absent for this industry; the index value stage "
+                "did not run or produced nothing for it.",
+                ticker_id, industry,
+            )
         return None
 
     def week_of(d):
