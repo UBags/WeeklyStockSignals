@@ -102,13 +102,13 @@ class TestSchemaDrift:
             "NEW migration, not an edit to 0052."
         )
 
-    def test_the_table_has_108_columns(self, db_engine):
+    def test_the_table_has_111_columns(self, db_engine):
         with db_engine.connect() as conn:
             n = conn.execute(text(
                 "SELECT count(*) FROM information_schema.columns "
                 "WHERE table_name = 'signal_enrichment'"
             )).scalar()
-        assert n == 108        # 9 pre-existing + 99
+        assert n == 111        # 9 pre-existing + 99 (0052) + 3 (0053)
 
     def test_the_band_columns_are_nullable(self, db_engine):
         """Until the v0.5 recompute lands, they must be. 0053 tightens
