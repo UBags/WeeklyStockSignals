@@ -206,3 +206,50 @@ class TestRateLimitError:
         g.observe_empty(1)
         g.observe_rate_limit_error(Exception("429"))
         assert g.snapshot()["solo_empty_streak"] == 0
+
+
+# ---- D2: trip_on_empty flag ----
+
+
+def test_observe_empty_returns_false_when_trip_on_empty_disabled():
+    """D2: retry cohort / reference-sweep gates disable empty-tripping.
+    observe_empty must be a no-op regardless of n_symbols, and the gate
+    must remain closed."""
+    from trip_ema.etl.throttle import ThrottleConfig, ThrottleGate
+
+    gate = ThrottleGate(ThrottleConfig(trip_on_empty=False))
+    assert gate.observe_empty(1) is False
+    assert gate.observe_empty(2) is False   # would trip under default
+    assert gate.observe_empty(50) is False  # would trip under default
+    snap = gate.snapshot()
+    assert snap["backoff_open"] is False
+    assert snap["backoff_level"] == 0
+
+
+def test_observe_rate_limit_still_trips_when_trip_on_empty_disabled():
+    """D2: even in retry-cohort mode, an explicit 429 must trip the gate.
+    trip_on_empty gates only the shape-based inference, not the explicit
+    rate-limit signal."""
+    from trip_ema.etl.throttle import ThrottleConfig, ThrottleGate
+
+    gate = ThrottleGate(
+        ThrottleConfig(trip_on_empty=False, base_seconds=1.0),
+        sleep=lambda _s: None,
+    )
+    tripped = gate.observe_rate_limit_error(RuntimeError("HTTP 429"))
+    assert tripped is True
+    assert gate.snapshot()["backoff_open"] is True
+
+
+def test_trip_on_empty_defaults_true_preserves_bulk_behaviour():
+    """D2: the default is True — the bulk pass still trips on unanimity,
+    exactly as it did before D2. This is the regression guard against
+    accidentally flipping the default."""
+    from trip_ema.etl.throttle import ThrottleConfig, ThrottleGate
+
+    assert ThrottleConfig().trip_on_empty is True
+
+    gate = ThrottleGate(
+        ThrottleConfig(base_seconds=1.0), sleep=lambda _s: None,
+    )
+    assert gate.observe_empty(2) is True

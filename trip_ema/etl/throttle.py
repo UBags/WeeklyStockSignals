@@ -84,6 +84,13 @@ class ThrottleConfig:
     caller's own bookkeeping (empty_tickers, the park threshold) takes it from
     here. Bounded, because an unbounded backoff is an unbounded hang."""
 
+    trip_on_empty: bool = True
+    """When False, observe_empty() is a no-op — the retry cohort and the
+    reference sweeps disable this because empties in those passes are expected
+    by construction (delisted, genuinely dataless, no financials to report).
+    Only observe_rate_limit_error() (explicit 429) can trip the gate in that
+    mode. See D2 in fetch_routine_fixes.md."""
+
 
 def looks_rate_limited(e: BaseException) -> bool:
     """True when an exception is Yahoo saying "too many requests".
@@ -138,6 +145,10 @@ class ThrottleGate:
         outcomes at face value" — either not enough evidence yet, or we have
         already backed off max_backoffs times and Yahoo is simply not answering.
         """
+        if not self._config.trip_on_empty:
+            # D2: retry cohort / reference sweeps disable this — empties are
+            # expected by construction. Only explicit 429s trip the gate.
+            return False
         if n_symbols >= 2:
             # Unanimity within one frame. One equity returning zero bars over a
             # multi-year window is plausible; all of them at once is not a mass
