@@ -150,6 +150,8 @@ def compose_email(
     subscriber: SubscriberRecord,
     cycle_id: str,
     now: datetime,
+    *,
+    max_corroborators: int = 3,
 ) -> EmailBody | None:
     """Compose the V1 cycle email body.
 
@@ -179,7 +181,10 @@ def compose_email(
         # No industry -> no lead/lag context to attach.
         if not row.industry:
             return None
-        return load_leadlag_context(conn, row.ticker_id, row.industry)
+        return load_leadlag_context(
+            conn, row.ticker_id, row.industry,
+            max_corroborators=max_corroborators,
+        )
 
     return build_email_body(rows, cycle_id, now, leadlag_fn=_leadlag)
 

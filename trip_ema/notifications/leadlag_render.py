@@ -17,10 +17,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-# Cap corroborators shown in the email (design §8 #4 — legibility).
-_MAX_CORROBORATORS = 3
-
-
 @dataclass(frozen=True, slots=True)
 class Corroborator:
     industry: str
@@ -124,8 +120,7 @@ def _industry_phrase(industry: str, ctx: LeadLagContext) -> str | None:
         return None
     line = (f"{industry} signalled {_dir_word(ctx.industry_regime_now)} "
             f"{_ago(ctx.industry_changed_weeks_ago)}")
-    corr = [_corro_phrase(c)
-            for c in ctx.corroborators[:_MAX_CORROBORATORS]]
+    corr = [_corro_phrase(c) for c in ctx.corroborators]
     if corr:
         line += ". Direction bolstered by " + "; ".join(corr)
     return line

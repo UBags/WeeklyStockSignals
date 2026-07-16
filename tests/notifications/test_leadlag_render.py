@@ -45,7 +45,7 @@ def test_decoupled_and_missing_stock_suppressed():
     ]
 
 
-def test_corroborators_capped_at_three_with_signs():
+def test_corroborators_rendered_uncapped():
     cs = (
         Corroborator("Oil & Gas", -0.78, 4, -1, True, 1, 5),
         Corroborator("Steel", -0.84, 6, -1, True, 1, 7),
@@ -58,7 +58,7 @@ def test_corroborators_capped_at_three_with_signs():
     assert (MINUS + "78% correlation at 4-week lag with Oil & Gas, "
             "which turned positive 5 weeks ago") in line
     assert "Cement" in line
-    assert "Extra" not in line          # 4th dropped by the top-3 cap
+    assert "Extra" in line          # renderer renders all; the reader caps
 
 
 def test_neutral_industry_line_suppressed():

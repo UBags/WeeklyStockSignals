@@ -60,6 +60,8 @@ def _regime_state(breadth_series: list[float]) -> tuple[int, int | None]:
 
 def load_leadlag_context(
     conn: Connection, ticker_id: int, industry: str,
+    *,
+    max_corroborators: int = 3,
 ) -> LeadLagContext:
     """Assemble the lead/lag context for a signal on `ticker_id` in
     `industry`. Every field degrades to None/empty when its table is thin, so
@@ -96,5 +98,5 @@ def load_leadlag_context(
         stock_coupling=(srow.coupling_class if srow else None),
         industry_regime_now=ind_regime_now,
         industry_changed_weeks_ago=ind_changed,
-        corroborators=tuple(corroborators),
+        corroborators=tuple(corroborators[:max_corroborators]),
     )
