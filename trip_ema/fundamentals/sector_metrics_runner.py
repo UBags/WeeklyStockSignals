@@ -30,6 +30,7 @@ from ..domain.market_session import market_session_for
 from .parallel import fan_out
 from .sector_cross_section import compute_rs_rank_by_week
 from .sector_leadlag import compute_sector_leadlag
+from .sector_leadlag_inputs import build_regime_leadlag_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -120,57 +121,98 @@ def _metrics_for_industry(conn, industry, session):
                 window=_RS_WINDOW, industry_name=industry, rs_rank=rr,
             ))
 
-    ll_rows = _leadlag_rows(
-        conn, industry, session, closes, weight_periods, week_of,
-    )
+    ll_rows = _leadlag_rows(conn, industry, session, ranked_ids)
     return rs_rows, ll_rows
 
 
-def _leadlag_rows(conn, industry, session, closes, weight_periods, week_of):
-    idx_rows = conn.execute(
-        text("SELECT trade_date, value FROM industry_index_value "
-             "WHERE industry_name = :ind ORDER BY trade_date"),
-        {"ind": industry},
-    ).all()
-    if not idx_rows:
+def _leadlag_rows(conn, industry, session, ranked_ids):
+    """Regime-based sector lead/lag (design §4.2). Correlates each ranked
+    stock's weekly display_regime against the industry BREADTH (equal-weight
+    mean constituent regime), leave-one-out-debiased at w_s = 1/N on the weeks
+    the stock is a breadth constituent (see sector_leadlag_inputs).
+
+    Weeks are keyed by stock_indicator_state.bar_timestamp so a stock's regime
+    and the breadth align on the identical instant. The per-(ticker, week)
+    value is the LATEST daily 1W regime in that week — the same DISTINCT ON the
+    industry-matrix breadth uses — so the 1/N debias subtraction is exact for a
+    constituent. All active constituents are a subset of ranked_ids, so the
+    breadth built from the ids-filtered CTE is complete."""
+    if not ranked_ids:
         return []
-    idx_weekly: dict = {}
-    for r in idx_rows:
-        idx_weekly[week_of(r.trade_date)] = r.value
-    r_I_map = _weekly_log_returns(idx_weekly)
-    if len(r_I_map) < min(_LEADLAG_WINDOWS):
+    ids = list(ranked_ids)
+
+    weekly_cte = (
+        "WITH weekly AS ("
+        " SELECT DISTINCT ON (sis.ticker_id, sis.bar_timestamp)"
+        " sis.ticker_id, sis.bar_timestamp AS wk, sis.date,"
+        " sis.display_regime"
+        " FROM stock_indicator_state sis"
+        " WHERE sis.timeframe = '1W' AND sis.ticker_id = ANY(:ids)"
+        " ORDER BY sis.ticker_id, sis.bar_timestamp, sis.date DESC )"
+    )
+
+    breadth: dict = {}
+    n_by_week: dict = {}
+    for r in conn.execute(
+        text(
+            weekly_cte
+            + " SELECT w.wk AS wk,"
+              " avg(w.display_regime::float) AS breadth, count(*) AS n"
+              " FROM industry_index_constituent iic"
+              " JOIN weekly w ON w.ticker_id = iic.ticker_id"
+              " WHERE iic.industry_name = :ind"
+              " AND w.date >= iic.effective_from"
+              " AND (iic.effective_to IS NULL OR w.date <= iic.effective_to)"
+              " GROUP BY w.wk"
+        ),
+        {"ind": industry, "ids": ids},
+    ).all():
+        breadth[r.wk] = r.breadth
+        n_by_week[r.wk] = r.n
+    if len(breadth) < min(_LEADLAG_WINDOWS):
         return []
-    idx_weeks = sorted(r_I_map)
+
+    stock_regime: dict = {}
+    for r in conn.execute(
+        text(
+            weekly_cte
+            + " SELECT w.ticker_id, w.wk AS wk, w.display_regime FROM weekly w"
+        ),
+        {"ids": ids},
+    ).all():
+        stock_regime.setdefault(r.ticker_id, {})[r.wk] = r.display_regime
+
+    cons_weeks: dict = {}
+    for r in conn.execute(
+        text(
+            weekly_cte
+            + " SELECT w.ticker_id, w.wk AS wk"
+              " FROM industry_index_constituent iic"
+              " JOIN weekly w ON w.ticker_id = iic.ticker_id"
+              " WHERE iic.industry_name = :ind"
+              " AND w.date >= iic.effective_from"
+              " AND (iic.effective_to IS NULL OR w.date <= iic.effective_to)"
+        ),
+        {"ind": industry, "ids": ids},
+    ).all():
+        cons_weeks.setdefault(r.ticker_id, set()).add(r.wk)
 
     out: list[SectorLeadlagMetric] = []
-    for t, cmap in closes.items():
-        r_s_map = _weekly_log_returns(cmap)
-        common = [w for w in idx_weeks if w in r_s_map]
-        if len(common) < min(_LEADLAG_WINDOWS):
+    for tid, regime_map in stock_regime.items():
+        weeks, r_s, r_I, w_s, isc = build_regime_leadlag_inputs(
+            regime_map, breadth, n_by_week, cons_weeks.get(tid, set()),
+        )
+        if len(weeks) < min(_LEADLAG_WINDOWS):
             continue
-        r_s = [r_s_map[w] for w in common]
-        r_i = [r_I_map[w] for w in common]
-        w_s = []
-        isc = []
-        for w in common:
-            wt = 0.0
-            is_c = False
-            for (fm, to, weight) in weight_periods.get(t, []):
-                if w >= fm and (to is None or w <= to):
-                    wt = weight
-                    is_c = True
-                    break
-            w_s.append(wt)
-            isc.append(is_c)
         for window in _LEADLAG_WINDOWS:
-            res = compute_sector_leadlag(r_s, r_i, w_s, window=window)
-            for i, m in enumerate(common):
+            res = compute_sector_leadlag(r_s, r_I, w_s, window=window)
+            for i, wk in enumerate(weeks):
                 cell = res[i]
                 if cell is None:
                     continue
                 out.append(SectorLeadlagMetric(
-                    ticker_id=t,
-                    asof_date=m.astimezone(session.zone).date(),
+                    ticker_id=tid,
+                    asof_date=wk.astimezone(session.zone).date(),
                     window=window, industry_name=industry,
                     is_constituent=isc[i],
                     insync_corr=cell["insync_corr"],
