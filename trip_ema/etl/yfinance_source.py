@@ -44,7 +44,6 @@ NOT in here:
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 from collections.abc import Iterable
@@ -54,7 +53,12 @@ from .exchanges import (
     from_yfinance_symbol as _from_yf_canonical,
     yfinance_symbol as _to_yf_canonical,
 )
-from .ports import Downloader, Sleeper, yf_download
+from .ports import (
+    Downloader,
+    Sleeper,
+    snapshot_and_clear_yf_errors,
+    yf_download,
+)
 from .throttle import ThrottleConfig, ThrottleGate, looks_rate_limited
 from .types import FetchOutcome, RawBar
 
@@ -62,37 +66,10 @@ logger = logging.getLogger(__name__)
 
 
 # ---------- yfinance internal error surface (B1) ---------- #
-
-_YF_ERRORS_LOCK = threading.Lock()
-
-
-def _snapshot_and_clear_yf_errors(yf_symbols: list[str]) -> dict[str, str]:
-    """B1: capture yfinance.shared._ERRORS entries for these symbols under a
-    lock, then remove them so subsequent batches on other threads don't see
-    stale attributions.
-
-    yfinance records per-symbol failures (IntCastingNaNError, "possibly
-    delisted", …) in yfinance.shared._ERRORS as a process-global dict. Under
-    concurrent batched downloads, two threads populating that dict would
-    cross-contaminate. Snapshot-and-clear per batch under one lock avoids
-    the race, at the cost of coupling to a yfinance internal — pinned in D5.
-
-    Returns {yf_symbol: error_string} for symbols this batch owned. Symbols
-    not in _ERRORS are omitted (they succeeded or had no error surface).
-    """
-    try:
-        import yfinance.shared as _yfs  # deferred: yfinance is heavy
-    except Exception:  # noqa: BLE001
-        return {}
-    captured: dict[str, str] = {}
-    with _YF_ERRORS_LOCK:
-        errs = getattr(_yfs, "_ERRORS", None)
-        if not isinstance(errs, dict):
-            return {}
-        for s in yf_symbols:
-            if s in errs:
-                captured[s] = str(errs.pop(s))
-    return captured
+#
+# `snapshot_and_clear_yf_errors` lives in .ports — this module cannot import
+# yfinance directly (Phase 4B closed seam). We import the port at the top of
+# this file and call it inline in the batched fetchers below.
 
 
 def _classify_empty(yf_symbol: str, errors: dict[str, str]) -> str:
@@ -325,7 +302,7 @@ class YFinanceSource:
                 # batch, before any other batch on another thread can pollute
                 # or clear it. Passed to _normalize so empty outcomes can be
                 # classified intcast / delisted / empty.
-                errors = _snapshot_and_clear_yf_errors(yf_symbols)
+                errors = snapshot_and_clear_yf_errors(yf_symbols)
                 outcomes = self._normalize_df_to_outcomes(
                     df, symbols, errors=errors,
                 )
@@ -400,7 +377,7 @@ class YFinanceSource:
                     group_by="ticker",
                 )
                 # B1: see _fetch_batch_daily for rationale.
-                errors = _snapshot_and_clear_yf_errors(yf_symbols)
+                errors = snapshot_and_clear_yf_errors(yf_symbols)
                 outcomes = self._normalize_df_to_outcomes(
                     df, symbols, errors=errors,
                 )

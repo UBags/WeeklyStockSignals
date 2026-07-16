@@ -381,9 +381,7 @@ class TestSnapshotAndClearYfErrors:
         from the shared dict so a concurrent batch does not see them.
         Entries belonging to OTHER batches must be left alone."""
         import yfinance.shared as yfs
-        from trip_ema.etl.yfinance_source import (
-            _snapshot_and_clear_yf_errors,
-        )
+        from trip_ema.etl.ports import snapshot_and_clear_yf_errors
 
         yfs._ERRORS.clear()
         yfs._ERRORS["FOO.NS"] = "IntCastingNaNError"
@@ -391,7 +389,7 @@ class TestSnapshotAndClearYfErrors:
         yfs._ERRORS["BAZ.NS"] = "should_stay"
 
         try:
-            captured = _snapshot_and_clear_yf_errors(["FOO.NS", "BAR.NS"])
+            captured = snapshot_and_clear_yf_errors(["FOO.NS", "BAR.NS"])
             assert captured == {
                 "FOO.NS": "IntCastingNaNError",
                 "BAR.NS": "possibly delisted",
@@ -404,12 +402,10 @@ class TestSnapshotAndClearYfErrors:
 
     def test_missing_symbol_is_silently_skipped(self):
         import yfinance.shared as yfs
-        from trip_ema.etl.yfinance_source import (
-            _snapshot_and_clear_yf_errors,
-        )
+        from trip_ema.etl.ports import snapshot_and_clear_yf_errors
         yfs._ERRORS.clear()
         try:
-            assert _snapshot_and_clear_yf_errors(["ABSENT.NS"]) == {}
+            assert snapshot_and_clear_yf_errors(["ABSENT.NS"]) == {}
         finally:
             yfs._ERRORS.clear()
 

@@ -15,6 +15,7 @@ yfinance installed.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterable
 from datetime import date
 from typing import Any, Protocol, runtime_checkable
@@ -53,3 +54,38 @@ def yf_download(**kwargs: Any) -> Any:
     import yfinance as yf
 
     return yf.download(**kwargs)
+
+
+_YF_ERRORS_LOCK = threading.Lock()
+
+
+def snapshot_and_clear_yf_errors(yf_symbols: list[str]) -> dict[str, str]:
+    """B1: capture yfinance.shared._ERRORS entries for these symbols under a
+    lock, then remove them so subsequent batches on other threads don't see
+    stale attributions.
+
+    yfinance records per-symbol failures (IntCastingNaNError, "possibly
+    delisted", …) in yfinance.shared._ERRORS as a process-global dict. Under
+    concurrent batched downloads, two threads populating that dict would
+    cross-contaminate. Snapshot-and-clear per batch under one lock avoids
+    the race, at the cost of coupling to a yfinance internal — pinned in D5.
+
+    Lives HERE, not in yfinance_source, because the architecture guardrail
+    (Phase 4B closed seam) requires yfinance to be imported ONLY from ports.
+
+    Returns {yf_symbol: error_string} for symbols this batch owned. Symbols
+    not in _ERRORS are omitted (they succeeded or had no error surface).
+    """
+    try:
+        import yfinance.shared as _yfs  # deferred: yfinance is heavy
+    except Exception:  # noqa: BLE001
+        return {}
+    captured: dict[str, str] = {}
+    with _YF_ERRORS_LOCK:
+        errs = getattr(_yfs, "_ERRORS", None)
+        if not isinstance(errs, dict):
+            return {}
+        for s in yf_symbols:
+            if s in errs:
+                captured[s] = str(errs.pop(s))
+    return captured
