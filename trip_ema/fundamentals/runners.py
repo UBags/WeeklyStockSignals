@@ -1397,136 +1397,120 @@ def run_financials_refresh(
             )
         cursor_index = 0
 
-    # ----- 2. Main loop ----- #
-    succeeded = 0
-    failed = 0
-    skipped = 0
+    # ----- 2. Parallel sweep -----
+    completed_ids = _completed_ids_from_checkpoint(
+        _load_progress_json(db_engine, run_id)
+    ) if resume_run_id is not None else set()
 
-    try:
-        for idx in range(cursor_index, len(ticker_list)):
-            t = ticker_list[idx]
-            tid, symbol = t["id"], t["symbol"]
-
-            try:
-                quarters = fetch_fn(symbol, exchange, max_quarters=max_quarters)
-                with transaction(db_engine) as conn:
-                    repo = QuarterlyFinancialsRepository(conn)
-                    for q in quarters:
-                        repo.insert_snapshot(
-                            tid,
-                            fiscal_quarter=q.fiscal_quarter,
-                            revenue=q.revenue,
-                            ebitda=q.ebitda,
-                            currency=q.currency,
-                            source="YFINANCE",
-                        )
-                    # THE MISSING RELEASE. mark_unavailable("financials") has been
-                    # written since K2b and nothing anywhere has ever cleared it —
-                    # not the sweep, not the monthly re-check (which only un-skips;
-                    # the release IS this line). A financials verdict could not be
-                    # revoked by any code path in the system.
-                    FundamentalsFetchStatusRepository(conn).clear(
-                        tid, "financials",
-                    )
-                succeeded += 1
-            except FinancialsFetchRateLimited as e:
-                logger.warning(
-                    "Rate limited on %s (%s): sleeping %.1fs",
-                    symbol, e, RATE_LIMIT_COOLOFF_S,
-                )
-                _checkpoint(db_engine, run_id, ticker_list, idx,
-                            succeeded, failed, skipped)
-                time.sleep(RATE_LIMIT_COOLOFF_S)
-                try:
-                    quarters = fetch_fn(symbol, exchange, max_quarters=max_quarters)
-                    with transaction(db_engine) as conn:
-                        repo = QuarterlyFinancialsRepository(conn)
-                        for q in quarters:
-                            repo.insert_snapshot(
-                                tid,
-                                fiscal_quarter=q.fiscal_quarter,
-                                revenue=q.revenue,
-                                ebitda=q.ebitda,
-                                currency=q.currency,
-                                source="YFINANCE",
-                            )
-                        FundamentalsFetchStatusRepository(conn).clear(
-                            tid, "financials",
-                        )
-                    succeeded += 1
-                except FinancialsFetchPermanent as e2:
-                    logger.info(
-                        "financials unavailable upstream for %s "
-                        "(after cool-off): %s",
-                        symbol, e2,
-                    )
-                    with transaction(db_engine) as conn:
-                        FundamentalsFetchStatusRepository(conn).mark_unavailable(
-                            tid, "financials", str(e2),
-                        )
-                    failed += 1
-                except Exception as e2:
-                    logger.error(
-                        "Failed retry after rate-limit cool-off for %s: %s",
-                        symbol, e2,
-                    )
-                    failed += 1
-            except FinancialsFetchPermanent as e:
-                # See the shares handler: an absence, not a failure.
-                logger.info(
-                    "financials unavailable upstream for %s: %s", symbol, e,
-                )
-                with transaction(db_engine) as conn:
-                    FundamentalsFetchStatusRepository(conn).mark_unavailable(
-                        tid, "financials", str(e),
-                    )
-                failed += 1
-            except FinancialsFetchTransient as e:
-                logger.warning("Failed to fetch financials for %s: %s", symbol, e)
-                failed += 1
-            except Exception as e:
-                logger.exception(
-                    "Unexpected error fetching financials for %s: %s",
-                    symbol, e,
-                )
-                failed += 1
-
-            if (idx + 1) % CHECKPOINT_EVERY == 0:
-                _checkpoint(db_engine, run_id, ticker_list, idx + 1,
-                            succeeded, failed, skipped)
-                logger.info(
-                    "Checkpoint: %d/%d processed (s=%d f=%d) on %s",
-                    idx + 1, len(ticker_list),
-                    succeeded, failed, exchange,
-                )
-
-            if request_delay_s > 0:
-                time.sleep(request_delay_s)
-
-    except KeyboardInterrupt:
-        logger.warning(
-            "KeyboardInterrupt — closing financials run %d as PARTIAL", run_id,
+    def _worker(t: dict) -> str:
+        return _classify_financials(
+            db_engine, t["id"], t["symbol"], exchange, max_quarters, fetch_fn,
+            FinancialsFetchRateLimited, FinancialsFetchPermanent,
+            FinancialsFetchTransient, QuarterlyFinancialsRepository,
         )
-        with transaction(db_engine) as conn:
-            FundamentalsRunRepository(conn).close(
-                run_id, status="PARTIAL",
-                succeeded=succeeded, failed=failed, skipped=skipped,
-                notes="Interrupted by KeyboardInterrupt",
-            )
-        raise
 
-    # ----- 3. Close out ----- #
-    status = _terminal_status(succeeded, failed)
-    with transaction(db_engine) as conn:
-        FundamentalsRunRepository(conn).close(
-            run_id, status=status,
-            succeeded=succeeded, failed=failed, skipped=skipped,
-        )
-    logger.info(
-        "Financials refresh run %d (%s) finished: status=%s s=%d f=%d",
-        run_id, exchange, status, succeeded, failed,
+    return _run_reference_sweep(
+        db_engine,
+        run_id=run_id,
+        exchange=exchange,
+        phase="financials",
+        ticker_list=ticker_list,
+        completed_ids=completed_ids,
+        worker_fn=_worker,
     )
-    return run_id
+
+
+def _classify_financials(
+    db_engine: Engine,
+    tid: int,
+    symbol: str,
+    exchange: str,
+    max_quarters: int,
+    fetch_fn,
+    FinancialsFetchRateLimited,
+    FinancialsFetchPermanent,
+    FinancialsFetchTransient,
+    QuarterlyFinancialsRepository,
+) -> str:
+    """Fetch + write up to max_quarters of financials for one ticker. Returns
+    'succeeded' or 'failed' (no 'skipped' — no override table).
+
+    Runs inside a fan_out worker: one ticker, its own transaction(s). Exception
+    taxonomy and DB effects are exactly the serial loop's:
+      * success  -> insert one quarterly_financials row per quarter, then
+        clear("financials") (the release that revokes a stale unavailable)
+      * Permanent -> mark_unavailable("financials")
+      * Transient -> nothing
+      * RateLimited -> cool off, retry once, then Permanent/failed
+    Mid-cool-off checkpoint gone; the spine's completion checkpoint covers it,
+    and an in-flight ticker is re-fetched on resume (not in completed_ids)."""
+    try:
+        quarters = fetch_fn(symbol, exchange, max_quarters=max_quarters)
+        with transaction(db_engine) as conn:
+            repo = QuarterlyFinancialsRepository(conn)
+            for q in quarters:
+                repo.insert_snapshot(
+                    tid,
+                    fiscal_quarter=q.fiscal_quarter,
+                    revenue=q.revenue,
+                    ebitda=q.ebitda,
+                    currency=q.currency,
+                    source="YFINANCE",
+                )
+            FundamentalsFetchStatusRepository(conn).clear(tid, "financials")
+        return "succeeded"
+    except FinancialsFetchRateLimited as e:
+        logger.warning(
+            "Rate limited on %s (%s): sleeping %.1fs",
+            symbol, e, RATE_LIMIT_COOLOFF_S,
+        )
+        time.sleep(RATE_LIMIT_COOLOFF_S)
+        try:
+            quarters = fetch_fn(symbol, exchange, max_quarters=max_quarters)
+            with transaction(db_engine) as conn:
+                repo = QuarterlyFinancialsRepository(conn)
+                for q in quarters:
+                    repo.insert_snapshot(
+                        tid,
+                        fiscal_quarter=q.fiscal_quarter,
+                        revenue=q.revenue,
+                        ebitda=q.ebitda,
+                        currency=q.currency,
+                        source="YFINANCE",
+                    )
+                FundamentalsFetchStatusRepository(conn).clear(tid, "financials")
+            return "succeeded"
+        except FinancialsFetchPermanent as e2:
+            logger.info(
+                "financials unavailable upstream for %s (after cool-off): %s",
+                symbol, e2,
+            )
+            with transaction(db_engine) as conn:
+                FundamentalsFetchStatusRepository(conn).mark_unavailable(
+                    tid, "financials", str(e2),
+                )
+            return "failed"
+        except Exception as e2:
+            logger.error(
+                "Failed retry after rate-limit cool-off for %s: %s",
+                symbol, e2,
+            )
+            return "failed"
+    except FinancialsFetchPermanent as e:
+        logger.info("financials unavailable upstream for %s: %s", symbol, e)
+        with transaction(db_engine) as conn:
+            FundamentalsFetchStatusRepository(conn).mark_unavailable(
+                tid, "financials", str(e),
+            )
+        return "failed"
+    except FinancialsFetchTransient as e:
+        logger.warning("Failed to fetch financials for %s: %s", symbol, e)
+        return "failed"
+    except Exception as e:
+        logger.exception(
+            "Unexpected error fetching financials for %s: %s", symbol, e,
+        )
+        return "failed"
 
 
 # ============================================================
