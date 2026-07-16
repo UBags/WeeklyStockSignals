@@ -101,6 +101,10 @@ def _run(recorder, *, failed, intcast_ids):
         # sentinel db_engine. Tests that exercise the filter itself pass their
         # own parked_lookup (see TestParkedExclusion).
         parked_lookup=lambda _e, ids: set(),
+        # D3-back: inject a no-op park so the still-empty parking never touches
+        # the sentinel db_engine. Tests that assert ON parking pass their own
+        # recording park_fn (see TestParkSurvivors).
+        park_fn=lambda *a: None,
     )
 
 
@@ -177,6 +181,7 @@ class TestBounds:
             timeframe=Timeframe.DAILY, intraday=False,
             process_batch_fn=rec, source_factory=_FakeSource,
             parked_lookup=lambda _e, ids: set(),
+            park_fn=lambda *a: None,
         )
         repairs = [c["repair"] for c in rec.calls if 7 in c["batch_ids"]]
         assert True in repairs and False in repairs
