@@ -589,6 +589,28 @@ def cmd_reference_recheck(args, ctx: AppContext) -> int:
     return 0
 
 
+def cmd_recompute_leadlag(args, ctx: AppContext) -> int:
+    """Monthly lead/lag moving-window recompute (design §7).
+
+    Re-runs only the two lead/lag stages (sector_stock_leadlag + the
+    industry regime matrix / breadth / ensembles) so the trailing-window
+    correlations track the latest data. Safe to run daily from cron with
+    --if-due; no-ops unless today is the first Saturday and the tables
+    were not already recomputed this month.
+    """
+    config = ctx.config
+    db_engine = ctx.db_engine
+    from ..fundamentals.leadlag_monthly import (
+        run_monthly_leadlag_recompute,
+    )
+
+    report = run_monthly_leadlag_recompute(
+        db_engine, args.exchange, config=config, if_due=args.if_due,
+    )
+    print(report.render())
+    return 0
+
+
 def cmd_refresh_reference(args, ctx: AppContext) -> int:
     """Populate the reference layer: industry, shares, quarterly financials.
 
@@ -1171,6 +1193,19 @@ def _build_parser() -> argparse.ArgumentParser:
              "refreshed this month (run this DAILY from cron)",
     )
 
+    rl = sub.add_parser(
+        "recompute-leadlag",
+        help="Monthly lead/lag recompute: refresh the trailing-window "
+             "correlation tables",
+    )
+    _add_exchange_arg(rl)
+    rl.add_argument(
+        "--if-due", dest="if_due", action="store_true",
+        help="no-op unless today is the first Saturday and the lead/lag "
+             "tables were not already recomputed this month "
+             "(run this DAILY from cron)",
+    )
+
     rr = sub.add_parser(
         "refresh-reference",
         help="Fetch industry / shares / financials for tickers that lack them",
@@ -1296,6 +1331,7 @@ def main(argv: list[str] | None = None) -> int:
         "audit":                cmd_audit,
         "refresh-reference":    cmd_refresh_reference,
         "reference-recheck":    cmd_reference_recheck,
+        "recompute-leadlag":    cmd_recompute_leadlag,
         "status":               cmd_status,
         "unpark":               cmd_unpark,
         "approve-action":       cmd_approve_action,
