@@ -851,6 +851,8 @@ def _solo_retry_once(
     timeframe: Timeframe,
     intraday: bool,
     intcast_ids: set | None = None,
+    process_batch_fn: Callable | None = None,
+    source_factory: Callable | None = None,
 ) -> None:
     """Re-fetch each flaked ticker ONCE, in a bounded set of solo passes.
 
@@ -888,6 +890,12 @@ def _solo_retry_once(
     if not snapshot:
         return
 
+    # Injected seams (default to the real collaborators). Named rather than
+    # reached-for so tests inject fakes without monkeypatching — the whole
+    # point of the de-monkeypatching programme. See test_solo_retry_layers.
+    _process_batch = process_batch_fn or _process_one_batch
+    _make_source = source_factory or YFinanceSource
+
     intcast_ids = intcast_ids or set()
     intcast_snapshot = [t for t in snapshot if t.ticker_id in intcast_ids]
     generic_snapshot = [t for t in snapshot if t.ticker_id not in intcast_ids]
@@ -910,7 +918,7 @@ def _solo_retry_once(
         """One bounded pass. Returns (recovered, still_failed). Plain `for`
         over a fixed snapshot; no `while`, hard-bounded — cannot loop.
         still_failed = tickers whose batch reported bs.succeeded == 0."""
-        src = YFinanceSource(
+        src = _make_source(
             exchange=exchange,
             batch_size=batch_size,
             request_delay_seconds=(
@@ -931,7 +939,7 @@ def _solo_retry_once(
             assert start_i < bound + batch_size, "retry pass exceeded its bound"
             chunk = pass_snapshot[start_i:start_i + batch_size]
             try:
-                bs = _process_one_batch(
+                bs = _process_batch(
                     db_engine=db_engine, config=config, src=src,
                     batch=chunk, start=start, end=end,
                     timeframe=timeframe, intraday=intraday,
