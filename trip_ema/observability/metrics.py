@@ -252,6 +252,16 @@ etl_divergences_flagged_total = Counter(
     registry=REGISTRY,
 )
 
+etl_fetch_recovery_total = Counter(
+    "trip_ema_etl_fetch_recovery_total",
+    "Solo-retry recovery outcomes, by kind and layer. `outcome` is one of "
+    "recovered | still_empty; `layer` is L1-intcast | L2 | L3. Lets the "
+    "post-flight report answer 'N IntCasting recovered, M genuinely dataless' "
+    "without grepping logs.",
+    labelnames=("outcome", "layer"),
+    registry=REGISTRY,
+)
+
 
 # ---------- Redis queue ---------- #
 

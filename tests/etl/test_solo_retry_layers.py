@@ -175,3 +175,36 @@ class TestBounds:
         )
         repairs = [c["repair"] for c in rec.calls if 7 in c["batch_ids"]]
         assert True in repairs and False in repairs
+
+
+# ---- D6: recovery metrics ----
+
+
+class TestRecoveryMetrics:
+
+    def _val(self, outcome, layer):
+        from trip_ema.observability import metrics as M
+        try:
+            return M.etl_fetch_recovery_total.labels(
+                outcome=outcome, layer=layer,
+            )._value.get()
+        except Exception:
+            return 0.0
+
+    def test_recovered_counter_increments(self):
+        """A generic ticker that recovers under repair=True bumps the
+        'recovered' counter on the L2 layer."""
+        before = self._val("recovered", "L2")
+        rec = _Recorder(recover_ids={100})
+        _run(rec, failed=[_ticker(100, "WINS")], intcast_ids=set())
+        after = self._val("recovered", "L2")
+        assert after >= before + 1
+
+    def test_still_empty_counter_increments(self):
+        """A ticker that survives every layer empty bumps the 'still_empty'
+        counter on the L3 layer (the last pass it fails)."""
+        before = self._val("still_empty", "L3")
+        rec = _Recorder(recover_ids=set())  # never recovers
+        _run(rec, failed=[_ticker(200, "DARK")], intcast_ids=set())
+        after = self._val("still_empty", "L3")
+        assert after >= before + 1

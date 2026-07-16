@@ -48,6 +48,11 @@ from ..config import Config
 from ..domain import OHLCVBar, Timeframe
 from ..observability import metrics as M
 from ..observability.correlation import correlation_id, new_correlation_id
+
+# C: a distinct child logger for the solo-retry layers. Raise just this to
+# DEBUG (logging.getLogger("trip_ema.etl.fetch.retry").setLevel(DEBUG)) to
+# watch a long recovery pass without turning up yfinance's own ERROR spam.
+retry_logger = logging.getLogger("trip_ema.etl.fetch.retry")
 from ..persistence.bars_repo import BarsRepository
 from ..persistence.exchange_state_repo import ExchangeStateRepository
 from .corporate_actions_repo import CorporateActionsRepository
@@ -914,10 +919,21 @@ def _solo_retry_once(
         ),
     )
 
-    def _pass(pass_snapshot, *, repair, batch_size):
+    def _pass(pass_snapshot, *, repair, batch_size, label="?"):
         """One bounded pass. Returns (recovered, still_failed). Plain `for`
         over a fixed snapshot; no `while`, hard-bounded — cannot loop.
-        still_failed = tickers whose batch reported bs.succeeded == 0."""
+        still_failed = tickers whose batch reported bs.succeeded == 0.
+
+        C: logs on retry_logger — one entry line for the layer, then a
+        per-chunk "[label i/n] X recovered, Y still empty" progress line.
+        D6: increments etl_fetch_recovery_total by (recovered|still_empty,
+        layer) so the counts are queryable, not just grep-able."""
+        n_total = len(pass_snapshot)
+        if n_total:
+            retry_logger.info(
+                "%s start: %d ticker(s), bs=%d, repair=%s",
+                label, n_total, batch_size, repair,
+            )
         src = _make_source(
             exchange=exchange,
             batch_size=batch_size,
@@ -931,6 +947,7 @@ def _solo_retry_once(
         bound = len(pass_snapshot)
         recovered = 0
         still_failed: list = []
+        seen = 0
         # Chunk the snapshot into batches of `batch_size`. batch_size=1 is
         # the classic solo pass; >1 lets the deterministic intcast layer
         # move faster without losing per-ticker success accounting, since
@@ -938,6 +955,8 @@ def _solo_retry_once(
         for start_i in range(0, len(pass_snapshot), batch_size):
             assert start_i < bound + batch_size, "retry pass exceeded its bound"
             chunk = pass_snapshot[start_i:start_i + batch_size]
+            chunk_recovered = 0
+            chunk_still = 0
             try:
                 bs = _process_batch(
                     db_engine=db_engine, config=config, src=src,
@@ -945,6 +964,7 @@ def _solo_retry_once(
                     timeframe=timeframe, intraday=intraday,
                 )
                 recovered += bs.succeeded
+                chunk_recovered = bs.succeeded
                 # Anything in this chunk that did NOT succeed rejoins the
                 # still_failed set: the batch reports counts, and the tickers
                 # that failed/emptied are exactly those it did not record a
@@ -958,12 +978,30 @@ def _solo_retry_once(
                         + list(bs.intcast_tickers)
                     )
                     still_failed.extend(failed_here)
+                    chunk_still = len(failed_here)
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "retry pass failed for chunk starting ticker_id=%s",
                     chunk[0].ticker_id if chunk else "<empty>",
                 )
                 still_failed.extend(chunk)
+                chunk_still = len(chunk)
+            seen += len(chunk)
+            retry_logger.info(
+                "[%s %d/%d] %s -> %d recovered, %d still empty",
+                label, seen, n_total,
+                [t.symbol for t in chunk],
+                chunk_recovered, chunk_still,
+            )
+        # D6: emit the layer's tally to the recovery counter.
+        if recovered:
+            M.etl_fetch_recovery_total.labels(
+                outcome="recovered", layer=label,
+            ).inc(recovered)
+        if still_failed:
+            M.etl_fetch_recovery_total.labels(
+                outcome="still_empty", layer=label,
+            ).inc(len(still_failed))
         return recovered, still_failed
 
     retry_batch_size = max(1, config.etl.yfinance_batch_size)
@@ -974,17 +1012,22 @@ def _solo_retry_once(
     if intcast_snapshot:
         rec_ic, _ic_still = _pass(
             intcast_snapshot, repair=False, batch_size=retry_batch_size,
+            label="L1-intcast",
         )
 
     # Layer 2: repair=True, solo — the generic batch-flake cohort.
-    rec_a, survivors = _pass(generic_snapshot, repair=True, batch_size=1)
+    rec_a, survivors = _pass(
+        generic_snapshot, repair=True, batch_size=1, label="L2",
+    )
 
     # Layer 3: repair=False, solo — Layer-2 survivors. Fixed before the pass;
     # no re-add, so no loop.
     rec_b = 0
     still_empty: list = []
     if survivors:
-        rec_b, still_empty = _pass(survivors, repair=False, batch_size=1)
+        rec_b, still_empty = _pass(
+            survivors, repair=False, batch_size=1, label="L3",
+        )
 
     logger.info(
         "solo-retry: %d recovered (L1 intcast repair=False), "
