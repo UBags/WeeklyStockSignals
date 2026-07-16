@@ -1,4 +1,7 @@
-"""Test the recompute-leadlag CLI handler wiring (leadlag F2)."""
+"""Test the recompute-leadlag CLI handler wiring (leadlag F2).
+
+No monkeypatch: the handler takes an injectable recompute_fn.
+"""
 from __future__ import annotations
 
 from trip_ema.etl import cli
@@ -21,7 +24,7 @@ class _Report:
         return "lead/lag recompute — NSE: completed"
 
 
-def test_cmd_recompute_leadlag_threads_config_and_if_due(monkeypatch):
+def test_cmd_recompute_leadlag_threads_config_and_if_due():
     captured = {}
 
     def fake(db_engine, exchange, *, config, if_due):
@@ -31,11 +34,7 @@ def test_cmd_recompute_leadlag_threads_config_and_if_due(monkeypatch):
         )
         return _Report()
 
-    monkeypatch.setattr(
-        "trip_ema.fundamentals.leadlag_monthly.run_monthly_leadlag_recompute",
-        fake,
-    )
-    rc = cli.cmd_recompute_leadlag(_Args(), _Ctx())
+    rc = cli.cmd_recompute_leadlag(_Args(), _Ctx(), recompute_fn=fake)
     assert rc == 0
     assert captured == {
         "db_engine": "ENG-SENTINEL",

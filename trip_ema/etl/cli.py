@@ -589,7 +589,9 @@ def cmd_reference_recheck(args, ctx: AppContext) -> int:
     return 0
 
 
-def cmd_recompute_leadlag(args, ctx: AppContext) -> int:
+def cmd_recompute_leadlag(
+    args, ctx: AppContext, *, recompute_fn=None,
+) -> int:
     """Monthly lead/lag moving-window recompute (design §7).
 
     Re-runs only the two lead/lag stages (sector_stock_leadlag + the
@@ -600,11 +602,13 @@ def cmd_recompute_leadlag(args, ctx: AppContext) -> int:
     """
     config = ctx.config
     db_engine = ctx.db_engine
-    from ..fundamentals.leadlag_monthly import (
-        run_monthly_leadlag_recompute,
-    )
+    if recompute_fn is None:
+        from ..fundamentals.leadlag_monthly import (
+            run_monthly_leadlag_recompute,
+        )
+        recompute_fn = run_monthly_leadlag_recompute
 
-    report = run_monthly_leadlag_recompute(
+    report = recompute_fn(
         db_engine, args.exchange, config=config, if_due=args.if_due,
     )
     print(report.render())
@@ -977,6 +981,7 @@ def cmd_cycle(
                     brevo_from_name=brevo_config.sender_name,
                     cycle_id=cycle_id,
                     now=now,
+                    max_corroborators=config.leadlag.max_corroborators,
                     progress_cb=_progress,
                 )
 
