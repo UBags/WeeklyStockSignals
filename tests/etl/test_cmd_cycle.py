@@ -386,3 +386,25 @@ class TestNotifyConfig:
         assert notify is not None
         assert notify["brevo_api_key"] == "xkeysib-test-key"
         assert notify["brevo_from_address"] == "from@example.com"
+
+
+def test_eod_triggers_leadlag_recompute(
+    fake_config, ctx, patched_market_hours, patched_compute_runs,
+    patched_transaction, stages,
+):
+    patched_market_hours["is_open"] = False  # -> kind == "eod"
+    seen = {}
+
+    def _spy(db_engine, exchange, *, config, if_due, is_eod_run):
+        seen.update(exchange=exchange, if_due=if_due, is_eod_run=is_eod_run)
+        from trip_ema.fundamentals.leadlag_monthly import (
+            LeadlagRecomputeReport,
+        )
+        return LeadlagRecomputeReport(exchange, False, "test skip")
+
+    rc = cmd_cycle(
+        SimpleNamespace(exchange="NSE"), ctx,
+        **stages.kwargs(leadlag_recompute_fn=_spy),
+    )
+    assert rc == 0
+    assert seen == {"exchange": "NSE", "if_due": True, "is_eod_run": True}

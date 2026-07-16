@@ -185,3 +185,24 @@ def test_no_config_passes_no_window_kwargs():
         _Engine(False), "NSE", if_due=False, sector_fn=sec, matrix_fn=mat,
     )
     assert captured == [("sector", {}), ("matrix", {})]
+
+
+def test_eod_run_skips_saturday_check_but_runs_when_stale():
+    calls, (s, m) = _spies()
+    r = run_monthly_leadlag_recompute(
+        _Engine(False), "NSE", if_due=True, is_eod_run=True, today=_NOT_SAT,
+        sector_fn=s, matrix_fn=m,
+    )
+    assert r.ran
+    assert calls == [("sector", "NSE"), ("matrix", "NSE")]
+
+
+def test_eod_run_still_skips_when_recomputed_this_month():
+    calls, (s, m) = _spies()
+    r = run_monthly_leadlag_recompute(
+        _Engine(True), "NSE", if_due=True, is_eod_run=True, today=_NOT_SAT,
+        sector_fn=s, matrix_fn=m,
+    )
+    assert not r.ran
+    assert "already recomputed" in r.reason
+    assert calls == []

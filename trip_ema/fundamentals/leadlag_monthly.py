@@ -72,6 +72,7 @@ def run_monthly_leadlag_recompute(
     exchange: str,
     *,
     if_due: bool = False,
+    is_eod_run: bool = False,
     today: date | None = None,
     config=None,
     sector_fn: Callable = backfill_sector_metrics,
@@ -86,7 +87,10 @@ def run_monthly_leadlag_recompute(
     today = today or market_today(exchange)
 
     if if_due:
-        if not is_first_saturday(today):
+        # In-service EOD runs are already after close, so they don't need
+        # the 'first Saturday' markets-closed safety the cron path relies
+        # on; the computed_at gate below still enforces once-per-month.
+        if not is_eod_run and not is_first_saturday(today):
             return LeadlagRecomputeReport(
                 exchange, False,
                 f"{today.isoformat()} is not the first Saturday of the month",

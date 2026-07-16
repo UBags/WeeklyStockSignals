@@ -746,6 +746,7 @@ def cmd_approve_action(args, ctx: AppContext) -> int:
 def cmd_cycle(
     args, ctx: AppContext, *,
     recompute_fn=None, notify_fn=None, fetch_fn=None,
+    leadlag_recompute_fn=None,
     market_hours_factory=None,
     compute_runs_repo_factory=None,
     tx_fn=None,
@@ -957,6 +958,28 @@ def cmd_cycle(
                 + recompute_result.stock_state_failed
                 + recompute_result.stock_state_skipped
             )
+
+            # ---- Stage 9b: monthly lead/lag recompute (EOD, due-gated) ----
+            # Cron-free: on the first EOD of a new month, refresh the
+            # trailing-window correlation tables so THIS cycle's emails use
+            # fresh lead/lag. No-ops otherwise (gated on computed_at). Runs
+            # before notify (once a month, already after close). A monthly
+            # refresh must never break the live cycle, so failures log.
+            if kind == "eod":
+                _ll_fn = leadlag_recompute_fn
+                if _ll_fn is None:
+                    from ..fundamentals.leadlag_monthly import (
+                        run_monthly_leadlag_recompute as _ll_fn,
+                    )
+                try:
+                    _ll_fn(
+                        db_engine, exchange, config=config,
+                        if_due=True, is_eod_run=True,
+                    )
+                except Exception as _ll_exc:  # non-critical monthly refresh
+                    logger.warning(
+                        "monthly lead/lag recompute skipped: %s", _ll_exc,
+                    )
 
             # ---- Stage 10: notify_subscribers ----
             brevo_config = getattr(
