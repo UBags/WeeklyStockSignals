@@ -929,131 +929,106 @@ def run_shares_refresh(
             )
         cursor_index = 0
 
-    # ----- 2. Main loop ----- #
-    succeeded = 0
-    failed = 0
-    skipped = 0  # always 0 for shares (no override table)
+    # ----- 2. Parallel sweep -----
+    completed_ids = _completed_ids_from_checkpoint(
+        _load_progress_json(db_engine, run_id)
+    ) if resume_run_id is not None else set()
 
-    try:
-        for idx in range(cursor_index, len(ticker_list)):
-            t = ticker_list[idx]
-            tid, symbol = t["id"], t["symbol"]
-
-            try:
-                info = fetch_fn(symbol, exchange)
-                with transaction(db_engine) as conn:
-                    InstrumentSharesRepository(conn).insert_snapshot(
-                        tid,
-                        as_of_date=today,
-                        shares_outstanding=info.shares_outstanding,
-                        shares_source=info.source,
-                    )
-                    # This ticker WAS dark and now has data — a microcap that
-                    # picked up yfinance coverage. Release it, in the same
-                    # transaction as the snapshot so the two cannot disagree.
-                    # Without this the verdict outlives its truth.
-                    FundamentalsFetchStatusRepository(conn).clear(tid, "shares")
-                succeeded += 1
-            except SharesFetchRateLimited as e:
-                logger.warning(
-                    "Rate limited on %s (%s): sleeping %.1fs",
-                    symbol, e, RATE_LIMIT_COOLOFF_S,
-                )
-                _checkpoint(db_engine, run_id, ticker_list, idx,
-                            succeeded, failed, skipped)
-                time.sleep(RATE_LIMIT_COOLOFF_S)
-                # Retry once after cool-off; if it still fails, count
-                # as failed and move on.
-                try:
-                    info = fetch_fn(symbol, exchange)
-                    with transaction(db_engine) as conn:
-                        InstrumentSharesRepository(conn).insert_snapshot(
-                            tid,
-                            as_of_date=today,
-                            shares_outstanding=info.shares_outstanding,
-                            shares_source=info.source,
-                        )
-                        # Same release as the first-attempt path. Its absence here
-                        # was a stale verdict generator for the throttle cohort.
-                        FundamentalsFetchStatusRepository(conn).clear(
-                            tid, "shares",
-                        )
-                    succeeded += 1
-                except SharesFetchPermanent as e2:
-                    logger.info(
-                        "shares unavailable upstream for %s (after cool-off): %s",
-                        symbol, e2,
-                    )
-                    with transaction(db_engine) as conn:
-                        FundamentalsFetchStatusRepository(conn).mark_unavailable(
-                            tid, "shares", str(e2),
-                        )
-                    failed += 1
-                except Exception as e2:
-                    logger.error(
-                        "Failed retry after rate-limit cool-off for %s: %s",
-                        symbol, e2,
-                    )
-                    failed += 1
-            except SharesFetchPermanent as e:
-                # The provider was asked and has nothing — "there's nothing to
-                # retry". Record it, so the gap-only sweep stops re-asking and
-                # so the fidelity audit can distinguish data we are MISSING from
-                # data that DOES NOT EXIST. Deliberately NOT a row in
-                # instrument_shares: that table holds facts about the company,
-                # and a today-dated sentinel there would shadow a ticker's real
-                # historical shares via get_latest's ORDER BY as_of_date DESC.
-                logger.info(
-                    "shares unavailable upstream for %s: %s", symbol, e,
-                )
-                with transaction(db_engine) as conn:
-                    FundamentalsFetchStatusRepository(conn).mark_unavailable(
-                        tid, "shares", str(e),
-                    )
-                failed += 1
-            except SharesFetchTransient as e:
-                # A hiccup, not an absence. Retried naturally on the next run;
-                # recording it would only accumulate noise.
-                logger.warning("Failed to fetch shares for %s: %s", symbol, e)
-                failed += 1
-            except Exception as e:
-                logger.exception("Unexpected error fetching shares for %s: %s", symbol, e)
-                failed += 1
-
-            if (idx + 1) % CHECKPOINT_EVERY == 0:
-                _checkpoint(db_engine, run_id, ticker_list, idx + 1,
-                            succeeded, failed, skipped)
-                logger.info(
-                    "Checkpoint: %d/%d processed (s=%d f=%d) on %s",
-                    idx + 1, len(ticker_list),
-                    succeeded, failed, exchange,
-                )
-
-            if request_delay_s > 0:
-                time.sleep(request_delay_s)
-
-    except KeyboardInterrupt:
-        logger.warning("KeyboardInterrupt — closing shares run %d as PARTIAL", run_id)
-        with transaction(db_engine) as conn:
-            FundamentalsRunRepository(conn).close(
-                run_id, status="PARTIAL",
-                succeeded=succeeded, failed=failed, skipped=skipped,
-                notes="Interrupted by KeyboardInterrupt",
-            )
-        raise
-
-    # ----- 3. Close out ----- #
-    status = _terminal_status(succeeded, failed)
-    with transaction(db_engine) as conn:
-        FundamentalsRunRepository(conn).close(
-            run_id, status=status,
-            succeeded=succeeded, failed=failed, skipped=skipped,
+    def _worker(t: dict) -> str:
+        return _classify_shares(
+            db_engine, t["id"], t["symbol"], exchange, today, fetch_fn,
+            SharesFetchRateLimited, SharesFetchPermanent, SharesFetchTransient,
         )
-    logger.info(
-        "Shares refresh run %d (%s) finished: status=%s s=%d f=%d",
-        run_id, exchange, status, succeeded, failed,
+
+    return _run_reference_sweep(
+        db_engine,
+        run_id=run_id,
+        exchange=exchange,
+        phase="shares",
+        ticker_list=ticker_list,
+        completed_ids=completed_ids,
+        worker_fn=_worker,
     )
-    return run_id
+
+
+def _classify_shares(
+    db_engine: Engine,
+    tid: int,
+    symbol: str,
+    exchange: str,
+    today,
+    fetch_fn,
+    SharesFetchRateLimited,
+    SharesFetchPermanent,
+    SharesFetchTransient,
+) -> str:
+    """Fetch + write shares-outstanding for one ticker. Returns
+    'succeeded' or 'failed' (shares has no 'skipped' — no override table).
+
+    Runs inside a fan_out worker: one ticker, its own transaction(s). The
+    exception taxonomy and DB effects are exactly the serial loop's:
+      * success  -> insert_snapshot + clear("shares")
+      * Permanent -> mark_unavailable("shares"); NOT a row in instrument_shares
+      * Transient -> nothing (retried naturally next run)
+      * RateLimited -> cool off, retry once, then Permanent/failed as above
+    The mid-cool-off checkpoint the serial loop did is gone; the spine's
+    completion checkpoint covers it, and an in-flight ticker is re-fetched on
+    resume (it is not in completed_ids)."""
+    try:
+        info = fetch_fn(symbol, exchange)
+        with transaction(db_engine) as conn:
+            InstrumentSharesRepository(conn).insert_snapshot(
+                tid, as_of_date=today,
+                shares_outstanding=info.shares_outstanding,
+                shares_source=info.source,
+            )
+            FundamentalsFetchStatusRepository(conn).clear(tid, "shares")
+        return "succeeded"
+    except SharesFetchRateLimited as e:
+        logger.warning(
+            "Rate limited on %s (%s): sleeping %.1fs",
+            symbol, e, RATE_LIMIT_COOLOFF_S,
+        )
+        time.sleep(RATE_LIMIT_COOLOFF_S)
+        try:
+            info = fetch_fn(symbol, exchange)
+            with transaction(db_engine) as conn:
+                InstrumentSharesRepository(conn).insert_snapshot(
+                    tid, as_of_date=today,
+                    shares_outstanding=info.shares_outstanding,
+                    shares_source=info.source,
+                )
+                FundamentalsFetchStatusRepository(conn).clear(tid, "shares")
+            return "succeeded"
+        except SharesFetchPermanent as e2:
+            logger.info(
+                "shares unavailable upstream for %s (after cool-off): %s",
+                symbol, e2,
+            )
+            with transaction(db_engine) as conn:
+                FundamentalsFetchStatusRepository(conn).mark_unavailable(
+                    tid, "shares", str(e2),
+                )
+            return "failed"
+        except Exception as e2:
+            logger.error(
+                "Failed retry after rate-limit cool-off for %s: %s",
+                symbol, e2,
+            )
+            return "failed"
+    except SharesFetchPermanent as e:
+        logger.info("shares unavailable upstream for %s: %s", symbol, e)
+        with transaction(db_engine) as conn:
+            FundamentalsFetchStatusRepository(conn).mark_unavailable(
+                tid, "shares", str(e),
+            )
+        return "failed"
+    except SharesFetchTransient as e:
+        logger.warning("Failed to fetch shares for %s: %s", symbol, e)
+        return "failed"
+    except Exception as e:
+        logger.exception("Unexpected error fetching shares for %s: %s", symbol, e)
+        return "failed"
 
 
 def run_shares_backfill(
