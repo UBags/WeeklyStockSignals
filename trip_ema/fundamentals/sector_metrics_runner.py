@@ -39,16 +39,6 @@ _RS_WINDOW = 4
 _LEADLAG_WINDOWS = (52, 260)
 
 
-def _weekly_log_returns(weekly_vals):
-    mondays = sorted(weekly_vals)
-    out = {}
-    for i in range(1, len(mondays)):
-        v0 = weekly_vals[mondays[i - 1]]
-        v1 = weekly_vals[mondays[i]]
-        if v0 and v1 and v0 > 0.0 and v1 > 0.0:
-            out[mondays[i]] = math.log(v1 / v0)
-    return out
-
 
 def _metrics_for_industry(conn, industry, session):
     """Return (rs_rank_rows, leadlag_rows) for one industry."""
@@ -70,13 +60,9 @@ def _metrics_for_industry(conn, industry, session):
         )
 
     active: dict = {}
-    weight_periods: dict = {}
     for c in cons:
         fm = week_of(c.effective_from)
         to = week_of(c.effective_to) if c.effective_to else None
-        weight_periods.setdefault(c.ticker_id, []).append(
-            (fm, to, c.weight_at_rebalance)
-        )
         if c.ticker_id in active:
             pf, pt = active[c.ticker_id]
             active[c.ticker_id] = (
