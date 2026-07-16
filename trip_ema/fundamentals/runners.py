@@ -49,7 +49,7 @@ from collections.abc import Callable
 
 from sqlalchemy import Engine, text
 
-from .parallel import fan_out
+from .parallel import fan_out, resolve_max_workers
 from .ports import DEFAULT_SOURCE, FundamentalsSource
 from ..persistence import transaction
 from ..persistence.fetch_status_repo import (
@@ -225,85 +225,41 @@ def run_industry_refresh(
             for ov in IndustryOverrideRepository(conn).list_all()
         }
 
-    # ----- 3. Main loop ----- #
-    succeeded = 0
-    failed = 0
-    skipped = 0
+    # ----- 3. Parallel sweep -----
+    #
+    # One worker per ticker, bounded by fan_out's pool (~8 on the NUC). The
+    # serial `for` + per-ticker sleep is gone: with N workers each making one
+    # HTTP at a time, the natural spacing between Yahoo calls is delay/N, so
+    # the manual request_delay_s sleep is no longer the throttle — the pool
+    # width is. request_delay_s is still accepted for signature compatibility
+    # (tests pass 0) but only gates a small optional jitter INSIDE the worker.
+    completed_ids = _completed_ids_from_checkpoint(
+        _load_progress_json(db_engine, run_id)
+    ) if resume_run_id is not None else set()
 
-    try:
-        for idx in range(cursor_index, len(ticker_list)):
-            t = ticker_list[idx]
-            tid, symbol = t["id"], t["symbol"]
-            # instrument_type drives the classification branch. Defaults
-            # to "EQ" if a checkpoint from before migration 0007 is
-            # being resumed (old checkpoints don't have this field).
-            itype = t.get("instrument_type", "EQ")
-
-            if tid in override_ids:
-                skipped += 1
-                continue
-
-            # Two branches: ETFs get bucketed as 'ETF' regardless of
-            # what yfinance returns (we still call yfinance to capture
-            # the long name, which is the one useful field). Equities
-            # get the full sector+industry classification path.
-            if itype == "ETF":
-                outcome = _classify_etf(
-                    db_engine, tid, symbol, exchange, fetch_fn,
-                    etf_long_name_fn=etf_long_name_fn,
-                )
-            else:
-                outcome = _classify_equity(
-                    db_engine, tid, symbol, exchange, fetch_fn,
-                    run_id, ticker_list, idx,
-                    succeeded, failed, skipped,
-                )
-
-            if outcome == "succeeded":
-                succeeded += 1
-            elif outcome == "failed":
-                failed += 1
-            elif outcome == "skipped":
-                skipped += 1
-
-            # Checkpoint cadence.
-            if (idx + 1) % CHECKPOINT_EVERY == 0:
-                _checkpoint(db_engine, run_id, ticker_list, idx + 1,
-                            succeeded, failed, skipped)
-                logger.info(
-                    "Checkpoint: %d/%d processed (s=%d f=%d sk=%d) on %s",
-                    idx + 1, len(ticker_list),
-                    succeeded, failed, skipped, exchange,
-                )
-
-            if request_delay_s > 0:
-                time.sleep(request_delay_s)
-
-    except KeyboardInterrupt:
-        # Operator hit Ctrl-C — close out with current counts as
-        # PARTIAL so they can resume. The progress_json was already
-        # updated at the last checkpoint, so resume picks up there.
-        logger.warning("KeyboardInterrupt — closing run %d as PARTIAL", run_id)
-        with transaction(db_engine) as conn:
-            FundamentalsRunRepository(conn).close(
-                run_id, status="PARTIAL",
-                succeeded=succeeded, failed=failed, skipped=skipped,
-                notes="Interrupted by KeyboardInterrupt",
+    def _worker(t: dict) -> str:
+        tid, symbol = t["id"], t["symbol"]
+        itype = t.get("instrument_type", "EQ")
+        if tid in override_ids:
+            return "skipped"
+        if itype == "ETF":
+            return _classify_etf(
+                db_engine, tid, symbol, exchange, fetch_fn,
+                etf_long_name_fn=etf_long_name_fn,
             )
-        raise
-
-    # ----- 4. Close out ----- #
-    status = _terminal_status(succeeded, failed)
-    with transaction(db_engine) as conn:
-        FundamentalsRunRepository(conn).close(
-            run_id, status=status,
-            succeeded=succeeded, failed=failed, skipped=skipped,
+        return _classify_equity(
+            db_engine, tid, symbol, exchange, fetch_fn,
         )
-    logger.info(
-        "Industry refresh run %d (%s) finished: status=%s s=%d f=%d sk=%d",
-        run_id, exchange, status, succeeded, failed, skipped,
+
+    return _run_reference_sweep(
+        db_engine,
+        run_id=run_id,
+        exchange=exchange,
+        phase="industry",
+        ticker_list=ticker_list,
+        completed_ids=completed_ids,
+        worker_fn=_worker,
     )
-    return run_id
 
 
 # ---------- Helpers ---------- #
@@ -318,21 +274,17 @@ def _classify_equity(
     symbol: str,
     exchange: str,
     fetch_fn,
-    run_id: int,
-    ticker_list: list[dict],
-    idx: int,
-    succeeded: int,
-    failed: int,
-    skipped: int,
 ) -> str:
     """Classify one equity by calling yfinance and writing the
     sector+industry result. Returns 'succeeded' or 'failed'.
 
-    Rate-limit handling: catches IndustryFetchRateLimited, persists
-    progress to the checkpoint BEFORE the long cool-off (so a SIGKILL
-    during sleep doesn't lose state), then retries the ticker once
-    after the cool-off. A second rate-limit failure counts as
-    'failed' and we move on.
+    Runs inside a fan_out worker: one ticker, its own transaction(s). The
+    spine handles checkpointing, so the mid-cool-off checkpoint the serial
+    loop did (to survive a SIGKILL during sleep) is gone — the completion
+    checkpoint fires on the regular cadence instead, and a ticker still in
+    flight during a crash is simply re-fetched on resume (it is not in
+    completed_ids). Rate-limit handling otherwise unchanged: catch
+    IndustryFetchRateLimited, cool off, retry once, then give up as 'failed'.
     """
     try:
         info = fetch_fn(symbol, exchange)
@@ -352,8 +304,6 @@ def _classify_equity(
             "Rate limited on %s (%s): sleeping %.1fs",
             symbol, e, RATE_LIMIT_COOLOFF_S,
         )
-        _checkpoint(db_engine, run_id, ticker_list, idx,
-                    succeeded, failed, skipped)
         time.sleep(RATE_LIMIT_COOLOFF_S)
         try:
             info = fetch_fn(symbol, exchange)
@@ -630,6 +580,15 @@ def _resume_from_checkpoint(
     return run_id, ticker_list, cursor_index
 
 
+def _load_progress_json(db_engine: Engine, run_id: int) -> dict | None:
+    """Fetch a run's raw progress_json. The spine needs it to recover the
+    completed_ids set on resume; _resume_from_checkpoint already validated
+    the run, so this is a plain read."""
+    with db_engine.connect() as conn:
+        run = FundamentalsRunRepository(conn).get(run_id)
+    return (run.progress_json if run is not None else None)
+
+
 def _checkpoint(
     db_engine: Engine,
     run_id: int,
@@ -658,6 +617,163 @@ def _terminal_status(succeeded: int, failed: int) -> str:
     if succeeded == 0:
         return "FAILED"
     return "PARTIAL"
+
+
+def _completed_ids_from_checkpoint(progress_json: dict | None) -> set[int]:
+    """Recover the set of ticker_ids already processed, from a checkpoint.
+
+    Backward-compatible with two checkpoint shapes:
+
+      * NEW (fan_out era): progress_json["completed_ids"] is an explicit list
+        of ticker_ids that finished. Order-independent — the only shape that
+        is correct when work completes out of order.
+      * OLD (serial cursor era): progress_json["cursor_index"] = N means the
+        first N entries of ticker_list are done. We map that back to the set
+        of their ids so a run checkpointed by the old serial loop still
+        resumes correctly under the spine.
+
+    A checkpoint carrying BOTH prefers completed_ids (the cursor is then just
+    a stale artifact of a mixed-version run)."""
+    pj = progress_json or {}
+    if "completed_ids" in pj:
+        return {int(x) for x in pj["completed_ids"]}
+    cursor = int(pj.get("cursor_index", 0))
+    ticker_list = pj.get("ticker_list") or []
+    return {int(t["id"]) for t in ticker_list[:cursor]}
+
+
+def _run_reference_sweep(
+    db_engine: Engine,
+    *,
+    run_id: int,
+    exchange: str,
+    phase: str,
+    ticker_list: list[dict],
+    completed_ids: set[int],
+    worker_fn: "Callable[[dict], str]",
+    max_workers: int | None = None,
+    checkpoint_sink: "Callable | None" = None,
+) -> int:
+    """Shared spine for the reference sweeps (industry / shares / financials).
+
+    Runs worker_fn over every not-yet-completed ticker on a bounded thread
+    pool (fan_out). worker_fn takes one ticker dict and returns one of
+    "succeeded" | "failed" | "skipped"; it opens its OWN DB transaction(s)
+    for its single ticker_id (disjoint PK ranges across workers, so no row
+    contention — see parallel.py's contract). The spine owns only the
+    orchestration: counters, completion-set checkpointing, KeyboardInterrupt,
+    and run close-out.
+
+    Resumability: the checkpoint records the growing completed_ids set (plus
+    the fixed ticker_list, so a resume uses the SAME list rather than whatever
+    is active at resume time). Because completion order is not deterministic
+    under fan_out, only a set — never an index — can express "what is done".
+
+    checkpoint_sink is an injectable seam (defaults to the real
+    _checkpoint_completion) so unit tests can observe checkpoints without
+    monkeypatching or a DB.
+
+    Returns run_id.
+    """
+    _sink = checkpoint_sink or _checkpoint_completion
+    pending = [t for t in ticker_list if int(t["id"]) not in completed_ids]
+
+    # Counters + completion set are shared mutable state across worker threads;
+    # a single lock guards every mutation. The work itself (the HTTP + the DB
+    # write) happens OUTSIDE the lock, inside worker_fn — the lock is held only
+    # for the O(1) bookkeeping after each ticker returns.
+    lock = threading.Lock()
+    state = {"succeeded": 0, "failed": 0, "skipped": 0}
+    done_ids: set[int] = set(completed_ids)
+
+    def _one(t: dict) -> None:
+        tid = int(t["id"])
+        outcome = worker_fn(t)
+        with lock:
+            if outcome == "succeeded":
+                state["succeeded"] += 1
+            elif outcome == "failed":
+                state["failed"] += 1
+            elif outcome == "skipped":
+                state["skipped"] += 1
+            done_ids.add(tid)
+            n_done = len(done_ids)
+            # Checkpoint every CHECKPOINT_EVERY completions. The completion
+            # count (not an index) drives cadence, since order is arbitrary.
+            if n_done % CHECKPOINT_EVERY == 0:
+                _sink(
+                    db_engine, run_id, ticker_list, sorted(done_ids),
+                    state["succeeded"], state["failed"], state["skipped"],
+                )
+                logger.info(
+                    "Checkpoint: %d/%d processed (s=%d f=%d sk=%d) on %s",
+                    n_done, len(ticker_list),
+                    state["succeeded"], state["failed"], state["skipped"],
+                    exchange,
+                )
+
+    workers = resolve_max_workers(max_workers)
+    try:
+        fan_out(
+            pending, _one,
+            label=f"{phase}_sweep_{exchange}",
+            max_workers=workers,
+        )
+    except KeyboardInterrupt:
+        logger.warning(
+            "KeyboardInterrupt — closing %s run %d as PARTIAL", phase, run_id,
+        )
+        with lock:
+            _sink(
+                db_engine, run_id, ticker_list, sorted(done_ids),
+                state["succeeded"], state["failed"], state["skipped"],
+            )
+            with transaction(db_engine) as conn:
+                FundamentalsRunRepository(conn).close(
+                    run_id, status="PARTIAL",
+                    succeeded=state["succeeded"], failed=state["failed"],
+                    skipped=state["skipped"],
+                    notes="Interrupted by KeyboardInterrupt",
+                )
+        raise
+
+    status = _terminal_status(state["succeeded"], state["failed"])
+    with transaction(db_engine) as conn:
+        FundamentalsRunRepository(conn).close(
+            run_id, status=status,
+            succeeded=state["succeeded"], failed=state["failed"],
+            skipped=state["skipped"],
+        )
+    logger.info(
+        "%s refresh run %d (%s) finished: status=%s s=%d f=%d sk=%d",
+        phase.capitalize(), run_id, exchange, status,
+        state["succeeded"], state["failed"], state["skipped"],
+    )
+    return run_id
+
+
+def _checkpoint_completion(
+    db_engine: Engine,
+    run_id: int,
+    ticker_list: list[dict],
+    completed_ids: list[int],
+    succeeded: int,
+    failed: int,
+    skipped: int,
+) -> None:
+    """Persist a completion-set checkpoint. Stores the explicit list of
+    finished ticker_ids (order-independent resume) alongside the fixed
+    ticker_list. Kept separate from the legacy _checkpoint (cursor-based),
+    which the serial shares/financials loops still use until A2/A3."""
+    with transaction(db_engine) as conn:
+        FundamentalsRunRepository(conn).update_progress(
+            run_id,
+            succeeded=succeeded, failed=failed, skipped=skipped,
+            progress_json={
+                "ticker_list": ticker_list,
+                "completed_ids": list(completed_ids),
+            },
+        )
 
 
 # ============================================================
