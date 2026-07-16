@@ -9,15 +9,24 @@ from __future__ import annotations
 
 import numpy as np
 
-_K = 4
+_K = 10
 
 
-def _corr(a, b):
-    if len(a) < 3:
+def _rankdata(a):
+    # average ranks for ties; a is 1-D float
+    _, inv, counts = np.unique(a, return_inverse=True, return_counts=True)
+    csum = np.cumsum(counts)
+    starts = csum - counts
+    avg = (starts + csum - 1) / 2.0
+    return avg[inv]
+
+
+def _spearman(a, b):
+    # Spearman rank-correlation via numpy rank-then-Pearson (no scipy dep).
+    if len(a) < 3 or a.std() == 0.0 or b.std() == 0.0:
         return None
-    if a.std() == 0.0 or b.std() == 0.0:
-        return None
-    return float(np.corrcoef(a, b)[0, 1])
+    ra, rb = _rankdata(a), _rankdata(b)
+    return float(np.corrcoef(ra, rb)[0, 1])
 
 
 def compute_sector_leadlag(r_s, r_I, w_s, window, k=_K):
@@ -41,7 +50,7 @@ def compute_sector_leadlag(r_s, r_I, w_s, window, k=_K):
             continue
         s_win = r_s[lo:t + 1]
         I_win = r_Is[lo:t + 1]
-        insync = _corr(s_win, I_win)
+        insync = _spearman(s_win, I_win)
         if insync is None:
             continue
         best_lag, best_rho = 0, insync
@@ -49,9 +58,9 @@ def compute_sector_leadlag(r_s, r_I, w_s, window, k=_K):
             if lag == 0:
                 rho = insync
             elif lag > 0:
-                rho = _corr(r_s[lo:t + 1 - lag], r_Is[lo + lag:t + 1])
+                rho = _spearman(r_s[lo:t + 1 - lag], r_Is[lo + lag:t + 1])
             else:
-                rho = _corr(r_s[lo - lag:t + 1], r_Is[lo:t + 1 + lag])
+                rho = _spearman(r_s[lo - lag:t + 1], r_Is[lo:t + 1 + lag])
             if rho is not None and abs(rho) > abs(best_rho):
                 best_lag, best_rho = lag, rho
         var_I = float(I_win.var())
