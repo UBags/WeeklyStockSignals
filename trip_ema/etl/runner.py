@@ -588,7 +588,9 @@ def fetch_bars_for_tickers(
                 exchange=exchange,
                 correlation_id=cid,
             )
-        outcome, _failed_tickers = (execute_batches_fn or _execute_batches)(
+        outcome, _failed_tickers, _intcast_ids = (
+            execute_batches_fn or _execute_batches
+        )(
             db_engine=db_engine,
             config=config,
             src=src,
@@ -608,6 +610,7 @@ def fetch_bars_for_tickers(
                 failed_tickers=_failed_tickers,
                 start=start_date, end=end_date,
                 timeframe=Timeframe.DAILY, intraday=False,
+                intcast_ids=_intcast_ids,
             )
         with db_engine.begin() as conn:
             EtlStatusRepository(conn).close_run(run_id, outcome)
@@ -791,7 +794,7 @@ def _run_fetch_pass(
         end_date = market_today(exchange)
         effective_start = start_date or (end_date - _timedelta_days(days_lookback))
 
-        outcome, _failed_tickers = _execute_batches(
+        outcome, _failed_tickers, _intcast_ids = _execute_batches(
             db_engine=db_engine,
             config=config,
             src=src,
@@ -813,6 +816,7 @@ def _run_fetch_pass(
                 failed_tickers=_failed_tickers,
                 start=effective_start, end=end_date,
                 timeframe=timeframe, intraday=intraday,
+                intcast_ids=_intcast_ids,
             )
 
         with db_engine.begin() as conn:
@@ -846,99 +850,148 @@ def _solo_retry_once(
     end: date,
     timeframe: Timeframe,
     intraday: bool,
+    intcast_ids: set | None = None,
 ) -> None:
-    """Re-fetch each flaked ticker ONCE, solo (batch_size=1).
+    """Re-fetch each flaked ticker ONCE, in a bounded set of solo passes.
 
     yfinance drops random symbols under batch load; a solo re-fetch is
-    reliable. This runs exactly ONE pass over the failed set captured at
+    reliable. This runs a fixed number of passes over the set captured at
     entry — it is NOT a retry-until-success loop:
 
-      * `snapshot` is fixed before the loop. New failures during the
-        retry are recorded by _process_one_batch's own failure handling
-        (counting toward the across-run park threshold) but are NOT
-        added back here, so they are never retried again in this pass.
-      * Plain `for` over the snapshot, hard-bounded by its length.
-      * A genuinely-dataless ticker (delisted / ETF / renamed) simply
-        fails its one solo attempt and is left alone. No infinite loop.
+      * every pass iterates a snapshot fixed before it starts. New failures
+        during the retry are recorded by _process_one_batch's own failure
+        handling (counting toward the across-run park threshold) but are NOT
+        added back here, so they are never retried again.
+      * Plain `for` over each snapshot, hard-bounded by its length.
+      * A genuinely-dataless ticker (delisted / ETF / renamed) simply fails
+        its passes and is left alone. No infinite loop.
+
+    B2 — three ordered layers:
+
+      Layer 1 (repair=False, intcast set): tickers that hit IntCastingNaN
+        under repair in the bulk pass. repair=True would drop them again, so
+        they skip the Layer-2 gauntlet and go straight to repair=False. These
+        are deterministic, not flakes, so the pass batches them (batch_size
+        from config) rather than going one at a time.
+      Layer 2 (repair=True, solo): the generic batch-flake cohort. repair's
+        fixing is what recovers a genuine flake.
+      Layer 3 (repair=False, solo): Layer-2 survivors. Catches repair
+        casualties the bulk classifier didn't tag as intcast (no error
+        surface), plus anything repair=True couldn't mend.
+
+    All three share ONE gate, built with trip_on_empty=False: expected
+    empties in the retry cohort must not manufacture phantom backoff windows.
+    Only an explicit 429 trips it. The shared gate still corroborates real
+    throttles across every fetch in every layer.
     """
     snapshot = list(failed_tickers)  # fixed; never appended to below
     if not snapshot:
         return
 
-    # ONE gate for the whole recovery — both layers, every ticker. This is
-    # the point of the exercise. Each solo fetch is a batch of one, and a
-    # lone empty frame is ambiguous, so no single fetch here can tell a
-    # delisted ticker from a rate-limit. Shared, they can: three consecutive
-    # solo fetches returning nothing is a throttle, and the gate makes every
-    # subsequent fetch in the pass sit out the backoff. Before this, the solo
-    # passes walked the entire snapshot at full speed against a closed door
-    # and wrote every ticker off as dataless.
+    intcast_ids = intcast_ids or set()
+    intcast_snapshot = [t for t in snapshot if t.ticker_id in intcast_ids]
+    generic_snapshot = [t for t in snapshot if t.ticker_id not in intcast_ids]
+
+    # ONE gate for the whole recovery — all layers, every ticker. Each solo
+    # fetch is a batch of one, and a lone empty frame is ambiguous, so no
+    # single fetch can tell a delisted ticker from a rate-limit. Shared, they
+    # can: consecutive empties are a throttle, and the gate makes every
+    # subsequent fetch sit out the backoff. trip_on_empty=False (D2): the
+    # retry cohort is FULL of expected empties, so shape-based tripping would
+    # fire constantly here — only an explicit 429 is allowed to open a window.
     gate = ThrottleGate(
         ThrottleConfig(
             base_seconds=config.etl.yfinance_throttle_backoff_seconds,
+            trip_on_empty=False,
         ),
     )
 
-    def _solo_pass(pass_snapshot, *, repair):
-        """One bounded solo pass. Returns (recovered, still_failed).
-        Plain `for` over a fixed snapshot; no `while`, hard-bounded —
-        cannot loop. still_failed = tickers with bs.succeeded == 0."""
+    def _pass(pass_snapshot, *, repair, batch_size):
+        """One bounded pass. Returns (recovered, still_failed). Plain `for`
+        over a fixed snapshot; no `while`, hard-bounded — cannot loop.
+        still_failed = tickers whose batch reported bs.succeeded == 0."""
         src = YFinanceSource(
             exchange=exchange,
-            batch_size=1,
+            batch_size=batch_size,
             request_delay_seconds=(
                 config.etl.yfinance_request_delay_seconds
             ),
             throttle_backoff_seconds=config.etl.yfinance_throttle_backoff_seconds,
             repair=repair,
-            # The shared gate. Every solo fetch in both layers corroborates
-            # every other one.
-            throttle=gate,
+            throttle=gate,  # shared — every fetch corroborates every other
         )
         bound = len(pass_snapshot)
         recovered = 0
-        still_failed = []
-        for i, ticker in enumerate(pass_snapshot):
-            assert i < bound, "solo-retry exceeded its bound"
+        still_failed: list = []
+        # Chunk the snapshot into batches of `batch_size`. batch_size=1 is
+        # the classic solo pass; >1 lets the deterministic intcast layer
+        # move faster without losing per-ticker success accounting, since
+        # _process_one_batch still reports which tickers in the batch won.
+        for start_i in range(0, len(pass_snapshot), batch_size):
+            assert start_i < bound + batch_size, "retry pass exceeded its bound"
+            chunk = pass_snapshot[start_i:start_i + batch_size]
             try:
                 bs = _process_one_batch(
                     db_engine=db_engine, config=config, src=src,
-                    batch=[ticker], start=start, end=end,
+                    batch=chunk, start=start, end=end,
                     timeframe=timeframe, intraday=intraday,
                 )
-                if bs.succeeded > 0:
-                    recovered += 1
-                else:
-                    still_failed.append(ticker)
+                recovered += bs.succeeded
+                # Anything in this chunk that did NOT succeed rejoins the
+                # still_failed set: the batch reports counts, and the tickers
+                # that failed/emptied are exactly those it did not record a
+                # success for. We re-derive that from the batch's own tallies
+                # by treating the chunk's non-succeeders as still-failed.
+                if bs.succeeded < len(chunk):
+                    failed_here = (
+                        list(bs.failed_tickers)
+                        + list(bs.empty_tickers)
+                        + list(bs.short_tickers)
+                        + list(bs.intcast_tickers)
+                    )
+                    still_failed.extend(failed_here)
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "solo-retry failed for ticker_id=%s",
-                    ticker.ticker_id,
+                    "retry pass failed for chunk starting ticker_id=%s",
+                    chunk[0].ticker_id if chunk else "<empty>",
                 )
-                still_failed.append(ticker)
+                still_failed.extend(chunk)
         return recovered, still_failed
 
-    # Layer 2: repair=True — batch-flakes recover WITH repair's fixing.
-    rec_a, survivors = _solo_pass(snapshot, repair=True)
-    # Layer 3: repair=False over ONLY Layer-2's survivors — rescues the
-    # IntCastingNaNError repair-casualties. survivors is fixed before
-    # this pass; no re-add, so no loop.
+    retry_batch_size = max(1, config.etl.yfinance_batch_size)
+
+    # Layer 1: repair=False over the intcast set, batched. These are repair
+    # casualties by construction — repair=True would re-drop them.
+    rec_ic = 0
+    if intcast_snapshot:
+        rec_ic, _ic_still = _pass(
+            intcast_snapshot, repair=False, batch_size=retry_batch_size,
+        )
+
+    # Layer 2: repair=True, solo — the generic batch-flake cohort.
+    rec_a, survivors = _pass(generic_snapshot, repair=True, batch_size=1)
+
+    # Layer 3: repair=False, solo — Layer-2 survivors. Fixed before the pass;
+    # no re-add, so no loop.
     rec_b = 0
     still_empty: list = []
     if survivors:
-        rec_b, still_empty = _solo_pass(survivors, repair=False)
+        rec_b, still_empty = _pass(survivors, repair=False, batch_size=1)
+
     logger.info(
-        "solo-retry: %d recovered (repair=True), %d recovered "
-        "(repair=False) of %d flaked",
-        rec_a, rec_b, len(snapshot),
+        "solo-retry: %d recovered (L1 intcast repair=False), "
+        "%d recovered (L2 repair=True), %d recovered (L3 repair=False) "
+        "of %d flaked (%d intcast, %d generic)",
+        rec_ic, rec_a, rec_b, len(snapshot),
+        len(intcast_snapshot), len(generic_snapshot),
     )
     if still_empty:
-        # Survived both solo passes. Either genuinely dataless (delisted,
-        # rights entitlement, never-traded) or Yahoo was throttling for the
-        # whole window. Named, not silent.
+        # Survived every pass. Either genuinely dataless (delisted, rights
+        # entitlement, never-traded) or Yahoo was throttling for the whole
+        # window. Named, not silent.
         logger.warning(
-            "solo-retry: %d ticker(s) STILL returned no data after Layer 2 "
-            "and Layer 3: %s",
+            "solo-retry: %d ticker(s) STILL returned no data after all "
+            "layers: %s",
             len(still_empty),
             ", ".join(
                 sorted(f"{t.symbol}(id={t.ticker_id})" for t in still_empty)
@@ -976,6 +1029,7 @@ def _execute_batches(
     all_failed_tickers: list = []
     all_empty_tickers: list = []
     all_short_tickers: list = []
+    all_intcast_tickers: list = []  # B2
 
     with ThreadPoolExecutor(max_workers=config.etl.yfinance_concurrency) as ex:
         futures = [
@@ -1000,6 +1054,7 @@ def _execute_batches(
             all_failed_tickers.extend(bs.failed_tickers)
             all_empty_tickers.extend(bs.empty_tickers)
             all_short_tickers.extend(bs.short_tickers)
+            all_intcast_tickers.extend(bs.intcast_tickers)  # B2
             # Update the run counters incrementally so the GUI sees progress.
             with db_engine.begin() as conn:
                 EtlStatusRepository(conn).increment_counters(
@@ -1010,15 +1065,27 @@ def _execute_batches(
 
     M.etl_bars_written_total.inc(total_bars_written)
 
-    # The retry set is failures PLUS zero-bar "successes" PLUS truncated ones.
-    # All three go to the bounded solo passes; only failures count toward the
-    # run outcome.
-    retry_tickers = all_failed_tickers + all_empty_tickers + all_short_tickers
+    # The retry set is failures PLUS zero-bar "successes" PLUS truncated ones
+    # PLUS intcast repair-casualties. All go to the bounded solo passes; only
+    # failures count toward the run outcome. intcast_ids lets _solo_retry_once
+    # route the intcast members to the repair=False Layer 1 ahead of the rest.
+    retry_tickers = (
+        all_failed_tickers + all_empty_tickers
+        + all_short_tickers + all_intcast_tickers
+    )
+    intcast_ids = {t.ticker_id for t in all_intcast_tickers}  # B2
     if all_empty_tickers:
         logger.warning(
             "fetch: %d ticker(s) returned zero bars without erroring "
             "(throttle or delisting) — routing to solo-retry",
             len(all_empty_tickers),
+        )
+    if all_intcast_tickers:
+        logger.info(
+            "fetch: %d ticker(s) hit IntCastingNaN under repair — routing to "
+            "repair=False Layer 1: %s",
+            len(all_intcast_tickers),
+            ", ".join(sorted(t.symbol for t in all_intcast_tickers)[:25]),
         )
     if all_short_tickers:
         logger.warning(
@@ -1030,14 +1097,14 @@ def _execute_batches(
         )
 
     if total_attempted == 0:
-        return RunOutcome.FAILED, retry_tickers
+        return RunOutcome.FAILED, retry_tickers, intcast_ids
     if total_succeeded == 0:
         # Every ticker errored or came back empty. Previously an all-empty
         # pass reported SUCCESS; it now fails loudly.
-        return RunOutcome.FAILED, retry_tickers
+        return RunOutcome.FAILED, retry_tickers, intcast_ids
     if total_failed > 0:
-        return RunOutcome.PARTIAL, retry_tickers
-    return RunOutcome.SUCCESS, retry_tickers
+        return RunOutcome.PARTIAL, retry_tickers, intcast_ids
+    return RunOutcome.SUCCESS, retry_tickers, intcast_ids
 
 
 @dataclass(frozen=True, slots=True)
@@ -1060,6 +1127,12 @@ class _BatchStats:
     # got are still written; what is withheld is the verdict "success". Same
     # retry path as empty_tickers.
     short_tickers: tuple = ()
+    # B2: empty tickers whose failure_kind was 'intcast' — yfinance's repair
+    # pass cast an all-NaN column and raised IntCastingNaNError, so the bars
+    # were dropped. These are NOT flakes: a solo repair=True re-fetch would
+    # drop them again. They are routed to a repair=False pass FIRST (Layer 1),
+    # ahead of the repair=True gauntlet the other empties still run.
+    intcast_tickers: tuple = ()
 
 
 def _coverage_shortfall_days(
@@ -1133,6 +1206,7 @@ def _process_one_batch(
     failed_tickers_local: list = []
     empty_tickers_local: list = []
     short_tickers_local: list = []
+    intcast_tickers_local: list = []  # B2: repair=False fast-path candidates
 
     for ticker in batch:
         outcome = results_by_symbol.get(ticker.symbol)
@@ -1162,10 +1236,21 @@ def _process_one_batch(
             # it solo (Layer 2), and if it is STILL empty, again with
             # repair=False (Layer 3). Genuinely-dataless tickers survive both
             # and are named in the Layer 3 WARNING.
-            empty_tickers_local.append(ticker)
-            M.etl_tickers_fetched_total.labels(
-                tier=str(ticker.tier.value), outcome="empty",
-            ).inc()
+            #
+            # B2: split intcast out of the generic empty cohort. An
+            # IntCastingNaN empty is a repair=True casualty by construction —
+            # sending it through the repair=True Layer 2 first would just drop
+            # it again. It goes straight to the repair=False Layer 1 instead.
+            if outcome.failure_kind == "intcast":
+                intcast_tickers_local.append(ticker)
+                M.etl_tickers_fetched_total.labels(
+                    tier=str(ticker.tier.value), outcome="intcast",
+                ).inc()
+            else:
+                empty_tickers_local.append(ticker)
+                M.etl_tickers_fetched_total.labels(
+                    tier=str(ticker.tier.value), outcome="empty",
+                ).inc()
             continue
 
         new_bars_for_engine = _aggregate_if_intraday(outcome.bars, intraday)
@@ -1256,6 +1341,7 @@ def _process_one_batch(
         failed_tickers=tuple(failed_tickers_local),
         empty_tickers=tuple(empty_tickers_local),
         short_tickers=tuple(short_tickers_local),
+        intcast_tickers=tuple(intcast_tickers_local),
     )
 
 

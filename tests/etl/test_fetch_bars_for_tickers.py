@@ -110,8 +110,8 @@ class TestFetchBarsForTickers:
         def _spy_execute_batches(*, tickers, **kwargs):
             captured_tickers.extend(tickers)
             from trip_ema.etl.types import RunOutcome
-            # _execute_batches now returns (outcome, failed_tickers).
-            return RunOutcome.SUCCESS, []
+            # B2: _execute_batches returns (outcome, failed_tickers, intcast_ids).
+            return RunOutcome.SUCCESS, [], set()
 
         run_id = fetch_bars_for_tickers(
             db_engine, _MockConfig(),
@@ -132,8 +132,8 @@ class TestFetchBarsForTickers:
 
         def _stub_execute_batches(**kwargs):
             from trip_ema.etl.types import RunOutcome
-            # _execute_batches now returns (outcome, failed_tickers).
-            return RunOutcome.SUCCESS, []
+            # B2: _execute_batches returns (outcome, failed_tickers, intcast_ids).
+            return RunOutcome.SUCCESS, [], set()
 
         run_id = fetch_bars_for_tickers(
             db_engine, _MockConfig(),
