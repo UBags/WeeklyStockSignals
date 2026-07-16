@@ -871,6 +871,49 @@ class ComputeConfig(BaseModel):
     """
 
 
+# ---------- Lead/lag analytics ---------- #
+
+
+class LeadlagConfig(BaseModel):
+    """Lead/lag analytics tunables (design §7).
+
+    Sourced under `leadlag:` in config.yaml. Every field has a default, so
+    the section is optional — omitting it yields the defaults below.
+
+    Windows are trailing weeks the correlations are computed over; each
+    must be >= 13 so the +/-10 lead/lag scan has usable observations at the
+    far lags. max_corroborators caps how many corroborating industries the
+    email and GUI show per signal (top-N by |corr|).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    industry_window_weeks: int = Field(
+        default=260, ge=13,
+        description="Trailing window (weeks) for the industry x industry "
+                    "regime correlation matrix.",
+    )
+    stock_windows_weeks: tuple[int, ...] = Field(
+        default=(52, 260),
+        description="Trailing windows (weeks) for the stock <-> industry "
+                    "lead/lag; one metric row is written per window.",
+    )
+    max_corroborators: int = Field(
+        default=3, ge=1,
+        description="Corroborating industries shown per signal (top-N by "
+                    "|corr|) in the email and GUI.",
+    )
+
+    @field_validator("stock_windows_weeks")
+    @classmethod
+    def _windows_valid(cls, v):
+        if not v or any(w < 13 for w in v):
+            raise ValueError(
+                "stock_windows_weeks must be non-empty and each >= 13"
+            )
+        return tuple(v)
+
+
 # ---------- Root ---------- #
 
 
@@ -888,6 +931,7 @@ class Config(BaseModel):
     observability: ObservabilityConfig = ObservabilityConfig()
     transports: TransportsConfig = TransportsConfig()
     etl: EtlConfig = EtlConfig()
+    leadlag: LeadlagConfig = LeadlagConfig()
     redis: RedisConfig | None = None
     """Redis configuration for the notifier queue. If None, the
     SubscriberDistributor runs in legacy in-process mode (synchronous

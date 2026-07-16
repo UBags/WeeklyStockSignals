@@ -139,3 +139,11 @@ http:
 #   # Only consulted when `redis` is set above.
 #   worker_concurrency: 4
 #   queue_name: trip_ema_notifications
+
+# ---------------------------------------------------------------------------
+# leadlag — lead/lag analytics tunables (optional; defaults shown)
+# ---------------------------------------------------------------------------
+# leadlag:
+#   industry_window_weeks: 260      # industry x industry matrix window (>= 13)
+#   stock_windows_weeks: [52, 260]  # stock <-> industry windows (each >= 13)
+#   max_corroborators: 3            # corroborating industries shown per signal
