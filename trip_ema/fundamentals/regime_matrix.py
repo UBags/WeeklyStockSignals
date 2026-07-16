@@ -9,13 +9,24 @@ from __future__ import annotations
 
 import numpy as np
 
-_K = 4
+_K = 10
 
 
-def _corr(a, b):
+def _rankdata(a):
+    # average ranks for ties; a is 1-D float
+    _, inv, counts = np.unique(a, return_inverse=True, return_counts=True)
+    csum = np.cumsum(counts)
+    starts = csum - counts
+    avg = (starts + csum - 1) / 2.0
+    return avg[inv]
+
+
+def _spearman(a, b):
+    # Spearman rank-correlation via numpy rank-then-Pearson (no scipy dep).
     if len(a) < 3 or a.std() == 0.0 or b.std() == 0.0:
         return None
-    return float(np.corrcoef(a, b)[0, 1])
+    ra, rb = _rankdata(a), _rankdata(b)
+    return float(np.corrcoef(ra, rb)[0, 1])
 
 
 def compute_regime_matrix(regime_by_industry, window=260, k=_K):
@@ -51,7 +62,7 @@ def compute_regime_matrix(regime_by_industry, window=260, k=_K):
             mask = ~np.isnan(xa) & ~np.isnan(xb)
             if int(mask.sum()) < 3:
                 continue
-            base = _corr(xa[mask], xb[mask])
+            base = _spearman(xa[mask], xb[mask])
             if base is None:
                 continue
             best_lag, best = 0, base
@@ -61,11 +72,11 @@ def compute_regime_matrix(regime_by_industry, window=260, k=_K):
                 elif lag > 0:
                     ia, ib = xa[:-lag], xb[lag:]
                     m = ~np.isnan(ia) & ~np.isnan(ib)
-                    rho = _corr(ia[m], ib[m]) if int(m.sum()) >= 3 else None
+                    rho = _spearman(ia[m], ib[m]) if int(m.sum()) >= 3 else None
                 else:
                     ia, ib = xa[-lag:], xb[:lag]
                     m = ~np.isnan(ia) & ~np.isnan(ib)
-                    rho = _corr(ia[m], ib[m]) if int(m.sum()) >= 3 else None
+                    rho = _spearman(ia[m], ib[m]) if int(m.sum()) >= 3 else None
                 if rho is not None and abs(rho) > abs(best):
                     best_lag, best = lag, rho
             rows.append((
