@@ -83,6 +83,30 @@ def _drain_qt_event_loop() -> None:
     app.processEvents(flags)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_qsettings_per_worker(tmp_path_factory):
+    """Give each xdist worker its own QSettings store.
+
+    QSettings is a per-user global — one INI (or registry key) per
+    organization+application, shared by every worker PROCESS under
+    `pytest -n`. The per-test _clean_qsettings fixtures only isolate WITHIN a
+    process; a concurrent worker writing the same key between another test's
+    clear and its assertion leaks across workers (e.g. the exchange picker
+    restoring a stale exchange). Redirecting each worker to a private temp INI
+    removes the shared store, so GUI tests are order-independent under xdist.
+    """
+    from PySide6.QtCore import QSettings
+
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    base = tmp_path_factory.getbasetemp() / f"qsettings-{worker}"
+    base.mkdir(parents=True, exist_ok=True)
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(
+        QSettings.IniFormat, QSettings.UserScope, str(base),
+    )
+    yield
+
+
 @pytest.fixture
 def managed_widget():
     """Factory fixture for opt-in safe widget management.
