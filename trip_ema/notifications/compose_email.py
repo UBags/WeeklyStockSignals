@@ -35,6 +35,8 @@ from sqlalchemy.engine import Connection
 
 from ..persistence.subscribers_repo import SubscriberRecord
 from .benchmark_rerank import fetch_rank_scores
+from .leadlag_reader import load_leadlag_context
+from .leadlag_render import render_leadlag_html, render_leadlag_text
 from ..domain.market_session import exchange_of_conn, market_tz
 
 # INTRADAY-CHAIN: the chain is keyed on the trading day in exchange-local
@@ -100,23 +102,47 @@ def build_email_body(
     rows: list[EnrichedSignalRow],
     cycle_id: str,
     now: datetime,
+    *,
+    leadlag_fn=None,
 ) -> EmailBody:
     """Render a pre-fetched, pre-filtered row list into an EmailBody.
 
     Shared renderer: compose_email (current cycle, all signals) and the
     per-subscriber signal-report notifier (filtered rows) both call
     this. Assumes `rows` is non-empty — callers handle the empty case.
+
+    leadlag_fn: optional (EnrichedSignalRow -> LeadLagContext | None). When
+    supplied, each signal gets a lead/lag clause appended under it; when None
+    (the default) the body renders exactly as before. Injected as a callable so
+    build_email_body stays DB-free and unit-testable.
     """
     counts = _count_signal_kinds(rows)
     subject = _make_subject(cycle_id, len(rows), counts)
-    html = _render_html(rows, cycle_id, now)
-    plain_text = _render_plain_text(rows, cycle_id, now)
+    clauses = _leadlag_clauses(rows, leadlag_fn)
+    html = _render_html(rows, cycle_id, now, clauses)
+    plain_text = _render_plain_text(rows, cycle_id, now, clauses)
     return EmailBody(
         subject=subject,
         html=html,
         plain_text=plain_text,
         signal_count=len(rows),
     )
+
+
+def _leadlag_clauses(rows, leadlag_fn):
+    """{ticker_id: (html_clause, text_clause)} per row, or {} when no reader is
+    injected. The reader is called once per row; a missing/thin context yields
+    empty strings (no clause), never a fabricated one."""
+    if leadlag_fn is None:
+        return {}
+    out: dict = {}
+    for r in rows:
+        ctx = leadlag_fn(r)
+        out[r.ticker_id] = (
+            render_leadlag_html(r, ctx),
+            render_leadlag_text(r, ctx),
+        )
+    return out
 
 
 def compose_email(
@@ -149,7 +175,13 @@ def compose_email(
     if not rows:
         return None
 
-    return build_email_body(rows, cycle_id, now)
+    def _leadlag(row):
+        # No industry -> no lead/lag context to attach.
+        if not row.industry:
+            return None
+        return load_leadlag_context(conn, row.ticker_id, row.industry)
+
+    return build_email_body(rows, cycle_id, now, leadlag_fn=_leadlag)
 
 
 # ====================================================================
@@ -271,6 +303,7 @@ def _render_html(
     rows: list[EnrichedSignalRow],
     cycle_id: str,
     now: datetime,
+    clauses: dict | None = None,
 ) -> str:
     by_industry = _group_by_industry(rows)
     industry_order = _industry_render_order(by_industry)
@@ -288,7 +321,9 @@ def _render_html(
 
     for industry in industry_order:
         parts.append(
-            _render_industry_section(industry, by_industry[industry]),
+            _render_industry_section(
+                industry, by_industry[industry], clauses,
+            ),
         )
 
     parts.append(_render_html_footer(now))
@@ -297,7 +332,9 @@ def _render_html(
 
 
 def _render_industry_section(
-    industry: str, rows: list[EnrichedSignalRow],
+    industry: str,
+    rows: list[EnrichedSignalRow],
+    clauses: dict | None = None,
 ) -> str:
     out = [
         f'<h3 style="margin: 18px 0 6px 0; color: {_COLOR_HEADER}; '
@@ -316,6 +353,12 @@ def _render_industry_section(
     ]
     for r in rows:
         out.append(_render_row_html(r))
+        clause = (clauses or {}).get(r.ticker_id, ("", ""))[0]
+        if clause:
+            out.append(
+                f'<tr><td colspan="4" '
+                f'style="padding: 0 8px 10px 8px;">{clause}</td></tr>'
+            )
     out.append('</tbody></table>')
     return "\n".join(out)
 
@@ -385,6 +428,7 @@ def _render_plain_text(
     rows: list[EnrichedSignalRow],
     cycle_id: str,
     now: datetime,
+    clauses: dict | None = None,
 ) -> str:
     by_industry = _group_by_industry(rows)
     industry_order = _industry_render_order(by_industry)
@@ -407,6 +451,9 @@ def _render_plain_text(
                 f"price={r.price_at_signal:.2f}  "
                 f"rank={r.rank_score:.2f}"
             )
+            clause = (clauses or {}).get(r.ticker_id, ("", ""))[1]
+            if clause:
+                lines.append(clause)
         lines.append("")
 
     stamp = now.strftime("%Y-%m-%d %H:%M %Z").strip()
