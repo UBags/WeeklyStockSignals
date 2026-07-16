@@ -30,14 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy import text
-from sqlalchemy.engine import Connection
 
-from ..persistence.subscribers_repo import SubscriberRecord
-from .benchmark_rerank import fetch_rank_scores
-from .leadlag_reader import load_leadlag_context
 from .leadlag_render import render_leadlag_html, render_leadlag_text
-from ..domain.market_session import exchange_of_conn, market_tz
 
 # INTRADAY-CHAIN: the chain is keyed on the trading day in exchange-local
 # time. current_signals.bar_timestamp is the week anchor, so it cannot
@@ -107,9 +101,8 @@ def build_email_body(
 ) -> EmailBody:
     """Render a pre-fetched, pre-filtered row list into an EmailBody.
 
-    Shared renderer: compose_email (current cycle, all signals) and the
-    per-subscriber signal-report notifier (filtered rows) both call
-    this. Assumes `rows` is non-empty — callers handle the empty case.
+    Renderer for the per-subscriber signal-report notifier (filtered
+    rows). Assumes `rows` is non-empty — callers handle the empty case.
 
     leadlag_fn: optional (EnrichedSignalRow -> LeadLagContext | None). When
     supplied, each signal gets a lead/lag clause appended under it; when None
@@ -145,135 +138,9 @@ def _leadlag_clauses(rows, leadlag_fn):
     return out
 
 
-def compose_email(
-    conn: Connection,
-    subscriber: SubscriberRecord,
-    cycle_id: str,
-    now: datetime,
-    *,
-    max_corroborators: int = 3,
-) -> EmailBody | None:
-    """Compose the V1 cycle email body.
-
-    Returns None when current_signals is empty — no email to send.
-
-    Args:
-        conn: SQLAlchemy Connection. Caller controls the transaction.
-        subscriber: target subscriber. Present for P2-A subscriber-
-            specific filtering; NOT used in V1.
-        cycle_id: identifier for this cycle (e.g. "20260626-1500").
-            Appears in the subject + body for operator reference.
-        now: instant used in the footer's "generated at" line.
-
-    Returns:
-        EmailBody | None.
-    """
-    # CHAIN-CLOCK-FIX: pass the cycle's instant down. The chain lookup must
-    # use the same day the transitions were LOGGED under
-    # (log_intraday_transitions writes signal_date from the cycle's as_of), not
-    # the wall clock at render time — otherwise an EoD cycle that straddles
-    # midnight silently loses every chain.
-    rows = _fetch_enriched_signals(conn, now=now)
-    if not rows:
-        return None
-
-    def _leadlag(row):
-        # No industry -> no lead/lag context to attach.
-        if not row.industry:
-            return None
-        return load_leadlag_context(
-            conn, row.ticker_id, row.industry,
-            max_corroborators=max_corroborators,
-        )
-
-    return build_email_body(rows, cycle_id, now, leadlag_fn=_leadlag)
-
-
 # ====================================================================
 # Internals
 # ====================================================================
-
-def _fetch_enriched_signals(
-    conn: Connection,
-    *,
-    now: datetime,
-) -> list[EnrichedSignalRow]:
-    """SELECT current_signals JOIN tickers + instrument_industry,
-    then attach rank_scores via fetch_rank_scores. Returns rows
-    sorted by (rank_score DESC, ticker_id ASC)."""
-    raw_rows = conn.execute(text("""
-        SELECT cs.ticker_id,
-               cs.timeframe,
-               cs.bar_timestamp,
-               cs.signal_type,
-               cs.regime_before,
-               cs.regime_after,
-               cs.price_at_signal,
-               cs.computed_at,
-               t.exchange,
-               t.symbol,
-               ii.industry
-          FROM current_signals cs
-          JOIN tickers t ON t.ticker_id = cs.ticker_id
-     LEFT JOIN instrument_industry ii ON ii.ticker_id = cs.ticker_id
-         ORDER BY cs.ticker_id
-    """)).all()
-
-    if not raw_rows:
-        return []
-
-    ticker_ids = [int(r.ticker_id) for r in raw_rows]
-    rank_scores = fetch_rank_scores(conn, ticker_ids)
-
-    # INTRADAY-CHAIN: the within-day sequence for each emailed ticker.
-    # current_signals holds only the ticker's LATEST signal; the chain shows
-    # how it got there (e.g. BUY - EXIT_FROM_BUY - BUY). Keyed on today in the
-    # session's own timezone: the bar_timestamp on current_signals is the week
-    # anchor, so it cannot supply the day.
-    from ..persistence.intraday_signal_log_repo import (
-        IntradaySignalLogRepository,
-    )
-    # CHAIN-CLOCK-FIX: the day comes from the CYCLE's instant, never from
-    # datetime.now(). log_intraday_transitions stamps signal_date from the
-    # cycle's as_of; using the wall clock here meant two different clocks
-    # decided the same day. An EoD cycle running at 23:5x writes
-    # signal_date = D, and if the email rendered minutes later — past midnight
-    # — the wall clock said D+1 and EVERY chain silently disappeared. It also
-    # made the feature untestable: tests pass an explicit `now=`, which was
-    # being ignored here.
-    # THE SAME CLOCK that wrote signal_date. recompute_market stamps it with
-    # market_tz(exchange); resolving the day here with a different zone is
-    # precisely the two-clocks bug the comment above describes — and for any
-    # exchange outside India the two WOULD disagree, and every chain would
-    # silently disappear.
-    _today = now.astimezone(market_tz(exchange_of_conn(conn))).date()
-    chains = IntradaySignalLogRepository(conn).chains_for_date(
-        signal_date=_today, ticker_ids=ticker_ids,
-    )
-
-    enriched = [
-        EnrichedSignalRow(
-            ticker_id=int(r.ticker_id),
-            symbol=r.symbol,
-            exchange=r.exchange,
-            industry=r.industry,
-            signal_type=r.signal_type,
-            regime_before=int(r.regime_before),
-            regime_after=int(r.regime_after),
-            price_at_signal=float(r.price_at_signal),
-            bar_timestamp=r.bar_timestamp,
-            computed_at=r.computed_at,
-            rank_score=rank_scores.get(int(r.ticker_id), 0.0),
-            # INTRADAY-CHAIN: the ordered signals this ticker fired today.
-            intraday_chain=chains.get(int(r.ticker_id), []),
-        )
-        for r in raw_rows
-    ]
-
-    # Sort by rank DESC, then ticker_id ASC for deterministic ties.
-    enriched.sort(key=lambda s: (-s.rank_score, s.ticker_id))
-    return enriched
-
 
 def _count_signal_kinds(
     rows: list[EnrichedSignalRow],
