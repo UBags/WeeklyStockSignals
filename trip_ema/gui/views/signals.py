@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..prompts import DEFAULT_PROMPTS, Prompts
-from sqlalchemy import text  # noqa: F401 — retained for future inline SQL
+from sqlalchemy import text
 
 from ..backtest_engine import (
     filter_bars_to_range,
@@ -59,8 +59,33 @@ from .industry_panel import IndustryPanel
 from .signal_generation_panel import SignalGenerationPanel
 from ..determine_background_color import DetermineBackgroundColor
 from ...domain.market_session import exchange_of_engine, market_tz
+from .widgets.leadlag_card import LeadLagCard
+from ...notifications.leadlag_reader import load_leadlag_context
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_leadlag_context(conn, exchange, symbol, instrument):
+    """Return (LeadLagContext, industry) for a ticker, or (None, None)
+    when the ticker or its industry is unknown. Module-level and conn-
+    injected so it is unit-testable without standing up the whole
+    SignalsView."""
+    row = conn.execute(
+        text(
+            "SELECT t.ticker_id, ii.industry FROM tickers t "
+            "LEFT JOIN instrument_industry ii "
+            "ON ii.ticker_id = t.ticker_id "
+            "WHERE t.exchange = :ex AND t.symbol = :sym "
+            "AND t.instrument_type = :inst LIMIT 1"
+        ),
+        {"ex": exchange, "sym": symbol, "inst": instrument},
+    ).first()
+    if row is None or row.industry is None:
+        return None, None
+    return (
+        load_leadlag_context(conn, row.ticker_id, row.industry),
+        row.industry,
+    )
 
 
 # Step 12c: EXIT_FROM_BUY and EXIT_FROM_SELL now use distinct
@@ -154,6 +179,11 @@ class SignalsView(QWidget):
 
         # Bar detail readout
         right_layout.addWidget(self._build_bar_detail_box())
+
+        # Lead/lag card (design §6.4): stock coupling, industry regime,
+        # and corroborating industries for the loaded ticker.
+        self._leadlag_card = LeadLagCard(parent=self)
+        right_layout.addWidget(self._leadlag_card)
 
         self._main_splitter.addWidget(right_widget)
 
@@ -524,8 +554,35 @@ class SignalsView(QWidget):
         self._fetch_history()
         # Left panel: refresh industry chart + minis for the new ticker.
         self._industry_panel.load_for_ticker(exchange, symbol, instrument)
+        # Lead/lag card (async — off the UI thread).
+        self._fetch_leadlag()
 
     # ====================  History fetch / render  ==================== #
+
+    def _fetch_leadlag(self) -> None:
+        if not (self._current_exchange and self._current_symbol):
+            self._leadlag_card.clear()
+            return
+        ex, sym = self._current_exchange, self._current_symbol
+        inst = self._current_instrument or "EQ"
+
+        def fetch():
+            with self._db.connect() as conn:
+                return _resolve_leadlag_context(conn, ex, sym, inst)
+
+        submit(
+            fetch,
+            on_finished=self._on_leadlag_received,
+            on_failed=self._on_leadlag_failed,
+        )
+
+    def _on_leadlag_received(self, payload) -> None:
+        ctx, industry = payload
+        self._leadlag_card.set_context(ctx, industry)
+
+    def _on_leadlag_failed(self, message: str) -> None:
+        logger.warning("lead/lag fetch failed: %s", message)
+        self._leadlag_card.clear()
 
     def _fetch_history(self) -> None:
         if not (self._current_exchange and self._current_symbol):
