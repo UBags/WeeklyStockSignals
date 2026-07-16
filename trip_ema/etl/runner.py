@@ -845,6 +845,16 @@ def _run_fetch_pass(
         return run_id
 
 
+def _default_parked_lookup(db_engine: Engine, ticker_ids: list) -> set:
+    """D3: the real parked lookup — one query via EtlStatusRepository.
+    Factored out as the default for _solo_retry_once's parked_lookup seam so
+    unit tests can inject a no-DB fake."""
+    if not ticker_ids:
+        return set()
+    with db_engine.connect() as conn:
+        return EtlStatusRepository(conn).parked_ids_in(ticker_ids)
+
+
 def _solo_retry_once(
     db_engine: Engine,
     config: Config,
@@ -858,6 +868,8 @@ def _solo_retry_once(
     intcast_ids: set | None = None,
     process_batch_fn: Callable | None = None,
     source_factory: Callable | None = None,
+    parked_lookup: Callable | None = None,
+    park_fn: Callable | None = None,
 ) -> None:
     """Re-fetch each flaked ticker ONCE, in a bounded set of solo passes.
 
@@ -900,6 +912,23 @@ def _solo_retry_once(
     # point of the de-monkeypatching programme. See test_solo_retry_layers.
     _process_batch = process_batch_fn or _process_one_batch
     _make_source = source_factory or YFinanceSource
+    _parked_lookup = parked_lookup or _default_parked_lookup
+
+    # D3: drop already-parked tickers from the cohort BEFORE the layers run.
+    # _select_tickers does not exclude parked, so a delisted ETF is re-selected
+    # and re-failed every run; without this filter it also re-enters retry and
+    # burns passes. A parked ticker will not return bars — leave it parked.
+    parked = _parked_lookup(db_engine, [t.ticker_id for t in snapshot])
+    if parked:
+        kept = [t for t in snapshot if t.ticker_id not in parked]
+        retry_logger.info(
+            "solo-retry: excluding %d already-parked ticker(s) from the "
+            "cohort of %d; %d remain",
+            len(snapshot) - len(kept), len(snapshot), len(kept),
+        )
+        snapshot = kept
+        if not snapshot:
+            return
 
     intcast_ids = intcast_ids or set()
     intcast_snapshot = [t for t in snapshot if t.ticker_id in intcast_ids]
@@ -1048,6 +1077,21 @@ def _solo_retry_once(
                 sorted(f"{t.symbol}(id={t.ticker_id})" for t in still_empty)
             ),
         )
+        # D3-back: count each all-layer survivor toward parking. This is the
+        # FIRST point in the pipeline with enough evidence to do so: a single
+        # empty batch is ambiguous (throttle vs delisting) and is deliberately
+        # NOT counted, but a ticker empty across Layer 1/2/3 in one run is a
+        # strong dataless signal. _handle_ticker_failure increments
+        # consecutive_failures and parks at park_failure_threshold; once
+        # parked, the front-filter (parked_lookup) keeps it out of subsequent
+        # retry cohorts, so we stop re-chasing it every run. A throttle that
+        # emptied the whole window still increments here, but recovers its
+        # count on the next successful fetch (record_success resets to 0), so a
+        # live-but-throttled ticker only parks after park_failure_threshold
+        # CONSECUTIVE dataless runs — the same bar every other failure clears.
+        _park = park_fn or _handle_ticker_failure
+        for t in still_empty:
+            _park(db_engine, config, t, "no data after all retry layers")
 
 
 def _execute_batches(

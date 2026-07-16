@@ -224,7 +224,7 @@ etl:
    park_failure_threshold: 3       # park after this many consecutive failures
    yfinance_batch_size: 100
 #   yfinance_concurrency: 4
-   yfinance_request_delay_seconds: 30
+   yfinance_request_delay_seconds: 0.5   # D4: was 30 — 30s dead sleep per batch; gate handles real 429s
 #   reconcile_window_days: 7
 #   parked_dir: var/etl/parked
 #   checkpoint_dir: var/etl

@@ -97,6 +97,10 @@ def _run(recorder, *, failed, intcast_ids):
         intcast_ids=intcast_ids,
         process_batch_fn=recorder,
         source_factory=_FakeSource,
+        # Drop 2: inject a no-op parked lookup so the filter never touches the
+        # sentinel db_engine. Tests that exercise the filter itself pass their
+        # own parked_lookup (see TestParkedExclusion).
+        parked_lookup=lambda _e, ids: set(),
     )
 
 
@@ -172,6 +176,7 @@ class TestBounds:
             start=date(2026, 1, 1), end=date(2026, 1, 31),
             timeframe=Timeframe.DAILY, intraday=False,
             process_batch_fn=rec, source_factory=_FakeSource,
+            parked_lookup=lambda _e, ids: set(),
         )
         repairs = [c["repair"] for c in rec.calls if 7 in c["batch_ids"]]
         assert True in repairs and False in repairs
@@ -208,3 +213,112 @@ class TestRecoveryMetrics:
         _run(rec, failed=[_ticker(200, "DARK")], intcast_ids=set())
         after = self._val("still_empty", "L3")
         assert after >= before + 1
+
+
+# ---- D3: parked tickers excluded from the retry cohort ----
+
+
+class TestParkedExclusion:
+
+    def test_parked_ticker_is_dropped_before_layers(self):
+        """A parked ticker must never reach _process_batch — the injected
+        parked_lookup removes it from the cohort up front."""
+        parked = _ticker(999, "DELISTED")
+        live = _ticker(1, "ALIVE")
+        rec = _Recorder(recover_ids={1})
+
+        _solo_retry_once(
+            db_engine=object(),
+            config=_config(),
+            exchange="NSE",
+            failed_tickers=[parked, live],
+            start=date(2026, 1, 1),
+            end=date(2026, 1, 31),
+            timeframe=Timeframe.DAILY,
+            intraday=False,
+            process_batch_fn=rec,
+            source_factory=_FakeSource,
+            parked_lookup=lambda _e, ids: {999},   # 999 is parked
+        )
+        seen = {tid for c in rec.calls for tid in c["batch_ids"]}
+        assert 999 not in seen, "parked ticker was retried"
+        assert 1 in seen, "live ticker was not retried"
+
+    def test_all_parked_is_a_clean_noop(self):
+        """If every cohort ticker is parked, the retry is a no-op — no
+        _process_batch calls at all."""
+        rec = _Recorder(recover_ids=set())
+        _solo_retry_once(
+            db_engine=object(),
+            config=_config(),
+            exchange="NSE",
+            failed_tickers=[_ticker(7, "A"), _ticker(8, "B")],
+            start=date(2026, 1, 1),
+            end=date(2026, 1, 31),
+            timeframe=Timeframe.DAILY,
+            intraday=False,
+            process_batch_fn=rec,
+            source_factory=_FakeSource,
+            parked_lookup=lambda _e, ids: {7, 8},
+        )
+        assert rec.calls == []
+
+
+# ---- D3-back: park tickers that survive all layers empty ----
+
+
+class TestParkSurvivors:
+
+    def _run_with_park(self, *, failed, recover_ids, park_calls):
+        rec = _Recorder(recover_ids=recover_ids)
+
+        def _park(db_engine, config, ticker, reason):
+            park_calls.append((ticker.ticker_id, reason))
+
+        _solo_retry_once(
+            db_engine=object(),
+            config=_config(),
+            exchange="NSE",
+            failed_tickers=failed,
+            start=date(2026, 1, 1),
+            end=date(2026, 1, 31),
+            timeframe=Timeframe.DAILY,
+            intraday=False,
+            process_batch_fn=rec,
+            source_factory=_FakeSource,
+            parked_lookup=lambda _e, ids: set(),   # nothing pre-parked
+            park_fn=_park,
+        )
+        return rec
+
+    def test_all_layer_survivor_is_parked(self):
+        """A ticker that never recovers (empty through L2 and L3) must be
+        handed to park_fn exactly once, with the dataless reason."""
+        park_calls: list = []
+        self._run_with_park(
+            failed=[_ticker(50, "DARK")],
+            recover_ids=set(),          # never recovers
+            park_calls=park_calls,
+        )
+        assert park_calls == [(50, "no data after all retry layers")]
+
+    def test_recovered_ticker_is_not_parked(self):
+        """A ticker that recovers under repair=True must NOT be parked."""
+        park_calls: list = []
+        self._run_with_park(
+            failed=[_ticker(60, "WINS")],
+            recover_ids={60},           # recovers in L2
+            park_calls=park_calls,
+        )
+        assert park_calls == []
+
+    def test_mixed_only_survivor_parked(self):
+        """Two tickers, one recovers and one doesn't — only the survivor is
+        parked."""
+        park_calls: list = []
+        self._run_with_park(
+            failed=[_ticker(70, "WINS"), _ticker(80, "DARK")],
+            recover_ids={70},
+            park_calls=park_calls,
+        )
+        assert park_calls == [(80, "no data after all retry layers")]

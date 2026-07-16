@@ -465,3 +465,21 @@ class EtlStatusRepository:
         return self._conn.execute(
             text("SELECT COUNT(*) FROM etl_ticker_status WHERE parked = TRUE"),
         ).scalar() or 0
+
+    def parked_ids_in(self, ticker_ids: list[int]) -> set[int]:
+        """D3: of the given ticker_ids, which are currently parked?
+
+        Used to drop known-dataless tickers from the solo-retry cohort before
+        the layers run — a parked ticker (delisted ETF, etc.) will not return
+        bars, so re-chasing it wastes passes. Returns a set for O(1) membership
+        at the call site. Empty input short-circuits (no query)."""
+        if not ticker_ids:
+            return set()
+        rows = self._conn.execute(
+            text("""
+                SELECT ticker_id FROM etl_ticker_status
+                WHERE parked = TRUE AND ticker_id = ANY(:ids)
+            """),
+            {"ids": list(ticker_ids)},
+        )
+        return {r.ticker_id for r in rows}
