@@ -70,3 +70,18 @@ def test_returns_none_when_ticker_missing():
 def test_returns_none_when_industry_missing():
     tid = _Row(ticker_id=7, industry=None)
     assert _resolve_leadlag_context(_Conn(tid), "NSE", "X", "EQ") == (None, None)
+
+
+def test_resolve_passes_max_corroborators_to_reader():
+    tid = _Row(ticker_id=7, industry="Automobiles")
+    ens = [
+        _Row(member_j=f"IND{i}", corr=-0.9 + 0.01 * i, best_lag=i,
+             sign=-1, is_leader=True)
+        for i in range(5)
+    ]
+    ll = {"stock": [], "ens": ens, "breadth": []}
+    ctx, _industry = _resolve_leadlag_context(
+        _Conn(tid, ll), "NSE", "TATA", "EQ", max_corroborators=2,
+    )
+    assert ctx is not None
+    assert len(ctx.corroborators) == 2

@@ -65,7 +65,9 @@ from ...notifications.leadlag_reader import load_leadlag_context
 logger = logging.getLogger(__name__)
 
 
-def _resolve_leadlag_context(conn, exchange, symbol, instrument):
+def _resolve_leadlag_context(
+    conn, exchange, symbol, instrument, *, max_corroborators=3,
+):
     """Return (LeadLagContext, industry) for a ticker, or (None, None)
     when the ticker or its industry is unknown. Module-level and conn-
     injected so it is unit-testable without standing up the whole
@@ -83,7 +85,10 @@ def _resolve_leadlag_context(conn, exchange, symbol, instrument):
     if row is None or row.industry is None:
         return None, None
     return (
-        load_leadlag_context(conn, row.ticker_id, row.industry),
+        load_leadlag_context(
+            conn, row.ticker_id, row.industry,
+            max_corroborators=max_corroborators,
+        ),
         row.industry,
     )
 
@@ -568,7 +573,10 @@ class SignalsView(QWidget):
 
         def fetch():
             with self._db.connect() as conn:
-                return _resolve_leadlag_context(conn, ex, sym, inst)
+                return _resolve_leadlag_context(
+                    conn, ex, sym, inst,
+                    max_corroborators=self._db.max_corroborators,
+                )
 
         submit(
             fetch,

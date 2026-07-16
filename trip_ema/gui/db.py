@@ -41,6 +41,9 @@ class GuiDbSession:
 
     def __init__(self, config: Config, *, pool_size: int = 3):
         password = resolve_db_password(config)
+        self.max_corroborators = getattr(
+            getattr(config, "leadlag", None), "max_corroborators", 3,
+        )
         db = config.database
         url = (
             f"postgresql+psycopg2://{db.user}:{password}"
