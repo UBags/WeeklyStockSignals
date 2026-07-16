@@ -105,6 +105,7 @@ def notify_subscribers(
     progress_cb: Callable[[str, str], None] | None = None,
     send: Callable = send_email,
     signals_repo_factory: Callable = CurrentSignalsRepository,
+    max_corroborators: int = 3,
 ) -> NotifyResult:
     """V1 distribute stage. See module docstring for the flow.
 
@@ -200,6 +201,7 @@ def notify_subscribers(
                 brevo_from_address=brevo_from_address,
                 brevo_from_name=brevo_from_name,
                 log_entries_template=log_entries_template,
+                max_corroborators=max_corroborators,
                 send=send,
             )
             emails_composed += outcome["composed"]
@@ -259,6 +261,7 @@ def _process_one_subscriber(
     log_entries_template: list[
         tuple[int, str, datetime, str, float]
     ],
+    max_corroborators: int = 3,
     send: Callable = send_email,
 ) -> dict:
     """One subscriber's full pipeline: compose → send → log → mark
@@ -280,6 +283,7 @@ def _process_one_subscriber(
         now=now,
         cycle_id=cycle_id,
         subscriber_id=subscriber.subscriber_id,
+        max_corroborators=max_corroborators,
         send=send,
     )
     if result is None:

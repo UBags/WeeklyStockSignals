@@ -990,6 +990,7 @@ def backfill(
                     brevo_from_name=brevo_config.sender_name,
                     cycle_id=_notify_now.strftime("%Y%m%d-%H%M%S"),
                     now=_notify_now,
+                    max_corroborators=config.leadlag.max_corroborators,
                     progress_cb=progress_cb,
                 )
         else:

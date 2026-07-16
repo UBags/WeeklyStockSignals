@@ -40,6 +40,7 @@ def fake_config():
     cfg = SimpleNamespace()
     cfg.market_hours = []
     cfg.transports = SimpleNamespace(brevo=None)
+    cfg.leadlag = SimpleNamespace(max_corroborators=3)
     return cfg
 
 

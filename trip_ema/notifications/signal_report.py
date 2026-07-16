@@ -39,6 +39,7 @@ from sqlalchemy.engine import Engine
 from ..persistence.subscribers_repo import SubscriberRecord
 from .benchmark_rerank import fetch_rank_scores
 from .compose_email import EnrichedSignalRow, build_email_body
+from .leadlag_reader import load_leadlag_context
 from .send_email import SendResult, send_email
 from ..domain.market_session import exchange_of_engine, market_tz
 
@@ -72,6 +73,22 @@ _KIND_BY_NAME: dict[str, SignalKind] = {
 }
 
 
+def _make_leadlag_fn(conn, max_corroborators):
+    """Per-row lead/lag closure for build_email_body. Extracted so it
+    is testable with a fake connection (no monkeypatching): the closure
+    captures the conn + cap and defers to load_leadlag_context.
+    """
+    def _leadlag(row):
+        if not row.industry:
+            return None
+        return load_leadlag_context(
+            conn, row.ticker_id, row.industry,
+            max_corroborators=max_corroborators,
+        )
+
+    return _leadlag
+
+
 def send_signal_report(
     db_engine: Engine,
     *,
@@ -90,6 +107,7 @@ def send_signal_report(
     now: datetime | None = None,
     cycle_id: str | None = None,
     subscriber_id: int = 0,
+    max_corroborators: int = 3,
     send: 'Callable[..., SendResult]' = send_email,
 ) -> SendResult | None:
     """Send one filtered signal report to `notification_mailid`.
@@ -132,7 +150,12 @@ def send_signal_report(
         return None
 
     cycle_id = cycle_id or now.strftime("%Y%m%d-%H%M%S")
-    body = build_email_body(rows, cycle_id, now)
+    # Attach lead/lag context per row (degrades to nothing on thin data).
+    with db_engine.connect() as _conn:
+        body = build_email_body(
+            rows, cycle_id, now,
+            leadlag_fn=_make_leadlag_fn(_conn, max_corroborators),
+        )
 
     subscriber = SubscriberRecord(
         subscriber_id=subscriber_id,
