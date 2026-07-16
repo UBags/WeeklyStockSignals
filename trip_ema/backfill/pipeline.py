@@ -800,7 +800,9 @@ def backfill(
         _sm = run_phase(
             db_engine, exchange, "sector_metrics",
             lambda: backfill_sector_metrics(
-                db_engine, exchange, progress_cb=progress_cb,
+                db_engine, exchange,
+                windows=config.leadlag.stock_windows_weeks,
+                progress_cb=progress_cb,
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -816,7 +818,9 @@ def backfill(
         _rm = run_phase(
             db_engine, exchange, "regime_matrix",
             lambda: backfill_industry_regime_matrix(
-                db_engine, exchange, progress_cb=progress_cb,
+                db_engine, exchange,
+                window=config.leadlag.industry_window_weeks,
+                progress_cb=progress_cb,
             ),
             backfill_run_id=run_id, force=_force,
         )

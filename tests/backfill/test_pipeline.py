@@ -33,7 +33,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from trip_ema.config.schema import ComputeConfig, EtlConfig
+from trip_ema.config.schema import ComputeConfig, EtlConfig, LeadlagConfig
 from trip_ema.backfill.pipeline import DEFAULT_BACKFILL_STAGES, backfill, BackfillResult
 from trip_ema.backfill.stages import ProcessBoundaryError
 
@@ -96,6 +96,7 @@ class _MockConfig:
     """
     etl = EtlConfig()
     compute = ComputeConfig(stock_state_processes=1)
+    leadlag = LeadlagConfig()
 
 
 def _seed_ticker(

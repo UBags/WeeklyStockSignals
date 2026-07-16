@@ -141,3 +141,47 @@ def test_recomputed_this_month_requires_both_tables_fresh(db_engine):
     with transaction(db_engine) as conn:
         _seed(conn, "sector_stock_leadlag", this_month)
     assert _recomputed_this_month(db_engine, today) is True
+
+
+# ---- G2: config windows thread to the runners ----
+
+
+class _LL:
+    stock_windows_weeks = (26, 104)
+    industry_window_weeks = 312
+
+
+class _Cfg:
+    leadlag = _LL()
+
+
+def test_config_windows_thread_to_runners():
+    captured = {}
+
+    def sec(e, ex, **kw):
+        captured["sector"] = kw
+
+    def mat(e, ex, **kw):
+        captured["matrix"] = kw
+
+    run_monthly_leadlag_recompute(
+        _Engine(False), "NSE", config=_Cfg(), if_due=False,
+        sector_fn=sec, matrix_fn=mat,
+    )
+    assert captured["sector"] == {"windows": (26, 104)}
+    assert captured["matrix"] == {"window": 312}
+
+
+def test_no_config_passes_no_window_kwargs():
+    captured = []
+
+    def sec(e, ex, **kw):
+        captured.append(("sector", kw))
+
+    def mat(e, ex, **kw):
+        captured.append(("matrix", kw))
+
+    run_monthly_leadlag_recompute(
+        _Engine(False), "NSE", if_due=False, sector_fn=sec, matrix_fn=mat,
+    )
+    assert captured == [("sector", {}), ("matrix", {})]

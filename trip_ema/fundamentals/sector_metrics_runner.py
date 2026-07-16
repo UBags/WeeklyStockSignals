@@ -40,7 +40,7 @@ _LEADLAG_WINDOWS = (52, 260)
 
 
 
-def _metrics_for_industry(conn, industry, session):
+def _metrics_for_industry(conn, industry, session, windows=_LEADLAG_WINDOWS):
     """Return (rs_rank_rows, leadlag_rows) for one industry."""
     cons = conn.execute(
         text(
@@ -107,11 +107,15 @@ def _metrics_for_industry(conn, industry, session):
                 window=_RS_WINDOW, industry_name=industry, rs_rank=rr,
             ))
 
-    ll_rows = _leadlag_rows(conn, industry, session, ranked_ids)
+    ll_rows = _leadlag_rows(
+        conn, industry, session, ranked_ids, windows,
+    )
     return rs_rows, ll_rows
 
 
-def _leadlag_rows(conn, industry, session, ranked_ids):
+def _leadlag_rows(
+    conn, industry, session, ranked_ids, windows=_LEADLAG_WINDOWS,
+):
     """Regime-based sector lead/lag (design §4.2). Correlates each ranked
     stock's weekly display_regime against the industry BREADTH (equal-weight
     mean constituent regime), leave-one-out-debiased at w_s = 1/N on the weeks
@@ -155,7 +159,7 @@ def _leadlag_rows(conn, industry, session, ranked_ids):
     ).all():
         breadth[r.wk] = r.breadth
         n_by_week[r.wk] = r.n
-    if len(breadth) < min(_LEADLAG_WINDOWS):
+    if len(breadth) < min(windows):
         return []
 
     stock_regime: dict = {}
@@ -188,9 +192,9 @@ def _leadlag_rows(conn, industry, session, ranked_ids):
         weeks, r_s, r_I, w_s, isc = build_regime_leadlag_inputs(
             regime_map, breadth, n_by_week, cons_weeks.get(tid, set()),
         )
-        if len(weeks) < min(_LEADLAG_WINDOWS):
+        if len(weeks) < min(windows):
             continue
-        for window in _LEADLAG_WINDOWS:
+        for window in windows:
             res = compute_sector_leadlag(r_s, r_I, w_s, window=window)
             for i, wk in enumerate(weeks):
                 cell = res[i]
@@ -215,6 +219,7 @@ def backfill_sector_metrics(
     db_engine: Engine,
     exchange: str,
     *,
+    windows=_LEADLAG_WINDOWS,
     progress_cb=None,
 ):
     """Recompute sector_stock_leadlag (rs_rank + sector lead/lag) for every
@@ -231,7 +236,9 @@ def backfill_sector_metrics(
 
     def _one(industry):
         with transaction(db_engine) as conn:
-            rs_rows, ll_rows = _metrics_for_industry(conn, industry, session)
+            rs_rows, ll_rows = _metrics_for_industry(
+                conn, industry, session, windows,
+            )
             repo = SectorStockLeadlagRepository(conn)
             n = 0
             if rs_rows:

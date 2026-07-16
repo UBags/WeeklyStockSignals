@@ -73,6 +73,7 @@ def run_monthly_leadlag_recompute(
     *,
     if_due: bool = False,
     today: date | None = None,
+    config=None,
     sector_fn: Callable = backfill_sector_metrics,
     matrix_fn: Callable = backfill_industry_regime_matrix,
 ) -> LeadlagRecomputeReport:
@@ -97,7 +98,17 @@ def run_monthly_leadlag_recompute(
 
     logger.info("lead/lag recompute starting for %s", exchange)
     # Ordering mirrors backfill(): sector metrics (6b) before the matrix (6c).
-    sector_fn(db_engine, exchange)
-    matrix_fn(db_engine, exchange)
+    # Windows come from config when supplied; otherwise the runners use
+    # their module defaults.
+    sector_kwargs = (
+        {} if config is None
+        else {"windows": config.leadlag.stock_windows_weeks}
+    )
+    matrix_kwargs = (
+        {} if config is None
+        else {"window": config.leadlag.industry_window_weeks}
+    )
+    sector_fn(db_engine, exchange, **sector_kwargs)
+    matrix_fn(db_engine, exchange, **matrix_kwargs)
     logger.info("lead/lag recompute complete for %s", exchange)
     return LeadlagRecomputeReport(exchange, True, "completed")
