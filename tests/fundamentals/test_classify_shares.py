@@ -37,9 +37,29 @@ class _Info:
         self.source = source
 
 
+class _FakeResult:
+    """Permissive stand-in for a SQLAlchemy Result. The repos read attributes
+    like .rowcount off execute()'s return; anything unspecified yields a
+    harmless default so the success path doesn't trip the bare except."""
+
+    rowcount = 1
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+    def scalar(self):
+        return None
+
+    def __iter__(self):
+        return iter(())
+
+
 class _NoOpConn:
     def execute(self, *a, **k):
-        return None
+        return _FakeResult()
 
     def __enter__(self):
         return self
