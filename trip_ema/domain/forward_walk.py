@@ -23,9 +23,14 @@ from __future__ import annotations
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 
 LONG = "LONG"
 SHORT = "SHORT"
+
+# exit_reason values
+NEXT_SIGNAL = "NEXT_SIGNAL"
+DATA_END = "DATA_END"
 
 # Relative tolerance for threshold touches. entry_open*(1+frac) is not exactly
 # representable (100*1.10 == 110.00000000000001), so an exact round-number touch
@@ -99,6 +104,30 @@ class ForwardWalkResult:
     realized_vol: float | None
     sharpe_in_window: float | None
     capture_ratio: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class SignalForwardWalk:
+    """One persisted forward-walk row: the runner's per-signal output.
+
+    Bookkeeping (side, dates, exit_reason, bars_in_window, window_censored) is
+    always present. ``result`` carries the measured geometry and is None only
+    when the window is DATA-QUALITY censored (demerger / step-suspect region) —
+    in that case the price-derived columns stay at their NULL/-1/false defaults
+    rather than emitting fabricated excursions. A right-censored (DATA_END)
+    window still gets a full ``result``: the trade is real, it simply has no
+    terminating next signal yet, so ``window_censored`` is True but the
+    excursions are honest.
+    """
+    signal_enrichment_id: int
+    side: str
+    entry_date: date
+    exit_date: date
+    exit_reason: str
+    bars_in_window: int
+    window_censored: bool
+    result: ForwardWalkResult | None
+    forward_walk_done: bool = True
 
 
 def _ols_slope(ys: Sequence[float]) -> float | None:
