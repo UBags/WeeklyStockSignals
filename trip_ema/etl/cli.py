@@ -724,6 +724,24 @@ def cmd_unpark(args, ctx: AppContext) -> int:
     return 0
 
 
+def cmd_refresh_corp_actions(args, ctx: AppContext) -> int:
+    from datetime import date
+    from ..etl.nse_actions_loader import run_nse_actions_refresh
+
+    to_date = args.to_date or date.today().strftime("%d-%m-%Y")
+    summary = run_nse_actions_refresh(
+        ctx.db_engine, from_date=args.from_date, to_date=to_date,
+    )
+    print(
+        f"nse corp actions [{args.from_date}..{to_date}]: "
+        f"fetched={summary.rows_fetched} built={summary.actions_built} "
+        f"inserted={summary.actions_inserted} resolved={summary.actions_resolved} "
+        f"unresolved={summary.actions_unresolved} "
+        f"skipped_bad_date={summary.rows_skipped_bad_date}"
+    )
+    return 0
+
+
 def cmd_approve_action(args, ctx: AppContext) -> int:
     config = ctx.config
     db_engine = ctx.db_engine
@@ -1311,6 +1329,19 @@ def _build_parser() -> argparse.ArgumentParser:
     appr.add_argument("action_id", type=int)
     appr.add_argument("--notes", help="Optional reviewer notes")
 
+    rca = sub.add_parser(
+        "refresh-corp-actions",
+        help="Fetch NSE corporate actions from nselib and upsert the parsed feed",
+    )
+    rca.add_argument(
+        "--from-date", dest="from_date", default="01-01-2006",
+        help="nselib from_date, DD-MM-YYYY (default 01-01-2006)",
+    )
+    rca.add_argument(
+        "--to-date", dest="to_date", default=None,
+        help="nselib to_date, DD-MM-YYYY (default: today)",
+    )
+
     # Phase 1 fundamentals commands. Registered here so the user
     # types `trip-ema-etl refresh-industry` exactly like the other
     # ETL commands. The fundamentals package's CLI module owns the
@@ -1363,6 +1394,7 @@ def main(argv: list[str] | None = None) -> int:
         "status":               cmd_status,
         "unpark":               cmd_unpark,
         "approve-action":       cmd_approve_action,
+        "refresh-corp-actions": cmd_refresh_corp_actions,
         "snapshot":             cmd_snapshot,
         "cycle":                cmd_cycle,
     }

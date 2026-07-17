@@ -66,6 +66,7 @@ from ..orchestrator.industry_stages import (
     _stage_industry_state,
 )
 from .stages import BackfillStages, ProcessBoundaryError
+from .ohlcv_correction_stage import correct_ohlcv_stage
 from ..persistence import transaction
 from .phase_ledger import reset_phases, run_phase as _ledger_run_phase
 from ..fundamentals.parallel import (
@@ -573,6 +574,28 @@ def backfill(
             _emit_progress(
                 progress_cb,
                 "stage_1_fetch_bars", "skipped (--no_fetch_bars)",
+            )
+
+        # ---- Stage 1b: OHLCV corporate-action correction ----
+        if refetch_bars:
+            _emit_progress(progress_cb, "stage_1b_correct_ohlcv", "starting")
+            _cr = run_phase(
+                db_engine, exchange, "correct_ohlcv",
+                lambda: correct_ohlcv_stage(
+                    db_engine, exchange=exchange, scoped_tickers=scoped_tickers,
+                ),
+                backfill_run_id=run_id, force=_force,
+            )
+            if _cr is not None:
+                _emit_progress(
+                    progress_cb, "stage_1b_correct_ohlcv",
+                    f"completed: corrected {_cr.tickers_corrected} tickers, "
+                    f"wrote {_cr.bars_written} bars, "
+                    f"censored {_cr.censored_windows} windows",
+                )
+        else:
+            _emit_progress(
+                progress_cb, "stage_1b_correct_ohlcv", "skipped (--no_fetch_bars)",
             )
 
         # ---- Stage 2: stock indicator state ----
