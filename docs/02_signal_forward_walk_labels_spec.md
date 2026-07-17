@@ -41,7 +41,7 @@ Because each threshold is an independent "ever touched within window" flag, intr
 
 ## 3. Data model
 
-Extend the existing **`signal_labels`** table (one row per signal, 1:1 with `signal_enrichment` via `signal_enrichment_id`; PK `signal_label_id`). A migration (`0054_signal_label_forward_walk`, already drafted) drops `quality_class` (+ its CHECK + index) and adds the columns below. The weekly `fwd_ret_4w/8w/13w`, `fwd_max_dd`, `fwd_rr` columns are retained for now (feature-only; recommend a later dedicated commit to retire the weekly labeler if they aren't wanted).
+Extend the existing **`signal_labels`** table (one row per signal, 1:1 with `signal_enrichment` via `signal_enrichment_id`; PK `signal_label_id`). A migration (`0055_signal_label_forward_walk`, drafted — renumbered from `0054` because `0054_nse_corporate_actions` landed in the interim and is the current alembic head; revises down from it) drops `quality_class` (+ its CHECK `sl_quality_class_chk` + index `ix_signal_labels_quality`) and adds the columns below. The weekly `fwd_ret_4w/8w/13w`, `fwd_max_dd`, `fwd_rr` columns are retained for now (feature-only; recommend a later dedicated commit to retire the weekly labeler if they aren't wanted).
 
 Everything the walk writes is gated by **`forward_walk_done`** (boolean, default false): rows predating the walk read false and their `hit_/bars_` columns are placeholders. Consumers filter `WHERE forward_walk_done`.
 
@@ -83,7 +83,15 @@ Everything the walk writes is gated by **`forward_walk_done`** (boolean, default
 | `sharpe_in_window` | float | mean daily ret / stdev |
 | `capture_ratio` | float | `realized_ret / mfe_pct` (≤ 1; NULL if mfe=0) |
 
-Bars/bools are NOT NULL (`-1`/false defaults); float metrics are nullable (NULL = genuinely no value). `atr10..atr40`, `signal_price`, `industry_id` are already on `signal_enrichment`; industry/market series come from `industry_index_value` / `market_overview_daily`.
+Bars/bools are NOT NULL (`-1`/false defaults); float metrics are nullable (NULL = genuinely no value). `atr10..atr40`, `signal_price` are already on `signal_enrichment`. Context-return series (see **§3a**): the **market** series is NIFTYBEES daily bars from `ohlcv_bars`; the **industry** series is `industry_index_value`. Note `market_overview_daily` is **breadth counts only (no index level)** and is *not* a return source; and `signal_enrichment.industry_id` is an unconstrained denormalised grouping int (no FK) and is *not* the industry join key.
+
+### 3a. Context-return resolution (`excess_ret_market`, `excess_ret_industry`)
+
+Both excess returns difference the trade's `realized_ret` against a benchmark total return over the same `[entry_date … exit_date]` window, using the `close_last / close_first − 1` convention already in `benchmark_stats_compute`, with **nearest-prior (asof-backward) alignment** inside the window (benchmark trading days may not coincide exactly with the stock's).
+
+- **Market series (NIFTYBEES).** Resolve once per run: `SELECT ticker_id FROM tickers WHERE exchange = :exch AND symbol = 'NIFTYBEES'` — the established `_NIFTY50_FALLBACK` / `NIFTY_BENCHMARK_ID` proxy. `market_ret = nifty_close(exit) / nifty_close(entry) − 1`. `excess_ret_market = realized_ret − market_ret`.
+- **Industry series.** Resolve the signal's industry **by ticker, not by `industry_id`**: `SELECT industry FROM instrument_industry WHERE ticker_id = :t`, then `SELECT trade_date, value FROM industry_index_value WHERE industry_name = :ind`. If the industry resolves **and** the value series covers the window, `industry_ret = value(exit) / value(entry) − 1`. **Fallback to NIFTYBEES** (`industry_ret := market_ret`) in any of: no industry mapping (ETF/unclassified), industry has no active constituent-bearing index (`< min_constituents`), or the index is unvalued across the window. In the fallback case `excess_ret_industry == excess_ret_market` by construction. `excess_ret_industry = realized_ret − industry_ret`.
+- **Nullability.** NIFTYBEES is always present in the NSE universe, so both excess columns are populated whenever the walk produced a `realized_ret`; they are NULL only if NIFTYBEES itself has no bars spanning the window (should not occur post-backfill).
 
 **Data-quality gate.** Any walk window containing a `step_suspect` / demerger / dropped-bad-tick region (from the OHLCV corrector) is marked `window_censored` rather than emitting fabricated excursions. Bad-tick/phantom bars are already absent (dropped upstream); demerger windows are censored.
 
@@ -105,7 +113,7 @@ Bars/bools are NOT NULL (`-1`/false defaults); float metrics are nullable (NULL 
 
 ## 5. Implementation plan
 
-1. **Migration `0054`** (drafted): drop `quality_class` + CHECK + index; add the ~79 columns above (rung lists generated in the migration). Regenerate `DDL.txt` via the standard `pg_dump` after `alembic upgrade`. *Ordering:* a preceding commit must stop the code writing `quality_class` (domain dataclass field, `compute_label`, runner, repo SQL, tests) before the column is dropped, else the labeler INSERT breaks.
+1. **Migration `0055`** (`0055_signal_label_forward_walk`, drafted; revises `0054_nse_corporate_actions`): drop `quality_class` + CHECK + index; add the ~79 columns above (rung lists generated in the migration). Regenerate `DDL.txt` via the standard `pg_dump` after `alembic upgrade`. *Ordering:* a preceding commit must stop the code writing `quality_class` (domain dataclass field, `compute_label`, runner, repo SQL, tests) before the column is dropped, else the labeler INSERT breaks.
 2. **Pure `walk_signal`** + exhaustive unit tests: long & short; the "3/5/7/9 all hit on bar 2 ⇒ distance 1" case; `-1` defaults; censored window; MAE/MFE bars; `mae_before_mfe`; capture ratio; a window abutting a censored/demerger region.
 3. **Per-ticker runner** (window pairing + single bulk bar fetch + in-memory slicing).
 4. **Orchestration** (ProcessPool, ticker sharding, single writer) + integration tests.
@@ -125,6 +133,8 @@ Discipline: compile → import-test → run affected suite; small green commits,
 - `quality_class` **dropped**; the target `y` is derived downstream from these metrics.
 - Extras approved: excess-return vs industry & market, ATR-normalized MFE/MAE, `mae_before_mfe`, time-underwater, in-window slope/vol/Sharpe, capture ratio. Triple-barrier **dropped**.
 - Walk runs on corrected, self-adjusted daily bars; demerger/step-suspect windows are `window_censored`.
+- **Context returns (§3a):** market benchmark = NIFTYBEES daily bars (`_NIFTY50_FALLBACK`), never `market_overview_daily`. Industry benchmark = `industry_index_value` resolved via `instrument_industry.industry` (by ticker, **not** `industry_id`); fall back to NIFTYBEES when the stock has no covered industry index. `close_last/close_first − 1` with nearest-prior alignment.
+- Migration is **`0055_signal_label_forward_walk`** (revises `0054_nse_corporate_actions`), not `0054`.
 
 ## 7. Open / downstream
 
