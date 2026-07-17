@@ -84,6 +84,7 @@ from ..fundamentals.runners import (
     run_shares_refresh,
     build_all_industry_index_chains,
     clear_industry_derived_for_rebuild,
+    clear_industry_derived_for_industries,
 )
 from ..fundamentals.sector_metrics_runner import backfill_sector_metrics
 from ..fundamentals.industry_regime_runner import backfill_industry_regime_matrix
@@ -730,6 +731,10 @@ def backfill(
         # chains are "built" iff industry_index_period has rows for an
         # ACTIVE index (the global clear wipes periods+constituents but keeps
         # the industry_index definitions, so base_date alone is insufficient).
+        _ind_scope = (
+            _resolve_affected_industries(db_engine, scoped_tickers)
+            if stocks is not None else None
+        )
         _scoped_industry_rebuild = False
         if _force:
             with db_engine.connect() as _c:
@@ -754,7 +759,19 @@ def backfill(
                     f"full rebuild first with --date_from <= {_origin}."
                 )
 
-        if _scoped_industry_rebuild:
+        if stocks is not None:
+            # Scoped-stocks recompute: reuse existing chains (skip clear +
+            # 3c) and scoped-clear ONLY the affected industries' DO-NOTHING
+            # derived value/state/enrichment so 3d/5/6 overwrite fresh.
+            # Every other industry is left untouched.
+            if _ind_scope:
+                clear_industry_derived_for_industries(db_engine, _ind_scope)
+            _emit_progress(
+                progress_cb, "stage_3c_industry_index_build",
+                f"skipped (scoped to {len(_ind_scope or [])} affected "
+                f"industry(ies))",
+            )
+        elif _scoped_industry_rebuild:
             # SCOPED: reuse constituents. Skip the global (unscoped) clear —
             # it deletes constituents+periods for ALL active industries and
             # would force a from-scratch rebuild — and skip stage_3c chain
@@ -808,6 +825,7 @@ def backfill(
                 db_engine, date_from=date_from, date_to=date_to,
                 progress_cb=progress_cb,
                 populate_fn=stages.populate_industry_index_value_for_all,
+                industries=_ind_scope,
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -824,6 +842,7 @@ def backfill(
             db_engine, exchange, "industry_state",
             lambda: stages.industry_state(
                 db_engine, mode="full", progress_cb=progress_cb,
+                industries=_ind_scope,
             )[0],
             backfill_run_id=run_id, force=_force,
         )
@@ -842,6 +861,7 @@ def backfill(
             db_engine, exchange, "industry_enrichment",
             lambda: stages.industry_enrichment(
                 db_engine, mode="full", progress_cb=progress_cb,
+                industries=_ind_scope,
             )[0],
             backfill_run_id=run_id, force=_force,
         )
@@ -1348,10 +1368,29 @@ def _stage_industry_index_build(
     return n_built
 
 
+def _resolve_affected_industries(db_engine, ticker_ids) -> list[str]:
+    """Industries whose index includes any of the given tickers as a
+    constituent (any period). Scopes an industry recompute to only the
+    affected industries on a stocks-scoped backfill."""
+    ids = [int(t) for t in (ticker_ids or [])]
+    if not ids:
+        return []
+    with db_engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT DISTINCT industry_name FROM "
+                "industry_index_constituent WHERE ticker_id = ANY(:ids)"
+            ),
+            {"ids": ids},
+        ).all()
+    return sorted(r.industry_name for r in rows)
+
+
 def _stage_industry_index_values(
     db_engine: Engine, *, date_from: date, date_to: date,
     progress_cb: Callable[[str, str], None] | None = None,
     populate_fn=None,
+    industries: list[str] | None = None,
 ) -> int:
     """Backfill daily industry_index_value rows for all active indices.
 
@@ -1366,7 +1405,7 @@ def _stage_industry_index_values(
         populate_fn = populate_industry_index_value_for_all
     report = populate_fn(
         db_engine, from_date=date_from, to_date=date_to,
-        progress_cb=progress_cb,
+        progress_cb=progress_cb, industries=industries,
     )
     return (
         len(report.get("succeeded", []))

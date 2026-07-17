@@ -2467,6 +2467,34 @@ def clear_industry_derived_for_rebuild(db_engine: Engine) -> dict:
     return counts
 
 
+def clear_industry_derived_for_industries(db_engine: Engine, industries) -> dict:
+    """Delete DERIVED value/state/enrichment rows for the GIVEN industries
+    only (NOT constituents/periods — chains are reused). For a scoped recompute
+    where a few stocks' industries need fresh values without touching the rest
+    or the rebalance chains. industry_index_value writes are ON CONFLICT DO
+    NOTHING, so the affected rows must be deleted before recompute or they keep
+    stale values."""
+    names = [n for n in (industries or []) if n]
+    if not names:
+        return {}
+    counts: dict[str, int] = {}
+    with transaction(db_engine) as conn:
+        for tbl in (
+            "industry_indicator_enrichment",
+            "industry_indicator_state",
+            "industry_index_value",
+        ):
+            res = conn.execute(
+                text(f"DELETE FROM {tbl} WHERE industry_name = ANY(:names)"),
+                {"names": names},
+            )
+            counts[tbl] = res.rowcount
+    logger.info(
+        "clear_industry_derived_for_industries(%d): %s", len(names), counts,
+    )
+    return counts
+
+
 def build_all_industry_index_chains(
     db_engine: Engine,
     exchange: str,

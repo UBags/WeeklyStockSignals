@@ -819,6 +819,7 @@ def populate_industry_index_value_for_all(
     to_date: date | None = None,
     checkpoint_every: int = 50,
     progress_cb=None,
+    industries: list[str] | None = None,
 ) -> dict:
     """Bulk-compute V1 industry index values for every ACTIVE industry.
 
@@ -845,6 +846,9 @@ def populate_industry_index_value_for_all(
     """
     with db_engine.connect() as conn:
         indices = IndustryIndexRepository(conn).list_active()
+        if industries is not None:
+            _want = set(industries)
+            indices = [i for i in indices if i.industry_name in _want]
 
     succeeded: list[tuple[str, int, int]] = []
     failed: list[tuple[str, str]] = []
@@ -1144,6 +1148,7 @@ def populate_industry_indicator_state_for_all(
     mode: Literal["full", "incremental"] = "full",
     n_weeks_to_upsert: int = 2,
     progress_cb=None,
+    industries: list[str] | None = None,
 ) -> dict:
     """Bulk-compute V1 industry indicator state for every ACTIVE
     industry.
@@ -1165,6 +1170,9 @@ def populate_industry_indicator_state_for_all(
     """
     with db_engine.connect() as conn:
         indices = IndustryIndexRepository(conn).list_active()
+        if industries is not None:
+            _want = set(industries)
+            indices = [i for i in indices if i.industry_name in _want]
 
     succeeded: list[tuple[str, int, int]] = []
     failed: list[tuple[str, str]] = []
@@ -1431,6 +1439,7 @@ def populate_industry_indicator_enrichment_for_all(
     mode: Literal["full", "incremental"] = "full",
     n_weeks_to_upsert: int = 2,
     progress_cb=None,
+    industries: list[str] | None = None,
 ) -> dict:
     """Bulk-compute V1 industry indicator enrichment for every
     ACTIVE industry.
@@ -1452,6 +1461,9 @@ def populate_industry_indicator_enrichment_for_all(
     """
     with db_engine.connect() as conn:
         indices = IndustryIndexRepository(conn).list_active()
+        if industries is not None:
+            _want = set(industries)
+            indices = [i for i in indices if i.industry_name in _want]
 
     succeeded: list[tuple[str, int, int]] = []
     failed: list[tuple[str, str]] = []
