@@ -1094,27 +1094,53 @@ def backfill(
         # it, so a cron-driven run cannot silently succeed on a half-built
         # database.
         _emit_progress(progress_cb, "stage_9_audit_postflight", "starting")
-        _post = audit_exchange(
-            db_engine, exchange, gap_days=config.etl.max_coverage_gap_days,
-        )
-        result_kwargs["fidelity_ready"] = _post.ready
-        result_kwargs["fidelity_gaps"] = [d.dataset for d in _post.gaps]
-        result_kwargs["fidelity_report"] = _post.render()
-        for _line in _post.render().splitlines():
-            logger.info("postflight| %s", _line)
-        if _post.ready:
-            logger.info("postflight: READY — every link in the chain is OK")
-        else:
-            logger.warning(
-                "postflight: NOT READY — %d gap(s) remain after a full "
-                "backfill: %s",
-                len(_post.gaps), ", ".join(d.dataset for d in _post.gaps),
+        if stocks is not None:
+            # Scoped run: only the scoped tickers were touched, so the
+            # exchange-wide readiness audit is not a verdict on THIS run.
+            # Skip it — a full-universe "NOT READY" on a scoped recompute is a
+            # false alarm (and the audit is slow). fidelity_ready=None makes
+            # the CLI print a scoped-run note and still exit 0.
+            result_kwargs["fidelity_ready"] = None
+            result_kwargs["fidelity_gaps"] = []
+            result_kwargs["fidelity_report"] = (
+                f"scoped run ({len(stocks)} ticker(s)) — full-universe "
+                "fidelity audit skipped (N/A for a scoped recompute)."
             )
-        _emit_progress(
-            progress_cb, "stage_9_audit_postflight",
-            "completed: READY" if _post.ready
-            else f"completed: {len(_post.gaps)} gap(s) REMAIN",
-        )
+            logger.info(
+                "postflight: scoped run (%d ticker(s)) — full-universe audit "
+                "skipped (N/A for a scoped recompute).", len(stocks),
+            )
+            _emit_progress(
+                progress_cb, "stage_9_audit_postflight",
+                f"completed: scoped run ({len(stocks)} ticker(s)) — "
+                "full-universe audit N/A",
+            )
+        else:
+            _post = audit_exchange(
+                db_engine, exchange,
+                gap_days=config.etl.max_coverage_gap_days,
+            )
+            result_kwargs["fidelity_ready"] = _post.ready
+            result_kwargs["fidelity_gaps"] = [d.dataset for d in _post.gaps]
+            result_kwargs["fidelity_report"] = _post.render()
+            for _line in _post.render().splitlines():
+                logger.info("postflight| %s", _line)
+            if _post.ready:
+                logger.info(
+                    "postflight: READY — every link in the chain is OK"
+                )
+            else:
+                logger.warning(
+                    "postflight: NOT READY — %d gap(s) remain after a full "
+                    "backfill: %s",
+                    len(_post.gaps),
+                    ", ".join(d.dataset for d in _post.gaps),
+                )
+            _emit_progress(
+                progress_cb, "stage_9_audit_postflight",
+                "completed: READY" if _post.ready
+                else f"completed: {len(_post.gaps)} gap(s) REMAIN",
+            )
 
         _emit_progress(progress_cb, "stage_10_cache", "skipped (service-side)")
 

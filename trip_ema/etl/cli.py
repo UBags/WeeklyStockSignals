@@ -418,6 +418,15 @@ def _report_backfill_result(result) -> int:
         print(f"  gaps:        {', '.join(result.fidelity_gaps)}")
         print()
         print(result.fidelity_report)
+    elif result.fidelity_ready is None:
+        # Scoped run — the exchange-wide fidelity audit does not apply.
+        print(
+            "backfill complete — scoped run "
+            "(full-universe fidelity audit N/A)"
+        )
+        print(f"  run_id:      {result.run_id}")
+        if result.fidelity_report:
+            print(f"  {result.fidelity_report}")
     else:
         print("backfill complete — data fidelity: READY")
         print(f"  run_id:      {result.run_id}")
