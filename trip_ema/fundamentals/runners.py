@@ -650,9 +650,9 @@ def _run_reference_sweep(
     phase: str,
     ticker_list: list[dict],
     completed_ids: set[int],
-    worker_fn: "Callable[[dict], str]",
+    worker_fn: Callable[[dict], str],
     max_workers: int | None = None,
-    checkpoint_sink: "Callable | None" = None,
+    checkpoint_sink: Callable | None = None,
 ) -> int:
     """Shared spine for the reference sweeps (industry / shares / financials).
 
@@ -881,6 +881,38 @@ def run_shares_refresh(
             )
             if t["id"] in _scoped
         ]
+        if not ticker_list:
+            logger.info(
+                "No matching active tickers for scoped shares refresh "
+                "on %s — nothing to fetch", exchange,
+            )
+            with transaction(db_engine) as conn:
+                run_id = FundamentalsRunRepository(conn).open(
+                    phase="shares", exchange=exchange,
+                    notes="No scoped tickers",
+                )
+                FundamentalsRunRepository(conn).close(
+                    run_id, status="SUCCESS",
+                    succeeded=0, failed=0, skipped=0,
+                )
+            return run_id
+        with transaction(db_engine) as conn:
+            run_id = FundamentalsRunRepository(conn).open(
+                phase="shares", exchange=exchange,
+                notes=f"Scoped shares refresh of {len(ticker_list)} tickers",
+            )
+            FundamentalsRunRepository(conn).update_progress(
+                run_id,
+                progress_json={
+                    "ticker_list": [
+                        {"id": t["id"], "symbol": t["symbol"],
+                         "instrument_type": t.get("instrument_type", "EQ")}
+                        for t in ticker_list
+                    ],
+                    "cursor_index": 0,
+                },
+            )
+        cursor_index = 0
     else:
         ticker_list = _load_active_tickers_for_exchange(
             db_engine, exchange,
