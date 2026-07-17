@@ -170,14 +170,24 @@ def compute_ticker_walks(
         # industry index over the window (spec §3a)
         industry_ret = ind_ret if ind_ret is not None else market_ret
 
-        result = walk_signal(
-            window[0].open,
-            window,
-            side,
-            atr20=sig.atr20,
-            industry_ret=industry_ret,
-            market_ret=market_ret,
-        )
+        try:
+            result = walk_signal(
+                window[0].open,
+                window,
+                side,
+                atr20=sig.atr20,
+                industry_ret=industry_ret,
+                market_ret=market_ret,
+            )
+        except ValueError as exc:
+            # One bad signal (non-positive entry/close from unrepaired
+            # data) must not lose the ticker's other signals — log, skip,
+            # keep going. A non-ValueError still propagates (real bug).
+            logger.warning(
+                "forward_walk: skipping signal %s (%s..%s): %s",
+                sig.signal_enrichment_id, entry_date, exit_date, exc,
+            )
+            continue
         out.append(SignalForwardWalk(
             signal_enrichment_id=sig.signal_enrichment_id,
             side=side,

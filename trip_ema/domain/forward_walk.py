@@ -170,6 +170,8 @@ def walk_signal(
     m = len(bars)
     exit_close = bars[-1].close
     closes = [b.close for b in bars]
+    if any(c <= 0 for c in closes):
+        raise ValueError("walk_signal requires positive closes")
 
     # --- realized directional return -------------------------------------
     if is_long:

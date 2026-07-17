@@ -181,6 +181,39 @@ def test_atr20_flows_from_signal_into_result():
     assert abs(r.mfe_atr20 - (r.mfe_pct * 100 / 3.0)) < 1e-9
 
 
+def test_a_bad_entry_open_signal_is_skipped_and_the_rest_survive():
+    # The first BUY's entry bar has open=0 -> walk_signal raises ValueError ->
+    # that signal is skipped; the second signal walks fine.
+    bars = [
+        bar(D(1, 1), 100, 101, 99, 100),
+        bar(D(1, 2), 0, 106, 100, 105),      # entry open 0 for the BUY
+        bar(D(1, 3), 105, 107, 104, 106),
+        bar(D(1, 4), 106, 108, 103, 104),
+        bar(D(1, 5), 104, 105, 100, 101),
+    ]
+    rows = compute_ticker_walks(
+        [sig(10, D(1, 1), "BUY"),      # entry D2 (open 0) -> skipped
+         sig(20, D(1, 3), "SELL")],    # entry D4 -> row
+        bars, market_series=[], industry_series=None,
+    )
+    assert [r.signal_enrichment_id for r in rows] == [20]
+
+
+def test_a_signal_with_a_zero_close_in_window_is_skipped():
+    # A zero close in the window would divide-by-zero (SHORT realized_ret /
+    # the returns series) — guarded to ValueError and skipped, not a crash.
+    bars = [
+        bar(D(1, 1), 100, 101, 99, 100),
+        bar(D(1, 2), 100, 106, 100, 105),
+        bar(D(1, 3), 105, 107, 104, 0),      # zero close inside the window
+    ]
+    rows = compute_ticker_walks(
+        [sig(10, D(1, 1), "BUY")],           # window [D2, D3]; D3 close 0
+        bars, market_series=[], industry_series=None,
+    )
+    assert rows == []
+
+
 def test_censor_predicate_true_when_window_spans_a_censor_date():
     pred = _make_censor_predicate([D(1, 3)])
     assert pred(D(1, 2), D(1, 4)) is True      # spans
