@@ -21,7 +21,6 @@ def test_build_labels_full_horizon():
     assert lab.signal_enrichment_id == 555
     assert lab.horizon_complete is True
     assert abs(lab.fwd_ret_4w - (weeks[7][1] / weeks[3][1] - 1)) < 1e-9
-    assert lab.quality_class == "VERY_GOOD"
 
 
 def test_build_labels_partial_horizon_null_class():
@@ -30,7 +29,6 @@ def test_build_labels_partial_horizon_null_class():
     labels = build_ticker_labels(enr, weeks, {}, lambda d: weeks[18][0])
     assert labels[0].horizon_complete is False
     assert labels[0].fwd_ret_13w is None
-    assert labels[0].quality_class is None
 
 
 def test_signal_not_in_weekly_series_is_skipped():

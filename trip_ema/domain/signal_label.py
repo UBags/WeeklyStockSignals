@@ -13,5 +13,4 @@ class SignalLabel:
     fwd_ret_13w: float | None
     fwd_max_dd: float | None
     fwd_rr: float | None
-    quality_class: str | None
     horizon_complete: bool

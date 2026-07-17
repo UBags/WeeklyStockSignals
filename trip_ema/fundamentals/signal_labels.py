@@ -11,16 +11,6 @@ judged on the direction-adjusted return. fwd_ret_Nw is stored raw
 """
 from __future__ import annotations
 
-# tunable thresholds (spec: "tuned on data")
-RET_VERYGOOD = 0.10     # >=10% directional return
-DD_VERYGOOD = 0.08      # <=8% max drawdown
-RR_VERYGOOD = 1.5       # moved >=1.5 ATR in favour
-DD_BAD = 0.15           # >15% drawdown -> Bad regardless of return
-
-CLASS_BAD = "BAD"
-CLASS_GOOD = "GOOD"
-CLASS_VERYGOOD = "VERY_GOOD"
-
 _DIR = {"BUY": 1, "SELL": -1, "EXIT_FROM_BUY": -1, "EXIT_FROM_SELL": 1}
 
 _HORIZON = 13
@@ -47,9 +37,9 @@ def _max_drawdown(equity):
 
 
 def compute_label(close_t, closes_ahead, atr_t, signal_type):
-    """Return (fwd_ret_4w, fwd_ret_8w, fwd_ret_13w, fwd_max_dd, fwd_rr,
-    quality_class). Any of the forward returns / rr / class may be None
-    when there aren't enough future bars yet."""
+    """Return (fwd_ret_4w, fwd_ret_8w, fwd_ret_13w, fwd_max_dd, fwd_rr).
+    Any of the forward returns / rr may be None when there aren't enough
+    future bars yet."""
     d = _DIR.get(signal_type, 1)
     r4 = _fwd_ret(close_t, closes_ahead, 4)
     r8 = _fwd_ret(close_t, closes_ahead, 8)
@@ -65,22 +55,11 @@ def compute_label(close_t, closes_ahead, atr_t, signal_type):
     else:
         fwd_max_dd = None
 
-    # class judged on the longest available horizon
+    # reward in ATR units (directional), on the longest available horizon
     prim = r13 if r13 is not None else (r8 if r8 is not None else r4)
     if prim is None:
-        return r4, r8, r13, fwd_max_dd, None, None
-    dprim = prim * d
-    # reward in ATR units (directional)
+        return r4, r8, r13, fwd_max_dd, None
     n = 13 if r13 is not None else (8 if r8 is not None else 4)
     move = closes_ahead[n - 1] - close_t
     rr = (move * d / atr_t) if (atr_t not in (None, 0)) else None
-
-    if dprim < 0 or (fwd_max_dd is not None and fwd_max_dd > DD_BAD):
-        qc = CLASS_BAD
-    elif (dprim >= RET_VERYGOOD
-          and fwd_max_dd is not None and fwd_max_dd <= DD_VERYGOOD
-          and rr is not None and rr >= RR_VERYGOOD):
-        qc = CLASS_VERYGOOD
-    else:
-        qc = CLASS_GOOD
-    return r4, r8, r13, fwd_max_dd, rr, qc
+    return r4, r8, r13, fwd_max_dd, rr

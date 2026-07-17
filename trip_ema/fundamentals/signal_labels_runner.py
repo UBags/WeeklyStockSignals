@@ -51,13 +51,13 @@ def build_ticker_labels(enr_rows, weekly, atr_by_date, week_of):
             continue
         close_t = closes[idx]
         ahead = closes[idx + 1: idx + 1 + _H]
-        r4, r8, r13, dd, rr, qc = compute_label(
+        r4, r8, r13, dd, rr = compute_label(
             close_t, ahead, atr_by_date.get(sdate), stype,
         )
         out.append(SignalLabel(
             signal_enrichment_id=seid,
             fwd_ret_4w=r4, fwd_ret_8w=r8, fwd_ret_13w=r13,
-            fwd_max_dd=dd, fwd_rr=rr, quality_class=qc,
+            fwd_max_dd=dd, fwd_rr=rr,
             horizon_complete=len(ahead) >= _H,
         ))
     return out
