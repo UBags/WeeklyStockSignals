@@ -725,10 +725,10 @@ def cmd_unpark(args, ctx: AppContext) -> int:
 
 
 def cmd_refresh_corp_actions(args, ctx: AppContext) -> int:
-    from datetime import date
+    from datetime import datetime
     from ..etl.nse_actions_loader import run_nse_actions_refresh
 
-    to_date = args.to_date or date.today().strftime("%d-%m-%Y")
+    to_date = args.to_date or datetime.now(market_tz("NSE")).strftime("%d-%m-%Y")
     summary = run_nse_actions_refresh(
         ctx.db_engine, from_date=args.from_date, to_date=to_date,
     )

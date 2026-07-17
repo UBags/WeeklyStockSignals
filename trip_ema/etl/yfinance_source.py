@@ -291,7 +291,7 @@ class YFinanceSource:
                     start=start.isoformat(),
                     end=(end + timedelta(days=1)).isoformat(),  # yf is end-exclusive
                     interval="1d",
-                    auto_adjust=True,   # split+dividend adjusted (was False)
+                    auto_adjust=False,  # split-adjusted only; dividends parked in adj_close (§3.2)
                     actions=False,
                     repair=self._repair,  # False on the solo-retry pass
                     threads=False,
@@ -369,7 +369,7 @@ class YFinanceSource:
                     tickers=yf_symbols,
                     period=f"{lookback_days}d",
                     interval="1h",
-                    auto_adjust=True,   # split+dividend adjusted (was False)
+                    auto_adjust=False,  # split-adjusted only; dividends parked in adj_close (§3.2)
                     actions=False,
                     repair=self._repair,  # False on the solo-retry pass
                     threads=False,

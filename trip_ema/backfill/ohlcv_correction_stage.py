@@ -80,17 +80,25 @@ def correct_ohlcv_stage(
     config: CorrectionConfig | None = None,
     bar_limit: int = 100_000,
     min_bars: int = 3,
+    transaction=transaction,
+    make_actions_repo=NseCorporateActionsRepository,
+    make_bars_repo=BarsRepository,
 ) -> CorrectionStageSummary:
     """Correct the daily series for every scoped ticker that has nselib
     actions, persisting the corrected bars. Idempotent: re-running on an
     already-corrected series is a no-op (seams measure ≈1 → ADJUSTED_OK →
-    no writes)."""
+    no writes).
+
+    The transaction opener and the two repositories are injected (defaulting
+    to the production collaborators) so the stage is testable without patching
+    — inject fakes, per the closed-seam discipline.
+    """
     tz = market_tz(exchange)
     scanned = corrected = bars_written = censored = 0
 
     with transaction(engine) as conn:
-        actions_repo = NseCorporateActionsRepository(conn)
-        bars_repo = BarsRepository(conn)
+        actions_repo = make_actions_repo(conn)
+        bars_repo = make_bars_repo(conn)
 
         for ticker_id in scoped_tickers:
             events = actions_repo.factor_events_for_ticker(ticker_id)

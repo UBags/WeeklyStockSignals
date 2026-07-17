@@ -67,6 +67,7 @@ from ..orchestrator.industry_stages import (
 )
 from .stages import BackfillStages, ProcessBoundaryError
 from .ohlcv_correction_stage import correct_ohlcv_stage
+from ..etl.nse_actions_loader import run_nse_actions_refresh
 from ..persistence import transaction
 from .phase_ledger import reset_phases, run_phase as _ledger_run_phase
 from ..fundamentals.parallel import (
@@ -551,6 +552,30 @@ def backfill(
             _emit_progress(
                 progress_cb, "stage_0b_reference",
                 "skipped (--no_refresh_reference)",
+            )
+
+        # ---- Stage 0c: refresh NSE corporate actions (nselib) ----
+        if refetch_bars and exchange == "NSE":
+            _emit_progress(progress_cb, "stage_0c_corp_actions", "starting")
+            _ca = run_phase(
+                db_engine, exchange, "refresh_corp_actions",
+                lambda: run_nse_actions_refresh(
+                    db_engine,
+                    from_date="01-01-2006",
+                    to_date=market_today(exchange).strftime("%d-%m-%Y"),
+                ),
+                backfill_run_id=run_id, force=_force,
+            )
+            if _ca is not None:
+                _emit_progress(
+                    progress_cb, "stage_0c_corp_actions",
+                    f"completed: fetched {_ca.rows_fetched}, "
+                    f"inserted {_ca.actions_inserted}",
+                )
+        else:
+            _emit_progress(
+                progress_cb, "stage_0c_corp_actions",
+                "skipped (--no_fetch_bars or non-NSE)",
             )
 
         # ---- Stage 1: yfinance bar refetch ----
