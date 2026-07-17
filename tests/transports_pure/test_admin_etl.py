@@ -324,9 +324,22 @@ class TestBackfill:
         )
         assert resp.status_code == 200
         _, args, _ = exec_.submitted[0]
-        tier_filter = args[4]
-        from trip_ema.etl.types import Tier
-        assert tier_filter == {Tier.TIER_1}
+        # args = (db_engine, config, exchange, start_date, stocks, tier)
+        assert args[4] is None      # no stocks CSV
+        assert args[5] == 1         # tier passed through; resolved on the worker
+
+    def test_with_stocks_scope(self, auth_headers):
+        exec_ = FakeExecutor()
+        client = _make_client(executor=exec_)
+        resp = client.post(
+            "/v1/admin/etl/backfill?exchange=NSE&start_date=2020-01-01"
+            "&stocks=RELIANCE,TCS",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        _, args, _ = exec_.submitted[0]
+        assert args[4] == "RELIANCE,TCS"   # raw CSV; resolved on the worker
+        assert args[5] is None
 
     def test_invalid_tier_rejected(self, auth_headers):
         client = _make_client(executor=FakeExecutor())

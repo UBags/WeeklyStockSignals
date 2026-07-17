@@ -41,10 +41,8 @@ from ....etl.exchanges import UnsupportedExchangeError, validate_exchange
 from ....etl.runner import (
     recompute_tiers,
     refresh_listings,
-    run_backfill,
     run_eod,
     run_intraday,
-    unpark_all,
 )
 from ....fundamentals.stages import FundamentalsRunners
 from ..dependencies import (
@@ -63,7 +61,6 @@ from ..schemas import (
     EtlParkedTicker,
     EtlRunSummary,
     EtlStatusPayload,
-    EtlTierCounts,
 )
 
 logger = logging.getLogger(__name__)
@@ -378,12 +375,22 @@ def admin_etl_backfill(
     exchange: str = Query(..., min_length=2, max_length=10),
     start_date: date = Query(..., description="ISO date, e.g. 2010-01-01"),
     tier: int | None = Query(None, ge=1, le=3),
+    stocks: str | None = Query(
+        None,
+        description=(
+            "Comma-separated symbols to scope the full pipeline to "
+            "(mid-week corporate-action recompute); omitted = all."
+        ),
+    ),
     db_engine: Engine = Depends(get_db_engine),
     config: Config = Depends(get_config),
     executor = Depends(get_etl_executor),
 ) -> EtlActionAcceptedPayload:
-    """Trigger historical backfill for `exchange` from `start_date`.
-    Optional `tier` filter restricts to one tier; omitted = all tiers."""
+    """Trigger the FULL backfill pipeline for `exchange` from `start_date`
+    (fetch -> correct -> indicators -> signals -> enrichment). `stocks` scopes
+    it to specific symbols (mid-week corporate-action recompute); `tier` scopes
+    to one tier; omit both = all. `stocks` wins. Scope is resolved on the
+    worker thread (this handler stays DB-free)."""
     _require_executor(executor)
     _validate_exchange_or_400(exchange, config)
     logger.info(
@@ -392,20 +399,23 @@ def admin_etl_backfill(
             "exchange": exchange,
             "start_date": start_date.isoformat(),
             "tier": tier,
+            "stocks": stocks,
         },
     )
-    from ....etl.types import Tier
-    tier_filter = {Tier(tier)} if tier else None
     executor.submit(
-        _run_backfill_safe, db_engine, config, exchange, start_date, tier_filter,
+        _run_backfill_safe, db_engine, config, exchange, start_date, stocks, tier,
     )
     return EtlActionAcceptedPayload(
         action="backfill", run_id=None,
         accepted_at=datetime.now(UTC),
         notes=(
-            f"Backfill ({exchange}) submitted from {start_date.isoformat()}"
-            + (f" (tier {tier} only)" if tier else " (all tiers)")
-            + ". Long-running; can take hours."
+            f"Full backfill pipeline ({exchange}) submitted from "
+            f"{start_date.isoformat()}"
+            + (
+                f" (stocks: {stocks})" if stocks
+                else (f" (tier {tier} only)" if tier else " (all tickers)")
+            )
+            + ". Long-running."
         ),
     )
 
@@ -622,12 +632,49 @@ def _recompute_tiers_safe(db_engine, config, exchange):
         )
 
 
-def _run_backfill_safe(db_engine, config, exchange, start_date, tier_filter):
+def _resolve_backfill_stocks(db_engine, exchange, stocks, tier):
+    """Resolve backfill scope to ticker_ids (or None = all). stocks CSV of
+    symbols wins; else tier; else None. [] when a filter matched nothing."""
+    if stocks:
+        syms = [s.strip().upper() for s in stocks.split(",") if s.strip()]
+        with db_engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT ticker_id FROM tickers WHERE symbol = ANY(:syms) "
+                    "AND exchange = :ex AND is_active = TRUE "
+                    "AND delisted_at IS NULL"
+                ),
+                {"syms": syms, "ex": exchange},
+            ).all()
+        return sorted(r.ticker_id for r in rows)
+    if tier is not None:
+        with db_engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT ticker_id FROM tickers WHERE tier = :tier "
+                    "AND exchange = :ex AND is_active = TRUE "
+                    "AND delisted_at IS NULL"
+                ),
+                {"tier": tier, "ex": exchange},
+            ).all()
+        return sorted(r.ticker_id for r in rows)
+    return None
+
+
+def _run_backfill_safe(db_engine, config, exchange, start_date, stocks, tier):
     try:
-        run_backfill(
+        scope = _resolve_backfill_stocks(db_engine, exchange, stocks, tier)
+        if (stocks or tier is not None) and not scope:
+            logger.warning(
+                "Backfill scope %r/%r matched no active tickers; nothing to do",
+                stocks, tier, extra={"exchange": exchange},
+            )
+            return
+        from ....backfill import backfill
+        backfill(
             db_engine, config,
-            exchange=exchange,
-            start_date=start_date, tier_filter=tier_filter,
+            date_from=start_date, exchange=exchange,
+            stocks=scope, refetch_bars=True,
         )
     except Exception:
         logger.exception(
