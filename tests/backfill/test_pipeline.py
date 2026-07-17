@@ -270,6 +270,93 @@ def stub_populators():
     )
 
 
+def _seed_industry_index(db_engine, name, *, sector="TestSector",
+                         base_date=date(2020, 4, 1)):
+    with transaction(db_engine) as conn:
+        conn.execute(text(
+            "INSERT INTO industry_index "
+            "(industry_name, sector_name, base_date) "
+            "VALUES (:n, :s, :d) ON CONFLICT (industry_name) DO NOTHING"
+        ), {"n": name, "s": sector, "d": base_date})
+
+
+def _seed_industry_constituent(db_engine, name, ticker_id,
+                               d=date(2020, 4, 1)):
+    with transaction(db_engine) as conn:
+        conn.execute(text(
+            "INSERT INTO industry_index_constituent "
+            "(industry_name, ticker_id, rebalance_date, effective_from, "
+            " weight_at_rebalance, market_cap_at_rebalance, "
+            " close_at_rebalance) "
+            "VALUES (:n, :t, :d, :d, 1.0, 1000000.0, 100.0)"
+        ), {"n": name, "t": ticker_id, "d": d})
+
+
+def _seed_industry_value(db_engine, name, td, value=1000.0):
+    with transaction(db_engine) as conn:
+        conn.execute(text(
+            "INSERT INTO industry_index_value "
+            "(industry_name, trade_date, value, constituents_used, "
+            " effective_rebalance_date) VALUES (:n, :td, :v, 1, :rb)"
+        ), {"n": name, "td": td, "v": value, "rb": td})
+
+
+class TestScopedIndustryRecompute:
+    """Patcher C: backfill(stocks=[X]) resolves the scoped stock's
+    industries, scoped-clears ONLY those industries' derived values
+    (reusing chains, skipping the global clear + 3c), and leaves every
+    other industry untouched. Also exercises the real scoped
+    run_shares_refresh (Patcher A's run_id path) via a stubbed fetcher."""
+
+    def test_scoped_run_clears_only_affected_industry(
+        self, db_engine, stub_populators,
+    ):
+        from trip_ema.fundamentals.runners import run_shares_refresh
+        from trip_ema.fundamentals.shares_fetch import SharesInfo
+
+        _seed_ticker(db_engine, ticker_id=1, symbol="TESTREF")
+        _seed_industry_index(db_engine, "Refineries")   # affected
+        _seed_industry_index(db_engine, "Banks")        # unaffected
+        _seed_industry_constituent(db_engine, "Refineries", 1)
+        v_td = date(2024, 5, 27)
+        _seed_industry_value(db_engine, "Refineries", v_td)
+        _seed_industry_value(db_engine, "Banks", v_td)
+
+        # Real scoped shares refresh (Patcher A run_id path) with a
+        # stubbed fetcher so there is no network.
+        def _shares_stage(db_engine, exchange, **kwargs):
+            return run_shares_refresh(
+                db_engine, exchange, request_delay_s=0,
+                fetch_fn=lambda sym, exch: SharesInfo(1_000_000, "YFINANCE"),
+                **kwargs,
+            )
+
+        stages = stub_populators.with_(run_shares_refresh=_shares_stage)
+
+        result = backfill(
+            db_engine, _MockConfig(),
+            stages=stages,
+            date_from=date(2024, 6, 3), date_to=date(2024, 6, 3),
+            stocks=[1], refetch_bars=False,
+        )
+        assert result.run_id > 0
+        assert not result.failed_stage
+
+        with db_engine.connect() as conn:
+            refineries = conn.execute(text(
+                "SELECT count(*) FROM industry_index_value "
+                "WHERE industry_name = 'Refineries'"
+            )).scalar()
+            banks = conn.execute(text(
+                "SELECT count(*) FROM industry_index_value "
+                "WHERE industry_name = 'Banks'"
+            )).scalar()
+        # Affected industry scoped-cleared (populators are no-ops, so not
+        # recomputed); unaffected untouched -> proves no global clear.
+        assert refineries == 0
+        assert banks == 1
+
+
 # ============================================================
 # Marker lifecycle
 # ============================================================
