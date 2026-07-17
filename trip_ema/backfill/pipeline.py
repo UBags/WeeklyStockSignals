@@ -932,6 +932,7 @@ def backfill(
             db_engine, exchange, "benchmark_stats",
             lambda: _stage_benchmark_stats(
                 db_engine, exchange=exchange, progress_cb=progress_cb,
+                stocks=(scoped_tickers if stocks is not None else None),
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -1450,6 +1451,7 @@ def _stage_benchmark_stats(
     *,
     exchange: str,
     progress_cb: Callable[[str, str], None] | None = None,
+    stocks: list[int] | None = None,
 ) -> tuple[int, int, int, int, list[tuple[str, str]]]:
     """BENCHMARK-STATS-STAGE: stock + industry benchmark stats.
 
@@ -1469,7 +1471,9 @@ def _stage_benchmark_stats(
     bad ticker cannot take the stage down.
     """
     _emit_progress(progress_cb, "stage_6d_benchmark_stats", "tickers")
-    t = run_benchmark_stats_for_all_tickers(db_engine, exchange=exchange)
+    t = run_benchmark_stats_for_all_tickers(
+        db_engine, exchange=exchange, stocks=stocks,
+    )
 
     _emit_progress(progress_cb, "stage_6d_benchmark_stats", "industries")
     i = run_benchmark_stats_for_all_industries(db_engine)

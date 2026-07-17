@@ -368,6 +368,7 @@ def run_benchmark_stats_for_all_tickers(
     *,
     exchange: str | None = None,
     as_of_date: date | None = None,
+    stocks: list[int] | None = None,
 ) -> dict:
     """Compute benchmark stats for every active ticker.
 
@@ -381,6 +382,9 @@ def run_benchmark_stats_for_all_tickers(
         tickers = TickersRepository(conn).find_active()
     if exchange is not None:
         tickers = [t for t in tickers if t.ref.exchange == exchange]
+    if stocks is not None:
+        _scoped = set(stocks)
+        tickers = [t for t in tickers if t.ticker_id in _scoped]
 
     succeeded: list = []
     skipped: list = []
