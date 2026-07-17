@@ -153,3 +153,36 @@ def test_reconcile_ticker_is_report_only():
     reports = reconcile_ticker(bars, [_evt(b, factor=2 / 3)])
     assert all(hasattr(r, "verdict") for r in reports)
     assert len(reports) == 1
+
+
+# --- regression: TickerRecord exposes exchange/symbol via .ref (not top-level) --- #
+
+class _FakeRef:
+    def __init__(self, exchange, symbol):
+        self.exchange, self.symbol = exchange, symbol
+
+
+class _FakeTickerRecord:
+    def __init__(self, ticker_id, exchange, symbol):
+        self.ticker_id = ticker_id
+        self.ref = _FakeRef(exchange, symbol)
+        self.is_active = True
+
+
+class _FakeTickersRepo:
+    def __init__(self, records):
+        self._records = records
+
+    def find_active(self):
+        return self._records
+
+
+def test_active_tickers_for_exchange_reads_ref():
+    from trip_ema.etl.split_reconcile import _active_tickers_for_exchange
+    repo = _FakeTickersRepo([
+        _FakeTickerRecord(1, "NSE", "ACME"),
+        _FakeTickerRecord(2, "BSE", "BETA"),
+        _FakeTickerRecord(3, "NSE", "GAMMA"),
+    ])
+    got = _active_tickers_for_exchange(repo, "NSE")
+    assert got == [(1, "ACME"), (3, "GAMMA")]   # BSE filtered out, symbol from ref

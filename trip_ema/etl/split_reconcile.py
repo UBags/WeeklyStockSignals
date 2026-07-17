@@ -204,6 +204,20 @@ def _bars_to_pricebars(bars, tz) -> list[PriceBar]:
     return out
 
 
+def _active_tickers_for_exchange(tickers_repo, exchange: str) -> list[tuple[int, str]]:
+    """(ticker_id, symbol) for active tickers on `exchange`.
+
+    TickerRecord carries the exchange/symbol on its `ref` (a TickerRef), not
+    as top-level attributes — kept as a named helper so the access path is
+    unit-tested rather than only exercised against a live DB.
+    """
+    return [
+        (t.ticker_id, t.ref.symbol)
+        for t in tickers_repo.find_active()
+        if t.ref.exchange == exchange
+    ]
+
+
 def run_split_reconcile(
     engine,
     *,
@@ -221,11 +235,7 @@ def run_split_reconcile(
         tickers_repo = TickersRepository(conn)
 
         def list_tickers() -> list[tuple[int, str]]:
-            return [
-                (t.ticker_id, t.symbol)
-                for t in tickers_repo.find_active()
-                if t.exchange == exchange
-            ]
+            return _active_tickers_for_exchange(tickers_repo, exchange)
 
         def load_events(ticker_id: int) -> list[FactorEvent]:
             return actions_repo.factor_events_for_ticker(ticker_id)
