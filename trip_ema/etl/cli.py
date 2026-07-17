@@ -42,7 +42,6 @@ from datetime import date
 from pathlib import Path
 
 from ..app_context import AppContext
-from ..config import Config
 from ..config.loader import load_config
 from ..domain.market_session import market_tz
 from ..observability.logging_config import configure_logging
@@ -482,7 +481,6 @@ def cmd_snapshot(args, ctx: AppContext) -> int:
     Idempotent — UPSERT semantics, multiple invocations for the
     same (date, exchange) yield the latest counts.
     """
-    config = ctx.config
     db_engine = ctx.db_engine
     from datetime import datetime
 
@@ -625,7 +623,6 @@ def cmd_refresh_reference(args, ctx: AppContext) -> int:
 
     Without it, every active ticker is re-fetched.
     """
-    config = ctx.config
     db_engine = ctx.db_engine
     runners = ctx.runners
 
@@ -686,7 +683,6 @@ def cmd_audit(args, ctx: AppContext) -> int:
 
 
 def cmd_status(args, ctx: AppContext) -> int:
-    config = ctx.config
     db_engine = ctx.db_engine
     with db_engine.connect() as conn:
         status_repo = EtlStatusRepository(conn)
@@ -743,7 +739,6 @@ def cmd_refresh_corp_actions(args, ctx: AppContext) -> int:
 
 
 def cmd_approve_action(args, ctx: AppContext) -> int:
-    config = ctx.config
     db_engine = ctx.db_engine
     with db_engine.begin() as conn:
         repo = CorporateActionsRepository(conn)

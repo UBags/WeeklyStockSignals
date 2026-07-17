@@ -85,7 +85,6 @@ from ..fundamentals.runners import (
     build_all_industry_index_chains,
     clear_industry_derived_for_rebuild,
 )
-from ..fundamentals.signal_enrichment_runner import backfill_signal_enrichment
 from ..fundamentals.sector_metrics_runner import backfill_sector_metrics
 from ..fundamentals.industry_regime_runner import backfill_industry_regime_matrix
 # BENCHMARK-STATS-STAGE: rank_score in the email comes from these tables.
@@ -93,8 +92,6 @@ from ..fundamentals.benchmark_stats_runners import (
     run_benchmark_stats_for_all_industries,
     run_benchmark_stats_for_all_tickers,
 )
-from ..fundamentals.signal_ensemble_runner import backfill_signal_ensemble_features
-from ..fundamentals.signal_labels_runner import backfill_signal_labels
 from ..fundamentals.per_signal_stages import run_per_signal_stages
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.historical_signals_repo import (
