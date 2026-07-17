@@ -70,6 +70,38 @@ def _stub_shares_fetcher(mapping: dict[str, SharesInfo]):
 
 class TestSharesHappyPath:
 
+    def test_scoped_stocks_refresh_creates_run_and_scopes(
+        self, db_engine, nse_tickers,
+    ):
+        """Regression: run_shares_refresh(stocks=[...]) must create its own
+        run_id (the scoped branch previously skipped run creation, so the
+        parallel sweep hit UnboundLocalError on run_id) AND write shares for
+        ONLY the scoped tickers, force-refreshing regardless of only_missing."""
+        fetcher = _stub_shares_fetcher({
+            "RELIANCE": SharesInfo(6_700_000_000, "YFINANCE"),
+            "TCS": SharesInfo(3_600_000_000, "YFINANCE"),
+            "HDFCBANK": SharesInfo(7_600_000_000, "YFINANCE"),
+            "INFY": SharesInfo(4_100_000_000, "YFINANCE"),
+            "WIPRO": SharesInfo(5_400_000_000, "YFINANCE"),
+        })
+        only = nse_tickers["RELIANCE"]
+        run_id = run_shares_refresh(
+            db_engine, "NSE",
+            request_delay_s=0, fetch_fn=fetcher,
+            force=True, stocks=[only],
+        )
+        assert isinstance(run_id, int)
+        with db_engine.connect() as conn:
+            r = FundamentalsRunRepository(conn).get(run_id)
+            n_rows = conn.execute(text(
+                "SELECT count(*) FROM instrument_shares"
+            )).scalar()
+            got = InstrumentSharesRepository(conn).get_latest(only)
+        assert r.status == "SUCCESS"
+        assert r.succeeded == 1
+        assert got.shares_outstanding == 6_700_000_000
+        assert n_rows == 1
+
     def test_all_tickers_get_shares_written(self, db_engine, nse_tickers):
         fetcher = _stub_shares_fetcher({
             "RELIANCE":  SharesInfo(6_700_000_000, "YFINANCE"),

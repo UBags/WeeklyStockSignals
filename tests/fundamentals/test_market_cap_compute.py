@@ -81,6 +81,56 @@ def _insert_shares(
 
 class TestComputeHappyPath:
 
+    def test_stocks_filter_scopes_universe_without_bind_error(
+        self, db_engine, universe,
+    ):
+        """Regression: compute_market_cap_for_date(stocks=[...]) must run
+        the parameterized universe filter (the :: cast form collided with
+        :param -> psycopg2 ProgrammingError) AND restrict rows to exactly
+        the given tickers."""
+        td = date(2026, 5, 22)
+        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=UTC)
+        for sym, close, sh in [
+            ("RELIANCE", 1450.0, 6_700_000_000),
+            ("TCS", 4100.0, 3_600_000_000),
+        ]:
+            _insert_bar(db_engine, universe[("NSE", sym)], bar_ts, close)
+            _insert_shares(db_engine, universe[("NSE", sym)],
+                           as_of_date=date(2026, 5, 21), count=sh)
+        only = universe[("NSE", "RELIANCE")]
+        result = compute_market_cap_for_date(
+            db_engine, "NSE", td,
+            use_current_shares_always=True, stocks=[only],
+        )
+        with db_engine.connect() as conn:
+            ids = [r[0] for r in conn.execute(text(
+                "SELECT ticker_id FROM daily_market_cap "
+                "WHERE trade_date = :td ORDER BY ticker_id"
+            ), {"td": td}).fetchall()]
+        assert ids == [only]
+        assert result.succeeded_approx == 1
+
+    def test_stocks_none_is_unscoped(self, db_engine, universe):
+        """stocks=None must be byte-identical to the all-universe path."""
+        td = date(2026, 5, 22)
+        bar_ts = datetime(2026, 5, 22, 15, 30, tzinfo=UTC)
+        for sym, close, sh in [
+            ("RELIANCE", 1450.0, 6_700_000_000),
+            ("TCS", 4100.0, 3_600_000_000),
+        ]:
+            _insert_bar(db_engine, universe[("NSE", sym)], bar_ts, close)
+            _insert_shares(db_engine, universe[("NSE", sym)],
+                           as_of_date=date(2026, 5, 21), count=sh)
+        compute_market_cap_for_date(
+            db_engine, "NSE", td,
+            use_current_shares_always=True, stocks=None,
+        )
+        with db_engine.connect() as conn:
+            n = conn.execute(text(
+                "SELECT count(*) FROM daily_market_cap WHERE trade_date = :td"
+            ), {"td": td}).scalar()
+        assert n == 2
+
     def test_shares_override_matches_per_ticker_current_shares(
         self, db_engine, universe,
     ):
