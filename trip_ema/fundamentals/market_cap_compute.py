@@ -90,6 +90,7 @@ def compute_market_cap_for_date(
     backup_price_column: str = "close",
     use_current_shares_always: bool = False,
     shares_override: dict[int, tuple[int | None, str]] | None = None,
+    stocks: list[int] | None = None,
 ) -> ComputeResult:
     """Compute and store daily_market_cap rows for all active EQ
     tickers on `exchange` for `trade_date`.
@@ -121,9 +122,11 @@ def compute_market_cap_for_date(
                   AND t.is_active = TRUE
                   AND t.instrument_type = 'EQ'
                   AND (t.delisted_at IS NULL OR t.delisted_at > :td)
+                  AND (:stocks IS NULL
+                       OR t.ticker_id = ANY(CAST(:stocks AS integer[])))
                 ORDER BY t.symbol
             """),
-            {"ex": exchange, "td": trade_date},
+            {"ex": exchange, "td": trade_date, "stocks": stocks},
         ).fetchall()
     universe = [(int(r[0]), r[1]) for r in rows]
 
@@ -335,6 +338,7 @@ def populate_market_cap_range(
     backup_price_column: str = "close",
     use_current_shares_always: bool = True,
     progress_cb=None,
+    stocks: list[int] | None = None,
 ) -> dict:
     """Walk every trading day in [date_from, date_to] and populate
     daily_market_cap via compute_market_cap_for_date.
@@ -373,6 +377,7 @@ def populate_market_cap_range(
             backup_price_column=backup_price_column,
             use_current_shares_always=use_current_shares_always,
             shares_override=shares_override,
+            stocks=stocks,
         )
         with _lock:
             _results.append(res)

@@ -812,6 +812,7 @@ def run_shares_refresh(
     recheck_unavailable: bool = False,
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn=None,
+    stocks: list[int] | None = None,
 ) -> int:
     """Refresh shares-outstanding for every active ticker on `exchange`.
 
@@ -867,6 +868,19 @@ def run_shares_refresh(
             "Resuming shares refresh run %d at index %d/%d",
             run_id, cursor_index, len(ticker_list),
         )
+    elif stocks is not None:
+        # Scoped force-refresh (e.g. a mid-week corporate action changed
+        # shares_outstanding). Ignore only_missing/skip_unavailable and
+        # restrict to the given tickers; a fresh today-snapshot upserts and
+        # get_latest then wins for market_cap.
+        _scoped = set(stocks)
+        ticker_list = [
+            t for t in _load_active_tickers_for_exchange(
+                db_engine, exchange,
+                missing_from=None, eq_only=False, skip_unavailable=None,
+            )
+            if t["id"] in _scoped
+        ]
     else:
         ticker_list = _load_active_tickers_for_exchange(
             db_engine, exchange,

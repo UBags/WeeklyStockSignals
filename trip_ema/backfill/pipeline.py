@@ -684,6 +684,21 @@ def backfill(
         # These three build the per-exchange industry indices that
         # stages 4-6 operate on. Without them, iiv/state/enrichment
         # process 0 industries.
+        if stocks is not None:
+            # Scoped shares force-refresh: the reference block refreshes
+            # shares gaps-only, so a scoped stock whose shares_outstanding
+            # just changed keeps stale shares and market_cap would be wrong.
+            _emit_progress(progress_cb, "stage_3a_scoped_shares", "starting")
+            run_phase(
+                db_engine, exchange, "scoped_shares_refresh",
+                lambda: stages.run_shares_refresh(
+                    db_engine, exchange, force=True,
+                    stocks=scoped_tickers,
+                ),
+                backfill_run_id=run_id, force=_force,
+            )
+            _emit_progress(progress_cb, "stage_3a_scoped_shares", "completed")
+
         _emit_progress(progress_cb, "stage_3b_market_cap", "starting")
         _r = run_phase(
             db_engine, exchange, "market_cap",
@@ -691,6 +706,7 @@ def backfill(
                 db_engine, exchange=exchange,
                 date_from=date_from, date_to=date_to,
                 progress_cb=progress_cb,
+                stocks=(scoped_tickers if stocks is not None else None),
             ),
             backfill_run_id=run_id, force=_force,
         )
@@ -1272,6 +1288,7 @@ def _stage_stock_enrichment_full(
 def _stage_market_cap(
     db_engine: Engine, *, exchange: str, date_from: date, date_to: date,
     progress_cb: Callable[[str, str], None] | None = None,
+    stocks: list[int] | None = None,
 ) -> int:
     """Populate daily_market_cap for the exchange over the range
     (adjusted close x current shares). Returns approx rows."""
@@ -1280,6 +1297,7 @@ def _stage_market_cap(
         date_from=date_from, date_to=date_to,
         use_current_shares_always=True,
         progress_cb=progress_cb,
+        stocks=stocks,
     )
     if not isinstance(res, dict):
         return 0
