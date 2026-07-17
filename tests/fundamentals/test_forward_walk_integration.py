@@ -66,6 +66,17 @@ def _seed_nifty(conn) -> None:
         _bar(conn, nifty, d, c, c, c, c)
 
 
+def _corp_action(conn, tid: int, ex_date, action_type: str, *,
+                 censor: bool, symbol: str = "TESTCO") -> None:
+    # action_id is GENERATED AS IDENTITY in the migrated schema -> omit it.
+    conn.execute(text(
+        "INSERT INTO nse_corporate_actions (ticker_id, isin, symbol, exchange, "
+        "ex_date, action_type, censor, subject, source) VALUES "
+        "(:t, 'INE000000001', :sym, 'NSE', :ex, :at, :c, :subj, 'nselib')"
+    ), {"t": tid, "sym": symbol, "ex": ex_date, "at": action_type,
+        "c": censor, "subj": f"{action_type} for {symbol}"})
+
+
 def test_forward_walk_end_to_end(db_engine):
     with transaction(db_engine) as conn:
         tid = _ticker(conn, "TESTCO")
@@ -161,3 +172,60 @@ def test_exit_only_ticker_produces_no_walk_rows(db_engine):
             text("SELECT count(*) FROM signal_labels")
         ).scalar_one()
     assert n == 0                            # EXIT_FROM_* never gets a walk row
+
+
+def test_demerger_in_window_censors_the_walk(db_engine):
+    with transaction(db_engine) as conn:
+        tid = _ticker(conn, "DEMRG")
+        for d, o, h, low, c in _TESTCO_BARS:
+            _bar(conn, tid, d, o, h, low, c)
+        _enrichment(conn, 9401, tid, D(1, 1), "BUY")
+        _enrichment(conn, 9402, tid, D(1, 3), "EXIT_FROM_BUY")
+        # demerger (censor) ex-date 01-03 falls inside the BUY window
+        # [01-02, 01-03]; the split (non-censor) in the same window must NOT.
+        _corp_action(conn, tid, D(1, 3), "demerger", censor=True, symbol="DEMRG")
+        _corp_action(conn, tid, D(1, 2), "split", censor=False, symbol="DEMRG")
+
+    backfill_forward_walk(db_engine, "NSE", scoped_tickers=[tid])
+
+    with db_engine.connect() as conn:
+        r = conn.execute(text(
+            "SELECT window_censored, forward_walk_done, side, entry_date, "
+            "exit_date, bars_in_window, exit_reason, entry_open, exit_close, "
+            "realized_ret, mfe_pct, hit_gain_5_pct, bars_to_gain_5_pct "
+            "FROM signal_labels WHERE signal_enrichment_id = 9401"
+        )).mappings().one()
+
+    assert r["window_censored"] is True
+    assert r["forward_walk_done"] is True        # row written...
+    assert r["entry_open"] is None               # ...but excursions suppressed
+    assert r["exit_close"] is None
+    assert r["realized_ret"] is None
+    assert r["mfe_pct"] is None
+    assert r["hit_gain_5_pct"] is False
+    assert r["bars_to_gain_5_pct"] == -1
+    assert r["side"] == "LONG"                    # bookkeeping kept
+    assert r["entry_date"] == D(1, 2) and r["exit_date"] == D(1, 3)
+    assert r["bars_in_window"] == 2
+    assert r["exit_reason"] == "NEXT_SIGNAL"
+
+
+def test_censor_date_outside_window_does_not_censor(db_engine):
+    with transaction(db_engine) as conn:
+        tid = _ticker(conn, "CLEAN")
+        for d, o, h, low, c in _TESTCO_BARS:
+            _bar(conn, tid, d, o, h, low, c)
+        _enrichment(conn, 9501, tid, D(1, 1), "BUY")
+        _enrichment(conn, 9502, tid, D(1, 3), "EXIT_FROM_BUY")
+        # demerger after the window closes (01-05) -> [01-02, 01-03] is clean
+        _corp_action(conn, tid, D(1, 5), "demerger", censor=True, symbol="CLEAN")
+
+    backfill_forward_walk(db_engine, "NSE", scoped_tickers=[tid])
+
+    with db_engine.connect() as conn:
+        r = conn.execute(text(
+            "SELECT window_censored, realized_ret FROM signal_labels "
+            "WHERE signal_enrichment_id = 9501"
+        )).mappings().one()
+    assert r["window_censored"] is False
+    assert abs(r["realized_ret"] - 0.06) < 1e-9

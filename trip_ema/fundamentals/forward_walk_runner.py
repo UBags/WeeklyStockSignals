@@ -268,6 +268,39 @@ def load_market_series(
     return [(b.timestamp.astimezone(session.zone).date(), b.close) for b in bars]
 
 
+def _load_censor_dates(conn: Connection, ticker_id: int) -> list[date]:
+    """Ex-dates of continuity-breaking corporate actions for a ticker
+    (nse_corporate_actions.censor = true — demerger / capital reduction, and
+    anything else the parser flags as a value transfer). A walk window that
+    spans one of these crosses a discontinuity the OHLCV corrector cannot
+    cleanly adjust, so the window is censored rather than emitting fabricated
+    excursions. Bad ticks are already dropped/corrected upstream; this is the
+    residual the corp action is insufficient to resolve."""
+    rows = conn.execute(
+        text(
+            "SELECT ex_date FROM nse_corporate_actions "
+            "WHERE ticker_id = :t AND censor = true"
+        ),
+        {"t": ticker_id},
+    ).all()
+    return [r[0] for r in rows]
+
+
+def _make_censor_predicate(
+    censor_dates: Sequence[date],
+) -> Callable[[date, date], bool]:
+    """A window [entry, exit] is censored iff a censor ex-date falls within it
+    (inclusive)."""
+    dates = list(censor_dates)
+    if not dates:
+        return lambda _e, _x: False
+
+    def _pred(entry: date, exit: date) -> bool:
+        return any(entry <= d <= exit for d in dates)
+
+    return _pred
+
+
 def walk_one_ticker(
     conn: Connection,
     ticker_id: int,
@@ -275,9 +308,15 @@ def walk_one_ticker(
     exchange: str,
     market_series: Sequence[tuple[date, float]],
     signal_timeframe: str = str(Timeframe.WEEKLY),
-    censored: Callable[[date, date], bool] = lambda _e, _x: False,
+    censored: Callable[[date, date], bool] | None = None,
 ) -> list[SignalForwardWalk]:
-    """Load one ticker's inputs and return its forward-walk rows. No writes."""
+    """Load one ticker's inputs and return its forward-walk rows. No writes.
+
+    ``censored`` defaults to the corp-actions-derived predicate: a window
+    is censored when it spans the ex-date of a continuity-breaking action
+    (nse_corporate_actions.censor = true). Pass an explicit predicate to
+    override (tests).
+    """
     session = market_session_for(exchange)
     signals = _load_signals(conn, ticker_id, signal_timeframe)
     if not signals:
@@ -290,6 +329,11 @@ def walk_one_ticker(
     industry_series = (
         _load_industry_series(conn, industry_name) if industry_name else None
     )
+
+    if censored is None:
+        censored = _make_censor_predicate(
+            _load_censor_dates(conn, ticker_id)
+        )
 
     return compute_ticker_walks(
         signals,

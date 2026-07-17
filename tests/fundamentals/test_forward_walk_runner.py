@@ -18,6 +18,7 @@ from trip_ema.domain.forward_walk import (
 )
 from trip_ema.fundamentals.forward_walk_runner import (
     _DatedBar,
+    _make_censor_predicate,
     _Signal,
     asof_backward,
     compute_ticker_walks,
@@ -178,3 +179,20 @@ def test_atr20_flows_from_signal_into_result():
     # mfe over [d2,d3] long: max((106-100)/100,(107-100)/100)=0.07 → atr units
     assert r.mfe_atr20 is not None
     assert abs(r.mfe_atr20 - (r.mfe_pct * 100 / 3.0)) < 1e-9
+
+
+def test_censor_predicate_true_when_window_spans_a_censor_date():
+    pred = _make_censor_predicate([D(1, 3)])
+    assert pred(D(1, 2), D(1, 4)) is True      # spans
+    assert pred(D(1, 3), D(1, 5)) is True      # inclusive start
+    assert pred(D(1, 1), D(1, 3)) is True      # inclusive end
+
+
+def test_censor_predicate_false_when_window_misses_the_censor_date():
+    pred = _make_censor_predicate([D(1, 3)])
+    assert pred(D(1, 4), D(1, 6)) is False     # entirely after
+    assert pred(D(1, 1), D(1, 2)) is False     # entirely before
+
+
+def test_censor_predicate_empty_never_censors():
+    assert _make_censor_predicate([])(D(1, 1), D(1, 9)) is False
