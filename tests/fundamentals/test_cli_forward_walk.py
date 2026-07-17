@@ -1,27 +1,36 @@
 """cmd_forward_walk: argument wiring, exit-code policy, and dispatch
-registration. No DB and no processes — the orchestrator is injected via
-``run_fn`` and exchange validation is isolated, so this is a test of the
-handler's own logic and of the dispatch table.
+registration.
+
+No DB and no processes: the orchestrator is injected via ``run_fn`` and the
+exchange is validated against a stub config (the same MagicMock seam the sibling
+CLI tests use). Nothing here patches a module attribute, so the patch-budget
+ratchet stays at zero for this file.
 """
 from __future__ import annotations
 
 import argparse
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
-from trip_ema.fundamentals import cli
 from trip_ema.fundamentals.cli import cmd_forward_walk, register_subparsers
 from trip_ema.fundamentals.forward_walk_orchestrator import ForwardWalkOutcome
 
 
-@pytest.fixture(autouse=True)
-def _isolate_validate(monkeypatch):
-    monkeypatch.setattr(cli, "validate_exchange", lambda ex, cfg: None)
+@pytest.fixture
+def fake_config():
+    """Minimal stub Config: validate_exchange() reads market_hours via
+    configured_exchanges(), so one NSE entry is all the handler needs."""
+    cfg = MagicMock()
+    nse = MagicMock()
+    nse.exchange = "NSE"
+    cfg.market_hours = [nse]
+    return cfg
 
 
-def _ctx():
-    return SimpleNamespace(config=object())
+def _ctx(fake_config):
+    return SimpleNamespace(config=fake_config)
 
 
 def _args(**kw):
@@ -30,7 +39,7 @@ def _args(**kw):
     return SimpleNamespace(**base)
 
 
-def test_returns_0_on_clean_run():
+def test_returns_0_on_clean_run(fake_config):
     seen = {}
 
     def fake_run(config, exchange, *, ticker_ids, processes, batch_size):
@@ -38,43 +47,45 @@ def test_returns_0_on_clean_run():
                     processes=processes, batch_size=batch_size)
         return ForwardWalkOutcome(tickers=3, rows_written=7, failed=[])
 
-    rc = cmd_forward_walk(_args(), _ctx(), run_fn=fake_run)
+    rc = cmd_forward_walk(_args(), _ctx(fake_config), run_fn=fake_run)
     assert rc == 0
     assert seen == dict(exchange="NSE", ticker_ids=None,
                         processes=None, batch_size=500)
 
 
-def test_returns_1_when_some_tickers_failed():
+def test_returns_1_when_some_tickers_failed(fake_config):
     def fake_run(config, exchange, **kw):
         return ForwardWalkOutcome(tickers=2, rows_written=1,
                                   failed=[(9, "Boom: bad")])
 
-    assert cmd_forward_walk(_args(), _ctx(), run_fn=fake_run) == 1
+    assert cmd_forward_walk(_args(), _ctx(fake_config), run_fn=fake_run) == 1
 
 
-def test_scopes_tickers_from_csv():
+def test_scopes_tickers_from_csv(fake_config):
     seen = {}
 
     def fake_run(config, exchange, *, ticker_ids, processes, batch_size):
         seen["ids"] = ticker_ids
         return ForwardWalkOutcome(tickers=3, rows_written=3, failed=[])
 
-    cmd_forward_walk(_args(tickers="10, 20 ,30"), _ctx(), run_fn=fake_run)
+    cmd_forward_walk(_args(tickers="10, 20 ,30"), _ctx(fake_config),
+                     run_fn=fake_run)
     assert seen["ids"] == [10, 20, 30]
 
 
-def test_passes_processes_and_batch_size():
+def test_passes_processes_and_batch_size(fake_config):
     seen = {}
 
     def fake_run(config, exchange, *, ticker_ids, processes, batch_size):
         seen.update(processes=processes, batch_size=batch_size)
         return ForwardWalkOutcome()
 
-    cmd_forward_walk(_args(processes=4, batch_size=250), _ctx(), run_fn=fake_run)
+    cmd_forward_walk(_args(processes=4, batch_size=250), _ctx(fake_config),
+                     run_fn=fake_run)
     assert seen == dict(processes=4, batch_size=250)
 
 
-def test_bad_tickers_returns_2_without_running():
+def test_bad_tickers_returns_2_without_running(fake_config):
     called = False
 
     def fake_run(*a, **k):
@@ -82,7 +93,8 @@ def test_bad_tickers_returns_2_without_running():
         called = True
         return ForwardWalkOutcome()
 
-    rc = cmd_forward_walk(_args(tickers="10,oops"), _ctx(), run_fn=fake_run)
+    rc = cmd_forward_walk(_args(tickers="10,oops"), _ctx(fake_config),
+                          run_fn=fake_run)
     assert rc == 2 and called is False
 
 
