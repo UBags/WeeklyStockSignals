@@ -988,9 +988,10 @@ def cmd_forward_walk(args, ctx: AppContext, *, run_fn=None) -> int:
     on signal_enrichment_id, so re-runs are safe.
     """
     config = ctx.config
+    db_engine = ctx.db_engine
     if run_fn is None:
-        from .forward_walk_orchestrator import run_forward_walk
-        run_fn = run_forward_walk
+        from .forward_walk_runner import backfill_forward_walk
+        run_fn = backfill_forward_walk
     validate_exchange(args.exchange, config)
 
     scoped = None
@@ -1002,15 +1003,14 @@ def cmd_forward_walk(args, ctx: AppContext, *, run_fn=None) -> int:
             return 2
 
     outcome = run_fn(
-        config,
+        db_engine,
         args.exchange,
-        ticker_ids=scoped,
-        processes=args.processes,
-        batch_size=args.batch_size,
+        scoped_tickers=scoped,
+        progress_cb=None,
     )
     print(
-        f"forward-walk {args.exchange}: {outcome.rows_written} rows, "
-        f"{outcome.tickers} tickers, {len(outcome.failed)} failed"
+        f"forward-walk {args.exchange}: {outcome.done} tickers ok, "
+        f"{len(outcome.failed)} failed"
     )
     if outcome.failed:
         for tid, err in outcome.failed[:10]:
@@ -1303,14 +1303,6 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, Callable]:
     fw.add_argument(
         "--tickers", default=None, metavar="ID,ID,...",
         help="Comma-separated ticker_ids to scope to (default: all active).",
-    )
-    fw.add_argument(
-        "--processes", type=int, default=None, metavar="N",
-        help="Child process count (default: round(2/3 x physical cores)).",
-    )
-    fw.add_argument(
-        "--batch-size", type=int, default=500, metavar="N",
-        help="Rows per upsert flush by the single writer (default: 500).",
     )
 
     return {

@@ -38,6 +38,10 @@ from ..domain.forward_walk import (
 )
 from ..domain.market_session import market_session_for
 from ..persistence.bars_repo import BarsRepository
+from ..persistence import transaction
+from ..persistence.signal_labels_repo import SignalLabelsRepository
+from .parallel import FanOutOutcome, fan_out
+from .runners import _load_active_tickers_for_exchange
 
 logger = logging.getLogger(__name__)
 
@@ -294,3 +298,53 @@ def walk_one_ticker(
         industry_series=industry_series,
         censored=censored,
     )
+
+
+def backfill_forward_walk(
+    db_engine,
+    exchange: str,
+    *,
+    scoped_tickers: Sequence[int] | None = None,
+    progress_cb: Callable[[str, str], None] | None = None,
+) -> FanOutOutcome:
+    """Compute + upsert forward-walk rows for every active ticker on
+    ``exchange`` (or ``scoped_tickers``).
+
+    Threaded fan_out, the codebase's IO-bound convention: each worker opens its
+    OWN connection, reads the ticker's signals + corrected daily bars + industry
+    series, walks every BUY/SELL, and upserts the rows — reads and writes on the
+    same connection. Workers touch disjoint signal_enrichment_ids (one ticker
+    each), so there is no row contention. The market benchmark series is loaded
+    ONCE and shared read-only across threads. Idempotent on
+    signal_enrichment_id, so re-runs are safe.
+    """
+    if scoped_tickers is None:
+        scoped_tickers = [
+            t["ticker_id"]
+            for t in _load_active_tickers_for_exchange(db_engine, exchange)
+        ]
+    if not scoped_tickers:
+        logger.info("forward_walk %s: no tickers in scope", exchange)
+        return FanOutOutcome()
+
+    with db_engine.connect() as conn:
+        market_series = load_market_series(conn, exchange)
+
+    def _one(ticker_id: int) -> int:
+        with transaction(db_engine) as conn:
+            rows = walk_one_ticker(
+                conn, ticker_id,
+                exchange=exchange, market_series=market_series,
+            )
+            SignalLabelsRepository(conn).upsert_forward_walk(rows)
+        return len(rows)
+
+    outcome = fan_out(
+        list(scoped_tickers), _one,
+        label="signal_forward_walk", progress_cb=progress_cb,
+    )
+    logger.info(
+        "backfill_forward_walk %s: %d tickers ok, %d failed",
+        exchange, outcome.done, len(outcome.failed),
+    )
+    return outcome
