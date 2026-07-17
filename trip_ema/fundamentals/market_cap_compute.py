@@ -86,7 +86,7 @@ def compute_market_cap_for_date(
     trade_date: date,
     *,
     allow_approx_fallback: bool = True,
-    price_column: str = "adj_close",
+    price_column: str = "close",
     backup_price_column: str = "close",
     use_current_shares_always: bool = False,
     shares_override: dict[int, tuple[int | None, str]] | None = None,
@@ -164,8 +164,9 @@ def compute_market_cap_for_date(
         raise ValueError(
             f"backup_price_column {backup_price_column!r} not allowed"
         )
-    # COALESCE(primary, backup): use adjusted price where present, fall
-    # back to raw close where adj_close is NULL. Per-row.
+    # COALESCE(primary, backup): market cap is actual price x shares, so
+    # the split-adjusted close is primary (NOT adj_close, which is dividend-
+    # back-adjusted and would understate historical mcap). Per-row.
     _price_expr = f"COALESCE(b.{price_column}, b.{backup_price_column})"
     with db_engine.connect() as conn:
         close_rows = conn.execute(
@@ -213,9 +214,9 @@ def compute_market_cap_for_date(
             for tid, _sym in universe:
                 if use_current_shares_always:
                     # Index-build mode: always current shares, always
-                    # APPROX_TODAYS_SHARES. The adjusted price already
-                    # handles splits/divs, so a uniform current-share
-                    # basis across all history is correct here.
+                    # APPROX_TODAYS_SHARES. The split-adjusted close is on
+                    # a current-share basis (splits divided out), so a uniform
+                    # current-share basis across all history is correct here.
                     latest = shares_repo.get_latest(tid)
                     if latest is not None and latest.shares_outstanding is not None:
                         ticker_shares_info[tid] = (
@@ -330,7 +331,7 @@ def populate_market_cap_range(
     *,
     date_from: date,
     date_to: date,
-    price_column: str = "adj_close",
+    price_column: str = "close",
     backup_price_column: str = "close",
     use_current_shares_always: bool = True,
     progress_cb=None,
