@@ -19,7 +19,6 @@ import time
 
 import pandas as pd
 import yfinance as yf
-from yfinance.utils import back_adjust
 
 # (bare NSE symbol -> list of suspected seam dates). Edit freely.
 EVENTS: dict[str, list[str]] = {

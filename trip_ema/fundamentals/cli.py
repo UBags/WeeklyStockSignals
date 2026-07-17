@@ -16,7 +16,6 @@ from collections.abc import Callable
 from sqlalchemy import text
 
 from ..app_context import AppContext
-from ..config import Config
 from ..etl.exchanges import validate_exchange
 from ..persistence import transaction
 from ..persistence.fundamentals_repo import (
