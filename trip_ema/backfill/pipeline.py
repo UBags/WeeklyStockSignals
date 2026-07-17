@@ -93,6 +93,7 @@ from ..fundamentals.benchmark_stats_runners import (
     run_benchmark_stats_for_all_industries,
     run_benchmark_stats_for_all_tickers,
 )
+from ..fundamentals.forward_walk_runner import backfill_forward_walk
 from ..fundamentals.per_signal_stages import run_per_signal_stages
 from ..persistence.backfill_runs_repo import BackfillRunsRepository
 from ..persistence.historical_signals_repo import (
@@ -1040,6 +1041,20 @@ def backfill(
         _enr = _pss.enrichment
         _lbl = _pss.labels
         _sef = _pss.ensemble
+
+        # ---- Forward-walk labels (spec 02): measured per-signal outcomes on
+        # the corrected/self-adjusted daily bars, for the run's tickers, just
+        # before notify. Idempotent on signal_enrichment_id. ----
+        _emit_progress(progress_cb, "stage_8e_forward_walk", "starting")
+        _fw = backfill_forward_walk(
+            db_engine, exchange,
+            scoped_tickers=scoped_tickers,
+            progress_cb=progress_cb,
+        )
+        _emit_progress(
+            progress_cb, "stage_8e_forward_walk",
+            f"completed: {_fw.done} tickers, {len(_fw.failed)} failed",
+        )
 
         # ---- Notify subscribers — IFF this backfill is current
         # through today (to_monday == the current IST week's Monday).

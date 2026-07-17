@@ -17,6 +17,7 @@ from trip_ema.persistence.tickers_repo import TickersRepository
 from trip_ema.orchestrator.eod_signal_scopes import (
     tickers_needing_enrichment,
     tickers_needing_labels,
+    tickers_with_exit_signal_on,
 )
 
 DAY = date(2026, 7, 14)
@@ -172,3 +173,45 @@ class TestLabelScope:
             _enrichment(conn, 6006, t)
         got = tickers_needing_labels(db_engine, "NSE")
         assert t not in got
+
+
+class TestExitScope:
+    """tickers_with_exit_signal_on — the EOD forward-walk scope. Only today's
+    EXIT_FROM_* flips (the closed positions) qualify."""
+
+    def test_exit_from_buy_today_is_selected(self, db_engine):
+        with transaction(db_engine) as conn:
+            t = _ticker(conn, "EXITB")
+            _hist_signal(conn, t, stype="EXIT_FROM_BUY")
+        assert tickers_with_exit_signal_on(db_engine, "NSE", DAY) == [t]
+
+    def test_exit_from_sell_today_is_selected(self, db_engine):
+        with transaction(db_engine) as conn:
+            t = _ticker(conn, "EXITS")
+            _hist_signal(conn, t, stype="EXIT_FROM_SELL")
+        assert tickers_with_exit_signal_on(db_engine, "NSE", DAY) == [t]
+
+    def test_a_buy_is_not_an_exit(self, db_engine):
+        with transaction(db_engine) as conn:
+            t = _ticker(conn, "BUYONLY")
+            _hist_signal(conn, t, stype="BUY")
+        assert t not in tickers_with_exit_signal_on(db_engine, "NSE", DAY)
+
+    def test_a_sell_is_not_an_exit(self, db_engine):
+        with transaction(db_engine) as conn:
+            t = _ticker(conn, "SELLONLY")
+            _hist_signal(conn, t, stype="SELL")
+        assert t not in tickers_with_exit_signal_on(db_engine, "NSE", DAY)
+
+    def test_an_exit_yesterday_is_not_selected(self, db_engine):
+        with transaction(db_engine) as conn:
+            t = _ticker(conn, "EXITYDAY")
+            _hist_signal(conn, t, day=date(2026, 7, 13),
+                         stype="EXIT_FROM_BUY")
+        assert t not in tickers_with_exit_signal_on(db_engine, "NSE", DAY)
+
+    def test_another_exchange_is_not_selected(self, db_engine):
+        with transaction(db_engine) as conn:
+            t = _ticker(conn, "EXITNYSE", exchange="NYSE")
+            _hist_signal(conn, t, stype="EXIT_FROM_BUY")
+        assert t not in tickers_with_exit_signal_on(db_engine, "NSE", DAY)

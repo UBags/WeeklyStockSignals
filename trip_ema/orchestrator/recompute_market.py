@@ -51,10 +51,12 @@ from sqlalchemy.engine import Engine
 
 from ..cache.current_signals_cache import CurrentSignalsCache
 from .intraday_chain import log_intraday_transitions
+from ..fundamentals.forward_walk_runner import backfill_forward_walk
 from ..fundamentals.per_signal_stages import run_per_signal_stages
 from .eod_signal_scopes import (
     tickers_needing_enrichment,
     tickers_needing_labels,
+    tickers_with_exit_signal_on,
 )
 from .process_day import process_signals_for_day
 from .stages import MarketStages
@@ -519,6 +521,20 @@ def recompute_market(
                 labels_scope=lbl_scope,
                 ensemble_scope=enr_scope,
                 progress_cb=progress_cb,
+            )
+            # ---- Forward-walk labels: only tickers whose position CLOSED
+            # today (an EXIT_FROM_* signal), so their walk window is now final.
+            # Runs just before the cycle notifies subscribers. ----
+            exit_scope = tickers_with_exit_signal_on(
+                db_engine, exchange, _market_day,
+            )
+            fw = backfill_forward_walk(
+                db_engine, exchange,
+                scoped_tickers=exit_scope, progress_cb=progress_cb,
+            )
+            logger.info(
+                "recompute_market[%s] forward-walk: %d exit ticker(s), "
+                "%d failed", exchange, fw.done, len(fw.failed),
             )
             logger.info(
                 "recompute_market[%s] stage 9 per-signal: "
