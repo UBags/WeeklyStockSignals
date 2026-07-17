@@ -976,6 +976,49 @@ def cmd_backfill_etf_classification(args, ctx: AppContext, *, classify_fn=None) 
     )
 
 
+# ---------- forward-walk (spec 02_signal_forward_walk_labels) ---------- #
+
+
+def cmd_forward_walk(args, ctx: AppContext, *, run_fn=None) -> int:
+    """Compute per-signal forward-walk outcome labels for an exchange.
+
+    Run AFTER signal generation and AFTER the OHLCV correction pass (the walk
+    measures trades on the corrected/self-adjusted daily bars). Process-pool
+    compute, single-process writer — see forward_walk_orchestrator. Idempotent
+    on signal_enrichment_id, so re-runs are safe.
+    """
+    config = ctx.config
+    if run_fn is None:
+        from .forward_walk_orchestrator import run_forward_walk
+        run_fn = run_forward_walk
+    validate_exchange(args.exchange, config)
+
+    scoped = None
+    if args.tickers:
+        try:
+            scoped = [int(x) for x in args.tickers.split(",") if x.strip()]
+        except ValueError as e:
+            print(f"invalid --tickers {args.tickers!r}: {e}", file=sys.stderr)
+            return 2
+
+    outcome = run_fn(
+        config,
+        args.exchange,
+        ticker_ids=scoped,
+        processes=args.processes,
+        batch_size=args.batch_size,
+    )
+    print(
+        f"forward-walk {args.exchange}: {outcome.rows_written} rows, "
+        f"{outcome.tickers} tickers, {len(outcome.failed)} failed"
+    )
+    if outcome.failed:
+        for tid, err in outcome.failed[:10]:
+            print(f"  FAILED ticker_id={tid} {err[:80]}", file=sys.stderr)
+        return 1
+    return 0
+
+
 # ---------- argparse registration helper ---------- #
 
 
@@ -1250,7 +1293,28 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, Callable]:
              "symmetry with sibling compute commands.",
     )
 
+    fw = sub.add_parser(
+        "forward-walk",
+        help="Compute per-signal forward-walk outcome labels (spec 02). "
+             "Run after signal generation + the OHLCV correction pass. "
+             "Process-pool compute, single writer; idempotent per signal.",
+    )
+    _add_exchange_arg(fw)
+    fw.add_argument(
+        "--tickers", default=None, metavar="ID,ID,...",
+        help="Comma-separated ticker_ids to scope to (default: all active).",
+    )
+    fw.add_argument(
+        "--processes", type=int, default=None, metavar="N",
+        help="Child process count (default: round(2/3 x physical cores)).",
+    )
+    fw.add_argument(
+        "--batch-size", type=int, default=500, metavar="N",
+        help="Rows per upsert flush by the single writer (default: 500).",
+    )
+
     return {
+        "forward-walk":                 cmd_forward_walk,
         "refresh-industry":             cmd_refresh_industry,
         "set-industry-override":        cmd_set_industry_override,
         "delete-industry-override":     cmd_delete_industry_override,
