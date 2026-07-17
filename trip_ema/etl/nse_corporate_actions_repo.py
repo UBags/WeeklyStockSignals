@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -51,6 +52,20 @@ class FactorEvent:
     ratio_denominator: int | None
     subject: str
     detected_at: datetime | None = None
+
+
+def _json_safe(value):
+    """Recursively replace non-finite floats (NaN / Inf) with None so the
+    payload is valid JSON. Postgres jsonb rejects NaN, and the nselib feed
+    uses NaN for missing numeric cells (e.g. faceVal). numpy float64 NaN is
+    caught too (it subclasses float)."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 class NseCorporateActionsRepository:
@@ -118,7 +133,8 @@ class NseCorporateActionsRepository:
                     "subject": rec.subject,
                     "source": rec.source,
                     "raw_payload": (
-                        json.dumps(rec.raw_payload) if rec.raw_payload else None
+                        json.dumps(_json_safe(rec.raw_payload))
+                        if rec.raw_payload else None
                     ),
                 },
             )
