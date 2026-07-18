@@ -837,6 +837,25 @@ class EtlConfig(BaseModel):
     2,700 tickers x 5s ~= 3h45m per sweep; x 2s ~= 1h30m; x 1s ~= 45m.
     Start at 5s while Yahoo is angry, then walk it down."""
 
+    yfinance_min_request_gap_seconds: float = Field(
+        default=0.0, ge=0.0, le=600.0,
+    )
+    """GLOBAL minimum spacing between OHLCV yfinance downloads across ALL
+    fetch threads and every retry layer (0.0 disables -- ungated, the
+    historical behaviour).
+
+    The OHLCV twin of fundamentals_min_request_gap_seconds, and the same
+    reasoning: yfinance_request_delay_seconds paces each worker
+    independently, so `yfinance_concurrency` workers can still fire that many
+    downloads within milliseconds of one another. This is the floor that says
+    no two downloads START closer together than this, whatever the thread
+    count.
+
+    THROUGHPUT IS THEN THIS ALONE: ~1/gap downloads per second, and extra
+    threads no longer add rate. Budget it: the bulk pass is
+    ceil(universe / yfinance_batch_size) downloads (~27 at 2,700/100, so ~2m
+    at 5s); the retry layers are one download per HALF-batch chunk."""
+
     yfinance_throttle_backoff_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
     """Base backoff when Yahoo is detected to be rate-limiting us.
 

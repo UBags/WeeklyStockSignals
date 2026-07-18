@@ -223,6 +223,13 @@ etl:
 #                                   # everything else → tier-3
    park_failure_threshold: 3       # park after this many consecutive failures
    yfinance_batch_size: 100
+   yfinance_min_request_gap_seconds: 5.0  # GLOBAL floor: no two OHLCV
+                                          # downloads start closer together
+                                          # than this, across ALL fetch
+                                          # threads and all retry layers.
+                                          # Retry layers re-batch at
+                                          # yfinance_batch_size / 2 = 50,
+                                          # single-threaded.
 #   yfinance_concurrency: 4
    yfinance_request_delay_seconds: 120   # D4: was 30 — 30s dead sleep per batch; gate handles real 429s
 

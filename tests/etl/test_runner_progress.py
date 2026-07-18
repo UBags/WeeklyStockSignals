@@ -82,6 +82,9 @@ class TestRunFetchPassProgressCb:
         config = MagicMock()
         config.etl.yfinance_batch_size = 100
         config.etl.yfinance_request_delay_seconds = 0.0
+        # Must be a real number: an unset MagicMock attribute is a MagicMock,
+        # and RequestGate's max(0.0, gap_s) cannot order a mock against a float.
+        config.etl.yfinance_min_request_gap_seconds = 0.0
 
         with pytest.raises(StopAfterRunning):
             runner_mod._run_fetch_pass(

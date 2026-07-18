@@ -74,6 +74,7 @@ from .types import (
     RunOutcome,
     Tier,
 )
+from .request_gate import RequestGate
 from .throttle import ThrottleConfig, ThrottleGate
 from .yfinance_source import YFinanceSource
 from ..domain.market_session import (
@@ -570,6 +571,12 @@ def fetch_bars_for_tickers(
         batch_size=config.etl.yfinance_batch_size,
         request_delay_seconds=config.etl.yfinance_request_delay_seconds,
         throttle_backoff_seconds=config.etl.yfinance_throttle_backoff_seconds,
+        # Same gate policy as the bulk pass. This path exists to re-fetch
+        # tickers a throttle already cost us; running it ungated is how a
+        # throttle becomes permanent.
+        request_gate=RequestGate(
+            config.etl.yfinance_min_request_gap_seconds,
+        ),
     )
     tickers = [
         _TickerInfo(
@@ -709,6 +716,12 @@ def _run_fetch_pass(
         batch_size=config.etl.yfinance_batch_size,
         request_delay_seconds=config.etl.yfinance_request_delay_seconds,
         throttle_backoff_seconds=config.etl.yfinance_throttle_backoff_seconds,
+        # ONE gate, one source, every worker thread: all yfinance_concurrency
+        # workers call through this instance, so no two downloads in the pass
+        # start closer than the configured gap.
+        request_gate=RequestGate(
+            config.etl.yfinance_min_request_gap_seconds,
+        ),
     )
 
     # Sanity: if the caller supplied a source, ensure it matches the
@@ -947,6 +960,11 @@ def _solo_retry_once(
             trip_on_empty=False,
         ),
     )
+    # ONE spacing gate for the whole recovery too, shared by L1/L2/L3. This
+    # path matters more than the bulk pass, not less: it runs after Yahoo has
+    # already pushed back once, so it is exactly where an unspaced burst turns
+    # an empty batch into an empty retry and a live ticker into "delisted".
+    req_gate = RequestGate(config.etl.yfinance_min_request_gap_seconds)
 
     def _pass(pass_snapshot, *, repair, batch_size, label="?"):
         """One bounded pass. Returns (recovered, still_failed). Plain `for`
@@ -972,6 +990,7 @@ def _solo_retry_once(
             throttle_backoff_seconds=config.etl.yfinance_throttle_backoff_seconds,
             repair=repair,
             throttle=gate,  # shared — every fetch corroborates every other
+            request_gate=req_gate,  # shared — spacing spans all three layers
         )
         bound = len(pass_snapshot)
         recovered = 0
@@ -1033,7 +1052,18 @@ def _solo_retry_once(
             ).inc(len(still_failed))
         return recovered, still_failed
 
-    retry_batch_size = max(1, config.etl.yfinance_batch_size)
+    # Half the bulk batch size, for EVERY layer. The bulk pass already
+    # proved the full size too big for these symbols, and a batch of one asks
+    # yfinance once per ticker — the request storm that gets us throttled in
+    # the first place. Half is the compromise: fewer requests than solo,
+    # smaller frames than bulk. max(1, ...) because 1 // 2 == 0 and a
+    # zero-width chunk would make the pass loop forever.
+    #
+    # Every layer below is SINGLE-THREADED — the `for` loop inside _pass runs
+    # on the calling thread and there is no executor anywhere in this
+    # function. That is deliberate and load-bearing: this code path only runs
+    # after Yahoo has already pushed back.
+    retry_batch_size = max(1, config.etl.yfinance_batch_size // 2)
 
     # Layer 1: repair=False over the intcast set, batched. These are repair
     # casualties by construction — repair=True would re-drop them.
@@ -1046,7 +1076,8 @@ def _solo_retry_once(
 
     # Layer 2: repair=True, solo — the generic batch-flake cohort.
     rec_a, survivors = _pass(
-        generic_snapshot, repair=True, batch_size=1, label="L2",
+        generic_snapshot, repair=True, batch_size=retry_batch_size,
+        label="L2",
     )
 
     # Layer 3: repair=False, solo — Layer-2 survivors. Fixed before the pass;
@@ -1055,7 +1086,8 @@ def _solo_retry_once(
     still_empty: list = []
     if survivors:
         rec_b, still_empty = _pass(
-            survivors, repair=False, batch_size=1, label="L3",
+            survivors, repair=False, batch_size=retry_batch_size,
+            label="L3",
         )
 
     logger.info(

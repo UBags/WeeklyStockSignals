@@ -33,6 +33,7 @@ def _config():
         yfinance_request_delay_seconds=0.0,
         yfinance_throttle_backoff_seconds=1.0,
         yfinance_batch_size=25,
+        yfinance_min_request_gap_seconds=0.0,
     )
     return SimpleNamespace(etl=etl)
 

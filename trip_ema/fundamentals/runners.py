@@ -51,6 +51,7 @@ from collections.abc import Callable
 from sqlalchemy import Engine, text
 
 from .parallel import fan_out, resolve_max_workers
+from ..etl.request_gate import RequestGate
 from .ports import DEFAULT_SOURCE, FundamentalsSource
 from ..persistence import transaction
 from ..persistence.fetch_status_repo import (
@@ -102,38 +103,6 @@ RATE_LIMIT_ATTEMPTS = 3
 # Ceiling on any SINGLE backoff sleep, so a large base cannot park a worker
 # for an unbounded stretch.
 RATE_LIMIT_BACKOFF_CAP_S = 900.0
-
-
-class _RequestGate:
-    """Process-wide minimum spacing between outbound yfinance calls.
-
-    Threads reserve their slot under a lock and sleep OUTSIDE it, so the HTTP
-    calls themselves still overlap — only their start times are spaced. Uses
-    time.monotonic(), so a wall-clock/NTP step cannot collapse the spacing.
-
-    gap<=0 makes wait() a no-op, restoring the previous behaviour exactly.
-    """
-
-    __slots__ = ("_gap", "_lock", "_next_at")
-
-    def __init__(self, gap_s: float = 0.0) -> None:
-        self._gap = max(0.0, gap_s)
-        self._lock = threading.Lock()
-        self._next_at = 0.0
-
-    def wait(self) -> float:
-        """Block until this thread's slot. Returns the seconds actually slept."""
-        if self._gap <= 0:
-            return 0.0
-        with self._lock:
-            now = time.monotonic()
-            start_at = now if now > self._next_at else self._next_at
-            self._next_at = start_at + self._gap
-        delay = start_at - now
-        if delay > 0:
-            time.sleep(delay)
-            return delay
-        return 0.0
 
 
 def _backoff_delay(base_s: float, attempt: int) -> float:
@@ -769,7 +738,7 @@ def _run_reference_sweep(
     state = {"succeeded": 0, "failed": 0, "skipped": 0}
     done_ids: set[int] = set(completed_ids)
 
-    gate = _RequestGate(min_request_gap_s)
+    gate = RequestGate(min_request_gap_s)
 
     def _one(t: dict) -> None:
         tid = int(t["id"])

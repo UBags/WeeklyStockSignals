@@ -59,6 +59,7 @@ from .ports import (
     snapshot_and_clear_yf_errors,
     yf_download,
 )
+from .request_gate import RequestGate
 from .throttle import ThrottleConfig, ThrottleGate, looks_rate_limited
 from .types import FetchOutcome, RawBar
 
@@ -139,6 +140,7 @@ class YFinanceSource:
         download: Downloader = yf_download,
         sleep: Sleeper = time.sleep,
         throttle: ThrottleGate | None = None,
+        request_gate: RequestGate | None = None,
     ):
         """`download`, `sleep` and `throttle` are collaborators, injected.
 
@@ -174,6 +176,12 @@ class YFinanceSource:
             ThrottleConfig(base_seconds=throttle_backoff_seconds),
             sleep=sleep,
         )
+        # Minimum spacing between download START times, shared across every
+        # source in a fetch phase. Distinct from `throttle`, which is a
+        # REACTIVE backoff opened after Yahoo has already pushed back; this
+        # is the PREVENTIVE floor that stops the burst arriving at all.
+        # Default is an open gate -- ungated, exactly as before.
+        self._request_gate = request_gate or RequestGate(0.0)
 
     @property
     def exchange(self) -> str:
@@ -285,6 +293,7 @@ class YFinanceSource:
             # This is what slows the WHOLE pass down once Yahoo starts
             # throttling, instead of each fetch discovering it alone.
             self._gate.wait()
+            self._request_gate.wait()
             try:
                 df = self._download(
                     tickers=yf_symbols,
@@ -364,6 +373,7 @@ class YFinanceSource:
         last_error = None
         for attempt in range(1, self._max_retries + 1):
             self._gate.wait()
+            self._request_gate.wait()
             try:
                 df = self._download(
                     tickers=yf_symbols,
