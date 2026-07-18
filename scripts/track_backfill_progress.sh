@@ -13,6 +13,8 @@
 #   bash scripts/track_backfill_progress.sh BSE          # another exchange
 #   bash scripts/track_backfill_progress.sh NSE --watch  # refresh every 30s
 #   bash scripts/track_backfill_progress.sh NSE --gaps   # only the gap report
+#   bash scripts/track_backfill_progress.sh NSE --ohlcv  # bar counts + thin tickers
+#   THIN_PCT=30 bash scripts/track_backfill_progress.sh NSE --ohlcv
 #   WATCH_SECS=10 bash scripts/track_backfill_progress.sh NSE --watch
 # =============================================================================
 set -uo pipefail
@@ -22,6 +24,7 @@ ROLE="${READ_ROLE:-trip_gui_user}"
 EXCHANGE="${1:-NSE}"
 MODE="${2:-}"
 WATCH_SECS="${WATCH_SECS:-30}"
+THIN_PCT="${THIN_PCT:-50}"   # "thin" = fewer bars than this %% of the average
 
 q()  { psql -U "$ROLE" -d "$DB" -X -q -c "$1" 2>&1; }
 qt() { psql -U "$ROLE" -d "$DB" -X -q -tAc "$1" 2>/dev/null; }
@@ -128,6 +131,89 @@ section_coverage() {
        WHERE k.exchange='${EXCHANGE}' AND k.is_active
     ) c
    ORDER BY label;"
+}
+
+section_ohlcv() {
+  hdr "OHLCV VOLUME — ${EXCHANGE}"
+  q "
+  SELECT
+    (SELECT count(*) FROM tickers
+      WHERE exchange='${EXCHANGE}')                              AS tickers_total,
+    (SELECT count(*) FROM tickers
+      WHERE exchange='${EXCHANGE}' AND is_active)                AS tickers_active,
+    (SELECT count(*) FROM tickers
+      WHERE exchange='${EXCHANGE}' AND delisted_at IS NOT NULL)  AS tickers_delisted,
+    (SELECT count(*) FROM ohlcv_bars b JOIN tickers k USING (ticker_id)
+      WHERE k.exchange='${EXCHANGE}')                            AS bars_total,
+    (SELECT count(*) FROM ohlcv_bars b JOIN tickers k USING (ticker_id)
+      WHERE k.exchange='${EXCHANGE}' AND b.timeframe='1D')       AS bars_1d,
+    (SELECT count(*) FROM ohlcv_bars b JOIN tickers k USING (ticker_id)
+      WHERE k.exchange='${EXCHANGE}' AND b.timeframe='1W')       AS bars_1w;"
+
+  echo "-- per-ticker 1D bar depth (active tickers with at least one bar) --"
+  q "
+  WITH per AS (
+      SELECT k.ticker_id, count(b.*) AS bars
+        FROM tickers k
+        LEFT JOIN ohlcv_bars b
+               ON b.ticker_id = k.ticker_id AND b.timeframe = '1D'
+       WHERE k.exchange='${EXCHANGE}' AND k.is_active
+       GROUP BY k.ticker_id
+  )
+  SELECT count(*) FILTER (WHERE bars > 0)                    AS tickers_with_bars,
+         count(*) FILTER (WHERE bars = 0)                    AS tickers_no_data,
+         round(avg(bars) FILTER (WHERE bars > 0))            AS avg_bars,
+         round(percentile_cont(0.5) WITHIN GROUP (ORDER BY bars)
+               FILTER (WHERE bars > 0))                      AS median_bars,
+         min(bars) FILTER (WHERE bars > 0)                   AS min_bars,
+         max(bars)                                           AS max_bars
+    FROM per;"
+}
+
+section_thin() {
+  hdr "TICKERS WITH NO DATA — ${EXCHANGE}"
+  echo "Active tickers with ZERO 1D bars. A fetch never landed for these."
+  q "
+  SELECT k.ticker_id, k.symbol, k.instrument_type,
+         to_char(k.listing_date,'YYYY-MM-DD') AS listed
+    FROM tickers k
+    LEFT JOIN ohlcv_bars b
+           ON b.ticker_id = k.ticker_id AND b.timeframe='1D'
+   WHERE k.exchange='${EXCHANGE}' AND k.is_active AND b.ticker_id IS NULL
+   ORDER BY k.symbol
+   LIMIT 40;"
+
+  hdr "THIN TICKERS — ${EXCHANGE}  (< ${THIN_PCT}% of average 1D bars)"
+  echo "Fewer bars than peers. Check 'listed' before alarm: a 2025 IPO SHOULD be"
+  echo "thin. A ticker listed long ago that is thin means a truncated fetch."
+  q "
+  WITH per AS (
+      SELECT k.ticker_id, k.symbol, k.listing_date,
+             count(b.*)                                   AS bars,
+             min(b.bar_timestamp) AT TIME ZONE 'Asia/Kolkata' AS first_bar,
+             max(b.bar_timestamp) AT TIME ZONE 'Asia/Kolkata' AS last_bar
+        FROM tickers k
+        JOIN ohlcv_bars b
+          ON b.ticker_id = k.ticker_id AND b.timeframe='1D'
+       WHERE k.exchange='${EXCHANGE}' AND k.is_active
+       GROUP BY k.ticker_id, k.symbol, k.listing_date
+  ), stats AS (
+      SELECT avg(bars) AS avg_bars FROM per
+  )
+  SELECT p.ticker_id, p.symbol, p.bars,
+         round(100.0 * p.bars / NULLIF(s.avg_bars,0)) || ' %' AS pct_of_avg,
+         to_char(p.listing_date,'YYYY-MM-DD')      AS listed,
+         to_char(p.first_bar,'YYYY-MM-DD')         AS first_bar,
+         to_char(p.last_bar,'YYYY-MM-DD')          AS last_bar,
+         CASE WHEN p.listing_date IS NOT NULL
+                   AND p.first_bar::date - p.listing_date <= 30
+              THEN 'ok: new listing'
+              ELSE 'CHECK: truncated?'
+         END AS verdict
+    FROM per p, stats s
+   WHERE p.bars < s.avg_bars * (${THIN_PCT} / 100.0)
+   ORDER BY p.bars
+   LIMIT 30;"
 }
 
 section_signals() {
@@ -251,10 +337,15 @@ snapshot() {
   if [[ "$MODE" == "--gaps" ]]; then
     section_gaps; section_hint; return
   fi
+  if [[ "$MODE" == "--ohlcv" ]]; then
+    section_ohlcv; section_thin; return
+  fi
   section_runs
   section_phases
   section_fundamentals
   section_coverage
+  section_ohlcv
+  section_thin
   section_signals
   section_gaps
   section_hint
