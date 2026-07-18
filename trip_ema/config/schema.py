@@ -811,6 +811,32 @@ class EtlConfig(BaseModel):
     exhausted the ticker is counted failed and the sweep moves on — the run
     finishes PARTIAL and is resumable with --resume."""
 
+    fundamentals_request_delay_seconds: float = Field(default=0.5, ge=0.0, le=60.0)
+    """Pause each sweep worker takes before its next yfinance call (jittered
+    50-100% of this).
+
+    These sweeps are one HTTP request PER TICKER — ~2,700 requests per sweep,
+    against ~27 for the batched OHLCV path — which is why they trip Yahoo's
+    per-IP limiter and the bar downloads never do. Concurrency caps how many
+    are in flight; this caps how fast each thread reloads. Aggregate rate is
+    roughly fundamentals_concurrency / this. 0.0 disables the pause."""
+
+    fundamentals_min_request_gap_seconds: float = Field(
+        default=5.0, ge=0.0, le=120.0,
+    )
+    """GLOBAL minimum spacing between yfinance requests across ALL sweep
+    threads (0.0 disables).
+
+    fundamentals_request_delay_seconds paces each thread independently, so W
+    workers can still fire W requests within milliseconds of one another —
+    the burst that actually trips the limiter. This gate is process-wide: no
+    two requests start closer together than this, whatever the thread count.
+
+    THROUGHPUT IS THEN THIS ALONE: ~1/gap requests per second, and extra
+    threads no longer add rate (they only hide slow responses). Budget it:
+    2,700 tickers x 5s ~= 3h45m per sweep; x 2s ~= 1h30m; x 1s ~= 45m.
+    Start at 5s while Yahoo is angry, then walk it down."""
+
     yfinance_throttle_backoff_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
     """Base backoff when Yahoo is detected to be rate-limiting us.
 

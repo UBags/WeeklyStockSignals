@@ -48,6 +48,10 @@ def cmd_refresh_industry(args, ctx: AppContext, *, refresh_fn=None) -> int:
         resume_run_id=args.resume,
         force=args.force,
         max_workers=config.etl.fundamentals_concurrency,
+        request_delay_s=config.etl.fundamentals_request_delay_seconds,
+        min_request_gap_s=(
+            config.etl.fundamentals_min_request_gap_seconds
+        ),
         rate_limit_cooloff_s=(
             config.etl.fundamentals_rate_limit_cooloff_seconds
         ),
@@ -316,6 +320,14 @@ def cmd_refresh_shares(args, ctx: AppContext, *, refresh_fn=None) -> int:
         args.exchange,
         resume_run_id=args.resume,
         force=args.force,
+        max_workers=config.etl.fundamentals_concurrency,
+        request_delay_s=config.etl.fundamentals_request_delay_seconds,
+        min_request_gap_s=(
+            config.etl.fundamentals_min_request_gap_seconds
+        ),
+        rate_limit_cooloff_s=(
+            config.etl.fundamentals_rate_limit_cooloff_seconds
+        ),
     )
     with db_engine.connect() as conn:
         r = FundamentalsRunRepository(conn).get(run_id)
@@ -413,6 +425,14 @@ def cmd_refresh_financials(args, ctx: AppContext, *, refresh_fn=None) -> int:
         args.exchange,
         resume_run_id=args.resume,
         force=args.force,
+        max_workers=config.etl.fundamentals_concurrency,
+        request_delay_s=config.etl.fundamentals_request_delay_seconds,
+        min_request_gap_s=(
+            config.etl.fundamentals_min_request_gap_seconds
+        ),
+        rate_limit_cooloff_s=(
+            config.etl.fundamentals_rate_limit_cooloff_seconds
+        ),
     )
     with db_engine.connect() as conn:
         r = FundamentalsRunRepository(conn).get(run_id)
