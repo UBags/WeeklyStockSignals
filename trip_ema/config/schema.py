@@ -821,6 +821,20 @@ class EtlConfig(BaseModel):
     are in flight; this caps how fast each thread reloads. Aggregate rate is
     roughly fundamentals_concurrency / this. 0.0 disables the pause."""
 
+    fundamentals_retry_gap_seconds: float = Field(
+        default=3.0, ge=0.0, le=600.0,
+    )
+    """Spacing for the SINGLE-THREADED retry layers over the failures of the
+    threaded first pass (the fundamentals twin of the OHLCV half-batch retry).
+
+    Separate from fundamentals_min_request_gap_seconds because the two passes
+    have opposite shapes. The first pass is thousands of tickers and the gap
+    sets the whole runtime, so it has to stay defensible. A retry layer is
+    only the failures — tens, maybe hundreds — so the gap costs little and a
+    tighter one is affordable.
+
+    Cost is exactly len(failures) x this, since the layers are serial."""
+
     fundamentals_min_request_gap_seconds: float = Field(
         default=5.0, ge=0.0, le=120.0,
     )

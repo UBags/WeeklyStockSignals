@@ -244,7 +244,7 @@ etl:
                                           # from the shared default. 3 =
                                           # polite, still ~3x serial. Drop to
                                           # 2 if 429s persist.
-   fundamentals_request_delay_seconds: 0.5  # pause each worker takes before
+   fundamentals_request_delay_seconds: 4.0  # pause each worker takes before
                                           # its next call, jittered 50-100%.
                                           # These sweeps are 1 HTTP request
                                           # PER TICKER (~2,700 per sweep), so
@@ -267,6 +267,12 @@ etl:
                                           #    1s -> ~45m
                                           # Start at 5, walk it down once
                                           # Yahoo stops throttling. 0 = off.
+   fundamentals_retry_gap_seconds: 3.0    # spacing for the
+                                          # SINGLE-THREADED retry layers over
+                                          # the first pass's failures. Cost is
+                                          # len(failures) x this, so a tighter
+                                          # gap than the sweep gap above is
+                                          # affordable here.
    fundamentals_rate_limit_cooloff_seconds: 60   # BASE backoff after a 429.
                                           # Each further attempt doubles it
                                           # (60 -> 120 -> 240), jittered, and

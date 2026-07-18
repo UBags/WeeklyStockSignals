@@ -325,8 +325,15 @@ class TestScopedIndustryRecompute:
         # Real scoped shares refresh (Patcher A run_id path) with a
         # stubbed fetcher so there is no network.
         def _shares_stage(db_engine, exchange, **kwargs):
+            # Override INSIDE kwargs, not alongside it. The pipeline now
+            # forwards the rate-limit knobs from config, so passing
+            # request_delay_s as a separate argument here would arrive twice.
+            # Pinning both to zero also keeps this orchestration test from
+            # sleeping if a config default ever moves.
+            kwargs["request_delay_s"] = 0
+            kwargs["min_request_gap_s"] = 0.0
             return run_shares_refresh(
-                db_engine, exchange, request_delay_s=0,
+                db_engine, exchange,
                 fetch_fn=lambda sym, exch: SharesInfo(1_000_000, "YFINANCE"),
                 **kwargs,
             )

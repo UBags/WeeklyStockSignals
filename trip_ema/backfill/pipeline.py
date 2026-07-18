@@ -540,9 +540,27 @@ def backfill(
                     # needless FULL re-sweep. A gap-only pass is precisely the
                     # thing that guard should not block — and the phase ledger
                     # already handles "don't redo completed work" for us.
+                    # The four rate-limit knobs MUST be passed. Every
+                    # one of them defaults to 0.0 / None inside the runners,
+                    # so omitting them does not mean "use the config value",
+                    # it means UNGATED — full concurrency, zero spacing.
+                    # That is exactly how a single throttled pass wrote off
+                    # 2,059 tickers as financials-UNAVAILABLE, a verdict the
+                    # table's CHECK constraint makes permanent. The gate was
+                    # correct the whole time; this call site never reached it.
                     lambda fn=_fn: fn(
                         db_engine, exchange,
                         force=True, only_missing=True,
+                        min_request_gap_s=(
+                            config.etl.fundamentals_min_request_gap_seconds
+                        ),
+                        request_delay_s=(
+                            config.etl.fundamentals_request_delay_seconds
+                        ),
+                        max_workers=config.etl.fundamentals_concurrency,
+                        rate_limit_cooloff_s=(
+                            config.etl.fundamentals_rate_limit_cooloff_seconds
+                        ),
                     ),
                     backfill_run_id=run_id, force=_force,
                 )
@@ -696,6 +714,19 @@ def backfill(
                 lambda: stages.run_shares_refresh(
                     db_engine, exchange, force=True,
                     stocks=scoped_tickers,
+                    # Same passthrough as the 0b/0c/0d block above. A scoped
+                    # run is small, but "small and ungated" is still how a
+                    # burst gets a live ticker recorded as UNAVAILABLE.
+                    min_request_gap_s=(
+                        config.etl.fundamentals_min_request_gap_seconds
+                    ),
+                    request_delay_s=(
+                        config.etl.fundamentals_request_delay_seconds
+                    ),
+                    max_workers=config.etl.fundamentals_concurrency,
+                    rate_limit_cooloff_s=(
+                        config.etl.fundamentals_rate_limit_cooloff_seconds
+                    ),
                 ),
                 backfill_run_id=run_id, force=_force,
             )
