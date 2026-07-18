@@ -224,7 +224,25 @@ etl:
    park_failure_threshold: 3       # park after this many consecutive failures
    yfinance_batch_size: 100
 #   yfinance_concurrency: 4
-   yfinance_request_delay_seconds: 0.5   # D4: was 30 — 30s dead sleep per batch; gate handles real 429s
+   yfinance_request_delay_seconds: 120   # D4: was 30 — 30s dead sleep per batch; gate handles real 429s
+
+   # --- Fundamentals reference sweeps (refresh-industry / -shares /
+   # --- -financials). SEPARATE from the yfinance_* keys above, which size the
+   # --- OHLCV bar batches. The sweeps make one lightweight .info call per
+   # --- ticker across thousands of tickers, so they trip Yahoo's per-IP
+   # --- limiter far more easily than a few batched bar downloads.
+   fundamentals_concurrency: 3            # sweep pool width (was an
+                                          # unbounded ~8 from the shared
+                                          # default). 3 = polite, still ~3x
+                                          # serial. Drop to 2 if 429s persist.
+   fundamentals_rate_limit_cooloff_seconds: 60   # BASE backoff after a 429.
+                                          # Each further attempt doubles it
+                                          # (60 -> 120 -> 240), jittered, and
+                                          # capped at 900s per sleep.
+   fundamentals_rate_limit_attempts: 3    # total tries per ticker (1 = no
+                                          # retry). Exhausted -> ticker counted
+                                          # failed, run ends PARTIAL, resumable
+                                          # with --resume <RUN_ID>.
 #   reconcile_window_days: 7
 #   parked_dir: var/etl/parked
 #   checkpoint_dir: var/etl

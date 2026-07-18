@@ -41,6 +41,7 @@ Exit semantics:
 from __future__ import annotations
 
 import logging
+import random
 import threading
 import time
 from dataclasses import dataclass
@@ -94,6 +95,26 @@ DEFAULT_REQUEST_DELAY_S = 2.0
 # windows are short (~1 minute); 60s usually clears it.
 RATE_LIMIT_COOLOFF_S = 60.0
 
+# Total attempts per ticker when Yahoo throttles (1 = no retry). Overridden
+# per-run from etl.fundamentals_rate_limit_attempts.
+RATE_LIMIT_ATTEMPTS = 3
+
+# Ceiling on any SINGLE backoff sleep, so a large base cannot park a worker
+# for an unbounded stretch.
+RATE_LIMIT_BACKOFF_CAP_S = 900.0
+
+
+def _backoff_delay(base_s: float, attempt: int) -> float:
+    """Exponential backoff with jitter for attempt N (1-based).
+
+    base * 2**(attempt-1), capped, then jittered into [50%, 100%] of that.
+    The jitter is not decoration: every worker was throttled at the same
+    instant, so a deterministic delay makes them all retry in lockstep and
+    trip the limiter again together.
+    """
+    raw = min(base_s * (2 ** (attempt - 1)), RATE_LIMIT_BACKOFF_CAP_S)
+    return raw * (0.5 + random.random() * 0.5)
+
 # Checkpoint every N tickers. Small enough that a crash near the end
 # of a long run doesn't lose hours of work; large enough that the
 # checkpoint write isn't itself the bottleneck.
@@ -114,6 +135,9 @@ def run_industry_refresh(
     request_delay_s: float = DEFAULT_REQUEST_DELAY_S,
     fetch_fn: Callable[[str, str], IndustryInfo] = fetch_industry,
     etf_long_name_fn: Callable[[str, str], str | None] | None = None,
+    max_workers: int | None = None,
+    rate_limit_cooloff_s: float = RATE_LIMIT_COOLOFF_S,
+    rate_limit_attempts: int = RATE_LIMIT_ATTEMPTS,
 ) -> int:
     """Refresh industry classification for every active ticker on `exchange`.
 
@@ -249,6 +273,8 @@ def run_industry_refresh(
             )
         return _classify_equity(
             db_engine, tid, symbol, exchange, fetch_fn,
+            cooloff_s=rate_limit_cooloff_s,
+            attempts=rate_limit_attempts,
         )
 
     return _run_reference_sweep(
@@ -259,6 +285,7 @@ def run_industry_refresh(
         ticker_list=ticker_list,
         completed_ids=completed_ids,
         worker_fn=_worker,
+        max_workers=max_workers,
     )
 
 
@@ -274,6 +301,9 @@ def _classify_equity(
     symbol: str,
     exchange: str,
     fetch_fn,
+    *,
+    cooloff_s: float = RATE_LIMIT_COOLOFF_S,
+    attempts: int = RATE_LIMIT_ATTEMPTS,
 ) -> str:
     """Classify one equity by calling yfinance and writing the
     sector+industry result. Returns 'succeeded' or 'failed'.
@@ -300,43 +330,59 @@ def _classify_equity(
             FundamentalsFetchStatusRepository(conn).clear(tid, "industry")
         return "succeeded"
     except IndustryFetchRateLimited as e:
-        logger.warning(
-            "Rate limited on %s (%s): sleeping %.1fs",
-            symbol, e, RATE_LIMIT_COOLOFF_S,
+        # Yahoo is throttling. Back off EXPONENTIALLY with jitter rather than
+        # taking one fixed 60s nap: when the pool trips the limiter its window
+        # is much longer than 60s, so a single short retry lands straight back
+        # in the throttle and the whole cohort fails together.
+        for attempt in range(1, attempts):
+            delay = _backoff_delay(cooloff_s, attempt)
+            logger.warning(
+                "Rate limited on %s (%s): attempt %d/%d, sleeping %.1fs",
+                symbol, e, attempt, attempts, delay,
+            )
+            time.sleep(delay)
+            try:
+                info = fetch_fn(symbol, exchange)
+                with transaction(db_engine) as conn:
+                    InstrumentIndustryRepository(conn).upsert_unless_overridden(
+                        tid,
+                        sector=info.sector,
+                        industry=info.industry,
+                        classification_source="YFINANCE",
+                    )
+                    FundamentalsFetchStatusRepository(conn).clear(
+                        tid, "industry",
+                    )
+                return "succeeded"
+            except IndustryFetchRateLimited as e_rl:
+                e = e_rl          # still throttled: keep backing off
+                continue
+            except IndustryFetchPermanent as e2:
+                # The retry is not a lesser path. A ticker that was throttled
+                # first and is definitively absent second is STILL definitively
+                # absent — and this handler is the only one that will ever see
+                # it. Catching it under `except Exception` below would discard
+                # the verdict for the exact cohort the cool-off exists to serve.
+                logger.info(
+                    "industry unavailable upstream for %s (after cool-off): %s",
+                    symbol, e2,
+                )
+                with transaction(db_engine) as conn:
+                    FundamentalsFetchStatusRepository(conn).mark_unavailable(
+                        tid, "industry", str(e2),
+                    )
+                return "failed"
+            except Exception as e2:
+                logger.error(
+                    "Failed retry after rate-limit cool-off for %s: %s",
+                    symbol, e2,
+                )
+                return "failed"
+        logger.error(
+            "Rate limited on %s after %d attempt(s), giving up: %s",
+            symbol, attempts, e,
         )
-        time.sleep(RATE_LIMIT_COOLOFF_S)
-        try:
-            info = fetch_fn(symbol, exchange)
-            with transaction(db_engine) as conn:
-                InstrumentIndustryRepository(conn).upsert_unless_overridden(
-                    tid,
-                    sector=info.sector,
-                    industry=info.industry,
-                    classification_source="YFINANCE",
-                )
-                FundamentalsFetchStatusRepository(conn).clear(tid, "industry")
-            return "succeeded"
-        except IndustryFetchPermanent as e2:
-            # The retry is not a lesser path. A ticker that was throttled first
-            # and is definitively absent second is STILL definitively absent —
-            # and this handler is the only one that will ever see it. Catching it
-            # under `except Exception` below would discard the verdict for the
-            # exact cohort the cool-off exists to serve.
-            logger.info(
-                "industry unavailable upstream for %s (after cool-off): %s",
-                symbol, e2,
-            )
-            with transaction(db_engine) as conn:
-                FundamentalsFetchStatusRepository(conn).mark_unavailable(
-                    tid, "industry", str(e2),
-                )
-            return "failed"
-        except Exception as e2:
-            logger.error(
-                "Failed retry after rate-limit cool-off for %s: %s",
-                symbol, e2,
-            )
-            return "failed"
+        return "failed"
     except IndustryFetchPermanent as e:
         # The provider was asked and has nothing to classify this with. Record
         # it: the gap-only sweep then stops re-asking, and the fidelity audit can

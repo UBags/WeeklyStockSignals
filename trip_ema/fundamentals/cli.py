@@ -47,6 +47,11 @@ def cmd_refresh_industry(args, ctx: AppContext, *, refresh_fn=None) -> int:
         args.exchange,
         resume_run_id=args.resume,
         force=args.force,
+        max_workers=config.etl.fundamentals_concurrency,
+        rate_limit_cooloff_s=(
+            config.etl.fundamentals_rate_limit_cooloff_seconds
+        ),
+        rate_limit_attempts=config.etl.fundamentals_rate_limit_attempts,
     )
     # Read back the run row to print a summary.
     with db_engine.connect() as conn:

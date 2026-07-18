@@ -788,6 +788,29 @@ class EtlConfig(BaseModel):
     """ThreadPoolExecutor worker count for parallel batches. Higher =
     faster + more rate-limit risk; lower = slower + safer."""
 
+    fundamentals_concurrency: int = Field(default=3, ge=1, le=16)
+    """Worker count for the fundamentals reference sweeps (refresh-industry /
+    -shares / -financials).
+
+    SEPARATE from yfinance_concurrency, which sizes the OHLCV bar batches. The
+    sweeps make one lightweight .info call per ticker across thousands of
+    tickers, which trips Yahoo's per-IP limiter far more easily than a few
+    batched bar downloads. Default 3 (was an unbounded ~8 from the shared pool
+    default) — low enough not to provoke the throttle, still ~3x serial."""
+
+    fundamentals_rate_limit_cooloff_seconds: float = Field(
+        default=60.0, ge=1.0, le=900.0,
+    )
+    """BASE backoff after a 429 in a reference sweep. Each successive attempt
+    doubles it (60s, 120s, 240s ...) with jitter, capped per sleep. Yahoo's
+    throttle window after a burst is much longer than a single 60s nap."""
+
+    fundamentals_rate_limit_attempts: int = Field(default=3, ge=1, le=10)
+    """Total fetch attempts per ticker when throttled (1 = no retry). Attempts
+    beyond the first are spaced by the exponential backoff above; when they are
+    exhausted the ticker is counted failed and the sweep moves on — the run
+    finishes PARTIAL and is resumable with --resume."""
+
     yfinance_throttle_backoff_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
     """Base backoff when Yahoo is detected to be rate-limiting us.
 
