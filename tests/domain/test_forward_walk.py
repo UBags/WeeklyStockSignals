@@ -63,7 +63,10 @@ def test_short_basic_is_mirrored():
         B(95, 97, 93, 96),     # exit 96
     ]
     r = walk_signal(100.0, bars, SHORT)
-    assert abs(r.realized_ret - (100.0 / 96.0 - 1.0)) < 1e-12
+    # Entry 100, exit 96 -> +4% short, denominated in entry_open like every
+    # other metric here. Was (100/96 - 1) = 4.17%, which divides by the EXIT
+    # price and is unbounded as that approaches zero.
+    assert abs(r.realized_ret - 0.04) < 1e-12
 
     assert r.bars_to_gain["1"] == 0            # entry low 98 → short +2%
     assert r.bars_to_gain["3"] == 1

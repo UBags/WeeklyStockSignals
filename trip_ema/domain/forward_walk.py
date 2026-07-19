@@ -174,10 +174,22 @@ def walk_signal(
         raise ValueError("walk_signal requires positive closes")
 
     # --- realized directional return -------------------------------------
+    # BOTH SIDES DIVIDE BY entry_open. The short leg used to divide by
+    # exit_close, which is unbounded: a short cannot gain more than 100%
+    # (price can only fall to zero), but entry_open/exit_close - 1 goes to
+    # infinity as exit_close approaches zero. On run 69 that reported
+    # TVVISION (282 -> 1.35) as +20,790% instead of +99.5%, and put 1,514
+    # short labels above a 100% gain.
+    #
+    # It also disagreed with every other short metric in this same function:
+    # `favorable` and `adverse` below are both (x - entry_open) / entry_open.
+    # capture_ratio divides realized_ret by mfe_pct, so mixing the two
+    # denominators scored TVVISION at 209 where a capture ratio belongs near
+    # 1.0, and excess_ret_vs_* subtract entry-denominated context returns.
     if is_long:
         realized_ret = exit_close / entry_open - 1.0
     else:
-        realized_ret = entry_open / exit_close - 1.0
+        realized_ret = (entry_open - exit_close) / entry_open
 
     # --- rungs: first-touch bar index per rung ---------------------------
     def _first_touch(frac: float, *, gain: bool) -> int:
