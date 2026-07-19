@@ -2595,6 +2595,26 @@ def build_rebalance_chain(
     each in ascending order. Ascending order matters: each period's continuity
     splice reads the prior period's stored link_factor.
 
+    IDEMPOTENT. This walks EVERY April from base_date, so it owns every
+    constituent and period row for this industry, and it clears them before
+    rebuilding. Without that, a second run inverts an effective period:
+    close_period closes "the open row", the open row after a completed run is
+    the one from the LAST rebalance, and an earlier rebalance then tries to
+    close it backwards. iic_range_chk catches it as a CheckViolation, which is
+    the loud version of what would otherwise be a corrupt effective period
+    feeding every index value derived from it.
+
+    That clear used to live only behind --rebuild
+    (clear_industry_derived_for_rebuild). Re-running the phase by deleting its
+    pipeline_phase_status row went around it. A function that rebuilds a whole
+    chain should not depend on its caller remembering that.
+
+    NOT cleared here: industry_index_value, _indicator_state and
+    _indicator_enrichment belong to later phases. If constituents change, those
+    are stale until their own phases re-run -- and since they write
+    insert-if-missing, "re-run" means clearing them too. That is still
+    --rebuild's job.
+
     Returns {'industry': ..., 'rebalances': [(date, picked|None, skipped_reason)],
              'n_built': int, 'n_skipped': int}.
     """
@@ -2605,6 +2625,23 @@ def build_rebalance_chain(
     if idx is None:
         raise ValueError(
             f"build_rebalance_chain: index {industry_name!r} does not exist"
+        )
+
+    # Order matters only in that both must go before the walk starts; there is
+    # no FK between them. Industries fan out in parallel but each touches only
+    # its own rows, so this needs no cross-industry lock.
+    with transaction(db_engine) as conn:
+        n_cons = conn.execute(text(
+            "DELETE FROM industry_index_constituent WHERE industry_name = :n"
+        ), {"n": industry_name}).rowcount
+        n_per = conn.execute(text(
+            "DELETE FROM industry_index_period WHERE industry_name = :n"
+        ), {"n": industry_name}).rowcount
+    if n_cons or n_per:
+        logger.info(
+            "build_rebalance_chain %s: cleared %d constituent + %d period "
+            "row(s) from a previous build",
+            industry_name, n_cons, n_per,
         )
 
     dates = _annual_april_rebalance_dates(db_engine, idx.base_date, through)

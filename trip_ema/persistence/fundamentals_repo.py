@@ -1694,15 +1694,49 @@ class IndustryIndexConstituentRepository:
                 f"removed_reason must be one of "
                 f"{CONSTITUENT_REMOVED_REASONS}, got {removed_reason!r}"
             )
+        # `AND effective_from <= :et` is the guard. Without it this closes
+        # whatever period happens to be open, and on a chain REBUILD that is
+        # the row from the LAST rebalance -- so an earlier rebalance closes it
+        # backwards and iic_range_chk rejects the write. An inverted effective
+        # period would mean a constituent that leaves before it joins, and
+        # every index value computed from that membership would be wrong.
         result = self._conn.execute(text("""
             UPDATE industry_index_constituent
             SET effective_to = :et, removed_reason = :rr
             WHERE industry_name = :n
               AND ticker_id = :tid
               AND effective_to IS NULL
+              AND effective_from <= :et
         """), {"n": industry_name, "tid": ticker_id,
                "et": effective_to, "rr": removed_reason})
-        return result.rowcount > 0
+        if result.rowcount > 0:
+            return True
+
+        # Nothing closed. Two very different reasons, and they must not be
+        # conflated: no open period at all is normal (the caller asks before
+        # it knows), but an open period that STARTS LATER means we are
+        # rebuilding over rows from a previous run. Returning False there
+        # would leave that row open, double-counting the ticker in the index
+        # for every subsequent period -- silent, and wrong.
+        open_from = self._conn.execute(text("""
+            SELECT effective_from
+            FROM industry_index_constituent
+            WHERE industry_name = :n
+              AND ticker_id = :tid
+              AND effective_to IS NULL
+        """), {"n": industry_name, "tid": ticker_id}).scalar()
+        if open_from is not None:
+            raise ValueError(
+                f"close_period: {industry_name!r} ticker {ticker_id} has an "
+                f"open period starting {open_from}, which is AFTER the "
+                f"requested effective_to {effective_to}. This means the "
+                f"rebalance chain is being rebuilt over rows from an earlier "
+                f"run -- clear industry_index_constituent and "
+                f"industry_index_period for this industry first "
+                f"(build_rebalance_chain does this; --rebuild does it for "
+                f"every industry)."
+            )
+        return False
 
 
 def _constituent_from_row(row):
