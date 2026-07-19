@@ -211,9 +211,14 @@ class TestSequenceNumbers:
         first, second = sorted(by_date)
         assert by_date[first].seq_in_week == 1
         assert by_date[second].seq_in_week == 2
-        assert by_date[second].seq_in_2w == 2
+        # Both signals are in ONE week, so the run length is 1 for both. Under
+        # the old fixed two-week window this asserted 2 -- which is exactly
+        # the confusion the run-length counter removes: two signals in a
+        # fortnight is not two consecutive weeks of signals.
+        assert by_date[first].seq_in_consec_weeks == 1
+        assert by_date[second].seq_in_consec_weeks == 1
 
-    def test_the_week_counter_resets_and_the_2w_counter_does_not(self):
+    def test_the_week_counter_resets_and_the_run_length_grows(self):
         rows, session, _sbd, weeks, _daily = _run(
             lambda s, w: {_day(w[1], 2, s): ["BUY"],
                           _day(w[2], 2, s): ["BUY"]}
@@ -222,7 +227,8 @@ class TestSequenceNumbers:
         wk1, wk2 = sorted(by_date)
         assert by_date[wk1].seq_in_week == 1
         assert by_date[wk2].seq_in_week == 1        # new week
-        assert by_date[wk2].seq_in_2w == 2          # still in the window
+        # Adjacent weeks, one signal each -> a run of 2.
+        assert by_date[wk2].seq_in_consec_weeks == 2
 
     def test_the_churn_week_is_counted_per_type(self):
         rows, session, _sbd, weeks, _daily = _run(

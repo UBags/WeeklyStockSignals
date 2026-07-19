@@ -106,7 +106,7 @@ class TestPerType:
         seq = sequence_numbers({WED: types})
         assert len(seq) == 4
         for t in types:
-            assert seq[(WED, t)] == SignalSequence(in_week=1, in_2w=1)
+            assert seq[(WED, t)] == SignalSequence(in_week=1, in_consec_weeks=1)
 
     def test_a_duplicate_type_on_one_date_is_one_signal(self):
         """(ticker, tf, signal_date, signal_type) is the natural key. Two
@@ -117,46 +117,70 @@ class TestPerType:
         assert seq[(THU, "BUY")].in_week == 2
 
 
-class TestTwoWeekWindow:
+class TestConsecutiveWeeks:
+    """Run length over contiguous weeks, not a fixed window.
 
-    def test_the_week_counter_resets_but_the_2w_counter_carries(self):
+    Week anchors used below: OLD_WED is in the week of 2026-06-29, PREV_* in
+    2026-07-06, and MON/TUE/WED/THU/FRI in 2026-07-13 — three CONTIGUOUS
+    weeks, which is what makes them useful for testing a run.
+    """
+
+    def test_the_week_counter_resets_but_the_run_carries(self):
         seq = sequence_numbers({PREV_WED: ["BUY"], TUE: ["BUY"]})
-        assert seq[(PREV_WED, "BUY")] == SignalSequence(in_week=1, in_2w=1)
-        assert seq[(TUE, "BUY")] == SignalSequence(in_week=1, in_2w=2)
+        assert seq[(PREV_WED, "BUY")] == SignalSequence(in_week=1, in_consec_weeks=1)
+        assert seq[(TUE, "BUY")] == SignalSequence(in_week=1, in_consec_weeks=2)
 
-    def test_two_weeks_ago_is_outside_the_window(self):
-        """OLD_WED is in the week before the previous week. It must not be
-        counted — the window is two weeks, not 'everything so far'."""
+    def test_three_contiguous_weeks_score_three(self):
+        """The old two-week window capped this at 2 and dropped OLD_WED. A
+        run length has no cap: it grows for as long as the weeks are
+        unbroken, which is the whole point of replacing the window."""
         seq = sequence_numbers({OLD_WED: ["BUY"], PREV_WED: ["BUY"],
                                 TUE: ["BUY"]})
-        assert seq[(TUE, "BUY")] == SignalSequence(in_week=1, in_2w=2)
-        assert seq[(PREV_WED, "BUY")] == SignalSequence(in_week=1, in_2w=2)
-        assert seq[(OLD_WED, "BUY")] == SignalSequence(in_week=1, in_2w=1)
+        assert seq[(OLD_WED, "BUY")] == SignalSequence(
+            in_week=1, in_consec_weeks=1)
+        assert seq[(PREV_WED, "BUY")] == SignalSequence(
+            in_week=1, in_consec_weeks=2)
+        assert seq[(TUE, "BUY")] == SignalSequence(
+            in_week=1, in_consec_weeks=3)
 
     def test_a_full_churn_across_both_weeks(self):
         seq = sequence_numbers({
             PREV_WED: ["BUY"], PREV_FRI: ["BUY"],
             MON: ["BUY"], WED: ["BUY"], FRI: ["BUY"],
         })
+        # in_week climbs within each week; the run counts WEEKS, so it is
+        # 1 across all of the first week and 2 across all of the second. The
+        # old window conflated the two by counting signals, which is why its
+        # buckets could not separate anything.
         assert seq[(PREV_WED, "BUY")] == SignalSequence(1, 1)
-        assert seq[(PREV_FRI, "BUY")] == SignalSequence(2, 2)
-        assert seq[(MON, "BUY")] == SignalSequence(1, 3)
-        assert seq[(WED, "BUY")] == SignalSequence(2, 4)
-        assert seq[(FRI, "BUY")] == SignalSequence(3, 5)
+        assert seq[(PREV_FRI, "BUY")] == SignalSequence(2, 1)
+        assert seq[(MON, "BUY")] == SignalSequence(1, 2)
+        assert seq[(WED, "BUY")] == SignalSequence(2, 2)
+        assert seq[(FRI, "BUY")] == SignalSequence(3, 2)
 
-    def test_a_gap_week_does_not_carry(self):
-        """Signal in week N, nothing in N+1, signal in N+2: the second one is
-        alone in its 2w window."""
+    def test_a_gap_week_resets_the_run(self):
+        """Signal in week N, nothing in N+1, signal in N+2. The run restarts
+        at 1 — never 0, because the signal's own week always counts."""
         seq = sequence_numbers({OLD_WED: ["BUY"], TUE: ["BUY"]})
-        assert seq[(TUE, "BUY")] == SignalSequence(in_week=1, in_2w=1)
+        assert seq[(TUE, "BUY")] == SignalSequence(in_week=1, in_consec_weeks=1)
 
-    def test_in_week_never_exceeds_in_2w(self):
+    def test_both_counters_are_at_least_one_and_independent(self):
+        """in_week <= in_consec_weeks held for a two-week WINDOW and is false
+        for a run length: two signals in one isolated week give in_week=2 and
+        a run of 1. The counters measure different things — signals within a
+        week, and weeks in a row — so neither bounds the other. What does
+        hold is that both are 1-based."""
         seq = sequence_numbers({
             PREV_MON: ["BUY"], PREV_FRI: ["BUY", "SELL"],
             MON: ["BUY"], TUE: ["SELL"], FRI: ["BUY", "EXIT_FROM_BUY"],
         })
         for s in seq.values():
-            assert 1 <= s.in_week <= s.in_2w
+            assert s.in_week >= 1
+            assert s.in_consec_weeks >= 1
+        # And the case that breaks the old invariant, stated outright.
+        churn = sequence_numbers({MON: ["BUY"], FRI: ["BUY"]})
+        assert churn[(FRI, "BUY")] == SignalSequence(
+            in_week=2, in_consec_weeks=1)
 
 
 class TestEdges:
@@ -166,7 +190,7 @@ class TestEdges:
 
     def test_a_single_signal_is_one_of_one(self):
         seq = sequence_numbers({WED: ["SELL"]})
-        assert seq[(WED, "SELL")] == SignalSequence(in_week=1, in_2w=1)
+        assert seq[(WED, "SELL")] == SignalSequence(in_week=1, in_consec_weeks=1)
 
     def test_every_input_signal_gets_exactly_one_entry(self):
         """The walk indexes this dict by (date, type) for every row it is
@@ -191,12 +215,14 @@ class TestEdges:
         thu = date(2026, 12, 31)
         fri = date(2027, 1, 1)
         seq = sequence_numbers({thu: ["BUY"], fri: ["BUY"]})
+        # Both fall in the week beginning Mon 2026-12-28, so the run is 1 for
+        # both — as the test's own name says. Only in_week advances.
         assert seq[(thu, "BUY")] == SignalSequence(1, 1)
-        assert seq[(fri, "BUY")] == SignalSequence(2, 2)   # same week
+        assert seq[(fri, "BUY")] == SignalSequence(2, 1)
 
 
 def test_sequence_is_frozen():
     """It lands in a DB column. Nothing downstream may adjust it in place."""
-    s = SignalSequence(in_week=1, in_2w=2)
+    s = SignalSequence(in_week=1, in_consec_weeks=2)
     with pytest.raises(Exception):
         s.in_week = 9

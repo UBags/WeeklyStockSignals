@@ -60,7 +60,7 @@ def _row(**over):
         industry_id=7,
         bands=_bands(),
         atrs=dict(ATRS),
-        seq_in_week=2, seq_in_2w=5,
+        seq_in_week=2, seq_in_consec_weeks=5,
         signal_price=105.0,
         band_polarity=POLARITY_UP,
     )
@@ -93,7 +93,7 @@ class TestSchemaDrift:
                 ))
             }
         expected = set(band_keys()) | {f"atr{n}" for n in ATR_PERIODS} | {
-            "seq_in_week", "seq_in_2w", "signal_price", "band_polarity",
+            "seq_in_week", "seq_in_consec_weeks", "signal_price", "band_polarity",
         }
         missing = sorted(expected - cols)
         assert not missing, (
@@ -139,7 +139,7 @@ class TestRoundTrip:
     def test_the_scalars_survive(self, db_engine):
         got = _put(db_engine, _row())
         assert got.seq_in_week == 2
-        assert got.seq_in_2w == 5
+        assert got.seq_in_consec_weeks == 5
         assert got.signal_price == pytest.approx(105.0)
         assert got.band_polarity == POLARITY_UP
         assert got.atrs == {n: pytest.approx(ATRS[n]) for n in ATR_PERIODS}
@@ -221,7 +221,7 @@ class TestNullIsNotFalse:
         """A pre-v0.5 row. bands=None, NOT a dict of Falses."""
         row = _row(
             ticker_id=9108, feature_spec_version="v0.4",
-            bands=None, atrs=None, seq_in_week=None, seq_in_2w=None,
+            bands=None, atrs=None, seq_in_week=None, seq_in_consec_weeks=None,
             signal_price=None, band_polarity=None,
         )
         got = _put(db_engine, row)

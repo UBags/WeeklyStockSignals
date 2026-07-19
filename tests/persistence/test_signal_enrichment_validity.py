@@ -37,7 +37,7 @@ def _row(**over):
         ticker_id=9200, timeframe="1W", signal_date=date(2026, 7, 14),
         signal_type="BUY", features={"x": 1.0}, feature_spec_version="v0.5",
         industry_id=7, bands=_bands(), atrs=dict(ATRS),
-        seq_in_week=1, seq_in_2w=1, signal_price=105.0, band_polarity="UP",
+        seq_in_week=1, seq_in_consec_weeks=1, signal_price=105.0, band_polarity="UP",
         bars_available=60, day_of_week=2,
     )
     base.update(over)
@@ -159,7 +159,7 @@ class TestDayOfWeek:
             signal_type="BUY", features={"x": 1.0},
             feature_spec_version="v0.5", industry_id=7,
             bands=_bands(), atrs=dict(ATRS),
-            seq_in_week=1, seq_in_2w=1, signal_price=105.0,
+            seq_in_week=1, seq_in_consec_weeks=1, signal_price=105.0,
             band_polarity="UP", bars_available=60,
             # day_of_week deliberately omitted -> __post_init__ derives it
         )

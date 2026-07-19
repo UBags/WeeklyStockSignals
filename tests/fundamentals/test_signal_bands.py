@@ -57,7 +57,7 @@ class TestShape:
         assert len(bools) == 75
         assert len(floats) == 15
         # 90 of the 99 new columns. The other 9: atr10/15/20/30/40,
-        # seq_in_week, seq_in_2w, signal_price, band_polarity.
+        # seq_in_week, seq_in_consec_weeks, signal_price, band_polarity.
         assert len(out) == 90
         assert len(band_keys()) == 90
 

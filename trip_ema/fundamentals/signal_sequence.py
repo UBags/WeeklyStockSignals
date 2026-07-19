@@ -12,8 +12,19 @@ Two counters, both 1-based, both per (ticker, timeframe, signal_type):
                 signal_date falls in the same Monday-anchored week, counting
                 only those on or before this one.
 
-  seq_in_2w     the same, over the two-week window [previous Monday, this
-                signal's date].
+  seq_in_consec_weeks
+                a RUN LENGTH, not a window count: how many contiguous
+                Monday-anchored weeks, ending with this signal's own week,
+                each contained at least one signal of this type. One missed
+                week resets it to 1. An isolated signal scores 1, never 0 --
+                its own week always counts.
+
+                This replaced seq_in_consec_weeks, a fixed two-week window that measured
+                nothing: across run 69's 193k labels its three buckets differed
+                by less than noise (BUY means 5.68 / 5.32 / 5.56). A fixed
+                window cannot distinguish "fired twice in a fortnight" from
+                "has fired every week for two months", and it is the second
+                that a persistence feature is supposed to capture.
 
 CAUSALITY IS THE POINT. Both counters look BACKWARD only. A Tuesday BUY is
 the 1st BUY of its week even if two more BUYs print on Thursday and Friday —
@@ -50,7 +61,7 @@ class SignalSequence:
     """1-based, causal, per signal type."""
 
     in_week: int
-    in_2w: int
+    in_consec_weeks: int
 
 
 def week_start(d: date) -> date:
@@ -83,12 +94,23 @@ def sequence_numbers(
         dates.sort()
         for i, d in enumerate(dates):
             wk = week_start(d)
-            prev_wk = wk - WEEK
             # dates[:i + 1] is every signal of this type ON OR BEFORE d.
             # Everything after i is the future and is not consulted.
             history = dates[: i + 1]
+            # Walk backwards one week at a time while each week has a signal.
+            # `wk` itself always qualifies -- d is in it -- so the run is at
+            # least 1 and there is no zero case. Earlier weeks lie entirely
+            # before d, so consulting them cannot leak the future; only the
+            # CURRENT week needs the on-or-before filter, and `history`
+            # already applies it.
+            weeks_seen = {week_start(x) for x in history}
+            run = 1
+            probe = wk - WEEK
+            while probe in weeks_seen:
+                run += 1
+                probe -= WEEK
             out[(d, t)] = SignalSequence(
                 in_week=sum(1 for x in history if week_start(x) == wk),
-                in_2w=sum(1 for x in history if week_start(x) >= prev_wk),
+                in_consec_weeks=run,
             )
     return out

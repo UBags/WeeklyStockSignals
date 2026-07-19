@@ -115,7 +115,7 @@ def compute_ticker_signal_enrichments(
                         atr_by_period=atrs, polarity=polarity,
                     ),
                     atrs=dict(atrs),
-                    seq_in_week=s.in_week, seq_in_2w=s.in_2w,
+                    seq_in_week=s.in_week, seq_in_consec_weeks=s.in_consec_weeks,
                     signal_price=price,
                     band_polarity=polarity,
                     bars_available=bars,

@@ -57,7 +57,7 @@ def _num(x) -> float | None:
 _BAND_KEYS: tuple[str, ...] = band_keys()                    # 75 + 15
 _ATR_COLS: tuple[str, ...] = tuple(f"atr{n}" for n in ATR_PERIODS)   # 5
 _SCALAR_COLS: tuple[str, ...] = _ATR_COLS + (
-    "seq_in_week", "seq_in_2w", "signal_price", "band_polarity",
+    "seq_in_week", "seq_in_consec_weeks", "signal_price", "band_polarity",
 )
 _BAND_COLS: tuple[str, ...] = _BAND_KEYS + _SCALAR_COLS      # 99
 
@@ -158,7 +158,7 @@ class SignalEnrichmentRepository:
             features=feats, feature_spec_version=row.feature_spec_version,
             industry_id=row.industry_id,
             bands=bands, atrs=atrs,
-            seq_in_week=m["seq_in_week"], seq_in_2w=m["seq_in_2w"],
+            seq_in_week=m["seq_in_week"], seq_in_consec_weeks=m["seq_in_consec_weeks"],
             signal_price=m["signal_price"],
             band_polarity=m["band_polarity"],
             bars_available=m["bars_available"],
@@ -205,7 +205,7 @@ class SignalEnrichmentRepository:
             p[f"atr{n}"] = _num(atrs.get(n))
 
         p["seq_in_week"] = row.seq_in_week
-        p["seq_in_2w"] = row.seq_in_2w
+        p["seq_in_consec_weeks"] = row.seq_in_consec_weeks
         p["signal_price"] = _num(row.signal_price)
         p["band_polarity"] = row.band_polarity
 

@@ -43,7 +43,7 @@ class SignalEnrichment:
     atrs: dict | None = None
     # Causal, per signal type (signal_sequence.SignalSequence).
     seq_in_week: int | None = None
-    seq_in_2w: int | None = None
+    seq_in_consec_weeks: int | None = None
     # The close the bands were cut against.
     signal_price: float | None = None
     # "UP" | "DOWN" — the geometry the flags were computed with. Read the
