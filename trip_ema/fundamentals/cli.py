@@ -47,6 +47,10 @@ def cmd_refresh_industry(args, ctx: AppContext, *, refresh_fn=None) -> int:
         args.exchange,
         resume_run_id=args.resume,
         force=args.force,
+        # getattr, not args.only_missing: the HTTP admin route builds its own
+        # namespace and does not carry this flag. A missing attribute there
+        # should mean "sweep everything", not AttributeError mid-request.
+        only_missing=getattr(args, "only_missing", False),
         max_workers=config.etl.fundamentals_concurrency,
         request_delay_s=config.etl.fundamentals_request_delay_seconds,
         min_request_gap_s=(
@@ -55,6 +59,10 @@ def cmd_refresh_industry(args, ctx: AppContext, *, refresh_fn=None) -> int:
         rate_limit_cooloff_s=(
             config.etl.fundamentals_rate_limit_cooloff_seconds
         ),
+        # Without this the serial L2/L3 layers run at gap 0.0 -- back-to-back
+        # requests against a provider that has just refused. backfill() has
+        # passed it since 993b117; these three call sites were missed.
+        retry_gap_s=config.etl.fundamentals_retry_gap_seconds,
         rate_limit_attempts=config.etl.fundamentals_rate_limit_attempts,
     )
     # Read back the run row to print a summary.
@@ -320,6 +328,10 @@ def cmd_refresh_shares(args, ctx: AppContext, *, refresh_fn=None) -> int:
         args.exchange,
         resume_run_id=args.resume,
         force=args.force,
+        # getattr, not args.only_missing: the HTTP admin route builds its own
+        # namespace and does not carry this flag. A missing attribute there
+        # should mean "sweep everything", not AttributeError mid-request.
+        only_missing=getattr(args, "only_missing", False),
         max_workers=config.etl.fundamentals_concurrency,
         request_delay_s=config.etl.fundamentals_request_delay_seconds,
         min_request_gap_s=(
@@ -328,6 +340,10 @@ def cmd_refresh_shares(args, ctx: AppContext, *, refresh_fn=None) -> int:
         rate_limit_cooloff_s=(
             config.etl.fundamentals_rate_limit_cooloff_seconds
         ),
+        # Without this the serial L2/L3 layers run at gap 0.0 -- back-to-back
+        # requests against a provider that has just refused. backfill() has
+        # passed it since 993b117; these three call sites were missed.
+        retry_gap_s=config.etl.fundamentals_retry_gap_seconds,
     )
     with db_engine.connect() as conn:
         r = FundamentalsRunRepository(conn).get(run_id)
@@ -425,6 +441,10 @@ def cmd_refresh_financials(args, ctx: AppContext, *, refresh_fn=None) -> int:
         args.exchange,
         resume_run_id=args.resume,
         force=args.force,
+        # getattr, not args.only_missing: the HTTP admin route builds its own
+        # namespace and does not carry this flag. A missing attribute there
+        # should mean "sweep everything", not AttributeError mid-request.
+        only_missing=getattr(args, "only_missing", False),
         max_workers=config.etl.fundamentals_concurrency,
         request_delay_s=config.etl.fundamentals_request_delay_seconds,
         min_request_gap_s=(
@@ -433,6 +453,10 @@ def cmd_refresh_financials(args, ctx: AppContext, *, refresh_fn=None) -> int:
         rate_limit_cooloff_s=(
             config.etl.fundamentals_rate_limit_cooloff_seconds
         ),
+        # Without this the serial L2/L3 layers run at gap 0.0 -- back-to-back
+        # requests against a provider that has just refused. backfill() has
+        # passed it since 993b117; these three call sites were missed.
+        retry_gap_s=config.etl.fundamentals_retry_gap_seconds,
     )
     with db_engine.connect() as conn:
         r = FundamentalsRunRepository(conn).get(run_id)
@@ -1065,6 +1089,15 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, Callable]:
         help="Re-run even if a successful refresh exists from the last 80 days",
     )
     ri.add_argument(
+        "--only-missing", action="store_true", dest="only_missing",
+        help="Ask only for tickers that have neither data nor a recorded "
+             "verdict. Tickers already marked UNAVAILABLE in "
+             "fundamentals_fetch_status are NOT re-asked -- use --force for "
+             "that. This is the flag for filling holes after a partial run: "
+             "at the configured request gap, re-sweeping the full universe "
+             "to collect a handful of rows costs hours.",
+    )
+    ri.add_argument(
         "--resume", type=int, default=None, metavar="RUN_ID",
         help="Resume a previously-interrupted run from its checkpoint",
     )
@@ -1120,6 +1153,15 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, Callable]:
         help="Re-run even if a successful refresh exists from the last 80 days",
     )
     rs.add_argument(
+        "--only-missing", action="store_true", dest="only_missing",
+        help="Ask only for tickers that have neither data nor a recorded "
+             "verdict. Tickers already marked UNAVAILABLE in "
+             "fundamentals_fetch_status are NOT re-asked -- use --force for "
+             "that. This is the flag for filling holes after a partial run: "
+             "at the configured request gap, re-sweeping the full universe "
+             "to collect a handful of rows costs hours.",
+    )
+    rs.add_argument(
         "--resume", type=int, default=None, metavar="RUN_ID",
         help="Resume a previously-interrupted shares run from its checkpoint",
     )
@@ -1158,6 +1200,15 @@ def register_subparsers(sub, _add_exchange_arg) -> dict[str, Callable]:
     rf.add_argument(
         "--force", action="store_true",
         help="Re-run even if a successful refresh exists from the last 80 days",
+    )
+    rf.add_argument(
+        "--only-missing", action="store_true", dest="only_missing",
+        help="Ask only for tickers that have neither data nor a recorded "
+             "verdict. Tickers already marked UNAVAILABLE in "
+             "fundamentals_fetch_status are NOT re-asked -- use --force for "
+             "that. This is the flag for filling holes after a partial run: "
+             "at the configured request gap, re-sweeping the full universe "
+             "to collect a handful of rows costs hours.",
     )
     rf.add_argument(
         "--resume", type=int, default=None, metavar="RUN_ID",
