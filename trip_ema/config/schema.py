@@ -775,6 +775,28 @@ class EtlConfig(BaseModel):
     tier_2_size: int = Field(default=500, ge=1)
     """Next-N tickers after Tier 1. The rest go in Tier 3."""
 
+    industry_index_min_constituents: int = Field(
+        default=4, ge=1, le=100,
+    )
+    """Minimum active EQ tickers an industry needs before an index is built
+    for it. Industries below this get no industry_index row, and therefore no
+    industry_index_value, no regime breadth, and no ensemble membership -- so
+    every signal on their constituents comes out with NULL ensemble features.
+
+    At 4 this excluded 32 industries. Dropping to 2 admits 18 of them; the
+    other 14 have a single ticker and can never qualify.
+
+    KNOW WHAT A LOW THRESHOLD BUYS. compute_sector_leadlag debiases the index
+    against the stock being measured, so a 3-member industry is a 2-member
+    index from that stock's point of view. Its breadth takes a handful of
+    distinct values, and a 52-week Spearman over that is weak evidence.
+    signal_ensemble_features stores no member count, so downstream cannot tell
+    a thin score from a well-supported one. Lower this if you would rather
+    have a weak number than a NULL -- but that is the trade, not a free win.
+
+    industry_index.min_constituents records the threshold each index was built
+    with, so changing this never retroactively reinterprets existing rows."""
+
     park_failure_threshold: int = Field(default=3, ge=1)
     """Consecutive ETL failures before a ticker is parked. 3 is a
     reasonable default — transient yfinance hiccups don't trip; real

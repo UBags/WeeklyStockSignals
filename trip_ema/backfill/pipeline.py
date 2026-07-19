@@ -833,6 +833,9 @@ def backfill(
                 db_engine, exchange, "industry_index_build",
                 lambda: _stage_industry_index_build(
                     db_engine, exchange=exchange, through=date_to,
+                    min_constituents=(
+                        config.etl.industry_index_min_constituents
+                    ),
                     progress_cb=progress_cb,
                 ),
                 backfill_run_id=run_id, force=_force,
@@ -1407,10 +1410,13 @@ def _stage_market_cap(
 
 def _stage_industry_index_build(
     db_engine: Engine, *, exchange: str, through: date,
+    min_constituents: int = 4,
     progress_cb: Callable[[str, str], None] | None = None,
 ) -> int:
     """Build per-exchange annual-April chain-linked industry indices
-    (top 12, min 4).
+    (top 12, min_constituents from config -- see
+    EtlConfig.industry_index_min_constituents for what a low threshold
+    costs in ensemble-feature quality).
 
     Visible-tolerance (Option 3): the phase completes even if some
     industries were skipped (too few tickers — structural, not a failure)
@@ -1419,7 +1425,8 @@ def _stage_industry_index_build(
     industries are named so they can be chased. Returns chains built.
     """
     out = build_all_industry_index_chains(
-        db_engine, exchange, through=through, n=12, min_constituents=4,
+        db_engine, exchange, through=through, n=12,
+        min_constituents=min_constituents,
         progress_cb=progress_cb,
     )
     if not isinstance(out, dict):

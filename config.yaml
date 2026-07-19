@@ -222,6 +222,12 @@ etl:
 #   tier_2_size: 500                # next 500 → tier-2
 #                                   # everything else → tier-3
    park_failure_threshold: 3       # park after this many consecutive failures
+   industry_index_min_constituents: 2  # was 4, which left 32 industries
+                                       # unindexed and therefore without
+                                       # ensemble features. 2 admits 18 of
+                                       # them; the rest have one ticker.
+                                       # See the schema docstring for what a
+                                       # thin index costs in signal quality.
    yfinance_batch_size: 100
    yfinance_min_request_gap_seconds: 5.0  # GLOBAL floor: no two OHLCV
                                           # downloads start closer together
