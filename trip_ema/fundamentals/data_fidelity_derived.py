@@ -513,25 +513,48 @@ def audit_derived_chain(
     #     enrichment row should have >= 1 ensemble row (PK is
     #     (signal_enrichment_id, variant)).
     # =====================================================================
+    #     ETFs are NOT in that universe. backfill_signal_ensemble_features
+    #     skips any ticker whose industry has no ensemble members, and the
+    #     'ETF' bucket never has any -- an ETF has no sector to lead or lag.
+    #     Counting them as missing made run 69 report a 6.5% gap of which
+    #     two thirds was correct behaviour, which is how a real gap hides.
+    _ETF_EXCLUDED = (
+        "  JOIN instrument_industry ii ON ii.ticker_id = e.ticker_id "
+        " WHERE t.exchange = :ex AND COALESCE(ii.industry, '') <> 'ETF' "
+    )
+    n_ens_universe = _scalar(
+        conn,
+        "SELECT count(*) FROM signal_enrichment e "
+        "  JOIN tickers t ON t.ticker_id = e.ticker_id "
+        + _ETF_EXCLUDED,
+        ex=exchange,
+    )
     ens_covered = _scalar(
         conn,
         "SELECT count(*) FROM signal_enrichment e "
         "  JOIN tickers t ON t.ticker_id = e.ticker_id "
-        " WHERE t.exchange = :ex "
+        + _ETF_EXCLUDED +
         "   AND EXISTS (SELECT 1 FROM signal_ensemble_features f "
         "                WHERE f.signal_enrichment_id = e.signal_enrichment_id)",
         ex=exchange,
     )
+    n_etf_excluded = max(0, n_enrichment - n_ens_universe)
     detail = ""
-    if n_enrichment and ens_covered < n_enrichment:
+    if n_ens_universe and ens_covered < n_ens_universe:
         detail = (
-            f"{n_enrichment - ens_covered} enrichment row(s) without ensemble "
-            f"features"
+            f"{n_ens_universe - ens_covered} non-ETF enrichment row(s) without "
+            f"ensemble features (industry below the index threshold)"
+        )
+    if n_etf_excluded:
+        detail = (
+            (detail + "; " if detail else "")
+            + f"{n_etf_excluded} ETF row(s) EXCLUDED, not missing "
+            f"(no sector to lead or lag)"
         )
     out.append(DatasetFidelity(
         dataset="signal_ensemble_features",
-        status=_status_for_coverage(ens_covered, n_enrichment),
-        rows=ens_covered, covered=ens_covered, universe=n_enrichment,
+        status=_status_for_coverage(ens_covered, n_ens_universe),
+        rows=ens_covered, covered=ens_covered, universe=n_ens_universe,
         detail=detail,
     ))
 

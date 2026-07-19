@@ -117,10 +117,11 @@ section_coverage() {
       SELECT 'ohlcv_bars (1D)', count(DISTINCT b.ticker_id)
         FROM ohlcv_bars b JOIN tickers k USING (ticker_id)
        WHERE k.exchange='${EXCHANGE}' AND k.is_active AND b.timeframe='1D'
-      UNION ALL
-      SELECT 'ohlcv_bars (1W)', count(DISTINCT b.ticker_id)
-        FROM ohlcv_bars b JOIN tickers k USING (ticker_id)
-       WHERE k.exchange='${EXCHANGE}' AND k.is_active AND b.timeframe='1W'
+      -- No 'ohlcv_bars (1W)' row. Verified 2026-07-19: ohlcv_bars
+      -- holds 1D only, while stock_indicator_state and historical_signals
+      -- are 100% 1W. Weekly bars are derived in memory by daily_to_weekly
+      -- and never persisted, so reporting 1W coverage here showed a
+      -- permanent 0.0% for a table nothing writes to.
       UNION ALL
       SELECT 'daily_market_cap', count(DISTINCT m.ticker_id)
         FROM daily_market_cap m JOIN tickers k USING (ticker_id)
@@ -323,9 +324,14 @@ section_hint() {
     [[ -n "${rid:-}" ]] && \
       echo "    python -m trip_ema.etl.cli refresh-industry --exchange ${EXCHANGE} --resume ${rid}"
     echo
-    echo "  Lower the request rate first if 429s persist (config.yaml, etl:):"
-    echo "    fundamentals_concurrency: 2"
-    echo "    fundamentals_request_delay_seconds: 1.5"
+    echo "  If 429s persist, raise the GLOBAL gap (config.yaml, etl:):"
+    echo "    fundamentals_min_request_gap_seconds: 10.0   # from 5.0"
+    echo
+    echo "  That is the knob that works. concurrency and request_delay pace"
+    echo "  each worker SEPARATELY, so N threads still fire N requests at"
+    echo "  once -- the burst is what trips the limiter. The gap is a floor"
+    echo "  between request START times across ALL threads."
+    echo "  Cost is linear: tickers x gap. ~2,400 x 5s = 3h20m."
   fi
 }
 

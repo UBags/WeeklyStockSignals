@@ -509,6 +509,9 @@ class YFinanceSource:
                     if any(_is_nan(x) for x in (o, h, lo, c)):
                         continue
                     trading_date = ts.date() if hasattr(ts, "date") else ts
+                    o = _open_or_substitute(
+                        o, h, lo, c, bars, yf_symbol, trading_date,
+                    )
                     bars.append(RawBar(
                         trading_date=trading_date,
                         open=float(o),
@@ -534,6 +537,44 @@ class YFinanceSource:
                 )
 
         return results
+
+
+def _open_or_substitute(
+    o, h, lo, c, bars, yf_symbol, trading_date,
+) -> float:
+    """Return a usable open, substituting when Yahoo reports none.
+
+    Yahoo writes 0.0 when an instrument had no opening print -- common for
+    thinly-traded ETFs in the late 2000s. ohlcv_bars.open is NOT NULL, so a
+    zero written here becomes an entry price in forward_walk: `entry_open must
+    be > 0` is that guard firing, 1,676 times on the 2026-07-19 backfill.
+
+    Preference order matters. The previous close is a price that ACTUALLY
+    TRADED and is what a bar opening without a gap implies, so it is a
+    defensible stand-in for an execution price. (H+L+C)/3 is a statistic, not
+    a price anyone could have transacted at -- it is the fallback only because
+    the first bar of a fetch has no predecessor.
+
+    Neither is real. Both are logged, loudly, every time.
+    """
+    o_val = float(o)
+    if o_val > 0.0:
+        return o_val
+    prev_close = bars[-1].close if bars else None
+    if prev_close is not None and prev_close > 0.0:
+        logger.warning(
+            "ohlcv: %s %s had no opening print (open=%r); substituting the "
+            "previous close %.4f",
+            yf_symbol, trading_date, o, prev_close,
+        )
+        return float(prev_close)
+    sub = (float(h) + float(lo) + float(c)) / 3.0
+    logger.warning(
+        "ohlcv: %s %s had no opening print (open=%r) and no previous bar; "
+        "substituting the typical price (H+L+C)/3 = %.4f",
+        yf_symbol, trading_date, o, sub,
+    )
+    return sub
 
 
 def _is_nan(v) -> bool:

@@ -12,12 +12,17 @@
 #
 # NOTE ON --no_fetch_bars: not passed by default, so this REFETCHES every bar
 # from yfinance (~2,600 tickers x ~20 years — the slowest, network-bound stage).
-# Rate-limit handling IS wired: YFinanceSource holds a ThrottleGate that trips a
-# bounded exponential backoff on an explicit 429 and on repeated empty batches,
-# plus a bounded solo-retry of flaked tickers. A sustained 429 slows the pass
-# and, once max_backoffs is spent, surfaces as failed tickers, not a crash --
-# watch the [stage_1] failed count. Add --no_fetch_bars to time the COMPUTE
-# chain only.
+# Rate-limit handling is TWO mechanisms, not one:
+#   PREVENTIVE — a global RequestGate (etl.yfinance_min_request_gap_seconds)
+#     holds every download START at least that far apart, across ALL worker
+#     threads and every retry layer. This is what stops the burst arriving.
+#   REACTIVE — YFinanceSource's ThrottleGate opens a bounded exponential
+#     backoff after an explicit 429 or repeated empty batches.
+# Failed and IntCasting tickers are re-fetched by three SINGLE-THREADED retry
+# layers at yfinance_batch_size / 2 per chunk (not one ticker at a time: that
+# was itself the request storm). A sustained 429 slows the pass and, once
+# max_backoffs is spent, surfaces as failed tickers, not a crash -- watch the
+# [stage_1] failed count. Add --no_fetch_bars to time the COMPUTE chain only.
 # =============================================================================
 set -uo pipefail
 
