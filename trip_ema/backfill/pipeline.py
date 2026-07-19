@@ -554,6 +554,9 @@ def backfill(
                         min_request_gap_s=(
                             config.etl.fundamentals_min_request_gap_seconds
                         ),
+                        retry_gap_s=(
+                            config.etl.fundamentals_retry_gap_seconds
+                        ),
                         request_delay_s=(
                             config.etl.fundamentals_request_delay_seconds
                         ),
@@ -719,6 +722,9 @@ def backfill(
                     # burst gets a live ticker recorded as UNAVAILABLE.
                     min_request_gap_s=(
                         config.etl.fundamentals_min_request_gap_seconds
+                    ),
+                    retry_gap_s=(
+                        config.etl.fundamentals_retry_gap_seconds
                     ),
                     request_delay_s=(
                         config.etl.fundamentals_request_delay_seconds

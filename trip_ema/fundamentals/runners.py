@@ -140,6 +140,8 @@ def run_industry_refresh(
     rate_limit_cooloff_s: float = RATE_LIMIT_COOLOFF_S,
     rate_limit_attempts: int = RATE_LIMIT_ATTEMPTS,
     min_request_gap_s: float = 0.0,
+    retry_gap_s: float = 0.0,
+    retry_layers: int = 2,
 ) -> int:
     """Refresh industry classification for every active ticker on `exchange`.
 
@@ -290,6 +292,8 @@ def run_industry_refresh(
         max_workers=max_workers,
         request_delay_s=request_delay_s,
         min_request_gap_s=min_request_gap_s,
+        retry_gap_s=retry_gap_s,
+        retry_layers=retry_layers,
     )
 
 
@@ -704,7 +708,10 @@ def _run_reference_sweep(
     max_workers: int | None = None,
     request_delay_s: float = 0.0,
     min_request_gap_s: float = 0.0,
+    retry_gap_s: float = 0.0,
+    retry_layers: int = 0,
     checkpoint_sink: Callable | None = None,
+    close_sink: Callable | None = None,
 ) -> int:
     """Shared spine for the reference sweeps (industry / shares / financials).
 
@@ -728,6 +735,7 @@ def _run_reference_sweep(
     Returns run_id.
     """
     _sink = checkpoint_sink or _checkpoint_completion
+    _close = close_sink or _close_run
     pending = [t for t in ticker_list if int(t["id"]) not in completed_ids]
 
     # Counters + completion set are shared mutable state across worker threads;
@@ -737,6 +745,9 @@ def _run_reference_sweep(
     lock = threading.Lock()
     state = {"succeeded": 0, "failed": 0, "skipped": 0}
     done_ids: set[int] = set(completed_ids)
+    # L1's failures, kept for the serial retry layers below. Guarded by the
+    # same lock as the counters -- fan_out workers append to it.
+    failed_tickers: list[dict] = []
 
     gate = RequestGate(min_request_gap_s)
 
@@ -756,6 +767,7 @@ def _run_reference_sweep(
                 state["succeeded"] += 1
             elif outcome == "failed":
                 state["failed"] += 1
+                failed_tickers.append(t)
             elif outcome == "skipped":
                 state["skipped"] += 1
             done_ids.add(tid)
@@ -790,28 +802,102 @@ def _run_reference_sweep(
                 db_engine, run_id, ticker_list, sorted(done_ids),
                 state["succeeded"], state["failed"], state["skipped"],
             )
-            with transaction(db_engine) as conn:
-                FundamentalsRunRepository(conn).close(
-                    run_id, status="PARTIAL",
-                    succeeded=state["succeeded"], failed=state["failed"],
-                    skipped=state["skipped"],
-                    notes="Interrupted by KeyboardInterrupt",
-                )
+            _close(
+                db_engine, run_id, status="PARTIAL",
+                succeeded=state["succeeded"], failed=state["failed"],
+                skipped=state["skipped"],
+                notes="Interrupted by KeyboardInterrupt",
+            )
         raise
 
-    status = _terminal_status(state["succeeded"], state["failed"])
-    with transaction(db_engine) as conn:
-        FundamentalsRunRepository(conn).close(
-            run_id, status=status,
-            succeeded=state["succeeded"], failed=state["failed"],
-            skipped=state["skipped"],
+    # =================================================================
+    # L2 / L3 — SERIAL re-ask of L1's failures.
+    #
+    # No worker changes are needed. A worker that succeeds calls
+    # FundamentalsFetchStatusRepository.clear(); one that fails permanently
+    # calls mark_unavailable(), which BUMPS `attempts`. So re-running a failed
+    # ticker either revokes its UNAVAILABLE row or raises attempts to 2, then
+    # 3 -- and attempts becomes the corroboration this table never had.
+    #
+    # Single-threaded on purpose. This runs after the provider has already
+    # refused once, and the whole point is to ask again from a quiet position
+    # rather than re-create the burst that caused the refusal.
+    #
+    # Cost is the FAILURE count, not the universe: len(failures) x
+    # retry_gap_s x retry_layers.
+    # =================================================================
+    for layer in range(2, 2 + max(0, retry_layers)):
+        if not failed_tickers:
+            break
+        cohort, failed_tickers = failed_tickers, []
+        logger.info(
+            "%s L%d: re-asking %d failed ticker(s) serially, %.1fs apart",
+            phase, layer, len(cohort), retry_gap_s,
         )
+        retry_gate = RequestGate(retry_gap_s)
+        try:
+            for t in cohort:
+                retry_gate.wait()
+                outcome = worker_fn(t)
+                # A recovery must MOVE the ticker between counters, not just
+                # increment: it was already counted failed by L1.
+                if outcome == "succeeded":
+                    state["succeeded"] += 1
+                    state["failed"] -= 1
+                elif outcome == "skipped":
+                    state["skipped"] += 1
+                    state["failed"] -= 1
+                else:
+                    failed_tickers.append(t)
+        except KeyboardInterrupt:
+            logger.warning(
+                "KeyboardInterrupt during %s L%d — closing run %d as PARTIAL",
+                phase, layer, run_id,
+            )
+            _sink(
+                db_engine, run_id, ticker_list, sorted(done_ids),
+                state["succeeded"], state["failed"], state["skipped"],
+            )
+            _close(
+                db_engine, run_id, status="PARTIAL",
+                succeeded=state["succeeded"], failed=state["failed"],
+                skipped=state["skipped"],
+                notes=f"Interrupted during retry layer {layer}",
+            )
+            raise
+        logger.info(
+            "%s L%d: %d recovered, %d still failing",
+            phase, layer, len(cohort) - len(failed_tickers),
+            len(failed_tickers),
+        )
+
+    status = _terminal_status(state["succeeded"], state["failed"])
+    _close(
+        db_engine, run_id, status=status,
+        succeeded=state["succeeded"], failed=state["failed"],
+        skipped=state["skipped"],
+    )
     logger.info(
         "%s refresh run %d (%s) finished: status=%s s=%d f=%d sk=%d",
         phase.capitalize(), run_id, exchange, status,
         state["succeeded"], state["failed"], state["skipped"],
     )
     return run_id
+
+
+def _close_run(
+    db_engine, run_id: int, *, status: str,
+    succeeded: int, failed: int, skipped: int, notes: str | None = None,
+) -> None:
+    """Default close_sink: the real DB close-out. Extracted so the spine's
+    only remaining DB touchpoints are both injectable, which is what lets the
+    retry-layer tests run with no database and no monkeypatch."""
+    with transaction(db_engine) as conn:
+        FundamentalsRunRepository(conn).close(
+            run_id, status=status,
+            succeeded=succeeded, failed=failed, skipped=skipped,
+            **({"notes": notes} if notes is not None else {}),
+        )
 
 
 def _checkpoint_completion(
@@ -878,6 +964,8 @@ def run_shares_refresh(
     max_workers: int | None = None,
     rate_limit_cooloff_s: float = RATE_LIMIT_COOLOFF_S,
     min_request_gap_s: float = 0.0,
+    retry_gap_s: float = 0.0,
+    retry_layers: int = 2,
 ) -> int:
     """Refresh shares-outstanding for every active ticker on `exchange`.
 
@@ -1063,6 +1151,8 @@ def run_shares_refresh(
         max_workers=max_workers,
         request_delay_s=request_delay_s,
         min_request_gap_s=min_request_gap_s,
+        retry_gap_s=retry_gap_s,
+        retry_layers=retry_layers,
     )
 
 
@@ -1418,6 +1508,8 @@ def run_financials_refresh(
     max_workers: int | None = None,
     rate_limit_cooloff_s: float = RATE_LIMIT_COOLOFF_S,
     min_request_gap_s: float = 0.0,
+    retry_gap_s: float = 0.0,
+    retry_layers: int = 2,
 ) -> int:
     """Refresh quarterly financials for every active ticker on `exchange`.
 
@@ -1541,6 +1633,8 @@ def run_financials_refresh(
         max_workers=max_workers,
         request_delay_s=request_delay_s,
         min_request_gap_s=min_request_gap_s,
+        retry_gap_s=retry_gap_s,
+        retry_layers=retry_layers,
     )
 
 
