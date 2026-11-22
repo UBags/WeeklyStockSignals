@@ -1,469 +1,719 @@
-# trip_ema
+# WeeklyStockSignals · `trip_ema`
 
-Python port of a TradingView Pine Script indicator (Weekly Triple
-EMA + ATR bands + regime classification) with a full backend service
-around it: ETL-driven ingest from Postgres, in-memory signal cache,
-HTTP API, subscriber notifications via email / webhook / Slack, a
-desktop **operator console** (PySide6), and Prometheus + OpenTelemetry
-observability.
+**Weekly-chart trend signals for Indian equities, computed every trading day and delivered by email.**
 
-Built for NSE/BSE-focused weekly signals with reliable alerting.
+`trip_ema` is a Python port of a TradingView Pine Script indicator — a volume-weighted **Triple EMA** ribbon with **ATR bands** and a three-state **regime** classifier — wrapped in a production service. It ingests NSE daily bars, recomputes the *weekly* chart of every listed instrument (~2,700 tickers) several times per session, detects regime flips (`BUY`, `SELL`, `EXIT_FROM_BUY`, `EXIT_FROM_SELL`), enriches each signal with industry, lead/lag and benchmark context, and emails a ranked digest to subscribers. A PySide6 desktop console sits on top for operations.
 
----
+![Indicator example](docs/images/indicator_example.png)
 
-## What it does
+<sub>Rendered by <a href="scripts/render_readme_chart.py"><code>scripts/render_readme_chart.py</code></a> from <b>synthetic</b> prices, using the production functions (<code>compute_indicator_series</code>, <code>_compute_regime_series</code>, <code>DetermineSignal</code>). No market data is involved.</sub>
 
-Every compute cycle:
+| | |
+|---|---|
+| **Language / runtime** | Python 3.12+ |
+| **Service** | FastAPI + uvicorn, two background threads, subprocess-per-cycle |
+| **Storage** | PostgreSQL (16–18), SQLAlchemy 2.0 Core, 56 Alembic revisions |
+| **Data sources** | NSE listing archives, yfinance (`auto_adjust=False`), `nselib` corporate actions |
+| **Delivery** | Brevo transactional-email HTTP API |
+| **Console** | PySide6 + pyqtgraph |
+| **Observability** | Structured logs, Prometheus, OpenTelemetry (all optional) |
+| **Size** | ~70k LOC in `trip_ema/`, 245 test modules |
+| **Version** | 0.12.0 |
 
-1. Reads OHLCV bars from Postgres (the ETL writes; this app never
-   does).
-2. For each registered ticker, advances the indicator engine with
-   any new bars.
-3. Detects regime changes (BULLISH / NEUTRAL / BEARISH) using the
-   Triple-EMA + ATR bands.
-4. Writes a `signal_event` row when a change occurs.
-5. Caches the latest state in memory for fast API reads.
-6. The `SubscriberDistributor` enqueues notifications for any
-   subscribers due for that signal (cadence-based).
-7. The `NotifierWorker` pops jobs from Redis and dispatches them
-   via the configured transports — with circuit-breaker protection
-   around each one.
-
-The indicator math is **faithful to Pine Script** down to the NaN
-warmup semantics. The harness in `tests/parity/` exists so that
-remains true under refactors.
+> **Not investment advice.** This is a signal-generation and research platform. Signals are mechanical outputs of a technical indicator; nothing here claims they are profitable.
 
 ---
 
-## Quickstart
+## Contents
 
-### Install
+1. [How it works, in one picture](#1-how-it-works-in-one-picture)
+2. [The indicator](#2-the-indicator)
+3. [Runtime architecture](#3-runtime-architecture)
+4. [The live cycle](#4-the-live-cycle)
+5. [Signal storage model](#5-signal-storage-model)
+6. [Data ingestion and OHLCV correction](#6-data-ingestion-and-ohlcv-correction)
+7. [Industry indices, lead/lag and enrichment](#7-industry-indices-leadlag-and-enrichment)
+8. [Forward-walk labels (research layer)](#8-forward-walk-labels-research-layer)
+9. [Notifications](#9-notifications)
+10. [Operator console](#10-operator-console)
+11. [HTTP API](#11-http-api)
+12. [Database](#12-database)
+13. [Installation and running](#13-installation-and-running)
+14. [Backfill](#14-backfill)
+15. [Testing and CI](#15-testing-and-ci)
+16. [Repository layout](#16-repository-layout)
+17. [Design invariants](#17-design-invariants)
+18. [Status and roadmap](#18-status-and-roadmap)
 
-```bash
-# Core only — engine, API, notifier
-pip install trip-ema
+---
 
-# With Prometheus metrics
-pip install trip-ema[observability]
+## 1. How it works, in one picture
 
-# With OpenTelemetry tracing (console exporter)
-pip install trip-ema[tracing]
+```mermaid
+flowchart LR
+    subgraph SRC["External sources"]
+        NSE["NSE listing archives<br/>(equities + ETFs CSV)"]
+        YF["yfinance<br/>daily OHLCV, shares,<br/>financials, industry"]
+        NL["nselib<br/>corporate actions"]
+    end
 
-# With the ETL CLI (yfinance + NSE listings ingest)
-pip install trip-ema[etl]
+    subgraph SVC["trip-ema service (one process)"]
+        SCH["RunScheduler<br/>wall-clock ticks"]
+        DSP["RunDispatcher<br/>one cycle at a time"]
+        API["FastAPI<br/>public + admin API"]
+    end
 
-# With the desktop operator console (PySide6 + pyqtgraph)
-pip install trip-ema[gui]
+    CYC["trip-ema-etl cycle<br/>(subprocess per tick)"]
+    PG[("PostgreSQL")]
+    BREVO["Brevo HTTP API"]
+    SUBS["Subscribers"]
+    GUI["trip-ema-console<br/>(PySide6)"]
 
-# With the Alembic-managed migration tooling (Phase 11+; needed
-# only if you're authoring new migrations or want auto-stamping
-# at startup)
-pip install trip-ema[migrations]
-
-# Production: everything
-pip install trip-ema[all]
-
-# For running the test suite
-pip install trip-ema[test]
+    SCH -- "enqueue (exchange, kind)" --> DSP
+    DSP -- "spawn" --> CYC
+    NSE --> CYC
+    YF --> CYC
+    NL --> CYC
+    CYC -- "bars, state, signals" --> PG
+    CYC -- "ranked digest" --> BREVO --> SUBS
+    API <--> PG
+    GUI -- "admin actions (HTTP)" --> API
+    GUI -. "read-only SQL" .-> PG
 ```
 
-### Run
+On each scheduled tick the service starts **one subprocess** that fetches fresh bars, recomputes the indicator state for every stock and industry index, derives signals, and (after the close) enriches, labels and emails them. The HTTP service never computes signals itself. It schedules, serves and administers.
+
+---
+
+## 2. The indicator
+
+### 2.1 Construction
+
+Each of the three ribbon lines is a **volume-weighted, Hull-polished, multi-stage EMA**. It is a direct port of the Pine source, including Pine's NaN warm-up semantics (`trip_ema/indicators/vw_ema.py`, `trip_ema/fundamentals/indicator_primitives.py`).
+
+```mermaid
+flowchart LR
+    V["volume"] --> SMA["sma(volume, 2)"]
+    C["close"] --> NUM["ema(close × vol, base)"]
+    SMA --> NUM
+    SMA --> DEN["ema(vol, base)"]
+    NUM --> VW1["vw1 = num / den"]
+    DEN --> VW1
+    VW1 --> VW2["vw2 = ema(vw1, s1)"]
+    VW2 --> HULL["Hull polish<br/>wma(2·wma(vw2, ⌊s2/2⌋) − wma(vw2, s2), ⌊√s2⌋)"]
+    HULL --> FIN{"final set?"}
+    FIN -- yes --> OUT1["ema(·, final)"]
+    FIN -- no --> OUT2["polished value"]
+```
+
+| Line | `base` | `s1` | `s2` | `final` |
+|---|---:|---:|---:|---:|
+| **Med** | 8 | 4 | 4 | — |
+| **Long** | 15 | 4 | 4 | 3 |
+| **Longest** | 28 | 7 | 5 | 3 |
+
+**ATR** is Wilder's RMA of true range (length 14): NaN for bars 1…13, seeded from the SMA at bar 14, recursive after that. Three band pairs hug the *outer edges* of the ribbon:
+
+```
+upper_k = max(med, long, longest) + mult_k × ATR
+lower_k = min(med, long, longest) − mult_k × ATR        mult = 0.2 (inner) · 2.0 (mid) · 4.0 (outer)
+```
+
+All parameters live in the `ema:` and `atr:` blocks of `config.yaml`.
+
+### 2.2 Regime state machine
+
+`trip_ema/regime/compute_regime.py` holds the single canonical implementation. Rules are evaluated top to bottom, and the first match wins:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> NEUTRAL
+    NEUTRAL --> BULLISH: close ≥ upper_inner
+    NEUTRAL --> BEARISH: close ≤ lower_inner
+    BULLISH --> BULLISH: close ≥ ribbon low<br/>OR (close ≥ lower_inner AND prev close ≥ prev ribbon low)
+    BULLISH --> BEARISH: close ≤ lower_inner (sharp reversal)
+    BULLISH --> NEUTRAL: continuation fails
+    BEARISH --> BEARISH: close ≤ ribbon high<br/>OR (close ≤ upper_inner AND prev close ≤ prev ribbon high)
+    BEARISH --> BULLISH: close ≥ upper_inner (sharp reversal)
+    BEARISH --> NEUTRAL: continuation fails
+```
+
+During warm-up, before all bands are finite, the classifier returns NEUTRAL.
+
+### 2.3 From regime transitions to signals
+
+`DetermineSignal` (`trip_ema/domain/determine_signal.py`) is the **only** place a signal is derived from a regime pair. It is total and never raises.
+
+| Before → After | Signal |
+|---|---|
+| any → **BULLISH** | `BUY` (wins over `EXIT_FROM_SELL` on a BEARISH→BULLISH reversal) |
+| any → **BEARISH** | `SELL` (wins over `EXIT_FROM_BUY` on a BULLISH→BEARISH reversal) |
+| BULLISH → NEUTRAL | `EXIT_FROM_BUY` |
+| BEARISH → NEUTRAL | `EXIT_FROM_SELL` |
+| unchanged | `NO_CHANGE` (never persisted) |
+
+### 2.4 Weekly chart, daily grain
+
+Signals are computed on the **weekly** chart but **evaluated every trading day**. Each row of `stock_indicator_state` is *the weekly chart as it stands at the close of day D*, with the current week's bar still forming. A signal fires on day D when the weekly regime on D differs from D‑1.
+
+```mermaid
+flowchart LR
+    subgraph W["Week of Mon 2026-07-13 (one weekly bar, still forming)"]
+        D1["Mon<br/>weekly bar = Mon"] --> D2["Tue<br/>weekly bar = Mon..Tue"] --> D3["Wed<br/>= Mon..Wed"] --> D4["Thu<br/>= Mon..Thu"] --> D5["Fri<br/>= Mon..Fri (final)"]
+    end
+    D1 -.-> R1["regime(D) vs regime(D-1)<br/>→ signal on signal_date = D"]
+    D3 -.-> R1
+```
+
+That is why every signal table carries two date columns: `signal_date` is the trading day the signal fired, and `bar_timestamp` is the IST-Monday week anchor that all days of the week share. **Filter on `signal_date`.**
+
+---
+
+## 3. Runtime architecture
+
+### 3.1 Processes and threads
+
+```mermaid
+flowchart TB
+    subgraph MAIN["trip-ema  (python -m trip_ema.app)"]
+        direction TB
+        UV["uvicorn / FastAPI<br/>HTTP :8000"]
+        RS["RunScheduler thread<br/>reads market_hours each loop,<br/>sleeps until next tick"]
+        RQ[["RunQueue"]]
+        RD["RunDispatcher thread<br/>gated on update_run_in_progress<br/>and backfill_runs"]
+        EX["ETL ThreadPoolExecutor<br/>max_workers = 2<br/>(GUI-triggered jobs)"]
+        CACHE["CurrentSignalsCache<br/>(in-memory read model)"]
+        MET["Prometheus /metrics<br/>(optional, own port)"]
+        RS --> RQ --> RD
+        UV --> CACHE
+    end
+
+    RD -- "Popen: trip_ema.etl.cli cycle<br/>--exchange X --kind intraday or eod" --> CYC["cycle subprocess"]
+    UV -- "POST /v1/admin/etl/enqueue-run" --> RQ
+    UV -- "POST /v1/admin/etl/reset-in-progress<br/>SIGTERM → SIGKILL" --> CYC
+    CYC --> PG[("PostgreSQL")]
+    UV --> PG
+```
+
+* **Single process, single writer.** Do not run uvicorn with `--workers N`. The scheduler, dispatcher and cache assume one owner.
+* **One cycle at a time, globally.** The `update_run_in_progress` row (unique per exchange) plus a backfill check means a cycle never overlaps another cycle or a running backfill.
+* **Cancellation is clean.** The cycle subprocess installs a SIGTERM handler, so a force-reset still closes its `compute_runs` row as cancelled.
+
+### 3.2 When ticks fire
+
+`trip_ema/scheduler/tick_planner.py` resolves each exchange's `tick_schedule:` into four instants per trading day, skipping weekends and holidays (python-`holidays` plus `configs/nse_holidays_2026.yaml`). The `mid_session` tick sits at the midpoint between the last open-anchored tick and the first close-anchored tick.
+
+```mermaid
+gantt
+    title NSE trading day (IST): session 09:15 to 15:30
+    dateFormat HH:mm
+    axisFormat %H:%M
+    section Session
+    Market open                     :active, s1, 09:15, 15:30
+    section Ticks
+    post_open  +15m  (intraday)     :milestone, t1, 09:30, 0m
+    mid_session midpoint (intraday) :milestone, t2, 12:15, 0m
+    pre_close  -30m  (intraday)     :milestone, t3, 15:00, 0m
+    post_close +60m  (EOD)          :crit, milestone, t4, 16:30, 0m
+```
+
+`post_close` is the only **EOD** tick. The other three are **intraday**. The kind decides what the cycle writes (§5) and whether the EOD-only stages run (§4).
+
+---
+
+## 4. The live cycle
+
+`trip-ema-etl cycle --exchange NSE --kind eod` is the unit of work, whether the dispatcher spawns it or an operator runs it by hand. It is implemented in `trip_ema/etl/cli.py::cmd_cycle` and `trip_ema/orchestrator/recompute_market.py`.
+
+```mermaid
+flowchart TB
+    START(["tick"]) --> F["1 · Fetch OHLCV<br/>whole universe, tier-1 first"]
+    F --> SS["2 · Stock indicator state<br/>(incremental, per ticker)"]
+    SS --> SE["3 · Stock indicator enrichment"]
+    SE --> SIG["4 · Signals<br/>intraday transition log<br/>+ process_signals_for_day"]
+    SIG --> CR["5 · Cache rebuild"]
+    CR --> IIV["6 · Industry index values<br/>(recent window)"]
+    IIV --> IS["7 · Industry indicator state"]
+    IS --> IE["8 · Industry indicator enrichment"]
+    IE --> K{"kind == eod?"}
+    K -- no --> N
+    K -- yes --> PS["9 · Per-signal stages<br/>signal_enrichment → labels → ensemble"]
+    PS --> FW["9a · Forward-walk labels<br/>for tickers that EXITed today"]
+    FW --> LL["9b · Monthly lead/lag refresh<br/>(first EOD of the month only)"]
+    LL --> N["10 · Notify subscribers<br/>(skipped if Brevo not configured)"]
+    N --> END(["compute_runs row closed"])
+
+    classDef eod fill:#fff3e0,stroke:#f57c00;
+    class PS,FW,LL eod;
+```
+
+A stage error halts the remaining stages and is recorded on the `compute_runs` row (`failed_stage`, `error_message`). A failure on one ticker or one industry inside a stage is isolated and does not halt the stage. Each stage publishes its live name to `compute_runs.current_stage`, so the console can show progress even for scheduler-driven runs whose stdout it can't read.
+
+### 4.1 One scheduled tick, end to end
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant RS as RunScheduler
+    participant RQ as RunQueue
+    participant RD as RunDispatcher
+    participant DB as PostgreSQL
+    participant CY as cycle subprocess
+    participant YF as yfinance / NSE
+    participant BR as Brevo
+
+    RS->>RS: sleep until next tick (NSE post_close 16:30 IST)
+    RS->>RQ: enqueue(NSE, eod)
+    RD->>RQ: poll
+    RD->>DB: update_run_in_progress empty? no active backfill?
+    RD->>DB: INSERT update_run_in_progress(NSE, eod)
+    RD->>CY: Popen(trip_ema.etl.cli cycle --exchange NSE --kind eod)
+    RD->>DB: record pid
+    CY->>DB: INSERT compute_runs
+    CY->>YF: fetch daily bars (all active tickers)
+    YF-->>CY: OHLCV
+    CY->>DB: upsert ohlcv_bars
+    CY->>DB: state → enrichment → signals → industries (stages 2–8)
+    CY->>DB: signal_enrichment / labels / ensemble / forward walk (EOD only)
+    CY->>DB: read current_signals + rank + lead/lag
+    CY->>BR: POST /v3/smtp/email (one digest per due subscriber)
+    CY->>DB: notification_log, compute_runs.finished_at
+    CY-->>RD: exit 0
+    RD->>DB: DELETE update_run_in_progress
+```
+
+---
+
+## 5. Signal storage model
+
+Three tables, three different questions. All are written atomically by `trip_ema/orchestrator/process_day.py`, so derivation and both writes share one transaction.
+
+```mermaid
+flowchart LR
+    DER["derive_signal_for_ticker_this_cycle<br/>(regime D-1 → regime D)"]
+    DER -->|"every intraday tick<br/>append transitions"| ISL[("intraday_signal_log<br/>full within-day chain<br/>e.g. BUY → EXIT_FROM_BUY → BUY")]
+    DER -->|"upsert flips,<br/>delete non-flips"| CS[("current_signals<br/>PK ticker_id<br/>'what fired today'")]
+    DER -->|"EOD and backfill only:<br/>delete day D + insert flips"| HS[("historical_signals<br/>UNIQUE ticker, timeframe, signal_date<br/>one NET signal per day")]
+```
+
+| Mode | `historical_signals` | `current_signals` |
+|---|---|---|
+| `intraday` | never written (the day isn't final) | upsert flips + delete non-flips |
+| `eod` | delete day D, insert flips | upsert flips + delete non-flips |
+| `backfill` | delete day D, insert flips | only when D is today |
+
+`current_signals` is refreshed with row-level upsert and delete, **not** `TRUNCATE`, so readers in the console and API never hit an `ACCESS EXCLUSIVE` lock.
+
+---
+
+## 6. Data ingestion and OHLCV correction
+
+### 6.1 Universe and fetch
+
+* **Listings:** `trip-ema-etl refresh-listings --exchange NSE` pulls the NSE equities and ETF archives and syncs `tickers`. Renames are tracked through ISIN continuity (`symbol_history`).
+* **Tiers:** a weekly recompute ranks tickers by 30-day average traded value. Tier 1 is the top 200, tier 2 the next 500, tier 3 the rest. Tiers only decide **fetch order**. Every cycle fetches the full universe.
+* **Parking:** three consecutive fetch failures park a ticker (`etl_ticker_status`). Unpark it from the console or with `trip-ema-etl unpark`.
+
+### 6.2 Seam correction against authoritative corporate actions
+
+yfinance is fetched with `auto_adjust=False`, which gives split-adjusted but dividend-unadjusted bars. Splits and bonuses can still leave **seams** in the series, i.e. unadjusted legs spliced to adjusted ones. Before any indicator is computed, `trip_ema/backfill/ohlcv_correction_stage.py` reconciles every affected ticker against `nselib`'s NSE corporate-action feed (`nse_corporate_actions`):
+
+```mermaid
+flowchart TB
+    A["daily bars around each ex_date"] --> B["boundary-excluding medians<br/>before vs after"]
+    B --> C["ratio r = after / before"]
+    C --> D{"classify r against<br/>{1, f, 1/f, f², 1/f²}<br/>(f = nselib price_factor)"}
+    D -- "≈ 1" --> OK["ADJUSTED_OK<br/>leave untouched"]
+    D -- "≈ 1/f" --> SEAM["SEAM_PRESENT<br/>rescale pre-boundary leg by exact f"]
+    D -- "≈ f² / 1/f²" --> BOT["BOTCHED<br/>(double or inverted adjustment)<br/>snap to exact factor"]
+    D -- "no match" --> CEN["censor window"]
+    DM["demerger /<br/>capital reduction"] --> CEN
+    SEAM --> W["write corrected bars<br/>back to ohlcv_bars"]
+    BOT --> W
+```
+
+`data/nse_corporate_actions.csv` is committed as an offline fallback snapshot. Any fallback path must report the snapshot's export date, so that bars are never silently reconciled against stale data. Design notes: [`docs/01_ohlcv_correction_design.md`](docs/01_ohlcv_correction_design.md), [`docs/nselib_source.md`](docs/nselib_source.md).
+
+---
+
+## 7. Industry indices, lead/lag and enrichment
+
+```mermaid
+flowchart LR
+    II["instrument_industry<br/>(yfinance / overrides)"] --> IDX["industry_index<br/>Modified Laspeyres,<br/>semi-annual Apr/Oct rebalance,<br/>top-N by market cap"]
+    MC["daily_market_cap<br/>(close × shares)"] --> IDX
+    IDX --> IIV["industry_index_value<br/>daily, base 1000,<br/>chain-linked periods"]
+    IIV --> IST["industry_indicator_state<br/>same Triple-EMA/ATR/regime"]
+    IST --> BR["industry_regime_breadth"]
+    IST --> CORR["industry_regime_corr<br/>pairwise corr + best lag"]
+    CORR --> ENS["influential_industry_ensemble<br/>leaders per industry"]
+    IIV --> SSL["sector_stock_leadlag<br/>stock vs own industry:<br/>LEADER / LAGGARD /<br/>COUPLED / DECOUPLED"]
+    ENS --> SEF["signal_ensemble_features<br/>do the leaders confirm?"]
+```
+
+Every signal gets a feature row in `signal_enrichment`:
+
+* signed, polarity-adjusted distance to each EMA in ATR(10/15/20/30/40) units, plus 75 band-membership flags
+* `seq_in_week` and `seq_in_consec_weeks` (causal repeat counters)
+* `data_is_valid` and `bars_available`, so long-period ATR families aren't trusted before there is enough history
+
+On top of that it gets the ensemble confirmation features and benchmark statistics (`stock_benchmark_stats`: β, α, R², relative strength over short/medium/long windows). Specs: [`docs/enrichment_features_spec.md`](docs/enrichment_features_spec.md), [`docs/leadlag-analytics-design.md`](docs/leadlag-analytics-design.md).
+
+---
+
+## 8. Forward-walk labels (research layer)
+
+When a position **closes** (an `EXIT_FROM_*` signal), its window becomes final and the EOD cycle labels it in `signal_labels`. Each label is a 1:1 child of the signal's enrichment row.
+
+```mermaid
+timeline
+    title Forward-walk window for one BUY
+    signal_date (D) : BUY fires on the weekly regime flip
+    D + 1 : Entry = open of first bar after D
+    Window : Daily walk tracks gain rungs 1…100%, loss rungs 5…20%, MAE / MFE and their bar index, time underwater
+    Exit day N : EXIT_FROM_BUY fires, Exit = close of day N, realized return, capture ratio, Sharpe in window
+    Censoring : Demerger or capital reduction inside the window, window_censored = true (bookkeeping row, no truncation)
+```
+
+The window yields 21 gain rungs and 6 loss rungs (including 7½% and 12½%). Each rung gets a hit boolean and a `bars_to_*` integer, with −1 as the "never hit" sentinel. There are also excess returns versus industry and market, ATR-normalised excursions, and in-window slope and volatility. The forward walk fans out across tickers on the shared threaded `fan_out` primitive (`trip_ema/fundamentals/parallel.py`). Each ticker's failure is isolated. Spec: [`docs/02_signal_forward_walk_labels_spec.md`](docs/02_signal_forward_walk_labels_spec.md).
+
+Backfill a range with `trip-ema-etl forward-walk --exchange NSE [--tickers …]`.
+
+---
+
+## 9. Notifications
+
+```mermaid
+flowchart LR
+    CS[("current_signals")] --> J["join tickers +<br/>instrument_industry"]
+    J --> RK["rank_score =<br/>0.5·stock RS 26w<br/>+ 0.3·industry RS 26w<br/>+ 0.2·stock R² 26w"]
+    RK --> G["group by industry<br/>(Unknown last)"]
+    G --> LL["append lead/lag context<br/>+ intraday chain"]
+    LL --> R["render HTML + plain text"]
+    R --> DUE{"subscriber due?<br/>notify_cadence_minutes"}
+    DUE -- yes --> B["Brevo POST /v3/smtp/email"]
+    B --> NL[("notification_log<br/>monthly partitions")]
+```
+
+* Subject line: `[trip_ema] <cycle_id> — N signal(s) (b BUY, s SELL, e EXIT)`
+* Subscribers set a cadence in multiples of 15 minutes, from 15 to 1,440. A "Test notification" button sends a one-off email through the configured transport.
+* The Brevo key lives in `secrets/brevo.yaml` (gitignored; template in `secrets/brevo.yaml.example`). Without it, the notify stage is skipped and the cycle still succeeds.
+* A Redis-backed queue, DLQ endpoints and circuit-breaking transports still exist in `trip_ema/notifications/`, but the V1 cycle sends directly and does not need them.
+
+---
+
+## 10. Operator console
+
+`trip-ema-console` is a desktop client.
+
+* **Administrative writes** go through the admin HTTP API: subscribers, listings and tier refreshes, unparking, and force-resetting a stuck run.
+* **Manual cycles and backfills** are launched as local `trip-ema-etl` subprocesses (QProcess). Their stdout drives the live stage list.
+* **Table views** read Postgres directly and read-only, optionally as `trip_gui_user`.
+
+Without `TRIP_EMA_ADMIN_TOKEN` the console starts in read-only mode, with write buttons disabled.
+
+| Tab | What it does |
+|---|---|
+| ⚙ **ETL Status** | Run history, live stage progress (for local runs and scheduler-driven runs alike), parked tickers, tier counts; start a cycle or backfill, reset a stuck run |
+| 📊 **Tickers** | Searchable universe with per-ticker signal history; CSV export; jump to chart |
+| 📈 **Signals** | pyqtgraph chart: candles, three EMAs, ATR bands, regime fill, signal markers, volume pane, crosshair OHLC; 1Y/3Y/5Y/10Y/All ranges; industry-index charts |
+| 👥 **Subscribers** | CRUD over subscribers, filters and cadence; test send |
+| 🔔 **Notifications** | Recent `notification_log` entries, colour-coded by signal |
+| ❤ **System Health** | Status cards polled every 10 s: universe, ETL freshness, scheduler, cache, queue, recent events |
+| ⚙ **Settings** | GUI preferences (`QSettings`, never `config.yaml`); read-only config viewer; timestamped config backup |
+
+The console also has a backtest dialog, a market-trend dialog, industry panels and a signal-generation panel.
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant GUI as trip-ema-console
+    participant CY as local cycle (QProcess)
+    participant DB as PostgreSQL
+    participant API as trip-ema API
+
+    rect rgb(232, 245, 233)
+    Note over Op,DB: Manual run, launched from the console
+    Op->>GUI: Start cycle (ETL Status)
+    GUI->>CY: python -m trip_ema.etl.cli cycle --exchange NSE
+    loop each stage
+        CY-->>GUI: stdout "[stage] running / done / failed"
+        GUI-->>Op: stage list updates
+    end
+    CY->>DB: bars, state, signals, compute_runs
+    end
+
+    rect rgb(227, 242, 253)
+    Note over Op,API: Scheduled run, spawned by the service
+    loop mutex tick
+        GUI->>DB: in-flight compute_runs, current_stage
+        GUI-->>Op: mirror the remote stage
+    end
+    Op->>GUI: Reset stuck run
+    GUI->>API: POST /v1/admin/etl/reset-in-progress (Bearer)
+    API-->>GUI: SIGTERM, then SIGKILL, row released
+    end
+```
+
+---
+
+## 11. HTTP API
+
+Default `http://0.0.0.0:8000`. Admin routes require `Authorization: Bearer $TRIP_EMA_ADMIN_TOKEN`. They return **503** if the token env var is unset, **401** if the header is missing, and **403** if the token is wrong.
+
+| Group | Endpoints |
+|---|---|
+| **Health** | `GET /healthz` · `GET /readyz` |
+| **Signals** | `GET /v1/signals/{exchange}/{symbol}/history` · `GET /v1/signals/industry/{industry_name}/history` · `POST /v1/compute` |
+| **ETL / runs** | `POST /v1/admin/etl/{enqueue-run, run-intraday, run-eod, backfill, backfill-shares, refresh-listings, recompute-tiers, unpark-all, reset-in-progress}` · `GET /v1/admin/etl/{status, parked, queue-snapshot}` |
+| **Exchanges** | `GET /v1/admin/exchanges` · `GET /v1/admin/exchange-state[/{exchange}]` |
+| **Signals admin** | `POST /v1/admin/signals/generate` · `GET /v1/admin/signals/generated` · `POST /v1/admin/compute-now` · `GET /v1/admin/stale-tickers` |
+| **V1 pipeline (manual recompute)** | `POST /v1/admin/v1pipeline/{stock-indicator-state, stock-indicator-enrichment, industry-index-value, industry-indicator-state, industry-indicator-enrichment}` |
+| **Subscribers** | `GET/POST /v1/admin/subscribers` · `GET/PATCH/DELETE /v1/admin/subscribers/{id}` · `PUT /v1/admin/subscribers/{id}/filters` |
+| **Notifications** | `GET /v1/admin/notifications/recent` · `GET /v1/admin/notifications/dlq` · `POST …/dlq/{job_id}/replay` · `DELETE …/dlq/{job_id}` |
+| **Health snapshot** | `GET /v1/admin/health-snapshot` |
+| **Fundamentals** | industry (get, refresh, override), shares, quarterly financials, market cap, industry indices (list, constituents, values, build, compute): all under `/v1/fundamentals/…` |
+
+FastAPI's interactive docs are at `/docs` while the service is running.
+
+---
+
+## 12. Database
+
+PostgreSQL, managed exclusively by **Alembic** (`alembic_pkg/versions/0001…0056`). Migrations run at service start, and a failed migration is fatal. Core relationships:
+
+```mermaid
+erDiagram
+    tickers ||--o{ ohlcv_bars : "daily bars"
+    tickers ||--o{ stock_indicator_state : "weekly chart @ day D"
+    stock_indicator_state ||--|| stock_indicator_enrichment : "1:1 (ticker, tf, date)"
+    tickers ||--o| current_signals : "fired this cycle"
+    tickers ||--o{ historical_signals : "net signal per day"
+    tickers ||--o{ intraday_signal_log : "within-day chain"
+    tickers ||--o{ signal_enrichment : "features per signal"
+    signal_enrichment ||--o| signal_labels : "forward-walk outcome"
+    signal_enrichment ||--o{ signal_ensemble_features : "per variant"
+    tickers ||--o| instrument_industry : "classification"
+    tickers ||--o{ nse_corporate_actions : "splits, bonuses, demergers"
+    tickers ||--o{ daily_market_cap : ""
+    industry_index ||--o{ industry_index_constituent : "per rebalance"
+    industry_index ||--o{ industry_index_value : "daily value"
+    industry_index ||--o{ industry_indicator_state : "weekly chart @ day D"
+    tickers ||--o{ sector_stock_leadlag : "vs own industry"
+    subscribers ||--o{ subscriptions : "filters"
+    subscribers ||--o{ notification_log : "sends (partitioned)"
+
+    tickers {
+        int ticker_id PK
+        varchar exchange
+        varchar symbol
+        char isin
+        smallint tier
+        bool is_active
+    }
+    historical_signals {
+        bigint signal_id PK
+        int ticker_id FK
+        date signal_date "UNIQUE with ticker, tf"
+        timestamptz bar_timestamp "week anchor"
+        varchar signal_type
+        smallint regime_before
+        smallint regime_after
+        float price_at_signal
+    }
+    stock_indicator_state {
+        int ticker_id PK
+        varchar timeframe PK
+        date date PK
+        float med_ema
+        float long_ema
+        float longest_ema
+        float atr
+        smallint display_regime
+    }
+```
+
+Run bookkeeping tables: `compute_runs` (PK `compute_run_id`), `etl_runs`, `backfill_runs` (PK `run_id`), `update_run_in_progress`, `pipeline_phase_status`, `exchange_state`, `fundamentals_run`.
+
+**Optional least-privilege roles** (migration `0002_db_roles`):
+
+```mermaid
+flowchart LR
+    ETL["trip_etl_user<br/>ETL + cycle"] -- "read/write" --> T[("all tables")]
+    ENG["trip_engine_user<br/>service"] -- "read/write<br/>(no TRUNCATE)" --> T
+    GUIU["trip_gui_user<br/>console"] -- "SELECT only" --> T
+```
+
+Enable them with a `database.roles:` block. See [`docs/operator/db-roles.md`](docs/operator/db-roles.md).
+
+---
+
+## 13. Installation and running
+
+### 13.1 Prerequisites
+
+* Python ≥ 3.12, PostgreSQL ≥ 16 (developed on 18)
+* A Brevo account with a verified sender (only needed to send email)
+* Linux recommended. The console also needs the usual Qt runtime libraries.
+
+### 13.2 Install
 
 ```bash
-# Apply migrations and start the main service
+git clone https://github.com/UBags/WeeklyStockSignals.git
+cd WeeklyStockSignals
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e ".[all,test]"          # service + ETL + GUI + migrations + observability + tests
+```
+
+| Extra | Pulls in |
+|---|---|
+| *(core)* | pydantic, SQLAlchemy, psycopg2, FastAPI, uvicorn, PyYAML, redis |
+| `etl` | yfinance, pandas, requests, holidays |
+| `gui` | PySide6, pyqtgraph |
+| `migrations` | alembic |
+| `observability` / `tracing` / `tracing-otlp` | prometheus_client / OpenTelemetry |
+| `gui-build` | PyInstaller (standalone console binary) |
+
+### 13.3 Configure
+
+```bash
+createdb trip_ema                                   # owner: trip_ema_app (see config.yaml → database)
+export TRIP_EMA_DB_PASSWORD='…'                     # never stored in config.yaml
+export TRIP_EMA_ADMIN_TOKEN="$(openssl rand -hex 32)"
+cp secrets/brevo.yaml.example secrets/brevo.yaml && chmod 600 secrets/brevo.yaml   # optional
+```
+
+`config.yaml` is the single runtime config: database, the `ema` and `atr` parameters, `market_hours` with per-exchange `tick_schedule`, ETL concurrency and tier sizes, HTTP, and observability. [`docs/operator/configuration.md`](docs/operator/configuration.md) has the reference.
+
+### 13.4 Run
+
+```bash
+# 1. Service: applies migrations, primes the cache, starts scheduler + dispatcher + API
 trip-ema --config config.yaml
+#    or, detached with log at /tmp/trip-ema.log and a /healthz wait:
+./scripts/restart_service.sh
 
-# Run the notifier worker (separate process, for queue-mode)
-trip-ema-notifier --config config.yaml
+# 2. First-time data load
+trip-ema-etl refresh-listings --exchange NSE
+trip-ema-etl backfill        --exchange NSE --date_from 2016-01-01
 
-# Ingest NSE/BSE data (separate CLI; populates the ohlcv_bars table)
-trip-ema-etl refresh-listings --config config.yaml      # ticker universe
-trip-ema-etl backfill --config config.yaml --years 10   # bulk history
-trip-ema-etl incremental-eod --config config.yaml       # nightly delta
+# 3. Ad-hoc cycle (what the scheduler does on every tick)
+trip-ema-etl cycle --exchange NSE --kind eod
 
-# Open the desktop operator console (read-only without admin token)
-TRIP_EMA_ADMIN_TOKEN=... trip-ema-console --config config.yaml
+# 4. Console
+trip-ema-console --config config.yaml --base-url http://localhost:8000
 ```
 
-The notifier worker is a separate process when you configure a
-Redis queue in `config.yaml`. In dev / small deployments without
-Redis configured, transports are dispatched in-process by the
-`SubscriberDistributor` thread — see "Deployment model" below.
+`scripts/` holds the operational toolbox: `health_check.sh`, `db_status.sh`, `smoke_test_fast.sh`, `track_backfill_progress.sh`, `preflight_coldstart.sh` and others. See [`scripts/operator_commands.md`](scripts/operator_commands.md).
 
-The ETL CLI is a separate package extra; it doesn't run on the same
-schedule as the main service and is invoked manually or via cron.
-The operator console (`trip-ema-console`) is a desktop GUI for
-day-to-day operations — see the "Operator console" section below.
+---
 
-### Minimal config
+## 14. Backfill
 
-```yaml
-database:
-  driver: postgresql
-  host: localhost
-  port: 5432
-  database: market_data
-  user: app
-  password_env: TRIP_EMA_DB_PWD     # never put the password in the file
+`trip-ema-etl backfill` rebuilds the whole derived model for a date range. A partial unique index makes it exclusive: only one active `backfill_runs` row can exist, and the live cycle defers while a backfill runs.
 
-ema:
-  med:     { base: 8,  s1: 4, s2: 4, final: null }
-  long:    { base: 15, s1: 4, s2: 4, final: 3 }
-  longest: { base: 28, s1: 7, s2: 5, final: 3 }
-
-atr:
-  length: 14
-  inner_mult: 0.2
-  mid_mult: 2.0
-  outer_mult: 4.0
-
-market_hours:
-  - exchange: NSE
-    open: "09:15"
-    close: "15:30"
-    tz: Asia/Kolkata
-    weekdays: [1, 2, 3, 4, 5]
+```mermaid
+flowchart TB
+    S0["acquire backfill lock<br/>(backfill_runs)"] --> S1["1 · fetch bars<br/>(unless --no_fetch_bars)"]
+    S1 --> S1b["1b · OHLCV seam correction"]
+    S1b --> S2["2–3 · stock state + enrichment<br/>(full mode, per ticker)"]
+    S2 --> S4["4–6 · industry index values,<br/>state, enrichment (all industries)"]
+    S4 --> S7["7 · delete historical_signals<br/>≥ Monday of date_from"]
+    S7 --> S8["8 · day-walk: derive and insert<br/>historical_signals per day"]
+    S8 --> S9["9 · rebuild current_signals<br/>(final day only)"]
+    S9 --> S10["10 · release lock (finally)"]
 ```
 
-Production additions:
-
-```yaml
-observability:
-  metrics_port: 9090          # Prometheus /metrics on a separate port
-  log_json: true              # JSON log lines for Loki / ELK
-  tracing:
-    enabled: true             # OpenTelemetry
-    exporter: otlp
-    otlp_endpoint: "http://otel-collector:4317"
-
-http:
-  notifier_subprocess_shutdown_timeout_seconds: 15
-
-transports:
-  circuit_breaker:
-    enabled: true             # Default; failure_threshold=5, reset=30s
-```
-
-See `docs/ARCHITECTURE.md` §8 for the full operational reference.
+Scope it with `--stocks SYM1,SYM2`, force a full recompute with `--rebuild`, and clear a stale lock with `--release-lock`.
 
 ---
 
-## Deployment model
-
-**Single-writer, single-process.** Do NOT run uvicorn with
-`--workers N` — it would produce N copies of every engine, N
-schedulers racing on the DB, and N caches that don't agree. The
-correctness invariants are written for one process holding the
-state.
-
-If you eventually need horizontal scale, that's a real
-architectural change (leader election or ticker sharding), not
-naive process multiplication. See ARCHITECTURE.md invariant 3.2.
-
----
-
-## API surface
-
-The HTTP API lives on `http.port` (default 8000); metrics live on
-a separate port (`observability.metrics_port`).
-
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /healthz` | Liveness — always 200 if the process is up |
-| `GET /readyz` | Readiness — includes `stale_tickers_count` informationally |
-| `GET /v1/signals/{exchange}/{symbol}` | Latest signal for a ticker |
-| `GET /v1/signals/{exchange}/{symbol}/history` | Bar-by-bar indicator history for the chart view |
-| `POST /v1/compute` | Trigger an out-of-band compute pass |
-| `POST /v1/admin/prime-all` | Re-prime all tickers from DB (admin) |
-| `POST /v1/admin/compute-now` | Force `ComputeScheduler.run_once` (admin) |
-| `GET /v1/admin/stale-tickers` | List tickers flagged stale due to ETL gaps (admin) |
-| `POST /v1/admin/reprime-ticker/{exchange}/{symbol}` | Reprime one ticker, refreshing metadata from DB (admin) |
-| `GET /v1/admin/circuit-breakers` | Current transport-breaker state per transport (admin) |
-| `GET /v1/admin/etl/status` | ETL run history + tier counts (admin) |
-| `GET /v1/admin/etl/parked` | Currently parked tickers + failure reasons (admin) |
-| `POST /v1/admin/etl/run/{kind}` | Trigger an ETL run (refresh-listings / backfill / eod) (admin) |
-| `GET /v1/admin/subscribers` | List all subscribers + their filter sets (admin) |
-| `POST /v1/admin/subscribers` | Create a subscriber (admin) |
-| `PATCH /v1/admin/subscribers/{id}` | Update subscriber fields (admin) |
-| `DELETE /v1/admin/subscribers/{id}` | Delete subscriber (cascades to filters + log) (admin) |
-| `PUT /v1/admin/subscribers/{id}/filters` | Replace subscriber's filter set (admin) |
-| `POST /v1/admin/subscribers/{id}/test-notification` | One-shot test send via the configured transport (admin) |
-| `GET /v1/admin/notifications/recent` | Recent notification_log entries, joined for display (admin) |
-| `GET /v1/admin/notifications/dlq` | List notifier dead-letter queue entries (admin, Phase 12) |
-| `POST /v1/admin/notifications/dlq/{job_id}/replay` | Move a DLQ entry back to the main queue (admin, Phase 12) |
-| `DELETE /v1/admin/notifications/dlq/{job_id}` | Permanently delete a DLQ entry (admin, Phase 12) |
-| `GET /v1/admin/health-snapshot` | 8-card system-health snapshot for the GUI dashboard (admin) |
-
-Admin endpoints require a bearer token. Set
-`TRIP_EMA_ADMIN_TOKEN=...` in the environment (or override the env
-var name via `http.admin_token_env`); endpoints return 503 if the
-env var isn't set, 401 without a header, 403 with a wrong token.
-
----
-
-## Operator console
-
-`trip-ema-console` is a PySide6 desktop application for day-to-day
-operations. It connects to the running `trip-ema` service via HTTP
-and to Postgres directly (read-only DB queries for table views).
-The console mirrors the API's read endpoints in tabbed views and
-funnels write operations through the admin endpoints above.
-
-Seven tabs in the sidebar:
-
-| Tab | Purpose |
-|-----|---------|
-| ETL Status | Recent runs, parked tickers, tier counts. Trigger ETL runs from the GUI (admin). |
-| Tickers | Searchable table of all tickers with signal history per row. Export to CSV. |
-| Signals | Chart view (pyqtgraph) — candles + EMA lines + ATR bands + regime fill + BUY/SELL markers + volume sub-panel. Crosshair OHLC readout. Ticker search-as-you-type + time-range buttons (1Y/3Y/5Y/10Y/All) + layer toggles. |
-| Subscribers | Full CRUD over the `subscribers` table — transport (email/webhook/slack), address, cadence, filter editor (per-ticker / per-signal). Test-notification button. Export to CSV. |
-| Notifications | Recent `notification_log` entries with signal color-coding, subscriber + hours filters. Export to CSV. |
-| System Health | 8 status cards polled every 10s — ticker universe, ETL freshness, compute scheduler, signal cache, circuit breakers, notification queue, subscribers, recent events. Color-coded by status. |
-| Settings | GUI preferences (refresh cadences, default chart range) persisted to `QSettings`. Read-only viewer for the loaded `config.yaml`. Backup-config action writes a timestamped copy. |
-
-Plus Help → About in the menu bar (version, runtime info).
-
-The console runs in **read-only mode** when `TRIP_EMA_ADMIN_TOKEN`
-is not set in the environment — all read panels work, all write
-buttons are disabled with explanatory tooltips. This is the
-recommended posture for analyst seats; ops/admin seats set the
-token.
-
-Cross-tab nav: selecting a ticker in the Tickers tab and clicking
-"View chart" opens the Signals tab pre-loaded with that ticker.
-
----
-
-## Where to look for what
-
-The detailed map is in `docs/ARCHITECTURE.md` §7. A few high-traffic
-pointers:
-
-| Question | File(s) |
-|----------|---------|
-| How does an EMA actually compute? | `trip_ema/indicators/vw_ema.py` |
-| Where does Pine's NaN warmup live? | `trip_ema/indicators/vw_ema.py::update`, `trip_ema/indicators/atr.py::update` |
-| How does the engine handle a re-applied provisional? | `trip_ema/engine/ticker_engine.py::ingest_provisional` |
-| Where is gap detection? | `trip_ema/scheduler/compute_scheduler.py::_check_for_data_gap`, `trip_ema/persistence/bars_repo.py::weekly_buckets_with_bars` |
-| How do timestamps cross zones? | `trip_ema/indicators/aggregation.py::_monday_of`, `bucket_end` |
-| Where does a notification's lifecycle live? | `trip_ema/scheduler/subscriber_distributor.py` (enqueue), `trip_ema/notifier_worker.py` (dispatch) |
-| Where are correlation IDs minted and propagated? | `trip_ema/observability/correlation.py` |
-| Where are Prometheus metrics defined? | `trip_ema/observability/metrics.py` |
-| How do circuit breakers wrap a transport? | `trip_ema/notifications/circuit_breaker.py` |
-| Where does the ETL fetch bars from? | `trip_ema/etl/yfinance_fetcher.py`, `trip_ema/etl/cli.py` (the `trip-ema-etl` entry point) |
-| Where does the operator console live? | `trip_ema/gui/` — `console.py` is the entry point, `main_window.py` is the sidebar+stack shell, individual tabs are in `gui/views/` |
-| How does the chart replay the engine server-side? | `trip_ema/transports/http/routes/signals.py::get_signal_history` — primes a fresh `TickerEngine` over the requested window and returns the bar-by-bar state |
-| How are admin write actions gated? | `trip_ema/transports/http/dependencies.py::require_admin_token` — bearer token whose env-var name is in `http.admin_token_env` |
-| Where does the notifier DLQ live? | `trip_ema/notifications/redis_queue.py` (the DLQ data structure + Redis HASH attempts counter), `trip_ema/notifier_worker.py::_handle_job` (the threshold check), `trip_ema/transports/http/routes/admin_notifications.py` (the three admin endpoints) |
-| Where are the DB roles defined? | `alembic_pkg/versions/0002_db_roles.py` (the CREATE ROLE + GRANT migration), `trip_ema/config/schema.py::DbRolesConfig` (the config), `trip_ema/persistence/connection.py::create_engine_for_role` (the role-aware engine builder) |
-
----
-
-## Running the tests
+## 15. Testing and CI
 
 ```bash
-# DB-free tests — fast, no Postgres needed
-pytest tests/indicators tests/engine tests/cache tests/notifications \
-       tests/scheduler_pure tests/notifier_pure tests/config \
-       tests/transports_pure tests/parity tests/observability \
-       tests/etl tests/gui_pure
+# DB-free suites: fast, no Postgres
+pytest tests/indicators tests/domain tests/regime tests/cache tests/config \
+       tests/notifications tests/scheduler_pure tests/transports_pure tests/parity tests/etl
 
-# Qt-using tests — separate invocation to avoid a pytest-qt
-# teardown race (see "Continuous integration" below)
+# Qt suites: separate invocation (pytest-qt teardown race)
 QT_QPA_PLATFORM=offscreen pytest tests/gui
 
-# Postgres-backed integration tests — needs pytest-postgresql
-pytest tests/persistence tests/scheduler tests/registry \
-       tests/transports tests/notifier tests/api
+# Postgres-backed suites (pytest-postgresql; pg_ctl path in pyproject.toml)
+pytest tests/persistence tests/orchestrator tests/fundamentals tests/backfill tests/api
 ```
 
-The DB-free suite is ~588 tests (465 non-Qt + 123 Qt) and runs in
-~15s wall time. The Postgres-backed slices are heavier and meant for
-CI / pre-release.
+* **Pine parity harness.** `tests/parity/` auto-discovers CSV fixtures and asserts bar-by-bar agreement at an absolute tolerance of `1e-9`. Drop a TradingView data-window export into `tests/parity/fixtures/` to anchor against real Pine output.
+* **Architecture tests.** `tests/test_no_dead_island.py` and `tests/architecture/` guard against unreachable modules and layer violations.
+* **GitHub Actions.** `.github/workflows/` has `tests.yml` (DB-free, Postgres integration, ruff), `release.yml` (wheel + PyInstaller console build), `docs.yml` (MkDocs) and `install-smoke.yml`.
 
-The GUI tests use `pytest-qt` with the offscreen Qt platform; they
-run headless in CI. `tests/gui_pure/` is for tests that import GUI
-modules but don't need a Qt event loop (e.g. the HTTP client tests).
+---
 
-`tests/gui/conftest.py` (Phase 12) implements the deferred-deletion
-pattern from Gemini's pytest-qt PDF: a `managed_widget` factory
-fixture plus an autouse `_drain_after_every_gui_test` that pumps
-Qt's event loop with `processEvents()` + `sendPostedEvents()`
-between tests. Standalone `tests/gui` reliability improved from
-~3/5 to ~4-5/5 clean exits as a result. The race isn't fully
-eliminated (some teardown happens inside pytest's atexit handlers,
-after fixtures can intervene), so the CI workflow's two-invocation
-pattern + output-parsing wrapper remain belt-and-braces. The
-conftest docstring documents this honestly.
+## 16. Repository layout
 
-### Continuous integration
-
-GitHub Actions workflows live under `.github/workflows/`:
-
-- **`tests.yml`** — three jobs:
-  - `db-free`: runs the full ~588-test suite on every push and PR,
-    split into two pytest invocations to avoid the Qt teardown race.
-    The Qt-using step checks pass/fail via output parsing rather
-    than trusting the process exit code, so a benign teardown
-    segfault doesn't fail the build. Real test failures still do.
-  - `postgres-integration`: provisions a `postgres:16` service
-    container and runs the Postgres-backed slices. Gated to main
-    pushes + manual dispatch + same-repo PRs.
-  - `lint`: `ruff check`, advisory only.
-- **`release.yml`** — tag-triggered. Builds sdist + wheel via
-  hatchling, verifies the wheel's `__version__` matches the tag,
-  publishes to PyPI via trusted publishing. Phase 12 added a
-  `build-gui-installer` job that uses PyInstaller (`gui_installer.spec`
-  at repo root) to build a standalone Linux x86_64 operator-console
-  binary; the binary is packaged as
-  `trip-ema-console-vX.Y.Z-linux-x86_64.tar.gz` and uploaded as a
-  release artifact. Windows + macOS builds are deferred.
-- **`docs.yml`** — Phase 12. Builds the MkDocs Material site (see
-  `mkdocs.yml` at repo root) and publishes to GitHub Pages on push
-  to main. Paths-filtered so it only runs when docs change.
-
-### Schema migrations
-
-Phase 12 made Alembic the exclusive migration system. Migrations
-live in `alembic_pkg/versions/`; state is tracked in
-`alembic_version`. The squashed initial revision
-(`0001_initial_schema`) reproduces the schema that the historical
-SQL migrators (001-010) produced. The legacy SQL files are
-archived in `migrations/legacy/` for human reference only — they
-are no longer applied to fresh databases.
-
-For pre-Phase-12 databases that ran the legacy migrator through
-version 010, `trip_ema.persistence.alembic_bridge.stamp_baseline_if_needed()`
-detects the populated `schema_migrations` table on first startup
-and stamps `0001_initial_schema` **without** re-running DDL.
-Subsequent `alembic upgrade head` then applies any post-squash
-revisions (currently `0002_db_roles`). No manual operator action
-required.
-
-To author a new migration:
-
-```bash
-pip install trip-ema[migrations]
-alembic revision -m "describe what this migration does"
-# edit alembic_pkg/versions/<rev>_<slug>.py — use the op API
-alembic upgrade head
+```
+trip_ema/
+├── app.py                 service entry point (trip-ema)
+├── indicators/            VW triple-EMA, ATR, bands, weekly aggregation (pure)
+├── regime/                canonical regime classifier
+├── domain/                frozen dataclasses, DetermineSignal, market sessions, OHLCV corrector
+├── fundamentals/          state/enrichment populators, industry indices, lead/lag,
+│                          signal enrichment, ensemble, forward-walk labels, benchmark stats
+├── orchestrator/          recompute_market, process_day, intraday chain, notify_subscribers
+├── backfill/              10-stage backfill pipeline, bulk day-walk, OHLCV correction stage
+├── etl/                   trip-ema-etl CLI, NSE listings, yfinance source, nselib actions,
+│                          tiering, parking, reconciliation
+├── scheduler/             tick planner, trading calendar, RunScheduler, RunQueue, RunDispatcher
+├── persistence/           SQLAlchemy Core repositories, Alembic bridge, connections
+├── cache/                 CurrentSignalsCache (in-memory read model)
+├── notifications/         email composer, Brevo transport, lead/lag rendering, (legacy) queue/DLQ
+├── transports/http/       FastAPI app, routes, schemas, admin-token dependency
+├── gui/                   PySide6 console: main window, views, chart widget, backtest engine
+├── observability/         logging, correlation IDs, Prometheus metrics, OpenTelemetry
+└── config/                Pydantic config schema + loader, Brevo secrets
+alembic_pkg/versions/      0001 … 0056 schema migrations
+tests/                     ~245 test modules (pure, Qt, Postgres-backed, parity, architecture)
+scripts/                   operator shell tools, probes, README chart renderer
+diagnostics/               standalone research and data-quality scripts (strategy backtests, exit optimisation)
+docs/                      design specs, operator guides, per-package READMEs (MkDocs site)
+data/                      nse_corporate_actions.csv offline snapshot
+configs/                   exchange holiday overrides
 ```
 
-Failure to apply migrations at startup is now **fatal** (was a
-logged warning during the Phase 11 transitional period). Operators
-who want to run a service without the `[migrations]` extra need
-to apply migrations out-of-band; the service will refuse to start
-if `alembic upgrade head` can't run.
+---
 
-The full migration story (including the parity test that asserts
-the legacy SQL and the squashed Alembic revision produce the same
-schema) is in `PHASE12_CHANGELOG.md` and the comments in
-`alembic.ini`. The legacy archive in `migrations/legacy/` has its
-own README.
+## 17. Design invariants
 
-### Notifier dead-letter queue (DLQ)
+These are the rules the code is written around. Break one only deliberately, and document why.
 
-Phase 12. When a notification job fails to deliver `max_attempts`
-times (default 5), the worker moves it to a Redis-backed DLQ
-instead of cycling it back into the queue. The attempt counter
-lives in a persistent Redis HASH keyed by job_id — it survives
-the distributor recreating the payload on each cycle.
+1. **Wrong data → wrong decisions → lost money.** Correctness beats speed. Censor or refuse rather than guess.
+2. **The ETL is the source of truth for bar availability.** The pipeline never interpolates or invents bars.
+3. **Pine numerical fidelity is non-negotiable.** EMA α = 2/(n+1), Wilder RMA seeding, WMA weights 1…n, and NaN warm-up all match Pine. If the parity harness doesn't catch a "simplification", the harness is under-specified.
+4. **One rule, one place.** Regime: `compute_regime`. Signal: `DetermineSignal`. Day attribution: the market's own trading date (`market_tz(exchange)`), never India's by default.
+5. **Daily grain, weekly chart.** Filter by `signal_date` or `date`. `bar_timestamp` is a shared week anchor and must never be used as a day bound.
+6. **All timestamps are timezone-aware UTC internally.** Local zones are applied only at the boundary.
+7. **Domain types are immutable** (`frozen=True, slots=True`). Mutation means replacement.
+8. **Single process, single writer.** No `--workers N`. One cycle at a time. Backfill and live cycles are mutually exclusive.
+9. **Process boundaries.** The service schedules and serves, and `trip-ema-etl` subprocesses compute, whether spawned by the dispatcher or by the console. The console's administrative writes go through the admin API, and its preferences live in `QSettings`, never in `config.yaml`.
+10. **Observability is additive.** Removing metrics or tracing must never change behaviour.
 
-Admin endpoints:
-- `GET /v1/admin/notifications/dlq?limit=` — list entries
-- `POST /v1/admin/notifications/dlq/{job_id}/replay` — requeue
-- `DELETE /v1/admin/notifications/dlq/{job_id}` — permanent delete
-
-All require the admin bearer token. Tuning: `notifier.max_attempts`
-in config.yaml; metric label `outcome="dlq"` on
-`trip_ema_notifier_jobs_processed_total`. Full operator workflow
-in `docs/operator/dlq.md`.
-
-### DB role separation (optional)
-
-Phase 12. Alembic migration `0002_db_roles.py` creates three
-Postgres roles (`trip_etl_user`, `trip_engine_user`,
-`trip_gui_user`) with per-table GRANTs that enforce invariant 3.14
-at the database level rather than only in Python code.
-
-Adoption is opt-in via a `database.roles:` block in config.yaml.
-Without it, all processes use the top-level user/password —
-preserving existing deployments. The roles are created with
-`NOLOGIN` and no password; operators grant `LOGIN` and set
-passwords as a deployment step. Migrations themselves continue to
-run as the top-level user (which has full schema privileges); the
-per-role users come into play for steady-state operation. See
-`docs/ARCHITECTURE.md` §8.6 and `docs/operator/db-roles.md` for
-the workflow.
-
-### The Pine parity harness
-
-`tests/parity/` auto-discovers `*.csv` fixtures and asserts the
-Python output matches expected indicator values bar-by-bar with
-`1e-9` absolute tolerance. The committed fixture is a self-pinned
-synthetic dataset that catches Python-side drift.
-
-To upgrade to true Pine-parity: export
-`(timestamp, OHLCV, med_ema, long_ema, longest_ema, atr)` from
-TradingView's data window for a representative ticker/timeframe,
-save as `tradingview_<symbol>_<tf>.csv` in `tests/parity/fixtures/`,
-re-run. Any drift surfaces immediately.
-
-Full workflow in ARCHITECTURE.md §8.5.
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/architecture/invariants.md`](docs/architecture/invariants.md) carry the original long-form rationale. Parts of them predate the V1 pipeline described here (they mention `ComputeScheduler` and `SignalCache`, which have since been removed).
 
 ---
 
-## Design contract
+## 18. Status and roadmap
 
-`docs/ARCHITECTURE.md` is the rule-book. The 14 invariants encode
-hard-won lessons; if a change appears to violate one, either rethink
-or update the doc along with the code. Two of the most important:
+**Live:** NSE end-to-end: scheduled intraday and EOD cycles, OHLCV seam correction, industry indices, lead/lag, per-signal enrichment, forward-walk labels, email digests, operator console.
 
-- **Invariant 3.1 — The ETL is the source of truth for bar
-  availability.** The application *consumes* what's in Postgres; it
-  does not infer, generate, or interpolate missing bars.
-- **Invariant 3.3 — Pine Script numerical fidelity is
-  non-negotiable.** If a refactor proposes "simplifying" the
-  indicator math, the parity harness should fail. If it doesn't,
-  the test is under-specified, not the code.
+**Configured but not yet ingesting:** BSE and NYSE. Both exchanges appear in `market_hours` and the tick planner handles them, but `refresh-listings` raises `UnsupportedExchangeError` for non-NSE exchanges, and several industry tables lack an exchange column.
 
----
+**Planned work:**
 
-## License
-
-Proprietary. See LICENSE if present in the source tree.
+* Lead/lag analytics phases A–E: `industry_correlation_pairs`, `industry_regime_events`, `ticker_industry_transmission_stats`, then email and GUI surfacing
+* A common notifier primitive with per-subscriber filters (signal bitmask, exchanges, industries, stocks, EOD-only, entitlement window)
+* An optional NIFTY trend-regime filter
+* Multi-exchange schema work (exchange columns on industry tables and subscribers)
 
 ---
 
-## Status
-
-Production-ready for its intended use case (NSE/BSE-focused weekly
-signals). Maturity has been hardened across multiple review rounds
-(Gemini + Grok) documented in the long-form conversation thread; the
-review outcomes are encoded as invariants in ARCHITECTURE.md.
-
-Phase history:
-- **Phase 1-8** — Pine port, engine, cache, scheduler, distributor
-- **Phase 9** — HTTP + notifier transports, configuration schema
-- **Phase 10** — Observability hardening (Prometheus, OpenTelemetry,
-  circuit breakers), single-writer invariant document
-- **Phase 11** — ETL backend (NSE/BSE listings + bars), desktop
-  operator console (PySide6), expanded admin API. Delivered in four
-  slices; see `PHASE11_CHANGELOG.md`
-- **Post-Phase-11 (Tier 2)** — version bump to 0.11.0, GitHub
-  Actions CI workflows, Alembic migration tooling alongside the
-  legacy SQL migrator, end-to-end integration test, invariant 3.14
-  in ARCHITECTURE.md codifying Engine/ETL/GUI process boundaries.
-  See the "Post-Phase-11 follow-ups (Tier 2)" section of
-  `PHASE11_CHANGELOG.md`.
-- **Phase 12 (Tier-3 review)** — six items shipped in response to
-  Gemini's "Deep Dive: Technical Debt and Hardening" review:
-  pytest-qt teardown race fix (deferred-deletion pattern in the
-  GUI conftest), Alembic exclusivity (legacy SQL archived, schema
-  squashed to a single revision), DB role separation (three
-  least-privilege Postgres roles, opt-in), DLQ for the notifier
-  worker, PyInstaller GUI installer (Linux x86_64), MkDocs Material
-  documentation site. Full detail in `PHASE12_CHANGELOG.md`.
-
-Current version: **0.12.0** (also visible via
-`python -c "from trip_ema import __version__; print(__version__)"`).
+<sub>Proprietary. © Uddipan Bagchi / CosTheta Technologies, Bengaluru.</sub>
