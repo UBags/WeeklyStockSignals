@@ -1,0 +1,6 @@
+flowchart LR
+    subgraph W["Week of Mon 2026-07-13 (one weekly bar, still forming)"]
+        D1["Mon<br/>weekly bar = Mon"] --> D2["Tue<br/>weekly bar = Mon..Tue"] --> D3["Wed<br/>= Mon..Wed"] --> D4["Thu<br/>= Mon..Thu"] --> D5["Fri<br/>= Mon..Fri (final)"]
+    end
+    D1 -.-> R1["regime(D) vs regime(D-1)<br/>→ signal on signal_date = D"]
+    D3 -.-> R1

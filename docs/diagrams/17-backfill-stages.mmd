@@ -1,0 +1,9 @@
+flowchart TB
+    S0["acquire backfill lock<br/>(backfill_runs)"] --> S1["1 · fetch bars<br/>(unless --no_fetch_bars)"]
+    S1 --> S1b["1b · OHLCV seam correction"]
+    S1b --> S2["2–3 · stock state + enrichment<br/>(full mode, per ticker)"]
+    S2 --> S4["4–6 · industry index values,<br/>state, enrichment (all industries)"]
+    S4 --> S7["7 · delete historical_signals<br/>≥ Monday of date_from"]
+    S7 --> S8["8 · day-walk: derive and insert<br/>historical_signals per day"]
+    S8 --> S9["9 · rebuild current_signals<br/>(final day only)"]
+    S9 --> S10["10 · release lock (finally)"]

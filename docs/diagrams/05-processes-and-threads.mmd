@@ -1,0 +1,19 @@
+flowchart TB
+    subgraph MAIN["trip-ema  (python -m trip_ema.app)"]
+        direction TB
+        UV["uvicorn / FastAPI<br/>HTTP :8000"]
+        RS["RunScheduler thread<br/>reads market_hours each loop,<br/>sleeps until next tick"]
+        RQ[["RunQueue"]]
+        RD["RunDispatcher thread<br/>gated on update_run_in_progress<br/>and backfill_runs"]
+        EX["ETL ThreadPoolExecutor<br/>max_workers = 2<br/>(GUI-triggered jobs)"]
+        CACHE["CurrentSignalsCache<br/>(in-memory read model)"]
+        MET["Prometheus /metrics<br/>(optional, own port)"]
+        RS --> RQ --> RD
+        UV --> CACHE
+    end
+
+    RD -- "Popen: trip_ema.etl.cli cycle<br/>--exchange X --kind intraday or eod" --> CYC["cycle subprocess"]
+    UV -- "POST /v1/admin/etl/enqueue-run" --> RQ
+    UV -- "POST /v1/admin/etl/reset-in-progress<br/>SIGTERM → SIGKILL" --> CYC
+    CYC --> PG[("PostgreSQL")]
+    UV --> PG

@@ -1,0 +1,9 @@
+flowchart LR
+    CS[("current_signals")] --> J["join tickers +<br/>instrument_industry"]
+    J --> RK["rank_score =<br/>0.5·stock RS 26w<br/>+ 0.3·industry RS 26w<br/>+ 0.2·stock R² 26w"]
+    RK --> G["group by industry<br/>(Unknown last)"]
+    G --> LL["append lead/lag context<br/>+ intraday chain"]
+    LL --> R["render HTML + plain text"]
+    R --> DUE{"subscriber due?<br/>notify_cadence_minutes"}
+    DUE -- yes --> B["Brevo POST /v3/smtp/email"]
+    B --> NL[("notification_log<br/>monthly partitions")]

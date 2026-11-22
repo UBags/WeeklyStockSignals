@@ -1,0 +1,28 @@
+sequenceDiagram
+    autonumber
+    participant RS as RunScheduler
+    participant RQ as RunQueue
+    participant RD as RunDispatcher
+    participant DB as PostgreSQL
+    participant CY as cycle subprocess
+    participant YF as yfinance / NSE
+    participant BR as Brevo
+
+    RS->>RS: sleep until next tick (NSE post_close 16:30 IST)
+    RS->>RQ: enqueue(NSE, eod)
+    RD->>RQ: poll
+    RD->>DB: update_run_in_progress empty? no active backfill?
+    RD->>DB: INSERT update_run_in_progress(NSE, eod)
+    RD->>CY: Popen(trip_ema.etl.cli cycle --exchange NSE --kind eod)
+    RD->>DB: record pid
+    CY->>DB: INSERT compute_runs
+    CY->>YF: fetch daily bars (all active tickers)
+    YF-->>CY: OHLCV
+    CY->>DB: upsert ohlcv_bars
+    CY->>DB: state → enrichment → signals → industries (stages 2–8)
+    CY->>DB: signal_enrichment / labels / ensemble / forward walk (EOD only)
+    CY->>DB: read current_signals + rank + lead/lag
+    CY->>BR: POST /v3/smtp/email (one digest per due subscriber)
+    CY->>DB: notification_log, compute_runs.finished_at
+    CY-->>RD: exit 0
+    RD->>DB: DELETE update_run_in_progress

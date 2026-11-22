@@ -1,0 +1,29 @@
+flowchart LR
+    subgraph SRC["External sources"]
+        NSE["NSE listing archives<br/>(equities + ETFs CSV)"]
+        YF["yfinance<br/>daily OHLCV, shares,<br/>financials, industry"]
+        NL["nselib<br/>corporate actions"]
+    end
+
+    subgraph SVC["trip-ema service (one process)"]
+        SCH["RunScheduler<br/>wall-clock ticks"]
+        DSP["RunDispatcher<br/>one cycle at a time"]
+        API["FastAPI<br/>public + admin API"]
+    end
+
+    CYC["trip-ema-etl cycle<br/>(subprocess per tick)"]
+    PG[("PostgreSQL")]
+    BREVO["Brevo HTTP API"]
+    SUBS["Subscribers"]
+    GUI["trip-ema-console<br/>(PySide6)"]
+
+    SCH -- "enqueue (exchange, kind)" --> DSP
+    DSP -- "spawn" --> CYC
+    NSE --> CYC
+    YF --> CYC
+    NL --> CYC
+    CYC -- "bars, state, signals" --> PG
+    CYC -- "ranked digest" --> BREVO --> SUBS
+    API <--> PG
+    GUI -- "admin actions (HTTP)" --> API
+    GUI -. "read-only SQL" .-> PG

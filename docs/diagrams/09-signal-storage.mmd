@@ -1,0 +1,5 @@
+flowchart LR
+    DER["derive_signal_for_ticker_this_cycle<br/>(regime D-1 → regime D)"]
+    DER -->|"every intraday tick<br/>append transitions"| ISL[("intraday_signal_log<br/>full within-day chain<br/>e.g. BUY → EXIT_FROM_BUY → BUY")]
+    DER -->|"upsert flips,<br/>delete non-flips"| CS[("current_signals<br/>PK ticker_id<br/>'what fired today'")]
+    DER -->|"EOD and backfill only:<br/>delete day D + insert flips"| HS[("historical_signals<br/>UNIQUE ticker, timeframe, signal_date<br/>one NET signal per day")]
