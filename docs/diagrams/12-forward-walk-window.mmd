@@ -1,0 +1,7 @@
+timeline
+    title Forward-walk window for one BUY
+    signal_date (D) : BUY fires on the weekly regime flip
+    D + 1 : Entry = open of first bar after D
+    Window : Daily walk tracks gain rungs 1…100%, loss rungs 5…20%, MAE / MFE and their bar index, time underwater
+    Exit day N : EXIT_FROM_BUY fires, Exit = close of day N, realized return, capture ratio, Sharpe in window
+    Censoring : Demerger or capital reduction inside the window, window_censored = true (bookkeeping row, no truncation)

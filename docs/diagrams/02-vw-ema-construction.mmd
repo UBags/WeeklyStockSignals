@@ -1,0 +1,12 @@
+flowchart LR
+    V["volume"] --> SMA["sma(volume, 2)"]
+    C["close"] --> NUM["ema(close × vol, base)"]
+    SMA --> NUM
+    SMA --> DEN["ema(vol, base)"]
+    NUM --> VW1["vw1 = num / den"]
+    DEN --> VW1
+    VW1 --> VW2["vw2 = ema(vw1, s1)"]
+    VW2 --> HULL["Hull polish<br/>wma(2·wma(vw2, ⌊s2/2⌋) − wma(vw2, s2), ⌊√s2⌋)"]
+    HULL --> FIN{"final set?"}
+    FIN -- yes --> OUT1["ema(·, final)"]
+    FIN -- no --> OUT2["polished value"]

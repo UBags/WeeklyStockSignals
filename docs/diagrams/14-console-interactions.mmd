@@ -1,0 +1,28 @@
+sequenceDiagram
+    participant Op as Operator
+    participant GUI as trip-ema-console
+    participant CY as local cycle (QProcess)
+    participant DB as PostgreSQL
+    participant API as trip-ema API
+
+    rect rgb(232, 245, 233)
+    Note over Op,DB: Manual run, launched from the console
+    Op->>GUI: Start cycle (ETL Status)
+    GUI->>CY: python -m trip_ema.etl.cli cycle --exchange NSE
+    loop each stage
+        CY-->>GUI: stdout "[stage] running / done / failed"
+        GUI-->>Op: stage list updates
+    end
+    CY->>DB: bars, state, signals, compute_runs
+    end
+
+    rect rgb(227, 242, 253)
+    Note over Op,API: Scheduled run, spawned by the service
+    loop mutex tick
+        GUI->>DB: in-flight compute_runs, current_stage
+        GUI-->>Op: mirror the remote stage
+    end
+    Op->>GUI: Reset stuck run
+    GUI->>API: POST /v1/admin/etl/reset-in-progress (Bearer)
+    API-->>GUI: SIGTERM, then SIGKILL, row released
+    end

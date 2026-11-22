@@ -49,37 +49,8 @@
 
 ## 1. How it works, in one picture
 
-```mermaid
-flowchart LR
-    subgraph SRC["External sources"]
-        NSE["NSE listing archives<br/>(equities + ETFs CSV)"]
-        YF["yfinance<br/>daily OHLCV, shares,<br/>financials, industry"]
-        NL["nselib<br/>corporate actions"]
-    end
-
-    subgraph SVC["trip-ema service (one process)"]
-        SCH["RunScheduler<br/>wall-clock ticks"]
-        DSP["RunDispatcher<br/>one cycle at a time"]
-        API["FastAPI<br/>public + admin API"]
-    end
-
-    CYC["trip-ema-etl cycle<br/>(subprocess per tick)"]
-    PG[("PostgreSQL")]
-    BREVO["Brevo HTTP API"]
-    SUBS["Subscribers"]
-    GUI["trip-ema-console<br/>(PySide6)"]
-
-    SCH -- "enqueue (exchange, kind)" --> DSP
-    DSP -- "spawn" --> CYC
-    NSE --> CYC
-    YF --> CYC
-    NL --> CYC
-    CYC -- "bars, state, signals" --> PG
-    CYC -- "ranked digest" --> BREVO --> SUBS
-    API <--> PG
-    GUI -- "admin actions (HTTP)" --> API
-    GUI -. "read-only SQL" .-> PG
-```
+![System overview](docs/images/diagrams/01-system-overview.svg)
+<sub>Source: [`docs/diagrams/01-system-overview.mmd`](docs/diagrams/01-system-overview.mmd)</sub>
 
 On each scheduled tick the service starts **one subprocess** that fetches fresh bars, recomputes the indicator state for every stock and industry index, derives signals, and (after the close) enriches, labels and emails them. The HTTP service never computes signals itself. It schedules, serves and administers.
 
@@ -91,20 +62,8 @@ On each scheduled tick the service starts **one subprocess** that fetches fresh 
 
 Each of the three ribbon lines is a **volume-weighted, Hull-polished, multi-stage EMA**. It is a direct port of the Pine source, including Pine's NaN warm-up semantics (`trip_ema/indicators/vw_ema.py`, `trip_ema/fundamentals/indicator_primitives.py`).
 
-```mermaid
-flowchart LR
-    V["volume"] --> SMA["sma(volume, 2)"]
-    C["close"] --> NUM["ema(close × vol, base)"]
-    SMA --> NUM
-    SMA --> DEN["ema(vol, base)"]
-    NUM --> VW1["vw1 = num / den"]
-    DEN --> VW1
-    VW1 --> VW2["vw2 = ema(vw1, s1)"]
-    VW2 --> HULL["Hull polish<br/>wma(2·wma(vw2, ⌊s2/2⌋) − wma(vw2, s2), ⌊√s2⌋)"]
-    HULL --> FIN{"final set?"}
-    FIN -- yes --> OUT1["ema(·, final)"]
-    FIN -- no --> OUT2["polished value"]
-```
+![VW-EMA construction](docs/images/diagrams/02-vw-ema-construction.svg)
+<sub>Source: [`docs/diagrams/02-vw-ema-construction.mmd`](docs/diagrams/02-vw-ema-construction.mmd)</sub>
 
 | Line | `base` | `s1` | `s2` | `final` |
 |---|---:|---:|---:|---:|
@@ -125,19 +84,8 @@ All parameters live in the `ema:` and `atr:` blocks of `config.yaml`.
 
 `trip_ema/regime/compute_regime.py` holds the single canonical implementation. Rules are evaluated top to bottom, and the first match wins:
 
-```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> NEUTRAL
-    NEUTRAL --> BULLISH: close ≥ upper_inner
-    NEUTRAL --> BEARISH: close ≤ lower_inner
-    BULLISH --> BULLISH: close ≥ ribbon low<br/>OR (close ≥ lower_inner AND prev close ≥ prev ribbon low)
-    BULLISH --> BEARISH: close ≤ lower_inner (sharp reversal)
-    BULLISH --> NEUTRAL: continuation fails
-    BEARISH --> BEARISH: close ≤ ribbon high<br/>OR (close ≤ upper_inner AND prev close ≤ prev ribbon high)
-    BEARISH --> BULLISH: close ≥ upper_inner (sharp reversal)
-    BEARISH --> NEUTRAL: continuation fails
-```
+![Regime state machine](docs/images/diagrams/03-regime-state-machine.svg)
+<sub>Source: [`docs/diagrams/03-regime-state-machine.mmd`](docs/diagrams/03-regime-state-machine.mmd)</sub>
 
 During warm-up, before all bands are finite, the classifier returns NEUTRAL.
 
@@ -157,14 +105,8 @@ During warm-up, before all bands are finite, the classifier returns NEUTRAL.
 
 Signals are computed on the **weekly** chart but **evaluated every trading day**. Each row of `stock_indicator_state` is *the weekly chart as it stands at the close of day D*, with the current week's bar still forming. A signal fires on day D when the weekly regime on D differs from D‑1.
 
-```mermaid
-flowchart LR
-    subgraph W["Week of Mon 2026-07-13 (one weekly bar, still forming)"]
-        D1["Mon<br/>weekly bar = Mon"] --> D2["Tue<br/>weekly bar = Mon..Tue"] --> D3["Wed<br/>= Mon..Wed"] --> D4["Thu<br/>= Mon..Thu"] --> D5["Fri<br/>= Mon..Fri (final)"]
-    end
-    D1 -.-> R1["regime(D) vs regime(D-1)<br/>→ signal on signal_date = D"]
-    D3 -.-> R1
-```
+![Weekly chart evaluated daily](docs/images/diagrams/04-weekly-chart-daily-grain.svg)
+<sub>Source: [`docs/diagrams/04-weekly-chart-daily-grain.mmd`](docs/diagrams/04-weekly-chart-daily-grain.mmd)</sub>
 
 That is why every signal table carries two date columns: `signal_date` is the trading day the signal fired, and `bar_timestamp` is the IST-Monday week anchor that all days of the week share. **Filter on `signal_date`.**
 
@@ -174,27 +116,8 @@ That is why every signal table carries two date columns: `signal_date` is the tr
 
 ### 3.1 Processes and threads
 
-```mermaid
-flowchart TB
-    subgraph MAIN["trip-ema  (python -m trip_ema.app)"]
-        direction TB
-        UV["uvicorn / FastAPI<br/>HTTP :8000"]
-        RS["RunScheduler thread<br/>reads market_hours each loop,<br/>sleeps until next tick"]
-        RQ[["RunQueue"]]
-        RD["RunDispatcher thread<br/>gated on update_run_in_progress<br/>and backfill_runs"]
-        EX["ETL ThreadPoolExecutor<br/>max_workers = 2<br/>(GUI-triggered jobs)"]
-        CACHE["CurrentSignalsCache<br/>(in-memory read model)"]
-        MET["Prometheus /metrics<br/>(optional, own port)"]
-        RS --> RQ --> RD
-        UV --> CACHE
-    end
-
-    RD -- "Popen: trip_ema.etl.cli cycle<br/>--exchange X --kind intraday or eod" --> CYC["cycle subprocess"]
-    UV -- "POST /v1/admin/etl/enqueue-run" --> RQ
-    UV -- "POST /v1/admin/etl/reset-in-progress<br/>SIGTERM → SIGKILL" --> CYC
-    CYC --> PG[("PostgreSQL")]
-    UV --> PG
-```
+![Processes and threads](docs/images/diagrams/05-processes-and-threads.svg)
+<sub>Source: [`docs/diagrams/05-processes-and-threads.mmd`](docs/diagrams/05-processes-and-threads.mmd)</sub>
 
 * **Single process, single writer.** Do not run uvicorn with `--workers N`. The scheduler, dispatcher and cache assume one owner.
 * **One cycle at a time, globally.** The `update_run_in_progress` row (unique per exchange) plus a backfill check means a cycle never overlaps another cycle or a running backfill.
@@ -204,19 +127,8 @@ flowchart TB
 
 `trip_ema/scheduler/tick_planner.py` resolves each exchange's `tick_schedule:` into four instants per trading day, skipping weekends and holidays (python-`holidays` plus `configs/nse_holidays_2026.yaml`). The `mid_session` tick sits at the midpoint between the last open-anchored tick and the first close-anchored tick.
 
-```mermaid
-gantt
-    title NSE trading day (IST): session 09:15 to 15:30
-    dateFormat HH:mm
-    axisFormat %H:%M
-    section Session
-    Market open                     :active, s1, 09:15, 15:30
-    section Ticks
-    post_open  +15m  (intraday)     :milestone, t1, 09:30, 0m
-    mid_session midpoint (intraday) :milestone, t2, 12:15, 0m
-    pre_close  -30m  (intraday)     :milestone, t3, 15:00, 0m
-    post_close +60m  (EOD)          :crit, milestone, t4, 16:30, 0m
-```
+![NSE tick schedule](docs/images/diagrams/06-tick-schedule.svg)
+<sub>Source: [`docs/diagrams/06-tick-schedule.mmd`](docs/diagrams/06-tick-schedule.mmd)</sub>
 
 `post_close` is the only **EOD** tick. The other three are **intraday**. The kind decides what the cycle writes (§5) and whether the EOD-only stages run (§4).
 
@@ -226,62 +138,15 @@ gantt
 
 `trip-ema-etl cycle --exchange NSE --kind eod` is the unit of work, whether the dispatcher spawns it or an operator runs it by hand. It is implemented in `trip_ema/etl/cli.py::cmd_cycle` and `trip_ema/orchestrator/recompute_market.py`.
 
-```mermaid
-flowchart TB
-    START(["tick"]) --> F["1 · Fetch OHLCV<br/>whole universe, tier-1 first"]
-    F --> SS["2 · Stock indicator state<br/>(incremental, per ticker)"]
-    SS --> SE["3 · Stock indicator enrichment"]
-    SE --> SIG["4 · Signals<br/>intraday transition log<br/>+ process_signals_for_day"]
-    SIG --> CR["5 · Cache rebuild"]
-    CR --> IIV["6 · Industry index values<br/>(recent window)"]
-    IIV --> IS["7 · Industry indicator state"]
-    IS --> IE["8 · Industry indicator enrichment"]
-    IE --> K{"kind == eod?"}
-    K -- no --> N
-    K -- yes --> PS["9 · Per-signal stages<br/>signal_enrichment → labels → ensemble"]
-    PS --> FW["9a · Forward-walk labels<br/>for tickers that EXITed today"]
-    FW --> LL["9b · Monthly lead/lag refresh<br/>(first EOD of the month only)"]
-    LL --> N["10 · Notify subscribers<br/>(skipped if Brevo not configured)"]
-    N --> END(["compute_runs row closed"])
-
-    classDef eod fill:#fff3e0,stroke:#f57c00;
-    class PS,FW,LL eod;
-```
+![Live cycle stages](docs/images/diagrams/07-live-cycle-stages.svg)
+<sub>Source: [`docs/diagrams/07-live-cycle-stages.mmd`](docs/diagrams/07-live-cycle-stages.mmd)</sub>
 
 A stage error halts the remaining stages and is recorded on the `compute_runs` row (`failed_stage`, `error_message`). A failure on one ticker or one industry inside a stage is isolated and does not halt the stage. Each stage publishes its live name to `compute_runs.current_stage`, so the console can show progress even for scheduler-driven runs whose stdout it can't read.
 
 ### 4.1 One scheduled tick, end to end
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant RS as RunScheduler
-    participant RQ as RunQueue
-    participant RD as RunDispatcher
-    participant DB as PostgreSQL
-    participant CY as cycle subprocess
-    participant YF as yfinance / NSE
-    participant BR as Brevo
-
-    RS->>RS: sleep until next tick (NSE post_close 16:30 IST)
-    RS->>RQ: enqueue(NSE, eod)
-    RD->>RQ: poll
-    RD->>DB: update_run_in_progress empty? no active backfill?
-    RD->>DB: INSERT update_run_in_progress(NSE, eod)
-    RD->>CY: Popen(trip_ema.etl.cli cycle --exchange NSE --kind eod)
-    RD->>DB: record pid
-    CY->>DB: INSERT compute_runs
-    CY->>YF: fetch daily bars (all active tickers)
-    YF-->>CY: OHLCV
-    CY->>DB: upsert ohlcv_bars
-    CY->>DB: state → enrichment → signals → industries (stages 2–8)
-    CY->>DB: signal_enrichment / labels / ensemble / forward walk (EOD only)
-    CY->>DB: read current_signals + rank + lead/lag
-    CY->>BR: POST /v3/smtp/email (one digest per due subscriber)
-    CY->>DB: notification_log, compute_runs.finished_at
-    CY-->>RD: exit 0
-    RD->>DB: DELETE update_run_in_progress
-```
+![One scheduled tick, end to end](docs/images/diagrams/08-live-cycle-sequence.svg)
+<sub>Source: [`docs/diagrams/08-live-cycle-sequence.mmd`](docs/diagrams/08-live-cycle-sequence.mmd)</sub>
 
 ---
 
@@ -289,13 +154,8 @@ sequenceDiagram
 
 Three tables, three different questions. All are written atomically by `trip_ema/orchestrator/process_day.py`, so derivation and both writes share one transaction.
 
-```mermaid
-flowchart LR
-    DER["derive_signal_for_ticker_this_cycle<br/>(regime D-1 → regime D)"]
-    DER -->|"every intraday tick<br/>append transitions"| ISL[("intraday_signal_log<br/>full within-day chain<br/>e.g. BUY → EXIT_FROM_BUY → BUY")]
-    DER -->|"upsert flips,<br/>delete non-flips"| CS[("current_signals<br/>PK ticker_id<br/>'what fired today'")]
-    DER -->|"EOD and backfill only:<br/>delete day D + insert flips"| HS[("historical_signals<br/>UNIQUE ticker, timeframe, signal_date<br/>one NET signal per day")]
-```
+![Signal storage model](docs/images/diagrams/09-signal-storage.svg)
+<sub>Source: [`docs/diagrams/09-signal-storage.mmd`](docs/diagrams/09-signal-storage.mmd)</sub>
 
 | Mode | `historical_signals` | `current_signals` |
 |---|---|---|
@@ -319,19 +179,8 @@ flowchart LR
 
 yfinance is fetched with `auto_adjust=False`, which gives split-adjusted but dividend-unadjusted bars. Splits and bonuses can still leave **seams** in the series, i.e. unadjusted legs spliced to adjusted ones. Before any indicator is computed, `trip_ema/backfill/ohlcv_correction_stage.py` reconciles every affected ticker against `nselib`'s NSE corporate-action feed (`nse_corporate_actions`):
 
-```mermaid
-flowchart TB
-    A["daily bars around each ex_date"] --> B["boundary-excluding medians<br/>before vs after"]
-    B --> C["ratio r = after / before"]
-    C --> D{"classify r against<br/>{1, f, 1/f, f², 1/f²}<br/>(f = nselib price_factor)"}
-    D -- "≈ 1" --> OK["ADJUSTED_OK<br/>leave untouched"]
-    D -- "≈ 1/f" --> SEAM["SEAM_PRESENT<br/>rescale pre-boundary leg by exact f"]
-    D -- "≈ f² / 1/f²" --> BOT["BOTCHED<br/>(double or inverted adjustment)<br/>snap to exact factor"]
-    D -- "no match" --> CEN["censor window"]
-    DM["demerger /<br/>capital reduction"] --> CEN
-    SEAM --> W["write corrected bars<br/>back to ohlcv_bars"]
-    BOT --> W
-```
+![OHLCV seam correction](docs/images/diagrams/10-ohlcv-seam-correction.svg)
+<sub>Source: [`docs/diagrams/10-ohlcv-seam-correction.mmd`](docs/diagrams/10-ohlcv-seam-correction.mmd)</sub>
 
 `data/nse_corporate_actions.csv` is committed as an offline fallback snapshot. Any fallback path must report the snapshot's export date, so that bars are never silently reconciled against stale data. Design notes: [`docs/01_ohlcv_correction_design.md`](docs/01_ohlcv_correction_design.md), [`docs/nselib_source.md`](docs/nselib_source.md).
 
@@ -339,18 +188,8 @@ flowchart TB
 
 ## 7. Industry indices, lead/lag and enrichment
 
-```mermaid
-flowchart LR
-    II["instrument_industry<br/>(yfinance / overrides)"] --> IDX["industry_index<br/>Modified Laspeyres,<br/>semi-annual Apr/Oct rebalance,<br/>top-N by market cap"]
-    MC["daily_market_cap<br/>(close × shares)"] --> IDX
-    IDX --> IIV["industry_index_value<br/>daily, base 1000,<br/>chain-linked periods"]
-    IIV --> IST["industry_indicator_state<br/>same Triple-EMA/ATR/regime"]
-    IST --> BR["industry_regime_breadth"]
-    IST --> CORR["industry_regime_corr<br/>pairwise corr + best lag"]
-    CORR --> ENS["influential_industry_ensemble<br/>leaders per industry"]
-    IIV --> SSL["sector_stock_leadlag<br/>stock vs own industry:<br/>LEADER / LAGGARD /<br/>COUPLED / DECOUPLED"]
-    ENS --> SEF["signal_ensemble_features<br/>do the leaders confirm?"]
-```
+![Industry indices and lead/lag](docs/images/diagrams/11-industry-leadlag.svg)
+<sub>Source: [`docs/diagrams/11-industry-leadlag.mmd`](docs/diagrams/11-industry-leadlag.mmd)</sub>
 
 Every signal gets a feature row in `signal_enrichment`:
 
@@ -366,15 +205,8 @@ On top of that it gets the ensemble confirmation features and benchmark statisti
 
 When a position **closes** (an `EXIT_FROM_*` signal), its window becomes final and the EOD cycle labels it in `signal_labels`. Each label is a 1:1 child of the signal's enrichment row.
 
-```mermaid
-timeline
-    title Forward-walk window for one BUY
-    signal_date (D) : BUY fires on the weekly regime flip
-    D + 1 : Entry = open of first bar after D
-    Window : Daily walk tracks gain rungs 1…100%, loss rungs 5…20%, MAE / MFE and their bar index, time underwater
-    Exit day N : EXIT_FROM_BUY fires, Exit = close of day N, realized return, capture ratio, Sharpe in window
-    Censoring : Demerger or capital reduction inside the window, window_censored = true (bookkeeping row, no truncation)
-```
+![Forward-walk window](docs/images/diagrams/12-forward-walk-window.svg)
+<sub>Source: [`docs/diagrams/12-forward-walk-window.mmd`](docs/diagrams/12-forward-walk-window.mmd)</sub>
 
 The window yields 21 gain rungs and 6 loss rungs (including 7½% and 12½%). Each rung gets a hit boolean and a `bars_to_*` integer, with −1 as the "never hit" sentinel. There are also excess returns versus industry and market, ATR-normalised excursions, and in-window slope and volatility. The forward walk fans out across tickers on the shared threaded `fan_out` primitive (`trip_ema/fundamentals/parallel.py`). Each ticker's failure is isolated. Spec: [`docs/02_signal_forward_walk_labels_spec.md`](docs/02_signal_forward_walk_labels_spec.md).
 
@@ -384,17 +216,8 @@ Backfill a range with `trip-ema-etl forward-walk --exchange NSE [--tickers …]`
 
 ## 9. Notifications
 
-```mermaid
-flowchart LR
-    CS[("current_signals")] --> J["join tickers +<br/>instrument_industry"]
-    J --> RK["rank_score =<br/>0.5·stock RS 26w<br/>+ 0.3·industry RS 26w<br/>+ 0.2·stock R² 26w"]
-    RK --> G["group by industry<br/>(Unknown last)"]
-    G --> LL["append lead/lag context<br/>+ intraday chain"]
-    LL --> R["render HTML + plain text"]
-    R --> DUE{"subscriber due?<br/>notify_cadence_minutes"}
-    DUE -- yes --> B["Brevo POST /v3/smtp/email"]
-    B --> NL[("notification_log<br/>monthly partitions")]
-```
+![Notification flow](docs/images/diagrams/13-notifications.svg)
+<sub>Source: [`docs/diagrams/13-notifications.mmd`](docs/diagrams/13-notifications.mmd)</sub>
 
 * Subject line: `[trip_ema] <cycle_id> — N signal(s) (b BUY, s SELL, e EXIT)`
 * Subscribers set a cadence in multiples of 15 minutes, from 15 to 1,440. A "Test notification" button sends a one-off email through the configured transport.
@@ -425,36 +248,8 @@ Without `TRIP_EMA_ADMIN_TOKEN` the console starts in read-only mode, with write 
 
 The console also has a backtest dialog, a market-trend dialog, industry panels and a signal-generation panel.
 
-```mermaid
-sequenceDiagram
-    participant Op as Operator
-    participant GUI as trip-ema-console
-    participant CY as local cycle (QProcess)
-    participant DB as PostgreSQL
-    participant API as trip-ema API
-
-    rect rgb(232, 245, 233)
-    Note over Op,DB: Manual run, launched from the console
-    Op->>GUI: Start cycle (ETL Status)
-    GUI->>CY: python -m trip_ema.etl.cli cycle --exchange NSE
-    loop each stage
-        CY-->>GUI: stdout "[stage] running / done / failed"
-        GUI-->>Op: stage list updates
-    end
-    CY->>DB: bars, state, signals, compute_runs
-    end
-
-    rect rgb(227, 242, 253)
-    Note over Op,API: Scheduled run, spawned by the service
-    loop mutex tick
-        GUI->>DB: in-flight compute_runs, current_stage
-        GUI-->>Op: mirror the remote stage
-    end
-    Op->>GUI: Reset stuck run
-    GUI->>API: POST /v1/admin/etl/reset-in-progress (Bearer)
-    API-->>GUI: SIGTERM, then SIGKILL, row released
-    end
-```
+![Operator console interactions](docs/images/diagrams/14-console-interactions.svg)
+<sub>Source: [`docs/diagrams/14-console-interactions.mmd`](docs/diagrams/14-console-interactions.mmd)</sub>
 
 ---
 
@@ -483,67 +278,15 @@ FastAPI's interactive docs are at `/docs` while the service is running.
 
 PostgreSQL, managed exclusively by **Alembic** (`alembic_pkg/versions/0001…0056`). Migrations run at service start, and a failed migration is fatal. Core relationships:
 
-```mermaid
-erDiagram
-    tickers ||--o{ ohlcv_bars : "daily bars"
-    tickers ||--o{ stock_indicator_state : "weekly chart @ day D"
-    stock_indicator_state ||--|| stock_indicator_enrichment : "1:1 (ticker, tf, date)"
-    tickers ||--o| current_signals : "fired this cycle"
-    tickers ||--o{ historical_signals : "net signal per day"
-    tickers ||--o{ intraday_signal_log : "within-day chain"
-    tickers ||--o{ signal_enrichment : "features per signal"
-    signal_enrichment ||--o| signal_labels : "forward-walk outcome"
-    signal_enrichment ||--o{ signal_ensemble_features : "per variant"
-    tickers ||--o| instrument_industry : "classification"
-    tickers ||--o{ nse_corporate_actions : "splits, bonuses, demergers"
-    tickers ||--o{ daily_market_cap : ""
-    industry_index ||--o{ industry_index_constituent : "per rebalance"
-    industry_index ||--o{ industry_index_value : "daily value"
-    industry_index ||--o{ industry_indicator_state : "weekly chart @ day D"
-    tickers ||--o{ sector_stock_leadlag : "vs own industry"
-    subscribers ||--o{ subscriptions : "filters"
-    subscribers ||--o{ notification_log : "sends (partitioned)"
-
-    tickers {
-        int ticker_id PK
-        varchar exchange
-        varchar symbol
-        char isin
-        smallint tier
-        bool is_active
-    }
-    historical_signals {
-        bigint signal_id PK
-        int ticker_id FK
-        date signal_date "UNIQUE with ticker, tf"
-        timestamptz bar_timestamp "week anchor"
-        varchar signal_type
-        smallint regime_before
-        smallint regime_after
-        float price_at_signal
-    }
-    stock_indicator_state {
-        int ticker_id PK
-        varchar timeframe PK
-        date date PK
-        float med_ema
-        float long_ema
-        float longest_ema
-        float atr
-        smallint display_regime
-    }
-```
+![Core entity relationships](docs/images/diagrams/15-er-diagram.svg)
+<sub>Source: [`docs/diagrams/15-er-diagram.mmd`](docs/diagrams/15-er-diagram.mmd)</sub>
 
 Run bookkeeping tables: `compute_runs` (PK `compute_run_id`), `etl_runs`, `backfill_runs` (PK `run_id`), `update_run_in_progress`, `pipeline_phase_status`, `exchange_state`, `fundamentals_run`.
 
 **Optional least-privilege roles** (migration `0002_db_roles`):
 
-```mermaid
-flowchart LR
-    ETL["trip_etl_user<br/>ETL + cycle"] -- "read/write" --> T[("all tables")]
-    ENG["trip_engine_user<br/>service"] -- "read/write<br/>(no TRUNCATE)" --> T
-    GUIU["trip_gui_user<br/>console"] -- "SELECT only" --> T
-```
+![Database roles](docs/images/diagrams/16-db-roles.svg)
+<sub>Source: [`docs/diagrams/16-db-roles.mmd`](docs/diagrams/16-db-roles.mmd)</sub>
 
 Enable them with a `database.roles:` block. See [`docs/operator/db-roles.md`](docs/operator/db-roles.md).
 
@@ -613,17 +356,8 @@ trip-ema-console --config config.yaml --base-url http://localhost:8000
 
 `trip-ema-etl backfill` rebuilds the whole derived model for a date range. A partial unique index makes it exclusive: only one active `backfill_runs` row can exist, and the live cycle defers while a backfill runs.
 
-```mermaid
-flowchart TB
-    S0["acquire backfill lock<br/>(backfill_runs)"] --> S1["1 · fetch bars<br/>(unless --no_fetch_bars)"]
-    S1 --> S1b["1b · OHLCV seam correction"]
-    S1b --> S2["2–3 · stock state + enrichment<br/>(full mode, per ticker)"]
-    S2 --> S4["4–6 · industry index values,<br/>state, enrichment (all industries)"]
-    S4 --> S7["7 · delete historical_signals<br/>≥ Monday of date_from"]
-    S7 --> S8["8 · day-walk: derive and insert<br/>historical_signals per day"]
-    S8 --> S9["9 · rebuild current_signals<br/>(final day only)"]
-    S9 --> S10["10 · release lock (finally)"]
-```
+![Backfill stages](docs/images/diagrams/17-backfill-stages.svg)
+<sub>Source: [`docs/diagrams/17-backfill-stages.mmd`](docs/diagrams/17-backfill-stages.mmd)</sub>
 
 Scope it with `--stocks SYM1,SYM2`, force a full recompute with `--rebuild`, and clear a stale lock with `--release-lock`.
 

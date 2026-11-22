@@ -1,0 +1,4 @@
+flowchart LR
+    ETL["trip_etl_user<br/>ETL + cycle"] -- "read/write" --> T[("all tables")]
+    ENG["trip_engine_user<br/>service"] -- "read/write<br/>(no TRUNCATE)" --> T
+    GUIU["trip_gui_user<br/>console"] -- "SELECT only" --> T

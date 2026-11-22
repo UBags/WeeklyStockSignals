@@ -1,0 +1,48 @@
+erDiagram
+    tickers ||--o{ ohlcv_bars : "daily bars"
+    tickers ||--o{ stock_indicator_state : "weekly chart @ day D"
+    stock_indicator_state ||--|| stock_indicator_enrichment : "1:1 (ticker, tf, date)"
+    tickers ||--o| current_signals : "fired this cycle"
+    tickers ||--o{ historical_signals : "net signal per day"
+    tickers ||--o{ intraday_signal_log : "within-day chain"
+    tickers ||--o{ signal_enrichment : "features per signal"
+    signal_enrichment ||--o| signal_labels : "forward-walk outcome"
+    signal_enrichment ||--o{ signal_ensemble_features : "per variant"
+    tickers ||--o| instrument_industry : "classification"
+    tickers ||--o{ nse_corporate_actions : "splits, bonuses, demergers"
+    tickers ||--o{ daily_market_cap : ""
+    industry_index ||--o{ industry_index_constituent : "per rebalance"
+    industry_index ||--o{ industry_index_value : "daily value"
+    industry_index ||--o{ industry_indicator_state : "weekly chart @ day D"
+    tickers ||--o{ sector_stock_leadlag : "vs own industry"
+    subscribers ||--o{ subscriptions : "filters"
+    subscribers ||--o{ notification_log : "sends (partitioned)"
+
+    tickers {
+        int ticker_id PK
+        varchar exchange
+        varchar symbol
+        char isin
+        smallint tier
+        bool is_active
+    }
+    historical_signals {
+        bigint signal_id PK
+        int ticker_id FK
+        date signal_date "UNIQUE with ticker, tf"
+        timestamptz bar_timestamp "week anchor"
+        varchar signal_type
+        smallint regime_before
+        smallint regime_after
+        float price_at_signal
+    }
+    stock_indicator_state {
+        int ticker_id PK
+        varchar timeframe PK
+        date date PK
+        float med_ema
+        float long_ema
+        float longest_ema
+        float atr
+        smallint display_regime
+    }

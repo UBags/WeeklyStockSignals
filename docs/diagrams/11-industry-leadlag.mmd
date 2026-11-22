@@ -1,0 +1,10 @@
+flowchart LR
+    II["instrument_industry<br/>(yfinance / overrides)"] --> IDX["industry_index<br/>Modified Laspeyres,<br/>semi-annual Apr/Oct rebalance,<br/>top-N by market cap"]
+    MC["daily_market_cap<br/>(close × shares)"] --> IDX
+    IDX --> IIV["industry_index_value<br/>daily, base 1000,<br/>chain-linked periods"]
+    IIV --> IST["industry_indicator_state<br/>same Triple-EMA/ATR/regime"]
+    IST --> BR["industry_regime_breadth"]
+    IST --> CORR["industry_regime_corr<br/>pairwise corr + best lag"]
+    CORR --> ENS["influential_industry_ensemble<br/>leaders per industry"]
+    IIV --> SSL["sector_stock_leadlag<br/>stock vs own industry:<br/>LEADER / LAGGARD /<br/>COUPLED / DECOUPLED"]
+    ENS --> SEF["signal_ensemble_features<br/>do the leaders confirm?"]

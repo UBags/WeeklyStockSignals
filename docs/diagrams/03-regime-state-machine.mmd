@@ -1,0 +1,11 @@
+stateDiagram-v2
+    direction LR
+    [*] --> NEUTRAL
+    NEUTRAL --> BULLISH: close ≥ upper_inner
+    NEUTRAL --> BEARISH: close ≤ lower_inner
+    BULLISH --> BULLISH: close ≥ ribbon low<br/>OR (close ≥ lower_inner AND prev close ≥ prev ribbon low)
+    BULLISH --> BEARISH: close ≤ lower_inner (sharp reversal)
+    BULLISH --> NEUTRAL: continuation fails
+    BEARISH --> BEARISH: close ≤ ribbon high<br/>OR (close ≤ upper_inner AND prev close ≤ prev ribbon high)
+    BEARISH --> BULLISH: close ≥ upper_inner (sharp reversal)
+    BEARISH --> NEUTRAL: continuation fails

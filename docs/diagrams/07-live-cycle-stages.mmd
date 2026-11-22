@@ -1,0 +1,19 @@
+flowchart TB
+    START(["tick"]) --> F["1 · Fetch OHLCV<br/>whole universe, tier-1 first"]
+    F --> SS["2 · Stock indicator state<br/>(incremental, per ticker)"]
+    SS --> SE["3 · Stock indicator enrichment"]
+    SE --> SIG["4 · Signals<br/>intraday transition log<br/>+ process_signals_for_day"]
+    SIG --> CR["5 · Cache rebuild"]
+    CR --> IIV["6 · Industry index values<br/>(recent window)"]
+    IIV --> IS["7 · Industry indicator state"]
+    IS --> IE["8 · Industry indicator enrichment"]
+    IE --> K{"kind == eod?"}
+    K -- no --> N
+    K -- yes --> PS["9 · Per-signal stages<br/>signal_enrichment → labels → ensemble"]
+    PS --> FW["9a · Forward-walk labels<br/>for tickers that EXITed today"]
+    FW --> LL["9b · Monthly lead/lag refresh<br/>(first EOD of the month only)"]
+    LL --> N["10 · Notify subscribers<br/>(skipped if Brevo not configured)"]
+    N --> END(["compute_runs row closed"])
+
+    classDef eod fill:#fff3e0,stroke:#f57c00;
+    class PS,FW,LL eod;

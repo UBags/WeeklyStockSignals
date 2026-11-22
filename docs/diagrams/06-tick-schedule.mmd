@@ -1,0 +1,11 @@
+gantt
+    title NSE trading day (IST): session 09:15 to 15:30
+    dateFormat HH:mm
+    axisFormat %H:%M
+    section Session
+    Market open                     :active, s1, 09:15, 15:30
+    section Ticks
+    post_open  +15m  (intraday)     :milestone, t1, 09:30, 0m
+    mid_session midpoint (intraday) :milestone, t2, 12:15, 0m
+    pre_close  -30m  (intraday)     :milestone, t3, 15:00, 0m
+    post_close +60m  (EOD)          :crit, milestone, t4, 16:30, 0m

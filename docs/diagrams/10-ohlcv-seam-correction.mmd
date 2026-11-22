@@ -1,0 +1,11 @@
+flowchart TB
+    A["daily bars around each ex_date"] --> B["boundary-excluding medians<br/>before vs after"]
+    B --> C["ratio r = after / before"]
+    C --> D{"classify r against<br/>{1, f, 1/f, f², 1/f²}<br/>(f = nselib price_factor)"}
+    D -- "≈ 1" --> OK["ADJUSTED_OK<br/>leave untouched"]
+    D -- "≈ 1/f" --> SEAM["SEAM_PRESENT<br/>rescale pre-boundary leg by exact f"]
+    D -- "≈ f² / 1/f²" --> BOT["BOTCHED<br/>(double or inverted adjustment)<br/>snap to exact factor"]
+    D -- "no match" --> CEN["censor window"]
+    DM["demerger /<br/>capital reduction"] --> CEN
+    SEAM --> W["write corrected bars<br/>back to ohlcv_bars"]
+    BOT --> W
