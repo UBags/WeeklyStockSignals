@@ -116,7 +116,8 @@ That is why every signal table carries two date columns: `signal_date` is the tr
 
 ### 3.1 Processes and threads
 
-![Processes and threads](docs/images/diagrams/05-processes-and-threads.svg)
+<p align="center"><img src="docs/images/diagrams/05-processes-and-threads.svg" alt="Processes and threads" width="620"></p>
+
 <sub>Source: [`docs/diagrams/05-processes-and-threads.mmd`](docs/diagrams/05-processes-and-threads.mmd)</sub>
 
 * **Single process, single writer.** Do not run uvicorn with `--workers N`. The scheduler, dispatcher and cache assume one owner.
@@ -138,7 +139,8 @@ That is why every signal table carries two date columns: `signal_date` is the tr
 
 `trip-ema-etl cycle --exchange NSE --kind eod` is the unit of work, whether the dispatcher spawns it or an operator runs it by hand. It is implemented in `trip_ema/etl/cli.py::cmd_cycle` and `trip_ema/orchestrator/recompute_market.py`.
 
-![Live cycle stages](docs/images/diagrams/07-live-cycle-stages.svg)
+<p align="center"><img src="docs/images/diagrams/07-live-cycle-stages.svg" alt="Live cycle stages" width="420"></p>
+
 <sub>Source: [`docs/diagrams/07-live-cycle-stages.mmd`](docs/diagrams/07-live-cycle-stages.mmd)</sub>
 
 A stage error halts the remaining stages and is recorded on the `compute_runs` row (`failed_stage`, `error_message`). A failure on one ticker or one industry inside a stage is isolated and does not halt the stage. Each stage publishes its live name to `compute_runs.current_stage`, so the console can show progress even for scheduler-driven runs whose stdout it can't read.
@@ -179,7 +181,8 @@ Three tables, three different questions. All are written atomically by `trip_ema
 
 yfinance is fetched with `auto_adjust=False`, which gives split-adjusted but dividend-unadjusted bars. Splits and bonuses can still leave **seams** in the series, i.e. unadjusted legs spliced to adjusted ones. Before any indicator is computed, `trip_ema/backfill/ohlcv_correction_stage.py` reconciles every affected ticker against `nselib`'s NSE corporate-action feed (`nse_corporate_actions`):
 
-![OHLCV seam correction](docs/images/diagrams/10-ohlcv-seam-correction.svg)
+<p align="center"><img src="docs/images/diagrams/10-ohlcv-seam-correction.svg" alt="OHLCV seam correction" width="560"></p>
+
 <sub>Source: [`docs/diagrams/10-ohlcv-seam-correction.mmd`](docs/diagrams/10-ohlcv-seam-correction.mmd)</sub>
 
 `data/nse_corporate_actions.csv` is committed as an offline fallback snapshot. Any fallback path must report the snapshot's export date, so that bars are never silently reconciled against stale data. Design notes: [`docs/01_ohlcv_correction_design.md`](docs/01_ohlcv_correction_design.md), [`docs/nselib_source.md`](docs/nselib_source.md).
@@ -356,7 +359,8 @@ trip-ema-console --config config.yaml --base-url http://localhost:8000
 
 `trip-ema-etl backfill` rebuilds the whole derived model for a date range. A partial unique index makes it exclusive: only one active `backfill_runs` row can exist, and the live cycle defers while a backfill runs.
 
-![Backfill stages](docs/images/diagrams/17-backfill-stages.svg)
+<p align="center"><img src="docs/images/diagrams/17-backfill-stages.svg" alt="Backfill stages" width="440"></p>
+
 <sub>Source: [`docs/diagrams/17-backfill-stages.mmd`](docs/diagrams/17-backfill-stages.mmd)</sub>
 
 Scope it with `--stocks SYM1,SYM2`, force a full recompute with `--rebuild`, and clear a stale lock with `--release-lock`.
